@@ -1,12 +1,13 @@
 package com.vingame.bot.brands.bom.message.bettingmini.response;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.vingame.bot.brands.bom.message.bettingmini.polymorphism.CmdAwareMessage;
 import lombok.Getter;
 import lombok.Setter;
 
 @Setter
 @Getter
-public class StartGameDataMd5 extends StartGameData {
+public class StartGameDataMd5 extends StartGameData implements CmdAwareMessage {
 
     private String md5;
 

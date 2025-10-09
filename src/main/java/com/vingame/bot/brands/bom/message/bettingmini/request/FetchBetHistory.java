@@ -1,18 +1,19 @@
 package com.vingame.bot.brands.bom.message.bettingmini.request;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.vingame.bot.brands.bom.message.bettingmini.polymorphism.CmdAwareMessage;
 import com.vingame.webocketparser.message.request.ActionRequestMessage;
-import com.vingame.webocketparser.message.request.Data;
+import com.vingame.webocketparser.message.request.Body;
 import lombok.Getter;
 
-public class FetchBetHistory extends ActionRequestMessage {
+public class FetchBetHistory extends ActionRequestMessage implements CmdAwareMessage {
 
     public FetchBetHistory(int cmd, String zoneName, String pluginName, int aid, int limit, int skip) {
         super(zoneName, pluginName, new FetchBetHistoryData(cmd, aid, limit, skip));
     }
 
     @Getter
-    public static class FetchBetHistoryData extends Data {
+    public static class FetchBetHistoryData extends Body {
 
         private final int aid;
 

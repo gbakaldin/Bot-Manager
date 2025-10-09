@@ -1,13 +1,14 @@
 package com.vingame.bot.brands.bom.message.bettingmini.request;
 
+import com.vingame.bot.brands.bom.message.bettingmini.polymorphism.CmdAwareMessage;
 import com.vingame.webocketparser.message.request.ActionRequestMessage;
-import com.vingame.webocketparser.message.request.Data;
+import com.vingame.webocketparser.message.request.Body;
 import lombok.Getter;
 import lombok.Setter;
 
 import java.util.List;
 
-public class AutoBet extends ActionRequestMessage {
+public class AutoBet extends ActionRequestMessage implements CmdAwareMessage {
 
     public AutoBet(int cmd, String zoneName, String pluginName, boolean isMini, List<BetEntryInfo> b) {
         super(zoneName, pluginName, new AutoBetData(cmd, isMini, b));
@@ -15,7 +16,7 @@ public class AutoBet extends ActionRequestMessage {
 
     @Getter
     @Setter
-    public static class AutoBetData extends Data {
+    public static class AutoBetData extends Body {
 
         private final boolean iab = true;
         private final boolean isMini;

@@ -10,6 +10,8 @@ import com.vingame.webocketparser.scenario.matchers.Qualifier;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
+import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import static com.vingame.webocketparser.scenario.matchers.Qualifier.qualifier;
 
@@ -22,14 +24,22 @@ public class OutputPrinter {
         return Scenario.pipeline()
                 .filter(cmd.stream()
                         .map(i -> qualifier(MessageProperty.CMD, i))
-                        .toList()
+                        .collect(Collectors.toList())
                         .toArray(new Qualifier[0]));
     }
 
     public static Scenario defaultOutputPrinter(List<Integer> cmd) {
+        return outputPrinter(cmd, log::info);
+    }
+
+    public static Scenario debugOutputPrinter(List<Integer> cmd, String name) {
+        return outputPrinter(cmd, s -> log.debug("User {}: {}", name, s));
+    }
+
+    private static Scenario outputPrinter(List<Integer> cmd, Consumer<String> printer) {
         return filter(cmd)
                 .map(ProcessableMessage::toString)
-                .peek(log::info)
+                .peek(printer)
                 .compile();
     }
 

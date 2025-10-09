@@ -1,22 +1,23 @@
 package com.vingame.bot.brands.bom.message.bettingmini.request;
 
 
+import com.vingame.bot.brands.bom.message.bettingmini.polymorphism.CmdAwareMessage;
 import com.vingame.webocketparser.message.request.ActionRequestMessage;
-import com.vingame.webocketparser.message.request.Data;
+import com.vingame.webocketparser.message.request.Body;
 import lombok.Getter;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-public class FetchAllPlayers extends ActionRequestMessage {
+public class FetchAllPlayers extends ActionRequestMessage implements CmdAwareMessage {
 
     public FetchAllPlayers(int cmd, String zoneName, String pluginName, int lm, int of, Map<String, Boolean> filterCriteria) {
         super(zoneName, pluginName, new FetchAllPlayerData(cmd, lm, of, filterCriteria));
     }
 
     @Getter
-    public static class FetchAllPlayerData extends Data {
+    public static class FetchAllPlayerData extends Body {
 
         private final int lm;
         private final int of;

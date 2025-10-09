@@ -1,5 +1,8 @@
 package com.vingame.bot.core;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vingame.bot.environment.store.ConnectionData;
 import com.vingame.bot.brands.bom.message.bettingmini.Request;
 import com.vingame.bot.brands.bom.message.bettingmini.response.EndGameData;
 import com.vingame.bot.brands.bom.message.bettingmini.response.StartGameData;
@@ -8,15 +11,14 @@ import com.vingame.bot.brands.bom.message.bettingmini.response.UpdateBet;
 import com.vingame.bot.util.BettingMiniGameState;
 import com.vingame.bot.util.GameState;
 import com.vingame.bot.util.SessionIdStore;
-import com.vingame.webocketparser.VingameWebsocketClient;
 import com.vingame.webocketparser.message.properties.MessageProperty;
 import com.vingame.webocketparser.message.properties.MessageType;
 import com.vingame.webocketparser.message.request.ActionRequestMessage;
 import com.vingame.webocketparser.message.response.ActionResponseMessage;
 import com.vingame.webocketparser.scenario.Scenario;
-import com.vingame.webocketparser.scenario.matchers.Qualifier;
 import com.vingame.webocketparser.scenario.processors.SendMode;
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -25,7 +27,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import static com.vingame.webocketparser.scenario.matchers.Qualifier.qualifier;
+import static com.vingame.webocketparser.scenario.matchers.Qualifier.typeOf;
 
+@Slf4j
 public abstract class BettingMiniGameBot extends Bot {
 
     private final Request REQUEST;
@@ -41,8 +45,8 @@ public abstract class BettingMiniGameBot extends Bot {
 
     private ScheduledExecutorService scheduler;
 
-    public BettingMiniGameBot(VingameWebsocketClient client, Request request, String botName, int cmdPrefix) {
-        super(client);
+    public BettingMiniGameBot(ConnectionData data, String userName, String password, Request request, int cmdPrefix) {
+        super(data, userName, password);
 
         this.REQUEST = request;
         this.cmdPrefix = cmdPrefix;
@@ -139,22 +143,24 @@ public abstract class BettingMiniGameBot extends Bot {
 
     @Override
     public Scenario botBehaviorScenario() {
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+
         return Scenario.pipeline()
                 .useClient(getClient())
                 .send(REQUEST::subscribe)
-                .waitForMessage(qualifier(MessageProperty.CMD, cmdPrefix + 3000), Qualifier.typeOf(MessageType.RECEIVED))
-                .onMessage(this::onSubscribe, Subscribe.class)
-                .onMessage(this::onStartGame, StartGameData.class)
-                .onMessage(this::onUpdate, UpdateBet.class)
+                .waitForMessage(qualifier(MessageProperty.CMD, cmdPrefix + 3000), typeOf(MessageType.RECEIVED))
+                .onMessage(this::onSubscribe, Subscribe.class, mapper)
+                .onMessage(this::onStartGame, StartGameData.class, mapper)
+                .onMessage(this::onUpdate, UpdateBet.class, mapper)
                 .waitFor(resolveDelayMillisBeforeFirstBet(), TimeUnit.MILLISECONDS)
                 .sendAsync(bet(), SendMode.INFINITE, resolveBetCondition(), resolveIntervalBetweenBets())
-                .onMessage(this::onEndGame, EndGameData.class)
+                .onMessage(this::onEndGame, EndGameData.class, mapper)
                 .compile();
     }
 
     @Override
-    public void start() {
-
+    public void onStart() {
         onNewSession();
         getClient().addScenario(botBehaviorScenario());
     }

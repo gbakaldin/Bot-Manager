@@ -1,11 +1,12 @@
 package com.vingame.bot.brands.bom.message.bettingmini.request;
 
+import com.vingame.bot.brands.bom.message.bettingmini.polymorphism.CmdAwareMessage;
 import com.vingame.webocketparser.message.request.ActionRequestMessage;
-import com.vingame.webocketparser.message.request.Data;
+import com.vingame.webocketparser.message.request.Body;
 import lombok.Getter;
 import lombok.Setter;
 
-public class Bet extends ActionRequestMessage {
+public class Bet extends ActionRequestMessage implements CmdAwareMessage {
 
     public Bet(int cmd, String zoneName, String pluginName, long entryId, long sessionId) {
         super(zoneName, pluginName, new BetData(cmd, entryId, sessionId));
@@ -17,7 +18,7 @@ public class Bet extends ActionRequestMessage {
 
     @Getter
     @Setter
-    public static class BetData extends Data {
+    public static class BetData extends Body {
         private final int aid = 1;
         private final long b;
         private final long eid;

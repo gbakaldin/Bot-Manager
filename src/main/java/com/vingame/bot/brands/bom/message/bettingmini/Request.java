@@ -8,11 +8,12 @@ import com.vingame.bot.brands.bom.message.bettingmini.request.FetchAllPlayers;
 import com.vingame.bot.brands.bom.message.bettingmini.request.FetchBetHistory;
 import com.vingame.bot.brands.bom.message.bettingmini.request.FetchSessionDetail;
 import com.vingame.bot.brands.bom.message.bettingmini.request.SubscribeToLobbyMessage;
-import com.vingame.webocketparser.message.request.Data;
+import com.vingame.webocketparser.message.request.Body;
 import lombok.AllArgsConstructor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @AllArgsConstructor
 public class Request {
@@ -30,7 +31,7 @@ public class Request {
     }
 
     public SubscribeToLobbyMessage subscribe() {
-        return new SubscribeToLobbyMessage(zoneName, pluginName, new Data(cmdPrefix + 3000));
+        return new SubscribeToLobbyMessage(zoneName, pluginName, new Body(cmdPrefix + 3000));
     }
 
     public Bet bet(long amount, int entryId, long sid) {
@@ -48,7 +49,7 @@ public class Request {
     public AutoBet autoBet(boolean isMini, Map<Integer, Long> betEntries) {
         List<BetEntryInfo> entries = betEntries.entrySet().stream()
                 .map(entry -> BetEntryInfo.of(entry.getKey(), entry.getValue()))
-                .toList();
+                .collect(Collectors.toList());
         return new  AutoBet(cmdPrefix + 3015, zoneName, pluginName, isMini, entries);
     }
 

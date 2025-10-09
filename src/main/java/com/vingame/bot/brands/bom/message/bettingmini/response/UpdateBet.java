@@ -1,9 +1,10 @@
 package com.vingame.bot.brands.bom.message.bettingmini.response;
 
 
-import com.vingame.webocketparser.message.request.Data;
+import com.vingame.bot.brands.bom.message.bettingmini.polymorphism.CmdAwareMessage;
+import com.vingame.webocketparser.message.request.Body;
 
-public class UpdateBet extends Data {
+public class UpdateBet extends Body implements CmdAwareMessage {
     public UpdateBet(int cmd) {
         super(cmd);
     }

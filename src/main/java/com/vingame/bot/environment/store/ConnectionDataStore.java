@@ -1,4 +1,4 @@
-package com.vingame.bot.authentication.store;
+package com.vingame.bot.environment.store;
 
 import java.net.URI;
 import java.util.HashMap;
@@ -32,7 +32,7 @@ public class ConnectionDataStore {
         headers.put("Sec-WebSocket-Key", "7z1NZZ1NLSCOwL2heHS8pA==");
         headers.put("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
 
-        return new ConnectionData(uri, headers);
+        return new ConnectionData(uri, headers, "https://apigw-bomwin.sgame.us", "bc114097", "MiniGame3", true);
     }
 
     private static ConnectionData setup111() {
@@ -51,7 +51,7 @@ public class ConnectionDataStore {
         headers.put("Sec-WebSocket-Key", "8vnYvXp+JpKlqgQ/l6qRbw==");
         headers.put("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
 
-        return new ConnectionData(uri, headers);
+        return new ConnectionData(uri, headers, "https://apigw-bomwin.sgame.us", "BC14097","MiniGame", false);
     }
 
     private static ConnectionData setup114() {
@@ -70,7 +70,7 @@ public class ConnectionDataStore {
         headers.put("Sec-WebSocket-Key", "PrmyxwizXVTKsGeHfixCRQ==");
         headers.put("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
 
-        return new ConnectionData(uri, headers);
+        return new ConnectionData(uri, headers, "https://apigw-bomwin.sgame.us", "BC14097","MiniGame", false);
     }
 
     private static ConnectionData setup114Prod() {
@@ -89,7 +89,7 @@ public class ConnectionDataStore {
         headers.put("Sec-WebSocket-Key", "8vnYvXp+JpKlqgQ/l6qRbw==");
         headers.put("Sec-WebSocket-Extensions", "permessage-deflate; client_max_window_bits");
 
-        return new ConnectionData(uri, headers);
+        return new ConnectionData(uri, headers, "https://apigw-bomwin.sgame.us", "BC14097","MiniGame", false);
     }
 
     public static ConnectionData get(String code) {

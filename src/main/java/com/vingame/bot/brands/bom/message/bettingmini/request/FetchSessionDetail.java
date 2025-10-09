@@ -1,10 +1,11 @@
 package com.vingame.bot.brands.bom.message.bettingmini.request;
 
+import com.vingame.bot.brands.bom.message.bettingmini.polymorphism.CmdAwareMessage;
 import com.vingame.webocketparser.message.request.ActionRequestMessage;
-import com.vingame.webocketparser.message.request.Data;
+import com.vingame.webocketparser.message.request.Body;
 import lombok.Getter;
 
-public class FetchSessionDetail extends ActionRequestMessage {
+public class FetchSessionDetail extends ActionRequestMessage implements CmdAwareMessage {
 
     public FetchSessionDetail(String zoneName, String pluginName, int cmd, long sid, int aid) {
         super(zoneName, pluginName, new FetchSessionDetailData(cmd, sid, aid));
@@ -15,7 +16,7 @@ public class FetchSessionDetail extends ActionRequestMessage {
     }
 
     @Getter
-    public static class FetchSessionDetailData extends Data {
+    public static class FetchSessionDetailData extends Body {
         private final long sid;
         private final int aid;
 

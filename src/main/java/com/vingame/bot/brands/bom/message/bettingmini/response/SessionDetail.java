@@ -2,7 +2,8 @@ package com.vingame.bot.brands.bom.message.bettingmini.response;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.vingame.webocketparser.message.request.Data;
+import com.vingame.bot.brands.bom.message.bettingmini.polymorphism.CmdAwareMessage;
+import com.vingame.webocketparser.message.request.Body;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -10,7 +11,7 @@ import lombok.Setter;
 @Getter
 @Setter
 @JsonIgnoreProperties(ignoreUnknown = true)
-public class SessionDetail extends Data {
+public class SessionDetail extends Body implements CmdAwareMessage {
 
     private String rs;
     private long st;
