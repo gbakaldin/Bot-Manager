@@ -1,21 +1,28 @@
 package com.vingame.bot.config;
 
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 
 import jakarta.annotation.PreDestroy;
 
 /**
  * Configuration for Netty EventLoopGroup used by WebSocket clients.
  * <p>
+ * Uses MultiThreadIoEventLoopGroup (Netty 4.2+) for better performance and scalability.
  * The EventLoopGroup is shared across all bot instances for optimal resource utilization.
+ * <p>
  * Thread count is configurable via application.properties:
  * - Default profile: 4 threads (suitable for few hundred bots)
- * - Loadtest profile: 32 threads (suitable for hundreds of thousands of bots)
+ * - Loadtest profile: 32+ threads (suitable for thousands of bots)
+ * <p>
+ * Scale targets:
+ * - Production: up to 2,000 concurrent bots
+ * - Load testing: up to 100,000 concurrent bots
  */
 @Slf4j
 @Configuration
@@ -28,8 +35,8 @@ public class NettyEventLoopConfig {
 
     @Bean
     public EventLoopGroup eventLoopGroup() {
-        log.info("Creating Netty EventLoopGroup with {} threads", eventLoopThreads);
-        eventLoopGroup = new NioEventLoopGroup(eventLoopThreads);
+        log.info("Creating Netty MultiThreadIoEventLoopGroup with {} threads (NioIoHandler)", eventLoopThreads);
+        eventLoopGroup = new MultiThreadIoEventLoopGroup(eventLoopThreads, NioIoHandler.newFactory());
         return eventLoopGroup;
     }
 

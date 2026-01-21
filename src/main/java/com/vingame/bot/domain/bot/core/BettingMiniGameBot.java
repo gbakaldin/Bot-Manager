@@ -105,7 +105,10 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private void startRemainingTimeCountDown() {
-        scheduler = Executors.newSingleThreadScheduledExecutor();
+        // Use virtual thread for countdown timer (lightweight, scalable to 100k+ bots)
+        scheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofVirtual().name("countdown-" + getUserName()).factory()
+        );
 
         remainingTime.set(timeForBetting);
         scheduler.scheduleAtFixedRate(() -> {

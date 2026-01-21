@@ -6,11 +6,12 @@ import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -20,10 +21,19 @@ import java.util.concurrent.TimeUnit;
  * This class holds the actual running bot instances and their current status.
  * <p>
  * Thread Management:
- * - Uses Spring's ThreadPoolTaskExecutor for bot execution
- * - Each bot runs in its own thread from the pool
+ * - Uses Java 21 virtual threads for bot execution (lightweight, scalable to 100k+ bots)
+ * - Each bot runs in its own virtual thread (not platform thread)
  * - Tracks Future<?> for each bot to monitor individual status
  * - Graceful shutdown with 30s timeout before force termination
+ * <p>
+ * Scale targets:
+ * - Production: up to 2,000 concurrent bots
+ * - Load testing: up to 100,000 concurrent bots
+ * <p>
+ * Virtual threads are ideal here because:
+ * - Bots spend most time waiting for WebSocket I/O (handled by Netty's event loop)
+ * - Platform threads would be wasteful at scale (2000+ threads = significant memory overhead)
+ * - Virtual threads have near-zero overhead and can scale to millions
  */
 @Slf4j
 @Getter
@@ -33,7 +43,7 @@ public class BotGroupRuntime {
     private final String groupId;
     private final List<Bot> botInstances;
     private final List<Future<?>> botFutures;
-    private final ThreadPoolTaskExecutor executor;
+    private final ExecutorService executor;
 
     // Actual runtime status (source of truth while group is managed)
     private BotGroupStatus actualStatus;           // ACTIVE, STOPPED, DEAD
@@ -47,14 +57,14 @@ public class BotGroupRuntime {
     /**
      * Create a new runtime for a bot group.
      *
-     * @param groupId The bot group ID
-     * @param botCount Number of bots in the group (for thread pool sizing)
+     * @param groupId  The bot group ID
+     * @param botCount Number of bots in the group (used for initial capacity, not thread pool sizing)
      */
     public BotGroupRuntime(String groupId, int botCount) {
         this.groupId = groupId;
         this.botInstances = new ArrayList<>(botCount);
         this.botFutures = new ArrayList<>(botCount);
-        this.executor = createExecutor(groupId, botCount);
+        this.executor = createExecutor(groupId);
         this.actualStatus = BotGroupStatus.ACTIVE;
         this.playingStatus = BotGroupPlayingStatus.IDLE;
         this.startedAt = Instant.now();
@@ -62,34 +72,32 @@ public class BotGroupRuntime {
     }
 
     /**
-     * Create and configure ThreadPoolTaskExecutor for this bot group.
+     * Create virtual thread executor for this bot group.
      * <p>
-     * Configuration:
-     * - Core pool size = bot count (one thread per bot)
-     * - Max pool size = bot count (fixed size pool)
-     * - Named threads: "botgroup-{groupId}-bot-{n}"
-     * - Reject policy: CallerRuns (safety fallback, shouldn't happen with fixed pool)
+     * Uses Java 21's virtual threads which are:
+     * - Lightweight (minimal memory overhead per thread)
+     * - Scalable (can handle 100k+ concurrent tasks)
+     * - Efficient (automatically yield during blocking operations)
+     * <p>
+     * Virtual threads are managed by the JVM and multiplexed onto
+     * a small pool of carrier (platform) threads.
      *
-     * @param groupId The bot group ID
-     * @param botCount Number of bots
-     * @return Configured and initialized executor
+     * @param groupId The bot group ID (used for thread naming)
+     * @return Virtual thread executor
      */
-    private ThreadPoolTaskExecutor createExecutor(String groupId, int botCount) {
-        ThreadPoolTaskExecutor taskExecutor = new ThreadPoolTaskExecutor();
-        taskExecutor.setCorePoolSize(botCount);
-        taskExecutor.setMaxPoolSize(botCount);
-        taskExecutor.setQueueCapacity(0); // No queue, direct handoff
-        taskExecutor.setThreadNamePrefix("botgroup-" + groupId + "-bot-");
-        taskExecutor.setWaitForTasksToCompleteOnShutdown(true);
-        taskExecutor.setAwaitTerminationSeconds(30);
-        taskExecutor.initialize();
+    private ExecutorService createExecutor(String groupId) {
+        ExecutorService virtualExecutor = Executors.newThreadPerTaskExecutor(
+                Thread.ofVirtual()
+                        .name("botgroup-" + groupId + "-bot-", 0)
+                        .factory()
+        );
 
-        log.info("Created thread pool for bot group {} with {} threads", groupId, botCount);
-        return taskExecutor;
+        log.info("Created virtual thread executor for bot group {}", groupId);
+        return virtualExecutor;
     }
 
     /**
-     * Start a bot in the thread pool.
+     * Start a bot in a virtual thread.
      * <p>
      * Submits bot.start() as a task and tracks the Future for monitoring.
      *
@@ -98,10 +106,10 @@ public class BotGroupRuntime {
     public void startBot(Bot bot) {
         Future<?> future = executor.submit(() -> {
             try {
-                log.info("Bot {} starting in thread {}", bot.getUserName(), Thread.currentThread().getName());
+                log.info("Bot {} starting in virtual thread {}", bot.getUserName(), Thread.currentThread().getName());
                 bot.start();
             } catch (Exception e) {
-                log.error("Bot {} failed in thread {}", bot.getUserName(), Thread.currentThread().getName(), e);
+                log.error("Bot {} failed in virtual thread {}", bot.getUserName(), Thread.currentThread().getName(), e);
             }
         });
 
@@ -116,8 +124,8 @@ public class BotGroupRuntime {
      */
     public long getRunningBotCount() {
         return botFutures.stream()
-            .filter(future -> !future.isDone())
-            .count();
+                .filter(future -> !future.isDone())
+                .count();
     }
 
     /**
@@ -127,8 +135,8 @@ public class BotGroupRuntime {
      */
     public boolean hasMajorityDisconnected() {
         long disconnectedCount = botInstances.stream()
-            .filter(bot -> bot.getClient() == null || !bot.getClient().isOpen())
-            .count();
+                .filter(bot -> bot.getClient() == null || !bot.getClient().isOpen())
+                .count();
 
         double disconnectedPercentage = (double) disconnectedCount / botInstances.size();
         return disconnectedPercentage > 0.5;
@@ -156,7 +164,7 @@ public class BotGroupRuntime {
     }
 
     /**
-     * Stop all bot instances and shutdown thread pool.
+     * Stop all bot instances and shutdown executor.
      * <p>
      * Shutdown process:
      * 1. Cleanup all bots (closes WebSocket connections gracefully)
@@ -176,19 +184,19 @@ public class BotGroupRuntime {
             }
         });
 
-        // Shutdown thread pool gracefully
-        if (executor != null && !executor.getThreadPoolExecutor().isShutdown()) {
-            log.info("Shutting down thread pool for group {}", groupId);
+        // Shutdown virtual thread executor gracefully
+        if (executor != null && !executor.isShutdown()) {
+            log.info("Shutting down virtual thread executor for group {}", groupId);
             executor.shutdown();
 
             try {
-                if (!executor.getThreadPoolExecutor().awaitTermination(30, TimeUnit.SECONDS)) {
-                    log.warn("Thread pool for group {} did not terminate within 30s, forcing shutdown", groupId);
-                    executor.getThreadPoolExecutor().shutdownNow();
+                if (!executor.awaitTermination(30, TimeUnit.SECONDS)) {
+                    log.warn("Executor for group {} did not terminate within 30s, forcing shutdown", groupId);
+                    executor.shutdownNow();
                 }
             } catch (InterruptedException e) {
-                log.error("Interrupted while waiting for thread pool shutdown for group {}", groupId, e);
-                executor.getThreadPoolExecutor().shutdownNow();
+                log.error("Interrupted while waiting for executor shutdown for group {}", groupId, e);
+                executor.shutdownNow();
                 Thread.currentThread().interrupt();
             }
         }
