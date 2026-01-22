@@ -13,6 +13,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Service;
 
+import org.springframework.beans.factory.annotation.Value;
+
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -20,7 +22,13 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Client for interacting with the API Gateway.
@@ -42,6 +50,14 @@ public class ApiGatewayClient {
 
     private final DisplayNameService displayNameService;
     private final HttpClient httpClient;
+
+    /**
+     * Max number of users to register simultaneously.
+     * Controls concurrency to avoid overwhelming the auth server.
+     * Configurable via application.properties: user.registration.parallelism
+     */
+    @Value("${user.registration.parallelism:10}")
+    private int registrationParallelism;
 
     private String apiGateway;
     private String appId;
@@ -98,7 +114,12 @@ public class ApiGatewayClient {
     }
 
     /**
-     * Bulk register users on the authentication server.
+     * Bulk register users on the authentication server using parallel execution.
+     * <p>
+     * Uses virtual threads with controlled concurrency (configurable via user.registration.parallelism).
+     * This dramatically reduces registration time compared to sequential execution:
+     * - Sequential (old): 100 users × 3s = 300s (~5 minutes)
+     * - Parallel (new): 100 users / 10 parallelism × ~3s = ~30s
      *
      * @param userNamePrefix Prefix for usernames (e.g., "bot" creates "bot1", "bot2", etc.)
      * @param password       Password for all created users
@@ -107,49 +128,95 @@ public class ApiGatewayClient {
      */
     public UserRegistrationResult registerUsers(String userNamePrefix, String password, int count) {
         checkInitialized();
-        log.info("Starting bulk user registration: {} users with prefix '{}'", count, userNamePrefix);
+        log.info("Starting parallel user registration: {} users with prefix '{}' (parallelism={})",
+                count, userNamePrefix, registrationParallelism);
 
-        int successCount = 0;
-        int failureCount = 0;
-        List<String> errors = new ArrayList<>();
+        AtomicInteger successCount = new AtomicInteger(0);
+        AtomicInteger failureCount = new AtomicInteger(0);
+        List<String> errors = Collections.synchronizedList(new ArrayList<>());
 
-        for (int i = 1; i <= count; i++) {
-            String username = userNamePrefix + i;
-            try {
-                 registerSingleUser(userNamePrefix, password, i);
-                log.info("Successfully registered user {}/{}: {}", i, count, username);
+        Semaphore semaphore = new Semaphore(registrationParallelism);
 
-                // Set display name if requested and names are available
-                if (displayNameService.hasDisplayNames()) {
+        // Use virtual threads for parallel registration
+        try (ExecutorService executor = Executors.newThreadPerTaskExecutor(
+                Thread.ofVirtual().name("user-registration-", 0).factory())) {
+
+            List<CompletableFuture<Void>> futures = new ArrayList<>(count);
+
+            for (int i = 1; i <= count; i++) {
+                final int userIndex = i;
+                final String username = userNamePrefix + userIndex;
+
+                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
                     try {
-                        //verifyToken();
-                        setDisplayNameForUser(username, password);
+                        // Acquire permit (blocks if at max concurrency)
+                        semaphore.acquire();
+                        try {
+                            registerSingleUserWithDisplayName(userNamePrefix, password, userIndex, count);
+                            successCount.incrementAndGet();
+                        } finally {
+                            semaphore.release();
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        failureCount.incrementAndGet();
+                        String errorMsg = String.format("Registration interrupted for %s", username);
+                        errors.add(errorMsg);
+                        log.error(errorMsg);
                     } catch (Exception e) {
-                        log.warn("Failed to set display name for {}: {}", username, e.getMessage());
-                        // Don't fail the whole registration just because display name failed
+                        failureCount.incrementAndGet();
+                        String errorMsg = String.format("Failed to register %s: %s", username, e.getMessage());
+                        errors.add(errorMsg);
+                        log.error(errorMsg);
                     }
-                }
+                }, executor);
 
-                successCount++;
-
-                // Small delay between registrations to avoid overwhelming the server
-                Thread.sleep(100);
-            } catch (Exception e) {
-                failureCount++;
-                String errorMsg = String.format("Failed to register %s: %s", username, e.getMessage());
-                errors.add(errorMsg);
-                log.error(errorMsg);
+                futures.add(future);
             }
+
+            // Wait for all registrations to complete
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         }
 
-        log.info("Bulk user registration completed. Success: {}, Failures: {}", successCount, failureCount);
+        log.info("Parallel user registration completed. Success: {}, Failures: {}",
+                successCount.get(), failureCount.get());
 
         return UserRegistrationResult.builder()
                 .totalRequested(count)
-                .successCount(successCount)
-                .failureCount(failureCount)
+                .successCount(successCount.get())
+                .failureCount(failureCount.get())
                 .errors(errors)
                 .build();
+    }
+
+    /**
+     * Register a single user and set their display name.
+     * This method is called in parallel from registerUsers().
+     *
+     * @param userNamePrefix Username prefix
+     * @param password       Password
+     * @param index          User index (1-based)
+     * @param totalCount     Total number of users being registered (for logging)
+     */
+    private void registerSingleUserWithDisplayName(String userNamePrefix, String password, int index, int totalCount) {
+        String username = userNamePrefix + index;
+
+        try {
+            registerSingleUser(userNamePrefix, password, index);
+            log.info("Successfully registered user {}/{}: {}", index, totalCount, username);
+
+            // Set display name if names are available
+            if (displayNameService.hasDisplayNames()) {
+                try {
+                    setDisplayNameForUser(username, password);
+                } catch (Exception e) {
+                    log.warn("Failed to set display name for {}: {}", username, e.getMessage());
+                    // Don't fail the whole registration just because display name failed
+                }
+            }
+        } catch (IOException | InterruptedException e) {
+            throw new RuntimeException("Failed to register user: " + username, e);
+        }
     }
 
     /**
@@ -168,7 +235,7 @@ public class ApiGatewayClient {
             throw new RuntimeException("Authentication failed for user: " + username);
         }
 
-        String authToken = tokens.get(0);
+        String authToken = tokens.getFirst();
 
         // Set display name with retry
         String displayName = setDisplayNameWithRetry(authToken, 5);

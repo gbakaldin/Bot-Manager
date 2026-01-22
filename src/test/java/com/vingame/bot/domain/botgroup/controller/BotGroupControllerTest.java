@@ -9,7 +9,6 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
-import com.vingame.bot.domain.botgroup.model.GameType;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import org.junit.jupiter.api.DisplayName;
@@ -69,7 +68,7 @@ class BotGroupControllerTest {
                     .name("Test Bot Group")
                     .namePrefix("bot")
                     .password("password123")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .botCount(10)
                     .environmentId("env-1")
                     .build();
@@ -78,7 +77,7 @@ class BotGroupControllerTest {
                     .id(String.valueOf(groupId))
                     .name("Test Bot Group")
                     .namePrefix("bot")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .botCount(10)
                     .environmentId("env-1")
                     .build();
@@ -91,7 +90,7 @@ class BotGroupControllerTest {
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.id").value(String.valueOf(groupId)))
                     .andExpect(jsonPath("$.name").value("Test Bot Group"))
-                    .andExpect(jsonPath("$.gameType").value("BAU_CUA"))
+                    .andExpect(jsonPath("$.gameId").value("game-baucua"))
                     .andExpect(jsonPath("$.botCount").value(10))
                     .andExpect(jsonPath("$.environmentId").value("env-1"));
         }
@@ -132,25 +131,25 @@ class BotGroupControllerTest {
             BotGroup group1 = BotGroup.builder()
                     .id("1")
                     .name("Group 1")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .build();
 
             BotGroup group2 = BotGroup.builder()
                     .id("2")
                     .name("Group 2")
-                    .gameType(GameType.BAU_CUA_MINI)
+                    .gameId("game-baucua-mini")
                     .build();
 
             BotGroupDTO dto1 = BotGroupDTO.builder()
                     .id("1")
                     .name("Group 1")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .build();
 
             BotGroupDTO dto2 = BotGroupDTO.builder()
                     .id("2")
                     .name("Group 2")
-                    .gameType(GameType.BAU_CUA_MINI)
+                    .gameId("game-baucua-mini")
                     .build();
 
             when(service.findAll()).thenReturn(List.of(group1, group2));
@@ -187,18 +186,18 @@ class BotGroupControllerTest {
         void shouldReturnOkWithFilteredBotGroupsByGameType() throws Exception {
             // Arrange
             BotGroupFilter filter = new BotGroupFilter();
-            filter.setGameType(GameType.BAU_CUA);
+            filter.setGameId("game-baucua");
 
             BotGroup group = BotGroup.builder()
                     .id("1")
                     .name("Filtered Group")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .build();
 
             BotGroupDTO dto = BotGroupDTO.builder()
                     .id("1")
                     .name("Filtered Group")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .build();
 
             when(service.filter(any(BotGroupFilter.class))).thenReturn(List.of(group));
@@ -211,7 +210,7 @@ class BotGroupControllerTest {
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.length()").value(1))
                     .andExpect(jsonPath("$[0].name").value("Filtered Group"))
-                    .andExpect(jsonPath("$[0].gameType").value("BAU_CUA"));
+                    .andExpect(jsonPath("$[0].gameId").value("game-baucua"));
         }
 
         @Test
@@ -225,14 +224,14 @@ class BotGroupControllerTest {
                     .id("1")
                     .name("Environment Group")
                     .environmentId("env-123")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .build();
 
             BotGroupDTO dto = BotGroupDTO.builder()
                     .id("1")
                     .name("Environment Group")
                     .environmentId("env-123")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .build();
 
             when(service.filter(any(BotGroupFilter.class))).thenReturn(List.of(group));
@@ -277,7 +276,7 @@ class BotGroupControllerTest {
                     .name("New Bot Group")
                     .namePrefix("testbot")
                     .password("secret")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .botCount(5)
                     .environmentId("env-1")
                     .build();
@@ -286,7 +285,7 @@ class BotGroupControllerTest {
                     .name("New Bot Group")
                     .namePrefix("testbot")
                     .password("secret")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .botCount(5)
                     .environmentId("env-1")
                     .build();
@@ -296,7 +295,7 @@ class BotGroupControllerTest {
                     .name("New Bot Group")
                     .namePrefix("testbot")
                     .password("secret")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .botCount(5)
                     .environmentId("env-1")
                     .build();
@@ -305,7 +304,7 @@ class BotGroupControllerTest {
                     .id("123")
                     .name("New Bot Group")
                     .namePrefix("testbot")
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .botCount(5)
                     .environmentId("env-1")
                     .build();
@@ -321,7 +320,7 @@ class BotGroupControllerTest {
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.id").value("123"))
                     .andExpect(jsonPath("$.name").value("New Bot Group"))
-                    .andExpect(jsonPath("$.gameType").value("BAU_CUA"))
+                    .andExpect(jsonPath("$.gameId").value("game-baucua"))
                     .andExpect(jsonPath("$.botCount").value(5));
         }
     }
@@ -344,14 +343,14 @@ class BotGroupControllerTest {
                     .id(String.valueOf(groupId))
                     .name("Updated Name")
                     .botCount(20)
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .build();
 
             BotGroupDTO outputDto = BotGroupDTO.builder()
                     .id(String.valueOf(groupId))
                     .name("Updated Name")
                     .botCount(20)
-                    .gameType(GameType.BAU_CUA)
+                    .gameId("game-baucua")
                     .build();
 
             when(service.update(eq(groupId), any(BotGroupDTO.class))).thenReturn(updatedEntity);
