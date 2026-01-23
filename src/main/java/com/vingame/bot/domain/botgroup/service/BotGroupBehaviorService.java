@@ -5,6 +5,8 @@ import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.core.Bot;
+import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
+import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
@@ -412,6 +414,53 @@ public class BotGroupBehaviorService {
         botGroupService.save(group);
 
         log.info("Scheduled restart for bot group {} at {}", id, time);
+    }
+
+    /**
+     * Get health details for a bot group including per-bot metrics.
+     */
+    public BotGroupHealthDTO getHealth(String id) {
+        BotGroup group = botGroupService.findById(id);
+        BotGroupRuntime runtime = runningGroups.get(id);
+
+        if (runtime == null) {
+            return BotGroupHealthDTO.builder()
+                    .groupId(id)
+                    .groupName(group.getName())
+                    .status(BotGroupStatus.STOPPED)
+                    .totalBots(0)
+                    .connectedBots(0)
+                    .disconnectedBots(0)
+                    .bots(List.of())
+                    .build();
+        }
+
+        List<BotHealthDTO> botDtos = runtime.getBotInstances().stream()
+                .map(bot -> BotHealthDTO.builder()
+                        .username(bot.getUserName())
+                        .connected(bot.isConnected())
+                        .balance(bot.getExpectedBalance())
+                        .lastFetchedBalance(bot.getLastFetchedBalance())
+                        .totalBetsPlaced(bot.getTotalBetsPlaced().get())
+                        .totalBetAmount(bot.getTotalBetAmount().get())
+                        .lastRoundWinnings(bot.getLastRoundWinnings())
+                        .build())
+                .toList();
+
+        int connected = (int) botDtos.stream().filter(BotHealthDTO::isConnected).count();
+
+        return BotGroupHealthDTO.builder()
+                .groupId(id)
+                .groupName(group.getName())
+                .status(runtime.getActualStatus())
+                .playingStatus(runtime.getPlayingStatus())
+                .startedAt(runtime.getStartedAt())
+                .consecutiveFailures(runtime.getConsecutiveFailures())
+                .totalBots(botDtos.size())
+                .connectedBots(connected)
+                .disconnectedBots(botDtos.size() - connected)
+                .bots(botDtos)
+                .build();
     }
 
     /**

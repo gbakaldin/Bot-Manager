@@ -45,6 +45,14 @@ public abstract class Bot {
     protected volatile long lastFetchedBalance = -1;
     protected final AtomicLong expectedCurrentBalance = new AtomicLong(-100_000_000L);
 
+    // Health metrics
+    @Getter
+    protected final AtomicLong totalBetsPlaced = new AtomicLong(0);
+    @Getter
+    protected final AtomicLong totalBetAmount = new AtomicLong(0);
+    @Getter
+    protected volatile long lastRoundWinnings = 0;
+
     /**
      * No-arg constructor for factory instantiation.
      * Factory will use fluent setters to configure, then call initialize().
@@ -252,6 +260,18 @@ public abstract class Bot {
         return 5_000_000L;
     }
 
+    public long getExpectedBalance() {
+        return expectedCurrentBalance.get();
+    }
+
+    public long getLastFetchedBalance() {
+        return lastFetchedBalance;
+    }
+
+    public boolean isConnected() {
+        return client != null && client.isOpen();
+    }
+
     protected abstract long resolveBetAmount();
 
     protected abstract Supplier<Boolean> resolveBetCondition();
@@ -260,6 +280,8 @@ public abstract class Bot {
 
     protected void creditBalance(long amount) {
         this.expectedCurrentBalance.addAndGet(-amount);
+        this.totalBetsPlaced.incrementAndGet();
+        this.totalBetAmount.addAndGet(amount);
     }
 
     public final void start() {

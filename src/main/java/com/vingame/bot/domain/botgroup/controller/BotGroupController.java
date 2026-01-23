@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.botgroup.controller;
 
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
+import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatusDTO;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
@@ -200,6 +201,21 @@ public class BotGroupController {
             behaviorService.scheduleRestart(id, time);
             return ResponseEntity.ok().build();
         } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().build();
+        }
+    }
+
+    @GetMapping("/{id}/health")
+    @Operation(
+            summary = "Get bot group health details",
+            description = "Returns detailed health metrics including per-bot connection status, balances, and bet counters")
+    public ResponseEntity<@NotNull BotGroupHealthDTO> getHealth(@PathVariable String id) {
+        try {
+            BotGroupHealthDTO health = behaviorService.getHealth(id);
+            return ResponseEntity.ok(health);
+        } catch (ResourceNotFoundException e) {
             return ResponseEntity.notFound().build();
         } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
