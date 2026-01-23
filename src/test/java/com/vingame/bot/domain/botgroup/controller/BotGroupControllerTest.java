@@ -62,9 +62,9 @@ class BotGroupControllerTest {
         @DisplayName("Should return 200 OK when bot group exists")
         void shouldReturnOkWhenBotGroupExists() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             BotGroup botGroup = BotGroup.builder()
-                    .id(String.valueOf(groupId))
+                    .id(groupId)
                     .name("Test Bot Group")
                     .namePrefix("bot")
                     .password("password123")
@@ -74,7 +74,7 @@ class BotGroupControllerTest {
                     .build();
 
             BotGroupDTO dto = BotGroupDTO.builder()
-                    .id(String.valueOf(groupId))
+                    .id(groupId)
                     .name("Test Bot Group")
                     .namePrefix("bot")
                     .gameId("game-baucua")
@@ -88,7 +88,7 @@ class BotGroupControllerTest {
             // Act & Assert
             mockMvc.perform(get("/api/v1/bot-group/{id}", groupId))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.id").value(String.valueOf(groupId)))
+                    .andExpect(jsonPath("$.id").value(groupId))
                     .andExpect(jsonPath("$.name").value("Test Bot Group"))
                     .andExpect(jsonPath("$.gameId").value("game-baucua"))
                     .andExpect(jsonPath("$.botCount").value(10))
@@ -99,7 +99,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 404 Not Found when bot group does not exist")
         void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
             // Arrange
-            int groupId = 999;
+            String groupId = "999";
             when(service.findById(groupId)).thenThrow(new ResourceNotFoundException("Bot group not found"));
 
             // Act & Assert
@@ -111,7 +111,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 400 Bad Request when ID is invalid")
         void shouldReturnBadRequestWhenIdIsInvalid() throws Exception {
             // Arrange
-            int groupId = -1;
+            String groupId = "invalid";
             when(service.findById(groupId)).thenThrow(new IllegalArgumentException("Invalid ID"));
 
             // Act & Assert
@@ -333,21 +333,21 @@ class BotGroupControllerTest {
         @DisplayName("Should return 200 OK with updated bot group")
         void shouldReturnOkWithUpdatedBotGroup() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             BotGroupDTO updateDto = BotGroupDTO.builder()
                     .name("Updated Name")
                     .botCount(20)
                     .build();
 
             BotGroup updatedEntity = BotGroup.builder()
-                    .id(String.valueOf(groupId))
+                    .id(groupId)
                     .name("Updated Name")
                     .botCount(20)
                     .gameId("game-baucua")
                     .build();
 
             BotGroupDTO outputDto = BotGroupDTO.builder()
-                    .id(String.valueOf(groupId))
+                    .id(groupId)
                     .name("Updated Name")
                     .botCount(20)
                     .gameId("game-baucua")
@@ -361,7 +361,7 @@ class BotGroupControllerTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(updateDto)))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.id").value(String.valueOf(groupId)))
+                    .andExpect(jsonPath("$.id").value(groupId))
                     .andExpect(jsonPath("$.name").value("Updated Name"))
                     .andExpect(jsonPath("$.botCount").value(20));
         }
@@ -370,7 +370,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 404 Not Found when bot group does not exist")
         void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
             // Arrange
-            int groupId = 999;
+            String groupId = "999";
             BotGroupDTO updateDto = BotGroupDTO.builder()
                     .name("Updated Name")
                     .build();
@@ -394,7 +394,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 200 OK when bot group is deleted")
         void shouldReturnOkWhenBotGroupIsDeleted() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             doNothing().when(service).delete(groupId);
 
             // Act & Assert
@@ -406,7 +406,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 404 Not Found when bot group does not exist")
         void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
             // Arrange
-            int groupId = 999;
+            String groupId = "999";
             doThrow(new IllegalArgumentException("Not found")).when(service).delete(groupId);
 
             // Act & Assert
@@ -423,7 +423,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 200 OK when bot group is started")
         void shouldReturnOkWhenBotGroupIsStarted() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             doNothing().when(behaviorService).start(groupId);
 
             // Act & Assert
@@ -435,7 +435,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 404 Not Found when bot group does not exist")
         void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
             // Arrange
-            int groupId = 999;
+            String groupId = "999";
             doThrow(new IllegalArgumentException("Not found")).when(behaviorService).start(groupId);
 
             // Act & Assert
@@ -447,7 +447,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 500 Internal Server Error when start fails")
         void shouldReturnInternalServerErrorWhenStartFails() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             doThrow(new RuntimeException("Start failed")).when(behaviorService).start(groupId);
 
             // Act & Assert
@@ -464,7 +464,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 200 OK when bot group is stopped")
         void shouldReturnOkWhenBotGroupIsStopped() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             doNothing().when(behaviorService).stop(groupId);
 
             // Act & Assert
@@ -476,7 +476,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 404 Not Found when bot group does not exist")
         void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
             // Arrange
-            int groupId = 999;
+            String groupId = "999";
             doThrow(new IllegalArgumentException("Not found")).when(behaviorService).stop(groupId);
 
             // Act & Assert
@@ -493,7 +493,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 200 OK when bot group is restarted")
         void shouldReturnOkWhenBotGroupIsRestarted() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             doNothing().when(behaviorService).restart(groupId);
 
             // Act & Assert
@@ -505,7 +505,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 404 Not Found when bot group does not exist")
         void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
             // Arrange
-            int groupId = 999;
+            String groupId = "999";
             doThrow(new IllegalArgumentException("Not found")).when(behaviorService).restart(groupId);
 
             // Act & Assert
@@ -522,7 +522,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 200 OK when restart is scheduled")
         void shouldReturnOkWhenRestartIsScheduled() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             LocalDateTime futureTime = LocalDateTime.now().plusHours(2);
             doNothing().when(behaviorService).scheduleRestart(eq(groupId), any(LocalDateTime.class));
 
@@ -537,7 +537,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 404 Not Found when bot group does not exist")
         void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
             // Arrange
-            int groupId = 999;
+            String groupId = "999";
             LocalDateTime futureTime = LocalDateTime.now().plusHours(2);
             doThrow(new IllegalArgumentException("Not found"))
                     .when(behaviorService).scheduleRestart(eq(groupId), any(LocalDateTime.class));
@@ -558,9 +558,9 @@ class BotGroupControllerTest {
         @DisplayName("Should return 200 OK with bot group status")
         void shouldReturnOkWithBotGroupStatus() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             BotGroup group = BotGroup.builder()
-                    .id(String.valueOf(groupId))
+                    .id(groupId)
                     .name("Test Group")
                     .targetStatus(BotGroupStatus.ACTIVE)
                     .build();
@@ -572,7 +572,7 @@ class BotGroupControllerTest {
             // Act & Assert
             mockMvc.perform(get("/api/v1/bot-group/{id}/status", groupId))
                     .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.groupId").value(String.valueOf(groupId)))
+                    .andExpect(jsonPath("$.groupId").value(groupId))
                     .andExpect(jsonPath("$.groupName").value("Test Group"))
                     .andExpect(jsonPath("$.targetStatus").value("ACTIVE"))
                     .andExpect(jsonPath("$.actualStatus").value("ACTIVE"))
@@ -583,7 +583,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 404 Not Found when bot group does not exist")
         void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
             // Arrange
-            int groupId = 999;
+            String groupId = "999";
             when(service.findById(groupId)).thenThrow(new ResourceNotFoundException("Bot group not found"));
 
             // Act & Assert
@@ -595,9 +595,9 @@ class BotGroupControllerTest {
         @DisplayName("Should return status with null playingStatus when bot group is stopped")
         void shouldReturnStatusWithNullPlayingStatusWhenBotGroupIsStopped() throws Exception {
             // Arrange
-            int groupId = 123;
+            String groupId = "123";
             BotGroup group = BotGroup.builder()
-                    .id(String.valueOf(groupId))
+                    .id(groupId)
                     .name("Stopped Group")
                     .targetStatus(BotGroupStatus.STOPPED)
                     .build();

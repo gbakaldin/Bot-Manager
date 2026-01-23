@@ -7,14 +7,18 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.mapping.Document;
 
 @Getter
 @Setter
 @Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
+@Document(collection = "games")
 public class Game {
 
+    @Id
     private String id;
     private BrandCode brandCode;
     private ProductCode productCode;

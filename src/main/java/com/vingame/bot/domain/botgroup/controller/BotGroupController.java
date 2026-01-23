@@ -47,7 +47,7 @@ public class BotGroupController {
             description = "Returns a single value or 404 if not found")
     @GetMapping("/{id}")
     public ResponseEntity<@NotNull BotGroupDTO> findById(
-            @PathVariable @Parameter(description = "ID of the bot group to retrieve", example = "123") int id) {
+            @PathVariable @Parameter(description = "ID of the bot group to retrieve") String id) {
         try {
             BotGroup botGroup = service.findById(id);
             return ResponseEntity.ok(mapper.toDTO(botGroup));
@@ -80,7 +80,7 @@ public class BotGroupController {
             description = "Returns a list of all bot groups containing the provided filter values")
     @PostMapping("/filter/")
     public ResponseEntity<@NotNull List<BotGroupDTO>> filter(
-            @Parameter(description = "The filter to query the bot groups by", example = "N/A")
+            @Parameter(description = "The filter to query the bot groups by")
             @RequestBody BotGroupFilter filter) {
 
         try {
@@ -100,7 +100,7 @@ public class BotGroupController {
             description = "Returns the freshly created bot group complete with the actual id")
     @PostMapping("/")
     public ResponseEntity<@NotNull BotGroupDTO> save(
-            @Parameter(description = "Bot group body to save in the database", example = "N/A")
+            @Parameter(description = "Bot group body to save in the database")
             @RequestBody BotGroupDTO botGroupDTO) {
         try {
             BotGroup botGroup = mapper.toEntity(botGroupDTO);
@@ -118,8 +118,8 @@ public class BotGroupController {
             description = "Returns the new version of the bot group updated with the provided fields. Only non-null fields in the DTO will be updated.")
     @PatchMapping("/{id}")
     public ResponseEntity<@NotNull BotGroupDTO> update(
-            @PathVariable @Parameter(description = "ID of the bot group to update", example = "123") int id,
-            @Parameter(description = "Bot group DTO containing the fields that need updating (only non-empty Optional fields will be updated)", example = "N/A")
+            @PathVariable @Parameter(description = "ID of the bot group to update") String id,
+            @Parameter(description = "Bot group DTO containing the fields that need updating")
             @RequestBody BotGroupDTO botGroupDTO) {
 
         try {
@@ -139,7 +139,7 @@ public class BotGroupController {
             description = "Returns only the HTTP status of the operation")
     @DeleteMapping("/{id}")
     public ResponseEntity<@NotNull Void> delete(
-            @PathVariable @Parameter(description = "ID to use for deletion", example = "24") int id) {
+            @PathVariable @Parameter(description = "ID to use for deletion") String id) {
 
         try {
             service.delete(id);
@@ -154,7 +154,7 @@ public class BotGroupController {
 
     @PostMapping("/{id}/start")
     @Operation(summary = "Start bot group", description = "Starts the bot group with the given ID")
-    public ResponseEntity<@NotNull Void> start(@PathVariable int id) {
+    public ResponseEntity<@NotNull Void> start(@PathVariable String id) {
         try {
             behaviorService.start(id);
             return ResponseEntity.ok().build();
@@ -167,7 +167,7 @@ public class BotGroupController {
 
     @PostMapping("/{id}/stop")
     @Operation(summary = "Stop bot group", description = "Stops the bot group with the given ID")
-    public ResponseEntity<@NotNull Void> stop(@PathVariable int id) {
+    public ResponseEntity<@NotNull Void> stop(@PathVariable String id) {
         try {
             behaviorService.stop(id);
             return ResponseEntity.ok().build();
@@ -180,7 +180,7 @@ public class BotGroupController {
 
     @PostMapping("/{id}/restart")
     @Operation(summary = "Restart bot group", description = "Restarts the bot group with the given ID")
-    public ResponseEntity<@NotNull Void> restart(@PathVariable int id) {
+    public ResponseEntity<@NotNull Void> restart(@PathVariable String id) {
         try {
             behaviorService.restart(id);
             return ResponseEntity.ok().build();
@@ -194,7 +194,7 @@ public class BotGroupController {
     @PostMapping("/{id}/schedule-restart")
     @Operation(summary = "Schedule bot group restart", description = "Schedules a restart for the bot group")
     public ResponseEntity<@NotNull Void> scheduleRestart(
-            @PathVariable int id,
+            @PathVariable String id,
             @RequestBody LocalDateTime time) {
         try {
             behaviorService.scheduleRestart(id, time);
@@ -210,7 +210,7 @@ public class BotGroupController {
     @Operation(
             summary = "Get bot group runtime status",
             description = "Returns both target status (from database) and actual runtime status")
-    public ResponseEntity<@NotNull BotGroupStatusDTO> getStatus(@PathVariable int id) {
+    public ResponseEntity<@NotNull BotGroupStatusDTO> getStatus(@PathVariable String id) {
         try {
             BotGroup group = service.findById(id);
             BotGroupStatus actualStatus = behaviorService.getActualStatus(id);

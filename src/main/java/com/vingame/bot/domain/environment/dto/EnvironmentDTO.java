@@ -45,4 +45,8 @@ public class EnvironmentDTO {
     private String encryptionIv;
 
     private Boolean alertOnLowBalance;
+
+    // Periodic logout configuration (null = use global defaults)
+    private Boolean periodicLogoutEnabled;
+    private Integer periodicLogoutIntervalMinutes;
 }

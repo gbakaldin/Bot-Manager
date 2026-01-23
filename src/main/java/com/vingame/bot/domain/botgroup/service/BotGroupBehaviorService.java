@@ -61,6 +61,26 @@ public class BotGroupBehaviorService {
     private int botCreationParallelism;
 
     /**
+     * Global default for enabling periodic logout.
+     * Can be overridden per-environment via Environment.periodicLogoutEnabled.
+     */
+    @Value("${bot.periodic-logout.enabled:true}")
+    private boolean periodicLogoutEnabled;
+
+    /**
+     * Global default interval between logout cycles (minutes).
+     * Can be overridden per-environment via Environment.periodicLogoutIntervalMinutes.
+     */
+    @Value("${bot.periodic-logout.interval-minutes:60}")
+    private int periodicLogoutIntervalMinutes;
+
+    /**
+     * Delay between logout and reconnect (seconds).
+     */
+    @Value("${bot.periodic-logout.reconnect-delay-seconds:5}")
+    private int reconnectDelaySeconds;
+
+    /**
      * Scheduler for timed operations (scheduled restarts, etc.)
      * Uses virtual threads for efficiency.
      */
@@ -113,12 +133,11 @@ public class BotGroupBehaviorService {
     public void onStartup() {
         log.info("Bot Manager starting up - checking for bot groups to auto-start");
 
-        botGroupService.findAll().stream()
-                .filter(group -> group.getTargetStatus() == BotGroupStatus.ACTIVE)
+        botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE)
                 .forEach(group -> {
                     try {
                         log.info("Auto-starting bot group: {} (ID: {})", group.getName(), group.getId());
-                        start(Integer.parseInt(group.getId()));
+                        start(group.getId());
                     } catch (Exception e) {
                         log.error("Failed to auto-start bot group {} (ID: {}): {}",
                                 group.getName(), group.getId(), e.getMessage(), e);
@@ -136,12 +155,10 @@ public class BotGroupBehaviorService {
      * - Sequential (old): 100 bots × 5s = 500s (~8 minutes)
      * - Parallel (new): 100 bots / 10 parallelism × ~5s = ~50s
      */
-    public void start(int id) {
-        String groupId = String.valueOf(id);
-
+    public void start(String id) {
         // Check if already running
-        if (runningGroups.containsKey(groupId)) {
-            log.warn("Bot group {} is already running", groupId);
+        if (runningGroups.containsKey(id)) {
+            log.warn("Bot group {} is already running", id);
             return;
         }
 
@@ -171,8 +188,8 @@ public class BotGroupBehaviorService {
             Game game = gameService.findById(group.getGameId());
 
             // Create runtime state
-            BotGroupRuntime runtime = new BotGroupRuntime(groupId, group.getBotCount());
-            runningGroups.put(groupId, runtime);
+            BotGroupRuntime runtime = new BotGroupRuntime(id, group.getBotCount());
+            runningGroups.put(id, runtime);
 
             log.info("Creating {} bots for group {} with parallel execution (parallelism={})",
                     group.getBotCount(), group.getName(), botCreationParallelism);
@@ -189,6 +206,9 @@ public class BotGroupBehaviorService {
             // Start health monitoring
             startHealthMonitoring(runtime);
 
+            // Start periodic logout scheduler
+            startPeriodicLogoutScheduler(runtime, environment);
+
             // Update entity
             group.setTargetStatus(BotGroupStatus.ACTIVE);
             group.setLastStartedAt(LocalDateTime.now());
@@ -201,7 +221,7 @@ public class BotGroupBehaviorService {
             log.error("Failed to start bot group {}: {}", group.getName(), e.getMessage(), e);
 
             // Cleanup runtime if it was created
-            BotGroupRuntime failedRuntime = runningGroups.remove(groupId);
+            BotGroupRuntime failedRuntime = runningGroups.remove(id);
             if (failedRuntime != null) {
                 try {
                     failedRuntime.stopAllBots();
@@ -325,12 +345,10 @@ public class BotGroupBehaviorService {
     /**
      * Stop a bot group - stops all bots, cleans up resources, removes from runtime map
      */
-    public void stop(int id) {
-        String groupId = String.valueOf(id);
-
-        BotGroupRuntime runtime = runningGroups.get(groupId);
+    public void stop(String id) {
+        BotGroupRuntime runtime = runningGroups.get(id);
         if (runtime == null) {
-            log.warn("Bot group {} is not running", groupId);
+            log.warn("Bot group {} is not running", id);
             return;
         }
 
@@ -339,7 +357,7 @@ public class BotGroupBehaviorService {
             runtime.stopAllBots();
 
             // Remove from runtime map
-            runningGroups.remove(groupId);
+            runningGroups.remove(id);
 
             // Update entity
             BotGroup group = botGroupService.findById(id);
@@ -347,10 +365,10 @@ public class BotGroupBehaviorService {
             group.setLastStoppedAt(LocalDateTime.now());
             botGroupService.save(group);
 
-            log.info("Bot group {} stopped successfully", groupId);
+            log.info("Bot group {} stopped successfully", id);
 
         } catch (Exception e) {
-            log.error("Error stopping bot group {}: {}", groupId, e.getMessage(), e);
+            log.error("Error stopping bot group {}: {}", id, e.getMessage(), e);
             throw new RuntimeException("Failed to stop bot group", e);
         }
     }
@@ -358,7 +376,7 @@ public class BotGroupBehaviorService {
     /**
      * Restart a bot group (even if DEAD)
      */
-    public void restart(int id) {
+    public void restart(String id) {
         log.info("Restarting bot group {}", id);
         stop(id);
 
@@ -375,7 +393,7 @@ public class BotGroupBehaviorService {
     /**
      * Schedule a restart for a specific time
      */
-    public void scheduleRestart(int id, LocalDateTime time) {
+    public void scheduleRestart(String id, LocalDateTime time) {
         BotGroup group = botGroupService.findById(id);
 
         long delayMillis = Duration.between(LocalDateTime.now(), time).toMillis();
@@ -399,9 +417,8 @@ public class BotGroupBehaviorService {
     /**
      * Get actual runtime status (ACTIVE, STOPPED, DEAD)
      */
-    public BotGroupStatus getActualStatus(int id) {
-        String groupId = String.valueOf(id);
-        return Optional.ofNullable(runningGroups.get(groupId))
+    public BotGroupStatus getActualStatus(String id) {
+        return Optional.ofNullable(runningGroups.get(id))
                 .map(BotGroupRuntime::getActualStatus)
                 .orElse(BotGroupStatus.STOPPED);
     }
@@ -409,9 +426,8 @@ public class BotGroupBehaviorService {
     /**
      * Get playing status (PLAYING, IDLE, PENDING) - only relevant when ACTIVE
      */
-    public BotGroupPlayingStatus getPlayingStatus(int id) {
-        String groupId = String.valueOf(id);
-        return Optional.ofNullable(runningGroups.get(groupId))
+    public BotGroupPlayingStatus getPlayingStatus(String id) {
+        return Optional.ofNullable(runningGroups.get(id))
                 .map(BotGroupRuntime::getPlayingStatus)
                 .orElse(null); // null if not running
     }
@@ -459,12 +475,117 @@ public class BotGroupBehaviorService {
         runtime.markAsDead();
 
         try {
-            BotGroup group = botGroupService.findById(Integer.parseInt(runtime.getGroupId()));
+            BotGroup group = botGroupService.findById(runtime.getGroupId());
             group.setTargetStatus(BotGroupStatus.DEAD);
             group.setLastFailureReason("Multiple bot disconnections detected");
             botGroupService.save(group);
         } catch (Exception e) {
             log.error("Failed to update database for dead bot group {}: {}", runtime.getGroupId(), e.getMessage());
+        }
+    }
+
+    /**
+     * Start periodic logout scheduler for a bot group.
+     * One bot logs out and reconnects per interval (round-robin).
+     *
+     * @param runtime     The bot group runtime
+     * @param environment The environment (for per-environment config overrides)
+     */
+    private void startPeriodicLogoutScheduler(BotGroupRuntime runtime, Environment environment) {
+        // Determine effective configuration (environment overrides global)
+        boolean enabled = environment.getPeriodicLogoutEnabled() != null
+                ? environment.getPeriodicLogoutEnabled()
+                : periodicLogoutEnabled;
+
+        int intervalMinutes = environment.getPeriodicLogoutIntervalMinutes() != null
+                ? environment.getPeriodicLogoutIntervalMinutes()
+                : periodicLogoutIntervalMinutes;
+
+        if (!enabled) {
+            log.info("Periodic logout disabled for group {} (environment: {})",
+                    runtime.getGroupId(), environment.getName());
+            return;
+        }
+
+        if (runtime.getBotInstances().isEmpty()) {
+            log.warn("No bots in group {}, skipping periodic logout setup", runtime.getGroupId());
+            return;
+        }
+
+        ScheduledExecutorService logoutScheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofVirtual()
+                        .name("logout-scheduler-" + runtime.getGroupId())
+                        .factory()
+        );
+        runtime.setLogoutScheduler(logoutScheduler);
+
+        logoutScheduler.scheduleAtFixedRate(() -> {
+            try {
+                performPeriodicLogout(runtime);
+            } catch (Exception e) {
+                log.error("Periodic logout error for group {}: {}",
+                        runtime.getGroupId(), e.getMessage(), e);
+            }
+        }, intervalMinutes, intervalMinutes, TimeUnit.MINUTES);
+
+        log.info("Periodic logout scheduler started for group {} (interval: {} minutes, reconnect delay: {} seconds)",
+                runtime.getGroupId(), intervalMinutes, reconnectDelaySeconds);
+    }
+
+    /**
+     * Perform a single periodic logout cycle.
+     * Gets the next bot via round-robin, logs it out, waits, then reconnects.
+     */
+    private void performPeriodicLogout(BotGroupRuntime runtime) {
+        // Skip if group is stopping or dead
+        if (runtime.getActualStatus() != BotGroupStatus.ACTIVE) {
+            log.debug("Skipping periodic logout for group {} - not active (status: {})",
+                    runtime.getGroupId(), runtime.getActualStatus());
+            return;
+        }
+
+        Bot bot = runtime.getNextBotForLogout();
+        if (bot == null) {
+            log.warn("No bot available for periodic logout in group {}", runtime.getGroupId());
+            return;
+        }
+
+        // Skip if bot is already disconnected
+        if (bot.getClient() == null || !bot.getClient().isOpen()) {
+            log.info("Bot {} already disconnected, skipping periodic logout", bot.getUserName());
+            return;
+        }
+
+        log.info("Periodic logout starting for bot {} in group {}",
+                bot.getUserName(), runtime.getGroupId());
+
+        try {
+            // Logout (closes connection)
+            bot.logout();
+
+            // Wait before reconnecting (virtual thread, no platform thread blocked)
+            Thread.sleep(reconnectDelaySeconds * 1000L);
+
+            // Check again if group is still active before reconnecting
+            if (runtime.getActualStatus() != BotGroupStatus.ACTIVE) {
+                log.info("Group {} stopped during logout delay, skipping reconnect for bot {}",
+                        runtime.getGroupId(), bot.getUserName());
+                return;
+            }
+
+            // Reconnect
+            bot.restart();
+
+            log.info("Periodic logout completed for bot {} in group {}",
+                    bot.getUserName(), runtime.getGroupId());
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Periodic logout interrupted for bot {} in group {}",
+                    bot.getUserName(), runtime.getGroupId());
+        } catch (Exception e) {
+            log.error("Periodic logout failed for bot {} in group {}: {}",
+                    bot.getUserName(), runtime.getGroupId(), e.getMessage(), e);
         }
     }
 }

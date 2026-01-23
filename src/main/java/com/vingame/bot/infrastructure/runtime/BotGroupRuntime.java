@@ -15,6 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Runtime state for a bot group that is currently managed by the application.
@@ -52,7 +53,11 @@ public class BotGroupRuntime {
     // Runtime metadata
     private Instant startedAt;
     private ScheduledExecutorService healthMonitor;
+    private ScheduledExecutorService logoutScheduler;
     private int consecutiveFailures;
+
+    // Round-robin index for periodic logout
+    private final AtomicInteger logoutIndex = new AtomicInteger(0);
 
     /**
      * Create a new runtime for a bot group.
@@ -164,6 +169,20 @@ public class BotGroupRuntime {
     }
 
     /**
+     * Get the next bot for periodic logout using round-robin.
+     * Thread-safe via AtomicInteger.
+     *
+     * @return The next bot to logout, or null if no bots available
+     */
+    public Bot getNextBotForLogout() {
+        if (botInstances.isEmpty()) {
+            return null;
+        }
+        int index = logoutIndex.getAndUpdate(i -> (i + 1) % botInstances.size());
+        return botInstances.get(index);
+    }
+
+    /**
      * Stop all bot instances and shutdown executor.
      * <p>
      * Shutdown process:
@@ -204,6 +223,11 @@ public class BotGroupRuntime {
         // Shutdown health monitor
         if (healthMonitor != null && !healthMonitor.isShutdown()) {
             healthMonitor.shutdownNow();
+        }
+
+        // Shutdown logout scheduler
+        if (logoutScheduler != null && !logoutScheduler.isShutdown()) {
+            logoutScheduler.shutdownNow();
         }
 
         log.info("All bots stopped for group {}", groupId);

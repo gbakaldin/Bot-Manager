@@ -5,6 +5,8 @@ import lombok.Builder;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.util.Map;
 
@@ -13,8 +15,10 @@ import java.util.Map;
 @Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
+@Document(collection = "environments")
 public class Environment {
 
+    @Id
     private String id;
 
     private String name;
@@ -42,4 +46,8 @@ public class Environment {
     private String encryptionIv;
 
     private boolean alertOnLowBalance;
+
+    // Periodic logout configuration (null = use global defaults from application.properties)
+    private Boolean periodicLogoutEnabled;
+    private Integer periodicLogoutIntervalMinutes;
 }
