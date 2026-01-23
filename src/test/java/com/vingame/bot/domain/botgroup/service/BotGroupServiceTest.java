@@ -15,9 +15,13 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Query;
 
 import java.util.List;
 import java.util.Optional;
@@ -25,8 +29,8 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -45,10 +49,16 @@ class BotGroupServiceTest {
     private EnvironmentClientRegistry clientRegistry;
 
     @Mock
+    private MongoTemplate mongoTemplate;
+
+    @Mock
     private EnvironmentClients environmentClients;
 
     @Mock
     private ApiGatewayClient apiGatewayClient;
+
+    @Captor
+    private ArgumentCaptor<Query> queryCaptor;
 
     @InjectMocks
     private BotGroupService service;
@@ -119,11 +129,8 @@ class BotGroupServiceTest {
         @Test
         @DisplayName("Should filter by environment ID")
         void shouldFilterByEnvironmentId() {
-            List<BotGroup> all = List.of(
-                    BotGroup.builder().id("1").environmentId("env-a").build(),
-                    BotGroup.builder().id("2").environmentId("env-b").build()
-            );
-            when(repository.findAll()).thenReturn(all);
+            List<BotGroup> expected = List.of(BotGroup.builder().id("1").environmentId("env-a").build());
+            when(mongoTemplate.find(any(Query.class), eq(BotGroup.class))).thenReturn(expected);
 
             BotGroupFilter filter = new BotGroupFilter();
             filter.setEnvironmentId("env-a");
@@ -131,17 +138,17 @@ class BotGroupServiceTest {
             List<BotGroup> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("environmentId");
+            assertThat(queryString).contains("env-a");
         }
 
         @Test
         @DisplayName("Should filter by name (case-insensitive)")
         void shouldFilterByName() {
-            List<BotGroup> all = List.of(
-                    BotGroup.builder().id("1").name("Production Group").build(),
-                    BotGroup.builder().id("2").name("Test Group").build()
-            );
-            when(repository.findAll()).thenReturn(all);
+            List<BotGroup> expected = List.of(BotGroup.builder().id("2").name("Test Group").build());
+            when(mongoTemplate.find(any(Query.class), eq(BotGroup.class))).thenReturn(expected);
 
             BotGroupFilter filter = new BotGroupFilter();
             filter.setName("test group");
@@ -149,17 +156,16 @@ class BotGroupServiceTest {
             List<BotGroup> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("2");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("name");
         }
 
         @Test
         @DisplayName("Should filter by game ID")
         void shouldFilterByGameId() {
-            List<BotGroup> all = List.of(
-                    BotGroup.builder().id("1").gameId("game-1").build(),
-                    BotGroup.builder().id("2").gameId("game-2").build()
-            );
-            when(repository.findAll()).thenReturn(all);
+            List<BotGroup> expected = List.of(BotGroup.builder().id("1").gameId("game-1").build());
+            when(mongoTemplate.find(any(Query.class), eq(BotGroup.class))).thenReturn(expected);
 
             BotGroupFilter filter = new BotGroupFilter();
             filter.setGameId("game-1");
@@ -167,19 +173,25 @@ class BotGroupServiceTest {
             List<BotGroup> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("gameId");
+            assertThat(queryString).contains("game-1");
         }
 
         @Test
-        @DisplayName("Should return all when no criteria")
+        @DisplayName("Should query with no criteria when filter is empty")
         void shouldReturnAllWhenNoCriteria() {
             List<BotGroup> all = List.of(
                     BotGroup.builder().id("1").build(),
                     BotGroup.builder().id("2").build()
             );
-            when(repository.findAll()).thenReturn(all);
+            when(mongoTemplate.find(any(Query.class), eq(BotGroup.class))).thenReturn(all);
 
             assertThat(service.filter(new BotGroupFilter())).hasSize(2);
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
+            // Empty query should have no criteria
+            assertThat(queryCaptor.getValue().getQueryObject()).isEmpty();
         }
     }
 

@@ -7,15 +7,18 @@ import com.vingame.bot.domain.environment.model.BrandCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.model.EnvironmentFilter;
 import com.vingame.bot.domain.environment.model.EnvironmentType;
-import com.vingame.bot.domain.environment.model.ProductCode;
 import com.vingame.bot.domain.environment.repository.EnvironmentRepository;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Query;
 
 import java.util.List;
 import java.util.Optional;
@@ -23,6 +26,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -35,6 +39,12 @@ class EnvironmentServiceTest {
 
     @Mock
     private EnvironmentMapper mapper;
+
+    @Mock
+    private MongoTemplate mongoTemplate;
+
+    @Captor
+    private ArgumentCaptor<Query> queryCaptor;
 
     @InjectMocks
     private EnvironmentService service;
@@ -100,11 +110,10 @@ class EnvironmentServiceTest {
         @Test
         @DisplayName("Should filter by type")
         void shouldFilterByType() {
-            List<Environment> all = List.of(
-                    Environment.builder().id("1").type(EnvironmentType.STAGING).build(),
-                    Environment.builder().id("2").type(EnvironmentType.PRODUCTION).build()
+            List<Environment> expected = List.of(
+                    Environment.builder().id("1").type(EnvironmentType.STAGING).build()
             );
-            when(repository.findAll()).thenReturn(all);
+            when(mongoTemplate.find(any(Query.class), eq(Environment.class))).thenReturn(expected);
 
             EnvironmentFilter filter = new EnvironmentFilter();
             filter.setType(EnvironmentType.STAGING);
@@ -112,17 +121,18 @@ class EnvironmentServiceTest {
             List<Environment> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("type");
         }
 
         @Test
         @DisplayName("Should filter by brand code")
         void shouldFilterByBrandCode() {
-            List<Environment> all = List.of(
-                    Environment.builder().id("1").brandCode(BrandCode.G2).build(),
-                    Environment.builder().id("2").brandCode(BrandCode.G4).build()
+            List<Environment> expected = List.of(
+                    Environment.builder().id("1").brandCode(BrandCode.G2).build()
             );
-            when(repository.findAll()).thenReturn(all);
+            when(mongoTemplate.find(any(Query.class), eq(Environment.class))).thenReturn(expected);
 
             EnvironmentFilter filter = new EnvironmentFilter();
             filter.setBrandCode(BrandCode.G2);
@@ -130,17 +140,18 @@ class EnvironmentServiceTest {
             List<Environment> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("brandCode");
         }
 
         @Test
         @DisplayName("Should filter by name (case-insensitive)")
         void shouldFilterByNameCaseInsensitive() {
-            List<Environment> all = List.of(
-                    Environment.builder().id("1").name("Staging Env").build(),
-                    Environment.builder().id("2").name("Production Env").build()
+            List<Environment> expected = List.of(
+                    Environment.builder().id("1").name("Staging Env").build()
             );
-            when(repository.findAll()).thenReturn(all);
+            when(mongoTemplate.find(any(Query.class), eq(Environment.class))).thenReturn(expected);
 
             EnvironmentFilter filter = new EnvironmentFilter();
             filter.setName("staging env");
@@ -148,32 +159,34 @@ class EnvironmentServiceTest {
             List<Environment> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("name");
         }
 
         @Test
-        @DisplayName("Should return all when filter has no criteria")
+        @DisplayName("Should query with no criteria when filter is empty")
         void shouldReturnAllWhenNoCriteria() {
             List<Environment> all = List.of(
                     Environment.builder().id("1").build(),
                     Environment.builder().id("2").build()
             );
-            when(repository.findAll()).thenReturn(all);
+            when(mongoTemplate.find(any(Query.class), eq(Environment.class))).thenReturn(all);
 
             List<Environment> result = service.filter(new EnvironmentFilter());
 
             assertThat(result).hasSize(2);
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
+            assertThat(queryCaptor.getValue().getQueryObject()).isEmpty();
         }
 
         @Test
         @DisplayName("Should apply multiple filter criteria together")
         void shouldApplyMultipleCriteria() {
-            List<Environment> all = List.of(
-                    Environment.builder().id("1").type(EnvironmentType.STAGING).brandCode(BrandCode.G2).build(),
-                    Environment.builder().id("2").type(EnvironmentType.STAGING).brandCode(BrandCode.G4).build(),
-                    Environment.builder().id("3").type(EnvironmentType.PRODUCTION).brandCode(BrandCode.G2).build()
+            List<Environment> expected = List.of(
+                    Environment.builder().id("1").type(EnvironmentType.STAGING).brandCode(BrandCode.G2).build()
             );
-            when(repository.findAll()).thenReturn(all);
+            when(mongoTemplate.find(any(Query.class), eq(Environment.class))).thenReturn(expected);
 
             EnvironmentFilter filter = new EnvironmentFilter();
             filter.setType(EnvironmentType.STAGING);
@@ -182,7 +195,10 @@ class EnvironmentServiceTest {
             List<Environment> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("type");
+            assertThat(queryString).contains("brandCode");
         }
     }
 

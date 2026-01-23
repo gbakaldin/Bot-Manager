@@ -6,20 +6,26 @@ import com.vingame.bot.domain.environment.mapper.EnvironmentMapper;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.model.EnvironmentFilter;
 import com.vingame.bot.domain.environment.repository.EnvironmentRepository;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @Service
 public class EnvironmentService {
 
     private final EnvironmentRepository repository;
     private final EnvironmentMapper mapper;
+    private final MongoTemplate mongoTemplate;
 
-    public EnvironmentService(EnvironmentRepository repository, EnvironmentMapper mapper) {
+    public EnvironmentService(EnvironmentRepository repository, EnvironmentMapper mapper, MongoTemplate mongoTemplate) {
         this.repository = repository;
         this.mapper = mapper;
+        this.mongoTemplate = mongoTemplate;
     }
 
     public Environment findById(String id) {
@@ -32,12 +38,20 @@ public class EnvironmentService {
     }
 
     public List<Environment> filter(EnvironmentFilter filter) {
-        return repository.findAll().stream()
-                .filter(e -> filter.getType() == null || e.getType() == filter.getType())
-                .filter(e -> filter.getName() == null || e.getName().equalsIgnoreCase(filter.getName()))
-                .filter(e -> filter.getBrandCode() == null || e.getBrandCode() == filter.getBrandCode())
-                .filter(e -> filter.getProductCode() == null || e.getProductCode() == filter.getProductCode())
-                .toList();
+        Query query = new Query();
+        if (filter.getType() != null) {
+            query.addCriteria(Criteria.where("type").is(filter.getType()));
+        }
+        if (filter.getName() != null) {
+            query.addCriteria(Criteria.where("name").regex("^" + Pattern.quote(filter.getName()) + "$", "i"));
+        }
+        if (filter.getBrandCode() != null) {
+            query.addCriteria(Criteria.where("brandCode").is(filter.getBrandCode()));
+        }
+        if (filter.getProductCode() != null) {
+            query.addCriteria(Criteria.where("productCode").is(filter.getProductCode()));
+        }
+        return mongoTemplate.find(query, Environment.class);
     }
 
     public Environment save(Environment environment) {

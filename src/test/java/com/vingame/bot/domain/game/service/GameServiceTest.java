@@ -13,9 +13,13 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Captor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Query;
 
 import java.util.List;
 import java.util.Optional;
@@ -23,6 +27,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -35,6 +40,12 @@ class GameServiceTest {
 
     @Mock
     private GameMapper mapper;
+
+    @Mock
+    private MongoTemplate mongoTemplate;
+
+    @Captor
+    private ArgumentCaptor<Query> queryCaptor;
 
     @InjectMocks
     private GameService service;
@@ -90,63 +101,58 @@ class GameServiceTest {
         @Test
         @DisplayName("Should filter by brand code")
         void shouldFilterByBrandCode() {
-            List<Game> all = List.of(
-                    Game.builder().id("1").brandCode(BrandCode.G2).build(),
-                    Game.builder().id("2").brandCode(BrandCode.G4).build()
-            );
-            when(repository.findAll()).thenReturn(all);
+            List<Game> expected = List.of(Game.builder().id("1").brandCode(BrandCode.G2).build());
+            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(expected);
 
             GameFilter filter = GameFilter.builder().brandCode(BrandCode.G2).build();
 
             List<Game> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("brandCode");
         }
 
         @Test
         @DisplayName("Should filter by game type")
         void shouldFilterByGameType() {
-            List<Game> all = List.of(
-                    Game.builder().id("1").gameType(GameType.BETTING_MINI).build(),
-                    Game.builder().id("2").gameType(null).build()
-            );
-            when(repository.findAll()).thenReturn(all);
+            List<Game> expected = List.of(Game.builder().id("1").gameType(GameType.BETTING_MINI).build());
+            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(expected);
 
             GameFilter filter = GameFilter.builder().gameType(GameType.BETTING_MINI).build();
 
             List<Game> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("gameType");
         }
 
         @Test
         @DisplayName("Should filter by name (case-insensitive, contains)")
         void shouldFilterByNameContains() {
-            List<Game> all = List.of(
-                    Game.builder().id("1").name("TaiXiu Seven").build(),
-                    Game.builder().id("2").name("BauCua").build()
-            );
-            when(repository.findAll()).thenReturn(all);
+            List<Game> expected = List.of(Game.builder().id("1").name("TaiXiu Seven").build());
+            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(expected);
 
             GameFilter filter = GameFilter.builder().name("taixiu").build();
 
             List<Game> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("name");
         }
 
         @Test
         @DisplayName("Should apply multiple filter criteria")
         void shouldApplyMultipleCriteria() {
-            List<Game> all = List.of(
-                    Game.builder().id("1").brandCode(BrandCode.G2).productCode(ProductCode.P_097).build(),
-                    Game.builder().id("2").brandCode(BrandCode.G2).productCode(ProductCode.P_118).build(),
-                    Game.builder().id("3").brandCode(BrandCode.G4).productCode(ProductCode.P_097).build()
+            List<Game> expected = List.of(
+                    Game.builder().id("1").brandCode(BrandCode.G2).productCode(ProductCode.P_097).build()
             );
-            when(repository.findAll()).thenReturn(all);
+            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(expected);
 
             GameFilter filter = GameFilter.builder()
                     .brandCode(BrandCode.G2)
@@ -156,21 +162,26 @@ class GameServiceTest {
             List<Game> result = service.filter(filter);
 
             assertThat(result).hasSize(1);
-            assertThat(result.get(0).getId()).isEqualTo("1");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
+            String queryString = queryCaptor.getValue().toString();
+            assertThat(queryString).contains("brandCode");
+            assertThat(queryString).contains("productCode");
         }
 
         @Test
-        @DisplayName("Should return all when no criteria set")
+        @DisplayName("Should query with no criteria when filter is empty")
         void shouldReturnAllWhenNoCriteria() {
             List<Game> all = List.of(
                     Game.builder().id("1").build(),
                     Game.builder().id("2").build()
             );
-            when(repository.findAll()).thenReturn(all);
+            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(all);
 
             List<Game> result = service.filter(GameFilter.builder().build());
 
             assertThat(result).hasSize(2);
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
+            assertThat(queryCaptor.getValue().getQueryObject()).isEmpty();
         }
     }
 

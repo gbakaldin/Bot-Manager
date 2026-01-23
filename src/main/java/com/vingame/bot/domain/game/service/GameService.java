@@ -8,20 +8,26 @@ import com.vingame.bot.domain.game.mapper.GameMapper;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameFilter;
 import com.vingame.bot.domain.game.repository.GameRepository;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @Service
 public class GameService {
 
     private final GameRepository repository;
     private final GameMapper mapper;
+    private final MongoTemplate mongoTemplate;
 
-    public GameService(GameRepository repository, GameMapper mapper) {
+    public GameService(GameRepository repository, GameMapper mapper, MongoTemplate mongoTemplate) {
         this.repository = repository;
         this.mapper = mapper;
+        this.mongoTemplate = mongoTemplate;
     }
 
     public Game findById(String id) {
@@ -34,12 +40,20 @@ public class GameService {
     }
 
     public List<Game> filter(GameFilter filter) {
-        return repository.findAll().stream()
-                .filter(g -> filter.getBrandCode() == null || g.getBrandCode() == filter.getBrandCode())
-                .filter(g -> filter.getProductCode() == null || g.getProductCode() == filter.getProductCode())
-                .filter(g -> filter.getGameType() == null || g.getGameType() == filter.getGameType())
-                .filter(g -> filter.getName() == null || g.getName().toLowerCase().contains(filter.getName().toLowerCase()))
-                .toList();
+        Query query = new Query();
+        if (filter.getBrandCode() != null) {
+            query.addCriteria(Criteria.where("brandCode").is(filter.getBrandCode()));
+        }
+        if (filter.getProductCode() != null) {
+            query.addCriteria(Criteria.where("productCode").is(filter.getProductCode()));
+        }
+        if (filter.getGameType() != null) {
+            query.addCriteria(Criteria.where("gameType").is(filter.getGameType()));
+        }
+        if (filter.getName() != null) {
+            query.addCriteria(Criteria.where("name").regex(Pattern.quote(filter.getName()), "i"));
+        }
+        return mongoTemplate.find(query, Game.class);
     }
 
     public Game save(Game game) {

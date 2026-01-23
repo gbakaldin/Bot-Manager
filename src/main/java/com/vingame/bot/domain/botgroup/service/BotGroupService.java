@@ -11,10 +11,14 @@ import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @Slf4j
 @Service
@@ -23,11 +27,14 @@ public class BotGroupService {
     private final BotGroupRepository repository;
     private final BotGroupMapper mapper;
     private final EnvironmentClientRegistry clientRegistry;
+    private final MongoTemplate mongoTemplate;
 
-    public BotGroupService(BotGroupRepository repository, BotGroupMapper mapper, EnvironmentClientRegistry clientRegistry) {
+    public BotGroupService(BotGroupRepository repository, BotGroupMapper mapper,
+                           EnvironmentClientRegistry clientRegistry, MongoTemplate mongoTemplate) {
         this.repository = repository;
         this.mapper = mapper;
         this.clientRegistry = clientRegistry;
+        this.mongoTemplate = mongoTemplate;
     }
 
     public BotGroup findById(String id) {
@@ -44,11 +51,17 @@ public class BotGroupService {
     }
 
     public List<BotGroup> filter(BotGroupFilter filter) {
-        return repository.findAll().stream()
-                .filter(bg -> filter.getEnvironmentId() == null || bg.getEnvironmentId().equals(filter.getEnvironmentId()))
-                .filter(bg -> filter.getName() == null || bg.getName().equalsIgnoreCase(filter.getName()))
-                .filter(bg -> filter.getGameId() == null || filter.getGameId().equals(bg.getGameId()))
-                .toList();
+        Query query = new Query();
+        if (filter.getEnvironmentId() != null) {
+            query.addCriteria(Criteria.where("environmentId").is(filter.getEnvironmentId()));
+        }
+        if (filter.getName() != null) {
+            query.addCriteria(Criteria.where("name").regex("^" + Pattern.quote(filter.getName()) + "$", "i"));
+        }
+        if (filter.getGameId() != null) {
+            query.addCriteria(Criteria.where("gameId").is(filter.getGameId()));
+        }
+        return mongoTemplate.find(query, BotGroup.class);
     }
 
     /**
