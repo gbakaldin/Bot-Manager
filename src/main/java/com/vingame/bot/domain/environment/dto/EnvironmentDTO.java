@@ -1,9 +1,9 @@
 package com.vingame.bot.domain.environment.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
-import com.vingame.bot.domain.environment.model.BrandCode;
+import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.environment.model.EnvironmentType;
-import com.vingame.bot.domain.environment.model.ProductCode;
+import com.vingame.bot.domain.brand.model.ProductCode;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -49,4 +49,10 @@ public class EnvironmentDTO {
     // Periodic logout configuration (null = use global defaults)
     private Boolean periodicLogoutEnabled;
     private Integer periodicLogoutIntervalMinutes;
+
+    // Aggregated bot group stats (read-only, populated on GET responses)
+    private Integer totalBotGroups;
+    private Integer runningBotGroups;
+    private Integer totalBots;
+    private Integer runningBots;
 }

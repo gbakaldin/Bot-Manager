@@ -464,6 +464,26 @@ public class BotGroupBehaviorService {
     }
 
     /**
+     * Check if a bot group is currently running (has an active runtime).
+     */
+    public boolean isGroupRunning(String groupId) {
+        BotGroupRuntime runtime = runningGroups.get(groupId);
+        return runtime != null && runtime.getActualStatus() == BotGroupStatus.ACTIVE;
+    }
+
+    /**
+     * Get the number of running bots for a specific group.
+     * Returns 0 if the group is not running.
+     */
+    public int getRunningBotCountForGroup(String groupId) {
+        BotGroupRuntime runtime = runningGroups.get(groupId);
+        if (runtime == null) {
+            return 0;
+        }
+        return (int) runtime.getRunningBotCount();
+    }
+
+    /**
      * Get actual runtime status (ACTIVE, STOPPED, DEAD)
      */
     public BotGroupStatus getActualStatus(String id) {
@@ -636,5 +656,37 @@ public class BotGroupBehaviorService {
             log.error("Periodic logout failed for bot {} in group {}: {}",
                     bot.getUserName(), runtime.getGroupId(), e.getMessage(), e);
         }
+    }
+}
+
+
+// Trading processor
+/*
+    1. Trades must be processed in the order they arrive per accountId.
+    2. Trades from different accounts can be processed in parallel.
+    3. You must use multiple threads for better performance.
+*/
+
+class Trade {
+    String accountId;
+    long timestamp;
+}
+
+class TradingProcessor {
+    private final ExternalClient client;
+
+    public TradingProcessor(ExternalClient client) {
+        this.client = client;
+    }
+
+    // assume it will be called from multiple threads
+    public void process(List<Trade> trades) {
+
+    }
+}
+
+class ExternalClient {
+    public void processTrade(Trade trade) {
+
     }
 }

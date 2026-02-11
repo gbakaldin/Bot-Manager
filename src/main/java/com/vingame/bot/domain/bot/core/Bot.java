@@ -11,7 +11,6 @@ import com.vingame.websocketparser.scenario.Scenario;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -37,10 +36,7 @@ public abstract class Bot {
     protected String apiGateway;
 
     @Getter
-    protected String authToken; // Token for WebSocket authentication (from authenticate()[0])
-
-    @Getter
-    protected String agencyToken; // Token for GameMS deposits (from authenticate()[1])
+    protected TokensProvider tokens; // All authentication tokens from ApiGatewayClient
 
     protected volatile long lastFetchedBalance = -1;
     protected final AtomicLong expectedCurrentBalance = new AtomicLong(-100_000_000L);
@@ -112,14 +108,11 @@ public abstract class Bot {
         log.debug("Initializing bot {}", userName);
 
         // Authenticate to get tokens BEFORE creating WebSocket client
-        // Returns [agencyToken, authToken]
-        List<String> authTokens = apiGatewayClient.authenticate(credentials);
-        this.agencyToken = authTokens.get(0); // Store agency token for GameMS deposits
-        this.authToken = authTokens.get(1);   // Store auth token for WebSocket authentication
+        this.tokens = apiGatewayClient.authenticate(credentials);
 
         // Create WebSocket client from factory, passing tokens directly
         // This avoids race conditions when multiple bots share the same factory
-        this.client = clientFactory.newClient(authTokens);
+        this.client = clientFactory.newClient(tokens);
 
         // Call child-specific initialization
         initializeSubclass();
@@ -129,8 +122,9 @@ public abstract class Bot {
         // connect() actually connects and sends AUTH message
         // This ensures bot 1 is fully connected before bot 2 is even created
         log.info("Bot {} - setting auth tokens [agency: {}, auth: {}]",
-                 userName, agencyToken.substring(0, 10) + "...", authToken.substring(0, 10) + "...");
-        client.authenticate(TokensProvider.of(agencyToken, authToken));
+                 userName,
+                 tokens.getAgencyToken().substring(0, 10) + "...",
+                 tokens.getAuthToken().substring(0, 10) + "...");
         client.connect();
 
         log.info("Bot {} initialized successfully and connected. Client: {}",
@@ -172,10 +166,8 @@ public abstract class Bot {
             client.close();
         }
         // Create new client from factory with existing tokens
-        List<String> tokens = List.of(agencyToken, authToken);
         this.client = clientFactory.newClient(tokens);
         // Re-setup authentication and reconnect
-        client.authenticate(TokensProvider.of(agencyToken, authToken));
         client.connect();
         start();
     }
@@ -194,8 +186,7 @@ public abstract class Bot {
 
     public void authenticate() {
         try {
-            List<String> tokens = apiGatewayClient.authenticate(credentials);
-            client.authenticate(TokensProvider.of(tokens.get(0), tokens.get(1)));
+            this.tokens = apiGatewayClient.authenticate(credentials);
         } catch (Exception e) {
             log.error("Bot {}: Authentication failed: {}", userName, e.getMessage());
         }

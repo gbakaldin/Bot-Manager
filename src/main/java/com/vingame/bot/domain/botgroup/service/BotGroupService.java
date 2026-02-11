@@ -46,6 +46,10 @@ public class BotGroupService {
         return repository.findAll();
     }
 
+    public List<BotGroup> findByEnvironmentId(String environmentId) {
+        return repository.findByEnvironmentId(environmentId);
+    }
+
     public List<BotGroup> findByTargetStatus(BotGroupStatus status) {
         return repository.findByTargetStatus(status);
     }
@@ -65,10 +69,19 @@ public class BotGroupService {
     }
 
     /**
+     * Save or update a bot group with user registration.
+     *
+     * @see #save(BotGroup, boolean)
+     */
+    public BotGroup save(BotGroup botGroup) {
+        return save(botGroup, false);
+    }
+
+    /**
      * Save or update a bot group.
      * <p>
      * If the bot group is NEW (ID is null):
-     * - Registers all bot users on the authentication server
+     * - Registers all bot users on the authentication server (unless skipRegistration is true)
      * - Generates a new ID
      * - Persists to MongoDB
      * - Throws exception if user registration completely fails
@@ -78,47 +91,53 @@ public class BotGroupService {
      * - Updates the existing document
      *
      * @param botGroup The bot group to save or update
+     * @param skipRegistration If true, skips user registration (for migrating existing bots)
      * @return The saved/updated bot group
      * @throws IllegalStateException if user registration completely fails (new groups only)
      * @throws ResourceNotFoundException if the environment doesn't exist
      */
-    public BotGroup save(BotGroup botGroup) {
+    public BotGroup save(BotGroup botGroup, boolean skipRegistration) {
         boolean isNewGroup = (botGroup.getId() == null || botGroup.getId().isEmpty());
 
         if (isNewGroup) {
             log.info("Creating new bot group '{}' with {} bots in environment {}",
                      botGroup.getName(), botGroup.getBotCount(), botGroup.getEnvironmentId());
 
-            EnvironmentClients clients = clientRegistry.getClients(botGroup.getEnvironmentId());
-
-            log.info("Registering {} users with prefix '{}' and password '{}'",
-                     botGroup.getBotCount(), botGroup.getNamePrefix(), botGroup.getPassword());
-
-            UserRegistrationResult registrationResult = clients.getApiGatewayClient().registerUsers(
-                    botGroup.getNamePrefix(),
-                    botGroup.getPassword(),
-                    botGroup.getBotCount());
-
-            if (registrationResult.isCompleteFailure()) {
-                String errorMsg = String.format(
-                    "Failed to register any users for bot group '%s'. Errors: %s",
-                    botGroup.getName(),
-                    String.join("; ", registrationResult.getErrors())
-                );
-                log.error(errorMsg);
-                throw new IllegalStateException(errorMsg);
-            }
-
-            if (registrationResult.isPartialSuccess()) {
-                log.warn("Partial user registration for bot group '{}': {}/{} succeeded. Errors: {}",
-                         botGroup.getName(),
-                         registrationResult.getSuccessCount(),
-                         registrationResult.getTotalRequested(),
-                         String.join("; ", registrationResult.getErrors()));
-            } else {
-                log.info("Successfully registered all {} users for bot group '{}'",
-                         registrationResult.getSuccessCount(),
+            if (skipRegistration) {
+                log.info("Skipping user registration for bot group '{}' (existing group migration)",
                          botGroup.getName());
+            } else {
+                EnvironmentClients clients = clientRegistry.getClients(botGroup.getEnvironmentId());
+
+                log.info("Registering {} users with prefix '{}' and password '{}'",
+                         botGroup.getBotCount(), botGroup.getNamePrefix(), botGroup.getPassword());
+
+                UserRegistrationResult registrationResult = clients.getApiGatewayClient().registerUsers(
+                        botGroup.getNamePrefix(),
+                        botGroup.getPassword(),
+                        botGroup.getBotCount());
+
+                if (registrationResult.isCompleteFailure()) {
+                    String errorMsg = String.format(
+                        "Failed to register any users for bot group '%s'. Errors: %s",
+                        botGroup.getName(),
+                        String.join("; ", registrationResult.getErrors())
+                    );
+                    log.error(errorMsg);
+                    throw new IllegalStateException(errorMsg);
+                }
+
+                if (registrationResult.isPartialSuccess()) {
+                    log.warn("Partial user registration for bot group '{}': {}/{} succeeded. Errors: {}",
+                             botGroup.getName(),
+                             registrationResult.getSuccessCount(),
+                             registrationResult.getTotalRequested(),
+                             String.join("; ", registrationResult.getErrors()));
+                } else {
+                    log.info("Successfully registered all {} users for bot group '{}'",
+                             registrationResult.getSuccessCount(),
+                             botGroup.getName());
+                }
             }
 
             botGroup.setId(UUID.randomUUID().toString());

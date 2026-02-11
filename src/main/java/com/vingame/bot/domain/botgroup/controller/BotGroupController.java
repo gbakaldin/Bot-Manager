@@ -98,14 +98,16 @@ public class BotGroupController {
 
     @Operation(
             summary = "Create a new bot group",
-            description = "Returns the freshly created bot group complete with the actual id")
+            description = "Returns the freshly created bot group complete with the actual id. " +
+                    "Set existingGroup=true to skip user registration (for migrating existing bots).")
     @PostMapping("/")
     public ResponseEntity<@NotNull BotGroupDTO> save(
             @Parameter(description = "Bot group body to save in the database")
             @RequestBody BotGroupDTO botGroupDTO) {
         try {
             BotGroup botGroup = mapper.toEntity(botGroupDTO);
-            BotGroup saved = service.save(botGroup);
+            boolean skipRegistration = Boolean.TRUE.equals(botGroupDTO.getExistingGroup());
+            BotGroup saved = service.save(botGroup, skipRegistration);
             return ResponseEntity.ok(mapper.toDTO(saved));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.notFound().build();

@@ -1,7 +1,7 @@
 package com.vingame.bot.domain.game.repository;
 
-import com.vingame.bot.domain.environment.model.BrandCode;
-import com.vingame.bot.domain.environment.model.ProductCode;
+import com.vingame.bot.domain.brand.model.BrandCode;
+import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import org.springframework.data.mongodb.repository.MongoRepository;

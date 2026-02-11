@@ -29,6 +29,7 @@ public interface GameMapper {
                 .pluginName(entity.getPluginName())
                 .gameId(entity.getGameId())
                 .numberOfOptions(entity.getNumberOfOptions())
+                .bettingOptions(entity.getBettingOptions())
                 .offset(entity.getOffset())
                 .md5(entity.isMd5())
                 .build();
@@ -53,6 +54,7 @@ public interface GameMapper {
                 .pluginName(dto.getPluginName())
                 .gameId(dto.getGameId())
                 .numberOfOptions(Optional.ofNullable(dto.getNumberOfOptions()).orElse(0))
+                .bettingOptions(dto.getBettingOptions())
                 .offset(dto.getOffset())
                 .md5(Optional.ofNullable(dto.getMd5()).orElse(false))
                 .build();
@@ -75,6 +77,7 @@ public interface GameMapper {
         entity.setPluginName(Optional.ofNullable(dto.getPluginName()).orElse(entity.getPluginName()));
         entity.setGameId(Optional.ofNullable(dto.getGameId()).orElse(entity.getGameId()));
         entity.setNumberOfOptions(Optional.ofNullable(dto.getNumberOfOptions()).orElse(entity.getNumberOfOptions()));
+        entity.setBettingOptions(Optional.ofNullable(dto.getBettingOptions()).orElse(entity.getBettingOptions()));
         entity.setOffset(Optional.ofNullable(dto.getOffset()).orElse(entity.getOffset()));
         entity.setMd5(Optional.ofNullable(dto.getMd5()).orElse(entity.isMd5()));
     }

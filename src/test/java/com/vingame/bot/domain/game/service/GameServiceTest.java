@@ -1,8 +1,8 @@
 package com.vingame.bot.domain.game.service;
 
 import com.vingame.bot.common.exception.ResourceNotFoundException;
-import com.vingame.bot.domain.environment.model.BrandCode;
-import com.vingame.bot.domain.environment.model.ProductCode;
+import com.vingame.bot.domain.brand.model.BrandCode;
+import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.dto.GameDTO;
 import com.vingame.bot.domain.game.mapper.GameMapper;
 import com.vingame.bot.domain.game.model.Game;

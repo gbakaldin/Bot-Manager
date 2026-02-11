@@ -2,7 +2,7 @@ package com.vingame.bot.domain.bot.message;
 
 import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.nohu.NohuGameMessageTypes;
-import com.vingame.bot.domain.environment.model.ProductCode;
+import com.vingame.bot.domain.brand.model.ProductCode;
 
 /**
  * Resolves the appropriate GameMessageTypes implementation based on product code.

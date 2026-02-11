@@ -2,13 +2,15 @@ package com.vingame.bot.domain.environment.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
+import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import com.vingame.bot.domain.environment.dto.EnvironmentDTO;
 import com.vingame.bot.domain.environment.mapper.EnvironmentMapper;
-import com.vingame.bot.domain.environment.model.BrandCode;
+import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.model.EnvironmentFilter;
 import com.vingame.bot.domain.environment.model.EnvironmentType;
-import com.vingame.bot.domain.environment.model.ProductCode;
+import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -50,6 +52,12 @@ class EnvironmentControllerTest {
     @MockitoBean
     private EnvironmentMapper mapper;
 
+    @MockitoBean
+    private BotGroupService botGroupService;
+
+    @MockitoBean
+    private BotGroupBehaviorService botGroupBehaviorService;
+
     @Nested
     @DisplayName("GET /api/v1/environment/{id}")
     class GetByIdTests {
@@ -77,6 +85,7 @@ class EnvironmentControllerTest {
 
             when(service.findById(envId)).thenReturn(environment);
             when(mapper.toDTO(environment)).thenReturn(dto);
+            when(botGroupService.findByEnvironmentId(envId)).thenReturn(List.of());
 
             // Act & Assert
             mockMvc.perform(get("/api/v1/environment/{id}", envId))
@@ -85,7 +94,11 @@ class EnvironmentControllerTest {
                     .andExpect(jsonPath("$.name").value("Test Environment"))
                     .andExpect(jsonPath("$.type").value("DEVELOPMENT"))
                     .andExpect(jsonPath("$.brandCode").value("G0"))
-                    .andExpect(jsonPath("$.productCode").value("097"));
+                    .andExpect(jsonPath("$.productCode.code").value("097"))
+                    .andExpect(jsonPath("$.totalBotGroups").value(0))
+                    .andExpect(jsonPath("$.totalBots").value(0))
+                    .andExpect(jsonPath("$.runningBotGroups").value(0))
+                    .andExpect(jsonPath("$.runningBots").value(0));
         }
 
         @Test
@@ -148,6 +161,7 @@ class EnvironmentControllerTest {
             when(service.findAll()).thenReturn(List.of(env1, env2));
             when(mapper.toDTO(env1)).thenReturn(dto1);
             when(mapper.toDTO(env2)).thenReturn(dto2);
+            when(botGroupService.findAll()).thenReturn(List.of());
 
             // Act & Assert
             mockMvc.perform(get("/api/v1/environment/"))
@@ -162,6 +176,7 @@ class EnvironmentControllerTest {
         void shouldReturnOkWithEmptyListWhenNoEnvironmentsExist() throws Exception {
             // Arrange
             when(service.findAll()).thenReturn(List.of());
+            when(botGroupService.findAll()).thenReturn(List.of());
 
             // Act & Assert
             mockMvc.perform(get("/api/v1/environment/"))
@@ -195,6 +210,7 @@ class EnvironmentControllerTest {
 
             when(service.filter(any(EnvironmentFilter.class))).thenReturn(List.of(env));
             when(mapper.toDTO(env)).thenReturn(dto);
+            when(botGroupService.findAll()).thenReturn(List.of());
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/environment/filter/")
@@ -226,6 +242,7 @@ class EnvironmentControllerTest {
 
             when(service.filter(any(EnvironmentFilter.class))).thenReturn(List.of(env));
             when(mapper.toDTO(env)).thenReturn(dto);
+            when(botGroupService.findAll()).thenReturn(List.of());
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/environment/filter/")
@@ -233,7 +250,7 @@ class EnvironmentControllerTest {
                             .content(objectMapper.writeValueAsString(filter)))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.length()").value(1))
-                    .andExpect(jsonPath("$[0].productCode").value("097"));
+                    .andExpect(jsonPath("$[0].productCode.code").value("097"));
         }
 
         @Test
@@ -244,6 +261,7 @@ class EnvironmentControllerTest {
             filter.setType(EnvironmentType.PRODUCTION);
 
             when(service.filter(any(EnvironmentFilter.class))).thenReturn(List.of());
+            when(botGroupService.findAll()).thenReturn(List.of());
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/environment/filter/")
@@ -304,7 +322,7 @@ class EnvironmentControllerTest {
                     .andExpect(jsonPath("$.id").value("generated-id-123"))
                     .andExpect(jsonPath("$.name").value("New Environment"))
                     .andExpect(jsonPath("$.brandCode").value("G2"))
-                    .andExpect(jsonPath("$.productCode").value("103"));
+                    .andExpect(jsonPath("$.productCode.code").value("103"));
         }
     }
 

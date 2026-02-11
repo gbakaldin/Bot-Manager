@@ -95,9 +95,9 @@ public class ApiGatewayClient {
      * Authenticate a bot with the given credentials.
      *
      * @param credentials Bot credentials (username, password, fingerprint)
-     * @return List of tokens [agencyToken, authToken]
+     * @return TokensProvider containing agencyToken, authToken, and jwtToken
      */
-    public List<String> authenticate(BotCredentials credentials) {
+    public TokensProvider authenticate(BotCredentials credentials) {
         checkInitialized();
 
         // Use AuthClient for authentication (composition)
@@ -109,8 +109,7 @@ public class ApiGatewayClient {
             credentials.getFingerprint()
         );
 
-        TokensProvider tokens = authClient.authenticate();
-        return List.of(tokens.getAgencyToken(), tokens.getAuthToken());
+        return authClient.authenticate();
     }
 
     /**
@@ -230,15 +229,13 @@ public class ApiGatewayClient {
                 .fingerprint(fingerprint)
                 .build();
 
-        List<String> tokens = authenticate(credentials);
-        if (tokens == null || tokens.isEmpty()) {
+        TokensProvider tokens = authenticate(credentials);
+        if (tokens == null) {
             throw new RuntimeException("Authentication failed for user: " + username);
         }
 
-        String authToken = tokens.getFirst();
-
         // Set display name with retry
-        String displayName = setDisplayNameWithRetry(authToken, 5);
+        String displayName = setDisplayNameWithRetry(tokens.getAgencyToken(), 5);
         if (displayName != null) {
             log.info("Set display name '{}' for user {}", displayName, username);
         } else {

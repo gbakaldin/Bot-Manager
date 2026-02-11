@@ -3,7 +3,7 @@ package com.vingame.bot.domain.environment.service;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.environment.dto.EnvironmentDTO;
 import com.vingame.bot.domain.environment.mapper.EnvironmentMapper;
-import com.vingame.bot.domain.environment.model.BrandCode;
+import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.model.EnvironmentFilter;
 import com.vingame.bot.domain.environment.model.EnvironmentType;

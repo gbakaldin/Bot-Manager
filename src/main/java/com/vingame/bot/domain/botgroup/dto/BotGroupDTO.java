@@ -53,4 +53,7 @@ public class BotGroupDTO {
     private LocalDateTime lastStartedAt;
     private LocalDateTime lastStoppedAt;
     private String lastFailureReason;
+
+    // Migration flag - when true, skips user registration (for importing existing bots)
+    private Boolean existingGroup;
 }

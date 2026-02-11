@@ -1,5 +1,7 @@
 package com.vingame.bot.domain.environment.model;
 
+import com.vingame.bot.domain.brand.model.BrandCode;
+import com.vingame.bot.domain.brand.model.ProductCode;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;

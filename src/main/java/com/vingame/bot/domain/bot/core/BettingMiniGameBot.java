@@ -14,6 +14,7 @@ import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
 import com.vingame.bot.domain.game.model.Game;
+import com.vingame.websocketparser.ObjectMapperProvider;
 import com.vingame.websocketparser.message.request.ActionRequestMessage;
 import com.vingame.websocketparser.message.response.ActionResponseMessage;
 import com.vingame.websocketparser.scenario.PipelineContext;
@@ -34,6 +35,7 @@ import static com.vingame.websocketparser.message.properties.MessageType.RECEIVE
 import static com.vingame.websocketparser.scenario.Scenario.pipeline;
 import static com.vingame.websocketparser.scenario.matchers.Qualifier.cmd;
 import static com.vingame.websocketparser.scenario.matchers.Qualifier.typeOf;
+import static com.vingame.websocketparser.scenario.processors.OutboundMessage.buildMessage;
 import static com.vingame.websocketparser.scenario.processors.SendMode.INFINITE;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
@@ -167,8 +169,8 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private int resolveNextEntryToBet() {
-        int numberOfOptions = configuration.getGame().getNumberOfOptions();
-        return random.nextInt(numberOfOptions);
+        List<Integer> options = configuration.getGame().getEffectiveBettingOptions();
+        return options.get(random.nextInt(options.size()));
     }
 
     private boolean doesEnoughTimeRemain() {
@@ -222,10 +224,11 @@ public class BettingMiniGameBot extends Bot {
         return 1_000L;
     }
 
-    private PipelineContext buildContext(String tag) {
-        return PipelineContext.builder()
+    private PipelineContext buildContext(String tag, ObjectMapper mapper) {
+        return PipelineContext.buildContext()
                 .timeoutMillis(configuration.getTimeoutMillis())
                 .client(client)
+                .objectMapper(mapper)
                 .tag(tag)
                 .build();
     }
@@ -245,20 +248,20 @@ public class BettingMiniGameBot extends Bot {
         Class<? extends UpdateBetMessage> updateBetClass = messageTypes.updateBetType();
         Class<? extends EndGameMessage> endGameClass = messageTypes.endGameType();
 
-        return pipeline(buildContext("[Betting Mini][" + configuration.getGame().getName() + "]"))
+        return pipeline(buildContext("[Betting Mini][" + configuration.getGame().getName() + "]", mapper))
                 .waitFor(1_000L)
                 .send(request::subscribe)
                 .waitForMessage(cmd(GameMessageTypes.SUBSCRIBE_CODE + offset).and(typeOf(RECEIVED)))
-                .onMessage(this::onSubscribe, subscribeClass, mapper)
-                .onMessage(this::onStartGame, startGameClass, mapper)
-                .onMessage(this::onUpdate, updateBetClass, mapper)
-                .sendAsync(OutboundMessage.builder()
+                .onMessage(subscribeClass, this::onSubscribe)
+                .onMessage(startGameClass, this::onStartGame)
+                .onMessage(updateBetClass, this::onUpdate)
+                .sendAsync(buildMessage()
                         .messageSupplier(bet())
                         .mode(INFINITE)
                         .condition(resolveBetCondition())
                         .interval(resolveIntervalBetweenBets(), MILLISECONDS)
                         .build())
-                .onMessage(this::onEndGame, endGameClass, mapper)
+                .onMessage(endGameClass, this::onEndGame)
                 .compile();
     }
 
@@ -284,7 +287,7 @@ public class BettingMiniGameBot extends Bot {
         getClient().addScenario(OutputPrinter.debugOutputPrinter(
             cmdList,
             getUserName(),
-            buildContext("OutputPrinter")
+            buildContext("OutputPrinter", ObjectMapperProvider.getDefault())
         ));
 
         getClient().addScenario(botBehaviorScenario());

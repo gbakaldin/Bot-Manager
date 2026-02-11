@@ -1,5 +1,8 @@
 package com.vingame.bot.domain.environment.controller;
 
+import com.vingame.bot.domain.botgroup.model.BotGroup;
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
+import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import com.vingame.bot.domain.environment.dto.EnvironmentDTO;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.environment.mapper.EnvironmentMapper;
@@ -21,6 +24,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("api/v1/environment")
@@ -28,11 +33,16 @@ public class EnvironmentController {
 
     private final EnvironmentService service;
     private final EnvironmentMapper mapper;
+    private final BotGroupService botGroupService;
+    private final BotGroupBehaviorService botGroupBehaviorService;
 
     @Autowired
-    public EnvironmentController(EnvironmentService environmentService, EnvironmentMapper mapper) {
+    public EnvironmentController(EnvironmentService environmentService, EnvironmentMapper mapper,
+                                 BotGroupService botGroupService, BotGroupBehaviorService botGroupBehaviorService) {
         this.service = environmentService;
         this.mapper = mapper;
+        this.botGroupService = botGroupService;
+        this.botGroupBehaviorService = botGroupBehaviorService;
     }
 
     @Operation(
@@ -44,7 +54,9 @@ public class EnvironmentController {
 
         try {
             Environment environment = service.findById(id);
-            return ResponseEntity.ok(mapper.toDTO(environment));
+            EnvironmentDTO dto = mapper.toDTO(environment);
+            enrichWithBotGroupStats(dto, botGroupService.findByEnvironmentId(id));
+            return ResponseEntity.ok(dto);
         } catch (ResourceNotFoundException e) {
             return ResponseEntity.notFound().build();
         } catch (IllegalArgumentException e) {
@@ -60,8 +72,16 @@ public class EnvironmentController {
     @GetMapping("/")
     public ResponseEntity<@NotNull List<EnvironmentDTO>> findAll() {
         try {
-            List<EnvironmentDTO> dtos = service.findAll().stream()
-                    .map(mapper::toDTO)
+            List<Environment> environments = service.findAll();
+            Map<String, List<BotGroup>> groupsByEnv = botGroupService.findAll().stream()
+                    .collect(Collectors.groupingBy(BotGroup::getEnvironmentId));
+
+            List<EnvironmentDTO> dtos = environments.stream()
+                    .map(env -> {
+                        EnvironmentDTO dto = mapper.toDTO(env);
+                        enrichWithBotGroupStats(dto, groupsByEnv.getOrDefault(env.getId(), List.of()));
+                        return dto;
+                    })
                     .toList();
             return ResponseEntity.ok(dtos);
         } catch (Exception e) {
@@ -78,8 +98,16 @@ public class EnvironmentController {
             @RequestBody EnvironmentFilter filter) {
 
         try {
-            List<EnvironmentDTO> dtos = service.filter(filter).stream()
-                    .map(mapper::toDTO)
+            List<Environment> environments = service.filter(filter);
+            Map<String, List<BotGroup>> groupsByEnv = botGroupService.findAll().stream()
+                    .collect(Collectors.groupingBy(BotGroup::getEnvironmentId));
+
+            List<EnvironmentDTO> dtos = environments.stream()
+                    .map(env -> {
+                        EnvironmentDTO dto = mapper.toDTO(env);
+                        enrichWithBotGroupStats(dto, groupsByEnv.getOrDefault(env.getId(), List.of()));
+                        return dto;
+                    })
                     .toList();
             return ResponseEntity.ok(dtos);
         } catch (IllegalArgumentException e) {
@@ -143,6 +171,23 @@ public class EnvironmentController {
         } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
         }
+    }
+
+    private void enrichWithBotGroupStats(EnvironmentDTO dto, List<BotGroup> groups) {
+        int runningGroups = 0;
+        int runningBots = 0;
+
+        for (BotGroup group : groups) {
+            if (botGroupBehaviorService.isGroupRunning(group.getId())) {
+                runningGroups++;
+                runningBots += botGroupBehaviorService.getRunningBotCountForGroup(group.getId());
+            }
+        }
+
+        dto.setTotalBotGroups(groups.size());
+        dto.setTotalBots(groups.stream().mapToInt(BotGroup::getBotCount).sum());
+        dto.setRunningBotGroups(runningGroups);
+        dto.setRunningBots(runningBots);
     }
 
 }

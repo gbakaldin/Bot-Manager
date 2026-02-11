@@ -1,4 +1,4 @@
-package com.vingame.bot.domain.environment.model;
+package com.vingame.bot.domain.brand.model;
 
 public enum BrandCode {
 
