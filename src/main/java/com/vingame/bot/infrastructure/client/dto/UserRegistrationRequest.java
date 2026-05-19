@@ -1,5 +1,6 @@
 package com.vingame.bot.infrastructure.client.dto;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -10,6 +11,7 @@ import lombok.NoArgsConstructor;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class UserRegistrationRequest {
 
     private String fullname;
@@ -30,4 +32,5 @@ public class UserRegistrationRequest {
     private String browser;
     private String fg;
     private String type;
+    private String source;
 }

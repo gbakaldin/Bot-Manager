@@ -3,7 +3,6 @@ package com.vingame.bot.infrastructure.client;
 import com.vingame.websocketparser.VingameWebSocketClient;
 import com.vingame.websocketparser.auth.TokensProvider;
 import com.vingame.websocketparser.encryption.EncryptionServiceImpl;
-import com.vingame.websocketparser.message.AuthMessage;
 import com.vingame.websocketparser.message.PingMessageImpl;
 import io.netty.channel.EventLoopGroup;
 import lombok.Setter;
@@ -24,6 +23,7 @@ public class ClientFactory {
     private String encryptionIv;
     private EventLoopGroup eventLoopGroup;
     private TokensProvider tokens;
+    private boolean ignoreJwtToken;
 
     /**
      * Create a new WebSocket client with authentication configured.
@@ -34,16 +34,13 @@ public class ClientFactory {
      * @param tokens TokensProvider from ApiGatewayClient.authenticate()
      * @return Configured WebSocket client ready to connect
      */
-    public VingameWebSocketClient newClient(TokensProvider tokens) {
+    public VingameWebSocketClient newClient(TokensProvider tokens, String name) {
         if (tokens == null) {
             throw new IllegalArgumentException("TokensProvider is required.");
         }
 
-        log.info("TOKENS ARE agency: {} auth: {} jwt: {}",
-                tokens.getAgencyToken(), tokens.getAuthToken(), tokens.getJwtToken());
-
-        VingameWebSocketClient client = buildClient(tokens);
-        log.info("ClientFactory created new client instance: {}", System.identityHashCode(client));
+        VingameWebSocketClient client = buildClient(tokens, name);
+        log.debug("Created client {} for {}", client.getName(), name);
         return client;
     }
 
@@ -63,31 +60,30 @@ public class ClientFactory {
             throw new IllegalStateException("TokensProvider must be set before creating client.");
         }
 
-        log.warn("DEPRECATED: Using newClient() without parameters. This is unsafe for shared factories. Use newClient(tokens) instead.");
-        log.info("TOKENS ARE agency: {} auth: {} jwt: {}",
-                tokens.getAgencyToken(), tokens.getAuthToken(), tokens.getJwtToken());
+        log.warn("DEPRECATED: Using newClient() without parameters. This is unsafe for shared factories. Use newClient(tokens, name) instead.");
 
-        return buildClient(tokens);
+        return buildClient(tokens, "unknown");
     }
 
     /**
      * Build the actual WebSocket client with the given tokens.
      * Shared implementation for both newClient() methods.
      */
-    private VingameWebSocketClient buildClient(TokensProvider tokens) {
+    private VingameWebSocketClient buildClient(TokensProvider tokens, String name) {
         return VingameWebSocketClient.builder()
+                .name("ws-" + name)
                 .agentId("1")
                 .serverUri(uri)
                 .httpHeaders(headers)
                 .zoneName(zoneName)
                 .tokensProvider(() -> tokens)
-                .authMessage(AuthMessage.builder()
-                        .zoneName(zoneName)
-                        .accessToken(tokens.getAgencyToken())
-                        .agentId("1")
-                        .build())
                 .pingMessage(new PingMessageImpl(zoneName))
                 .pingFrequencyMillis(5000L)
+                .then(builder -> {
+                    if (ignoreJwtToken) {
+                        builder.ignoreJwtToken();
+                    }
+                })
                 .then(builder -> {
                     // Set encryption if enabled
                     if (encryption && encryptionKey != null && encryptionIv != null) {

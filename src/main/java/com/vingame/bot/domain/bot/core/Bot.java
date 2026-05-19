@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.core;
 
+import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
@@ -23,6 +24,7 @@ public abstract class Bot {
     protected ClientFactory clientFactory;
 
     // Bot runtime configuration (set via builder-style setters)
+    @Getter
     protected BotConfiguration configuration;
     protected BotCredentials credentials;
 
@@ -48,6 +50,9 @@ public abstract class Bot {
     protected final AtomicLong totalBetAmount = new AtomicLong(0);
     @Getter
     protected volatile long lastRoundWinnings = 0;
+
+    @Getter
+    private volatile BotStatus status = BotStatus.AUTHENTICATING;
 
     /**
      * No-arg constructor for factory instantiation.
@@ -105,32 +110,37 @@ public abstract class Bot {
      * @return this for method chaining
      */
     public Bot initialize() {
-        log.debug("Initializing bot {}", userName);
+        BotMdc.set(
+                configuration.getBotGroupId(),
+                configuration.getBotIndex(),
+                configuration.getEnvironmentId(),
+                configuration.getGame().getName(),
+                userName
+        );
+        try {
+            log.debug("Initializing bot {}", userName);
 
-        // Authenticate to get tokens BEFORE creating WebSocket client
-        this.tokens = apiGatewayClient.authenticate(credentials);
+            transitionStatus(BotStatus.AUTHENTICATING);
+            this.tokens = apiGatewayClient.authenticate(credentials);
+            transitionStatus(BotStatus.AUTHENTICATED);
 
-        // Create WebSocket client from factory, passing tokens directly
-        // This avoids race conditions when multiple bots share the same factory
-        this.client = clientFactory.newClient(tokens);
+            this.client = clientFactory.newClient(tokens, userName);
+            initializeSubclass();
+            configureClient(client);
 
-        // Call child-specific initialization
-        initializeSubclass();
+            transitionStatus(BotStatus.CONNECTING);
+            log.debug("Setting auth tokens [agency: {}..., auth: {}...]",
+                     tokens.getAgencyToken().substring(0, 10),
+                     tokens.getAuthToken().substring(0, 10));
+            client.connect();
 
-        // CRITICAL: Authenticate THEN connect (matches old Connector behavior)
-        // authenticate() sets up the auth tokens that will be used on connect
-        // connect() actually connects and sends AUTH message
-        // This ensures bot 1 is fully connected before bot 2 is even created
-        log.info("Bot {} - setting auth tokens [agency: {}, auth: {}]",
-                 userName,
-                 tokens.getAgencyToken().substring(0, 10) + "...",
-                 tokens.getAuthToken().substring(0, 10) + "...");
-        client.connect();
+            log.info("Bot initialized and connected. Client: {}",
+                     System.identityHashCode(client));
 
-        log.info("Bot {} initialized successfully and connected. Client: {}",
-                 userName, System.identityHashCode(client));
-
-        return this;
+            return this;
+        } finally {
+            BotMdc.clear();
+        }
     }
 
     /**
@@ -161,13 +171,12 @@ public abstract class Bot {
     }
 
     public void restart() {
-        // Close old client
         if (client != null && client.isOpen()) {
             client.close();
         }
-        // Create new client from factory with existing tokens
-        this.client = clientFactory.newClient(tokens);
-        // Re-setup authentication and reconnect
+        this.client = clientFactory.newClient(tokens, userName);
+        configureClient(client);
+        transitionStatus(BotStatus.CONNECTING);
         client.connect();
         start();
     }
@@ -224,26 +233,23 @@ public abstract class Bot {
     }
 
     protected long checkBalance() {
-        log.info("Bot {} - checkBalance() ENTRY. lastFetched: {}, expected: {}, delta: {}",
-                 userName, lastFetchedBalance, expectedCurrentBalance.get(),
+        log.debug("checkBalance() ENTRY. lastFetched: {}, expected: {}, delta: {}",
+                 lastFetchedBalance, expectedCurrentBalance.get(),
                  Math.abs(lastFetchedBalance - expectedCurrentBalance.get()));
 
         if (Math.abs(lastFetchedBalance - expectedCurrentBalance.get()) > 1_000_000L) {
-            log.info("Bot {} - checkBalance() fetching from server (delta > 1M)", userName);
-            String token = getClient().getAuthToken();
-            log.info("Bot {} - VERIFYING TOKEN: {}", userName, token);
+            log.debug("checkBalance() fetching from server (delta > 1M)");
             lastFetchedBalance = apiGatewayClient.getBalance(
-                token,
+                getClient().getAuthToken(),
                 credentials.getFingerprint(),
                 userName
             );
-            log.info("Bot {} - checkBalance() fetched: {}", userName, lastFetchedBalance);
+            log.debug("checkBalance() fetched: {}", lastFetchedBalance);
             expectedCurrentBalance.set(lastFetchedBalance);
         } else {
-            log.info("Bot {} - checkBalance() SKIPPED fetch (delta < 1M), returning cached: {}", userName, expectedCurrentBalance.get());
+            log.debug("checkBalance() using cached: {}", expectedCurrentBalance.get());
         }
 
-        log.info("Bot {} - checkBalance() RETURNING: {}", userName, expectedCurrentBalance.get());
         return expectedCurrentBalance.get();
     }
 
@@ -263,6 +269,31 @@ public abstract class Bot {
         return client != null && client.isOpen();
     }
 
+    protected void markConnectionAuthenticated() {
+        if (status != BotStatus.CONNECTION_AUTHENTICATED) {
+            transitionStatus(BotStatus.CONNECTION_AUTHENTICATED);
+        }
+    }
+
+    private void transitionStatus(BotStatus next) {
+        BotStatus prev = this.status;
+        this.status = next;
+        log.info("Bot {}: {} → {}", userName, prev, next);
+    }
+
+    private void configureClient(VingameWebSocketClient wsClient) {
+        wsClient.onWsStatusChange(wsStatus -> {
+            switch (wsStatus) {
+                case CONNECTED -> transitionStatus(BotStatus.CONNECTED);
+                case AUTHENTICATING_WS -> transitionStatus(BotStatus.AUTHENTICATING_CONNECTION);
+                default -> {}
+            }
+        });
+        wsClient.onDisconnect(() ->
+            log.warn("Bot {}: disconnected (status was {})", userName, status)
+        );
+    }
+
     protected abstract long resolveBetAmount();
 
     protected abstract Supplier<Boolean> resolveBetCondition();
@@ -276,15 +307,13 @@ public abstract class Bot {
     }
 
     public final void start() {
-        log.info("========== Bot {} START ========== Client: {} | Thread: {}",
-                 userName, System.identityHashCode(client), Thread.currentThread().getName());
+        log.debug("Bot starting. Client: {} | Thread: {}",
+                 System.identityHashCode(client), Thread.currentThread().getName());
 
         // Connection and authentication already happened in initialize()
         // Just run the bot logic
         onStart();
-        log.info("Bot {} - onStart() completed", userName);
-
-        log.info("========== Bot {} START COMPLETED ==========", userName);
+        transitionStatus(BotStatus.STARTED);
     }
 
     protected abstract void onStart();

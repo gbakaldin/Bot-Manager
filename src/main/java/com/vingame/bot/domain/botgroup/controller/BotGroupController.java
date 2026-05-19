@@ -13,7 +13,6 @@ import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
-import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -47,7 +46,7 @@ public class BotGroupController {
             summary = "Find bot group by ID",
             description = "Returns a single value or 404 if not found")
     @GetMapping("/{id}")
-    public ResponseEntity<@NotNull BotGroupDTO> findById(
+    public ResponseEntity<BotGroupDTO> findById(
             @PathVariable @Parameter(description = "ID of the bot group to retrieve") String id) {
         try {
             BotGroup botGroup = service.findById(id);
@@ -65,7 +64,7 @@ public class BotGroupController {
             summary = "Get the full list of created bot groups",
             description = "Returns a list of all bot groups, does not support paging yet")
     @GetMapping("/")
-    public ResponseEntity<@NotNull List<BotGroupDTO>> findAll() {
+    public ResponseEntity<List<BotGroupDTO>> findAll() {
         try {
             List<BotGroupDTO> dtos = service.findAll().stream()
                     .map(mapper::toDTO)
@@ -80,7 +79,7 @@ public class BotGroupController {
             summary = "Filter all bot groups with given specs",
             description = "Returns a list of all bot groups containing the provided filter values")
     @PostMapping("/filter/")
-    public ResponseEntity<@NotNull List<BotGroupDTO>> filter(
+    public ResponseEntity<List<BotGroupDTO>> filter(
             @Parameter(description = "The filter to query the bot groups by")
             @RequestBody BotGroupFilter filter) {
 
@@ -101,7 +100,7 @@ public class BotGroupController {
             description = "Returns the freshly created bot group complete with the actual id. " +
                     "Set existingGroup=true to skip user registration (for migrating existing bots).")
     @PostMapping("/")
-    public ResponseEntity<@NotNull BotGroupDTO> save(
+    public ResponseEntity<BotGroupDTO> save(
             @Parameter(description = "Bot group body to save in the database")
             @RequestBody BotGroupDTO botGroupDTO) {
         try {
@@ -120,7 +119,7 @@ public class BotGroupController {
             summary = "Update existing bot group",
             description = "Returns the new version of the bot group updated with the provided fields. Only non-null fields in the DTO will be updated.")
     @PatchMapping("/{id}")
-    public ResponseEntity<@NotNull BotGroupDTO> update(
+    public ResponseEntity<BotGroupDTO> update(
             @PathVariable @Parameter(description = "ID of the bot group to update") String id,
             @Parameter(description = "Bot group DTO containing the fields that need updating")
             @RequestBody BotGroupDTO botGroupDTO) {
@@ -141,7 +140,7 @@ public class BotGroupController {
             summary = "Delete bot group record by its id",
             description = "Returns only the HTTP status of the operation")
     @DeleteMapping("/{id}")
-    public ResponseEntity<@NotNull Void> delete(
+    public ResponseEntity<Void> delete(
             @PathVariable @Parameter(description = "ID to use for deletion") String id) {
 
         try {
@@ -157,7 +156,7 @@ public class BotGroupController {
 
     @PostMapping("/{id}/start")
     @Operation(summary = "Start bot group", description = "Starts the bot group with the given ID")
-    public ResponseEntity<@NotNull Void> start(@PathVariable String id) {
+    public ResponseEntity<Void> start(@PathVariable String id) {
         try {
             behaviorService.start(id);
             return ResponseEntity.ok().build();
@@ -170,7 +169,7 @@ public class BotGroupController {
 
     @PostMapping("/{id}/stop")
     @Operation(summary = "Stop bot group", description = "Stops the bot group with the given ID")
-    public ResponseEntity<@NotNull Void> stop(@PathVariable String id) {
+    public ResponseEntity<Void> stop(@PathVariable String id) {
         try {
             behaviorService.stop(id);
             return ResponseEntity.ok().build();
@@ -183,7 +182,7 @@ public class BotGroupController {
 
     @PostMapping("/{id}/restart")
     @Operation(summary = "Restart bot group", description = "Restarts the bot group with the given ID")
-    public ResponseEntity<@NotNull Void> restart(@PathVariable String id) {
+    public ResponseEntity<Void> restart(@PathVariable String id) {
         try {
             behaviorService.restart(id);
             return ResponseEntity.ok().build();
@@ -196,7 +195,7 @@ public class BotGroupController {
 
     @PostMapping("/{id}/schedule-restart")
     @Operation(summary = "Schedule bot group restart", description = "Schedules a restart for the bot group")
-    public ResponseEntity<@NotNull Void> scheduleRestart(
+    public ResponseEntity<Void> scheduleRestart(
             @PathVariable String id,
             @RequestBody LocalDateTime time) {
         try {
@@ -213,7 +212,7 @@ public class BotGroupController {
     @Operation(
             summary = "Get bot group health details",
             description = "Returns detailed health metrics including per-bot connection status, balances, and bet counters")
-    public ResponseEntity<@NotNull BotGroupHealthDTO> getHealth(@PathVariable String id) {
+    public ResponseEntity<BotGroupHealthDTO> getHealth(@PathVariable String id) {
         try {
             BotGroupHealthDTO health = behaviorService.getHealth(id);
             return ResponseEntity.ok(health);
@@ -228,7 +227,7 @@ public class BotGroupController {
     @Operation(
             summary = "Get bot group runtime status",
             description = "Returns both target status (from database) and actual runtime status")
-    public ResponseEntity<@NotNull BotGroupStatusDTO> getStatus(@PathVariable String id) {
+    public ResponseEntity<BotGroupStatusDTO> getStatus(@PathVariable String id) {
         try {
             BotGroup group = service.findById(id);
             BotGroupStatus actualStatus = behaviorService.getActualStatus(id);

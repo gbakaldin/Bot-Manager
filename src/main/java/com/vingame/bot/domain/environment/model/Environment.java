@@ -49,6 +49,9 @@ public class Environment {
 
     private boolean alertOnLowBalance;
 
+    // When true, jwtToken (token2) is required and passed as WebSocket subprotocol during handshake
+    private boolean useJwtAuth;
+
     // Periodic logout configuration (null = use global defaults from application.properties)
     private Boolean periodicLogoutEnabled;
     private Integer periodicLogoutIntervalMinutes;

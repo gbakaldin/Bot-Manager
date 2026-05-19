@@ -310,7 +310,7 @@ class BotGroupControllerTest {
                     .build();
 
             when(mapper.toEntity(any(BotGroupDTO.class))).thenReturn(entity);
-            when(service.save(entity)).thenReturn(savedEntity);
+            when(service.save(any(BotGroup.class), eq(false))).thenReturn(savedEntity);
             when(mapper.toDTO(savedEntity)).thenReturn(outputDto);
 
             // Act & Assert

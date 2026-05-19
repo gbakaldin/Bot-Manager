@@ -1,0 +1,9 @@
+.git
+.idea
+logs
+*.tar
+*.md
+seed.js
+src/main/resources/namechangeref.js
+src/main/resources/application-loadtest.properties
+startup.sh

@@ -11,3 +11,9 @@ public class Starter {
     }
 
 }
+
+/*
+* TODO: IMPORTANT
+*  1. Fix name setting issue -- the names are never set properly
+*  2. Add missing tests for non Spring managed classes
+* */

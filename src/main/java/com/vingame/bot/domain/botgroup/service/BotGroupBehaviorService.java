@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.service;
 
+import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
@@ -190,7 +191,7 @@ public class BotGroupBehaviorService {
             Game game = gameService.findById(group.getGameId());
 
             // Create runtime state
-            BotGroupRuntime runtime = new BotGroupRuntime(id, group.getBotCount());
+            BotGroupRuntime runtime = new BotGroupRuntime(id, group.getBotCount(), group.getEnvironmentId());
             runningGroups.put(id, runtime);
 
             log.info("Creating {} bots for group {} with parallel execution (parallelism={})",
@@ -257,8 +258,8 @@ public class BotGroupBehaviorService {
             final int botIndex = i;
 
             CompletableFuture<Bot> future = CompletableFuture.supplyAsync(() -> {
+                BotMdc.setGroupContext(group.getId(), group.getEnvironmentId());
                 try {
-                    // Acquire permit (blocks if at max concurrency)
                     semaphore.acquire();
                     try {
                         return createSingleBot(group, environment, game, botIndex);
@@ -268,6 +269,8 @@ public class BotGroupBehaviorService {
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     throw new RuntimeException("Bot creation interrupted", e);
+                } finally {
+                    BotMdc.clear();
                 }
             }, botCreationExecutor);
 
@@ -332,6 +335,8 @@ public class BotGroupBehaviorService {
         BotConfiguration configuration = BotConfiguration.builder()
                 .credentials(credentials)
                 .environmentId(group.getEnvironmentId())
+                .botGroupId(group.getId())
+                .botIndex(botIndex)
                 .game(game)
                 .behaviorConfig(behaviorConfig)
                 .zoneName(environment.getMiniZoneName())
@@ -511,10 +516,13 @@ public class BotGroupBehaviorService {
         runtime.setHealthMonitor(monitor);
 
         monitor.scheduleAtFixedRate(() -> {
+            BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
             try {
                 monitorHealth(runtime);
             } catch (Exception e) {
                 log.error("Health monitoring error for group {}: {}", runtime.getGroupId(), e.getMessage());
+            } finally {
+                BotMdc.clear();
             }
         }, 10, 30, TimeUnit.SECONDS);
     }
@@ -589,11 +597,14 @@ public class BotGroupBehaviorService {
         runtime.setLogoutScheduler(logoutScheduler);
 
         logoutScheduler.scheduleAtFixedRate(() -> {
+            BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
             try {
                 performPeriodicLogout(runtime);
             } catch (Exception e) {
                 log.error("Periodic logout error for group {}: {}",
                         runtime.getGroupId(), e.getMessage(), e);
+            } finally {
+                BotMdc.clear();
             }
         }, intervalMinutes, intervalMinutes, TimeUnit.MINUTES);
 

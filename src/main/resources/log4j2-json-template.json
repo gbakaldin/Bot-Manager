@@ -1,0 +1,52 @@
+{
+  "timestamp": {
+    "$resolver": "timestamp",
+    "pattern": {
+      "format": "yyyy-MM-dd'T'HH:mm:ss.SSSZ",
+      "timeZone": "UTC"
+    }
+  },
+  "level": {
+    "$resolver": "level",
+    "field": "name"
+  },
+  "logger": {
+    "$resolver": "logger",
+    "field": "name"
+  },
+  "thread": {
+    "$resolver": "thread",
+    "field": "name"
+  },
+  "message": {
+    "$resolver": "message",
+    "stringified": true
+  },
+  "exception": {
+    "$resolver": "exception",
+    "field": "stackTrace",
+    "stackTrace": {
+      "stringified": true
+    }
+  },
+  "botGroupId": {
+    "$resolver": "mdc",
+    "key": "botGroupId"
+  },
+  "botId": {
+    "$resolver": "mdc",
+    "key": "botId"
+  },
+  "environmentId": {
+    "$resolver": "mdc",
+    "key": "environmentId"
+  },
+  "gameType": {
+    "$resolver": "mdc",
+    "key": "gameType"
+  },
+  "botUserName": {
+    "$resolver": "mdc",
+    "key": "botUserName"
+  }
+}

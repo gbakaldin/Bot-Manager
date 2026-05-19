@@ -1,0 +1,71 @@
+services:
+  mongo:
+    image: mongo:8.0
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+      - ./seed.js:/seed.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  bot-manager:
+    image: vingame-bot:latest
+    ports:
+      - "8080:8085"
+    environment:
+      - SPRING_DATA_MONGODB_URI=mongodb://mongo:27017/botmanager
+    depends_on:
+      mongo:
+        condition: service_healthy
+    extra_hosts:
+      - "gamems.dev:10.30.1.104"
+    volumes:
+      - logs-data:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085/actuator/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  loki:
+    image: grafana/loki:3.3.2
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki-data:/loki
+
+  promtail:
+    image: grafana/promtail:3.3.2
+    volumes:
+      - logs-data:/logs:ro
+      - ./promtail-config.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - loki
+
+volumes:
+  mongo-data:
+  loki-data:
+  grafana-data:
+  logs-data:

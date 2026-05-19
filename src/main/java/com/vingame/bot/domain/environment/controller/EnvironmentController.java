@@ -11,7 +11,6 @@ import com.vingame.bot.domain.environment.model.EnvironmentFilter;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
-import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -49,7 +48,7 @@ public class EnvironmentController {
             summary = "Find environment by ID",
             description = "Returns a single value or 404 if not found or 400 if the ID is malformed")
     @GetMapping("/{id}")
-    public ResponseEntity<@NotNull EnvironmentDTO> findById(
+    public ResponseEntity<EnvironmentDTO> findById(
             @PathVariable @Parameter(description = "ID of the environment to retrieve", example = "123") String id) {
 
         try {
@@ -70,7 +69,7 @@ public class EnvironmentController {
             summary = "Get the full list of created environments",
             description = "Returns a list of all environments, does not support paging yet")
     @GetMapping("/")
-    public ResponseEntity<@NotNull List<EnvironmentDTO>> findAll() {
+    public ResponseEntity<List<EnvironmentDTO>> findAll() {
         try {
             List<Environment> environments = service.findAll();
             Map<String, List<BotGroup>> groupsByEnv = botGroupService.findAll().stream()
@@ -93,7 +92,7 @@ public class EnvironmentController {
             summary = "Filter all environments with given specs",
             description = "Returns a list of all environments containing the provided brand and type values")
     @PostMapping("/filter/")
-    public ResponseEntity<@NotNull List<EnvironmentDTO>> filter(
+    public ResponseEntity<List<EnvironmentDTO>> filter(
             @Parameter(description = "The filter to query the environments by", example = "N/A") //TODO: pending example
             @RequestBody EnvironmentFilter filter) {
 
@@ -121,7 +120,7 @@ public class EnvironmentController {
             summary = "Create a new environment",
             description = "Returns the freshly created environment complete with the actual id")
     @PostMapping("/")
-    public ResponseEntity<@NotNull EnvironmentDTO> save(
+    public ResponseEntity<EnvironmentDTO> save(
             @Parameter(description = "Environment body to save in the database", example = "N/A") //TODO: pending example
             @RequestBody EnvironmentDTO environmentDTO) {
         try {
@@ -139,7 +138,7 @@ public class EnvironmentController {
             summary = "Update existing environment",
             description = "Returns the new version of the environment updated with the provided fields. Only non-null fields in the DTO will be updated.")
     @PatchMapping("/{id}")
-    public ResponseEntity<@NotNull EnvironmentDTO> update(
+    public ResponseEntity<EnvironmentDTO> update(
             @PathVariable @Parameter(description = "ID of the environment to update", example = "123") String id,
             @Parameter(description = "Environment DTO containing the fields that need updating (only non-empty Optional fields will be updated)", example = "N/A") //TODO: pending example
             @RequestBody EnvironmentDTO environmentDTO) {
@@ -160,7 +159,7 @@ public class EnvironmentController {
             summary = "Delete environment record by its id",
             description = "Returns only the HTTP status of the operation")
     @DeleteMapping("/{id}")
-    public ResponseEntity<@NotNull Void> delete(
+    public ResponseEntity<Void> delete(
             @PathVariable @Parameter(description = "ID to use for deletion", example = "24") String id) {
 
         try {

@@ -84,8 +84,6 @@ public class BotFactory {
         // Fetch shared environment clients from registry
         EnvironmentClients environmentClients = clientRegistry.getClients(environmentId);
 
-        // DIAGNOSTIC: Create a FRESH ClientFactory for each bot instead of sharing
-        // This helps identify if the issue is with shared ClientFactory state
         Environment env = environmentClients.getEnvironment();
         ClientFactory freshClientFactory = new ClientFactory();
         freshClientFactory.setUri(URI.create(env.getWebSocketMiniUrl()));
@@ -94,12 +92,8 @@ public class BotFactory {
         freshClientFactory.setEncryption(env.getEncryptionKey() != null && env.getEncryptionIv() != null);
         freshClientFactory.setEncryptionKey(env.getEncryptionKey());
         freshClientFactory.setEncryptionIv(env.getEncryptionIv());
+        freshClientFactory.setIgnoreJwtToken(!env.isUseJwtAuth());
         freshClientFactory.setEventLoopGroup(eventLoopGroup);
-
-        log.info("Created fresh ClientFactory for bot {} (factory: {}, eventLoopGroup: {})",
-            configuration.getCredentials().getUsername(),
-            System.identityHashCode(freshClientFactory),
-            eventLoopGroup != null ? System.identityHashCode(eventLoopGroup) : "NULL");
 
         // Resolve message types based on environment's product code
         GameMessageTypes messageTypes = GameMessageTypesResolver.resolve(env.getProductCode());
@@ -119,7 +113,7 @@ public class BotFactory {
         bot.setClients(
                 environmentClients.getApiGatewayClient(),
                 environmentClients.getGameMsClient(),
-                freshClientFactory  // Use fresh factory instead of shared
+                freshClientFactory
             )
             .setConfiguration(configuration)
             .initialize();

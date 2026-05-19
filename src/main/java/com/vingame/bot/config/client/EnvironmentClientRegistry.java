@@ -1,5 +1,6 @@
 package com.vingame.bot.config.client;
 
+import com.vingame.bot.infrastructure.auth.AuthStrategyFactory;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.GameMsClient;
@@ -37,6 +38,7 @@ public class EnvironmentClientRegistry {
     private final EnvironmentService environmentService;
     private final EventLoopGroup eventLoopGroup;
     private final ObjectProvider<ApiGatewayClient> apiGatewayClientProvider;
+    private final AuthStrategyFactory authStrategyFactory;
     private final String gameMsUrl;
 
     @Autowired
@@ -44,11 +46,13 @@ public class EnvironmentClientRegistry {
             EnvironmentService environmentService,
             EventLoopGroup eventLoopGroup,
             ObjectProvider<ApiGatewayClient> apiGatewayClientProvider,
+            AuthStrategyFactory authStrategyFactory,
             @Value("${gamems.url}") String gameMsUrl
     ) {
         this.environmentService = environmentService;
         this.eventLoopGroup = eventLoopGroup;
         this.apiGatewayClientProvider = apiGatewayClientProvider;
+        this.authStrategyFactory = authStrategyFactory;
         this.gameMsUrl = gameMsUrl;
     }
 
@@ -117,7 +121,7 @@ public class EnvironmentClientRegistry {
 
         // Get prototype ApiGatewayClient from Spring and initialize with environment config
         ApiGatewayClient apiGatewayClient = apiGatewayClientProvider.getObject();
-        apiGatewayClient.init(env.getApiGatewayUrl(), env.getAppId());
+        apiGatewayClient.init(env.getApiGatewayUrl(), env.getAppId(), authStrategyFactory.getAuthProfile(env));
 
         // Create shared GameMsClient (stateless) with global GameMS URL
         GameMsClient gameMsClient = new GameMsClient(gameMsUrl);
@@ -128,6 +132,7 @@ public class EnvironmentClientRegistry {
         clientFactory.setHeaders(env.getHeaders());
         clientFactory.setZoneName(env.getMiniZoneName());
         clientFactory.setEncryption(true);
+        clientFactory.setIgnoreJwtToken(!env.isUseJwtAuth());
         clientFactory.setEventLoopGroup(eventLoopGroup); // CRITICAL: Share EventLoopGroup across all bots
 
         log.info("Successfully created shared clients for environment {} ({})",

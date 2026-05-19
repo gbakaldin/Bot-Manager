@@ -10,7 +10,6 @@ import com.vingame.bot.domain.game.model.GameFilter;
 import com.vingame.bot.domain.game.service.GameService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
-import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -41,7 +40,7 @@ public class GameController {
             summary = "Find game by ID",
             description = "Returns a single game or 404 if not found")
     @GetMapping("/{id}")
-    public ResponseEntity<@NotNull GameDTO> findById(
+    public ResponseEntity<GameDTO> findById(
             @PathVariable @Parameter(description = "ID of the game to retrieve", example = "game-bom-baucua") String id) {
 
         try {
@@ -60,7 +59,7 @@ public class GameController {
             summary = "Get all games for a brand and product",
             description = "Returns a list of all games available in the specified brand and product")
     @GetMapping("/{brandCode}/{productCode}")
-    public ResponseEntity<@NotNull List<GameDTO>> findByBrandAndProduct(
+    public ResponseEntity<List<GameDTO>> findByBrandAndProduct(
             @PathVariable @Parameter(description = "Brand code", example = "G2") BrandCode brandCode,
             @PathVariable @Parameter(description = "Product code", example = "P_097") ProductCode productCode) {
 
@@ -78,7 +77,7 @@ public class GameController {
             summary = "Filter games with given criteria",
             description = "Returns a list of games matching the provided filter criteria")
     @PostMapping("/filter/")
-    public ResponseEntity<@NotNull List<GameDTO>> filter(
+    public ResponseEntity<List<GameDTO>> filter(
             @Parameter(description = "Filter criteria for games")
             @RequestBody GameFilter filter) {
 
@@ -96,7 +95,7 @@ public class GameController {
             summary = "Create a new game",
             description = "Creates a new game configuration. Requires brandCode and productCode.")
     @PostMapping("/{brandCode}/{productCode}")
-    public ResponseEntity<@NotNull GameDTO> save(
+    public ResponseEntity<GameDTO> save(
             @PathVariable @Parameter(description = "Brand code", example = "G2") BrandCode brandCode,
             @PathVariable @Parameter(description = "Product code", example = "P_097") ProductCode productCode,
             @Parameter(description = "Game configuration to create")
@@ -119,7 +118,7 @@ public class GameController {
             summary = "Update existing game",
             description = "Updates the game with the provided fields. Only non-null fields in the DTO will be updated.")
     @PatchMapping("/{id}")
-    public ResponseEntity<@NotNull GameDTO> update(
+    public ResponseEntity<GameDTO> update(
             @PathVariable @Parameter(description = "ID of the game to update", example = "game-bom-baucua") String id,
             @Parameter(description = "Game DTO containing fields to update")
             @RequestBody GameDTO gameDTO) {
@@ -140,7 +139,7 @@ public class GameController {
             summary = "Delete game by ID",
             description = "Deletes the game configuration")
     @DeleteMapping("/{id}")
-    public ResponseEntity<@NotNull Void> delete(
+    public ResponseEntity<Void> delete(
             @PathVariable @Parameter(description = "ID of the game to delete", example = "game-bom-baucua") String id) {
 
         try {

@@ -3,6 +3,8 @@ package com.vingame.bot.infrastructure.client.dto;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 
+import java.util.List;
+
 /**
  * Response from user registration API.
  * <p>
@@ -41,9 +43,9 @@ public class UserRegistrationResponse {
     private String message;
 
     /**
-     * Response data - typically an array of registered user objects
+     * Response data - array of registered user objects; use data.get(0) for the created user
      */
-    private Object data;
+    private List<UserRegistrationData> data;
 
     /**
      * Error details (if status is ERROR)

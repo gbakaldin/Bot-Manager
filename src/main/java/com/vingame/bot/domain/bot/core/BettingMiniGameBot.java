@@ -94,16 +94,14 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private void onNewSession() {
-        log.info("BettingMiniGameBot.onNewSession() - Bot {} starting balance check", getUserName());
         long balance = checkBalance();
-        log.info("BettingMiniGameBot.onNewSession() - Bot {} balance: {}, minBalance: {}", getUserName(), balance, getMinBalance());
-
         BotBehaviorConfig behavior = configuration.getBehaviorConfig();
         if (behavior.isAutoDepositEnabled() && balance < getMinBalance()) {
-            log.info("BettingMiniGameBot.onNewSession() - Bot {} calling deposit()", getUserName());
+            log.info("Bot {}: balance {} below minimum {}, triggering deposit", getUserName(), balance, getMinBalance());
             deposit();
+        } else {
+            log.debug("Bot {}: session balance {}", getUserName(), balance);
         }
-        log.info("BettingMiniGameBot.onNewSession() - Bot {} completed", getUserName());
     }
 
     private void startRemainingTimeCountDown() {
@@ -121,6 +119,7 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private void onSubscribe(ActionResponseMessage<? extends SubscribeMessage> data) {
+        markConnectionAuthenticated();
         SubscribeMessage msg = data.getData();
         blockBetTime = msg.getTimeForDecision();
         timeForBetting = msg.getTimeForBetting();
@@ -267,17 +266,13 @@ public class BettingMiniGameBot extends Bot {
 
     @Override
     protected void onStart() {
-        log.info("BettingMiniGameBot.onStart() - Bot {} starting", getUserName());
         try {
-            log.info("BettingMiniGameBot.onStart() - Bot {} calling onNewSession()", getUserName());
             onNewSession();
-            log.info("BettingMiniGameBot.onStart() - Bot {} onNewSession() completed", getUserName());
         } catch (Exception e) {
-            log.error("BettingMiniGameBot.onStart() - Bot {} onNewSession() FAILED: {}", getUserName(), e.getMessage(), e);
+            log.error("Bot {}: initial session setup failed", getUserName(), e);
             throw e;
         }
 
-        // Add output logging scenario for debugging
         List<Integer> cmdList = List.of(
             GameMessageTypes.SUBSCRIBE_CODE + offset,
             GameMessageTypes.UPDATE_BET_CODE + offset,
@@ -291,6 +286,5 @@ public class BettingMiniGameBot extends Bot {
         ));
 
         getClient().addScenario(botBehaviorScenario());
-        log.info("BettingMiniGameBot.onStart() - Bot {} finished", getUserName());
     }
 }

@@ -2,11 +2,14 @@ package com.vingame.bot.infrastructure.client;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vingame.bot.infrastructure.auth.AuthProfile;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationRequest;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResponse;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.websocketparser.auth.AuthClient;
+import com.vingame.websocketparser.auth.AuthContext;
+import com.vingame.websocketparser.auth.LoginRequest;
 import com.vingame.websocketparser.auth.TokensProvider;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,6 +32,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 
 /**
  * Client for interacting with the API Gateway.
@@ -42,8 +46,6 @@ public class ApiGatewayClient {
 
     private static final ObjectMapper mapper = new ObjectMapper();
 
-    private static final String USER_REGISTER_ENDPOINT = "/user/register.aspx";
-    private static final String USER_UPDATE_ENDPOINT = "/user/update.aspx";
     private static final String VERIFY_TOKEN_ENDPOINT = "/gwms/v1/verifytoken.aspx";
     private static final String USER_AGENT = "PostmanRuntime/7.15.2";
     private static final String SESSION_TOKEN_HEADER = "X-TOKEN";
@@ -59,8 +61,16 @@ public class ApiGatewayClient {
     @Value("${user.registration.parallelism:10}")
     private int registrationParallelism;
 
+    @Value("${bot.ip}")
+    private String botIp;
+
     private String apiGateway;
     private String appId;
+    private String loginPath;
+    private String registrationPath;
+    private String updateFullnamePath;
+    private String xToken;
+    private Function<AuthContext, ? extends LoginRequest> loginRequestFactory;
     private boolean initialized = false;
 
     @Autowired
@@ -72,17 +82,25 @@ public class ApiGatewayClient {
     /**
      * Initialize the client with environment-specific configuration.
      * Must be called before using any other methods.
-     *
-     * @param apiGateway API gateway base URL
-     * @param appId      Application ID
-     * @return this instance for method chaining
      */
-    public ApiGatewayClient init(String apiGateway, String appId) {
+    public ApiGatewayClient init(String apiGateway, String appId, AuthProfile authProfile) {
         this.apiGateway = apiGateway;
         this.appId = appId;
+        this.loginPath = authProfile.loginPath();
+        this.registrationPath = authProfile.registrationPath();
+        this.updateFullnamePath = authProfile.updateFullnamePath();
+        this.xToken = authProfile.xToken();
+        this.loginRequestFactory = authProfile.loginRequestFactory();
         this.initialized = true;
         log.debug("ApiGatewayClient initialized with gateway: {}, appId: {}", apiGateway, appId);
         return this;
+    }
+
+    /** Backward-compatible overload — uses standard user endpoints and no X-TOKEN. */
+    public ApiGatewayClient init(String apiGateway, String appId, Function<AuthContext, ? extends LoginRequest> loginRequestFactory) {
+        return init(apiGateway, appId, new AuthProfile(
+                "/user/login.aspx", "/user/register.aspx", "/user/update.aspx", null, loginRequestFactory
+        ));
     }
 
     private void checkInitialized() {
@@ -100,16 +118,29 @@ public class ApiGatewayClient {
     public TokensProvider authenticate(BotCredentials credentials) {
         checkInitialized();
 
-        // Use AuthClient for authentication (composition)
-        AuthClient authClient = new AuthClient(
+        AuthContext ctx = new AuthContext(
             apiGateway,
             credentials.getUsername(),
             credentials.getPassword(),
             appId,
-            credentials.getFingerprint()
+            credentials.getFingerprint(),
+            loginPath,
+            xToken
         );
 
-        return authClient.authenticate();
+        try {
+            String requestBody = mapper.writeValueAsString(loginRequestFactory.apply(ctx));
+            log.info("[Login] POST {} | X-TOKEN: {} | body: {}",
+                    apiGateway + loginPath, xToken != null ? xToken : "(none)", requestBody);
+        } catch (Exception e) {
+            log.warn("[Login] Could not serialize login request for logging: {}", e.getMessage());
+        }
+
+        TokensProvider tokens = new AuthClient(ctx, loginRequestFactory).authenticate();
+        log.info("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
+                tokens.getAgencyToken(), tokens.getAuthToken(), tokens.getJwtToken());
+
+        return tokens;
     }
 
     /**
@@ -191,6 +222,9 @@ public class ApiGatewayClient {
     /**
      * Register a single user and set their display name.
      * This method is called in parallel from registerUsers().
+     * <p>
+     * Uses tokens returned directly from the register response — no re-authentication needed.
+     * A 500ms delay before verifytoken gives the auth server time to reach internal consistency.
      *
      * @param userNamePrefix Username prefix
      * @param password       Password
@@ -201,16 +235,23 @@ public class ApiGatewayClient {
         String username = userNamePrefix + index;
 
         try {
-            registerSingleUser(userNamePrefix, password, index);
+            RegistrationResult result = registerSingleUser(userNamePrefix, password, index);
             log.info("Successfully registered user {}/{}: {}", index, totalCount, username);
 
-            // Set display name if names are available
             if (displayNameService.hasDisplayNames()) {
                 try {
-                    setDisplayNameForUser(username, password);
+                    if (xToken == null) {
+                        Thread.sleep(500);
+                        verifyToken(result.authToken(), result.fingerprint());
+                    }
+                    String displayName = setDisplayNameWithRetry(username, result.authToken(), 5);
+                    if (displayName != null) {
+                        log.info("Set display name '{}' for user {}", displayName, username);
+                    } else {
+                        log.warn("Could not set display name for user {}", username);
+                    }
                 } catch (Exception e) {
                     log.warn("Failed to set display name for {}: {}", username, e.getMessage());
-                    // Don't fail the whole registration just because display name failed
                 }
             }
         } catch (IOException | InterruptedException e) {
@@ -219,71 +260,83 @@ public class ApiGatewayClient {
     }
 
     /**
-     * Authenticate a user and set their display name.
+     * Call verifytoken to activate the session after registration.
+     * The response is not used — the call is made purely to allow the auth server
+     * to complete internal session setup before subsequent operations.
      */
-    private void setDisplayNameForUser(String username, String password) {
-        String fingerprint = AuthClient.generateFingerprint();
-        BotCredentials credentials = BotCredentials.builder()
-                .username(username)
-                .password(password)
-                .fingerprint(fingerprint)
+    private void verifyToken(String authToken, String fingerprint) throws IOException, InterruptedException {
+        HttpRequest httpRequest = HttpRequest.newBuilder()
+                .uri(URI.create(apiGateway + VERIFY_TOKEN_ENDPOINT + "?token=" + authToken + "&fg=" + fingerprint))
+                .header("Cache-Control", "no-cache")
+                .header("Content-Type", "application/json")
+                .header("User-Agent", USER_AGENT)
+                .GET()
+                .timeout(Duration.ofSeconds(10))
                 .build();
-
-        TokensProvider tokens = authenticate(credentials);
-        if (tokens == null) {
-            throw new RuntimeException("Authentication failed for user: " + username);
-        }
-
-        // Set display name with retry
-        String displayName = setDisplayNameWithRetry(tokens.getAgencyToken(), 5);
-        if (displayName != null) {
-            log.info("Set display name '{}' for user {}", displayName, username);
-        } else {
-            log.warn("Could not set display name for user {}", username);
-        }
+        httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
     }
 
-    private void registerSingleUser(String userNamePrefix, String password, int index) throws IOException, InterruptedException {
-        String ip = generateRandomIp();
-        String avatar = "Avatar" + (int)(Math.random() * 45 + 1);
+    private record RegistrationResult(String agencyToken, String authToken, String fingerprint) {}
+
+    private RegistrationResult registerSingleUser(String userNamePrefix, String password, int index) throws IOException, InterruptedException {
+        String ip = botIp;
+        String username = userNamePrefix + index;
         String fingerprint = AuthClient.generateFingerprint();
 
-        UserRegistrationRequest request = UserRegistrationRequest.builder()
-                .fullname("_undefined")
-                .username(userNamePrefix + index)
-                .password(password)
-                .avatar(avatar)
-                .registerIp(ip)
-                .ip(ip)
-                .os("OS X")
-                .appId(appId)
-                .device("Computer")
-                .browser("chrome")
-                .fg(fingerprint)
-                .type("BOT")
-                .build();
+        UserRegistrationRequest request;
+        HttpRequest.Builder requestBuilder;
+
+        if (xToken != null) {
+            request = UserRegistrationRequest.builder()
+                    .username(username)
+                    .password(password)
+                    .ip(ip)
+                    .registerIp(ip)
+                    .os("OS X")
+                    .appId(appId)
+                    .device("Computer")
+                    .browser("chrome")
+                    .source(appId)
+                    .build();
+            requestBuilder = HttpRequest.newBuilder()
+                    .uri(URI.create(apiGateway + registrationPath))
+                    .header("Content-Type", "application/json")
+                    .header(SESSION_TOKEN_HEADER, xToken);
+        } else {
+            String avatar = "Avatar" + (int) (Math.random() * 45 + 1);
+            request = UserRegistrationRequest.builder()
+                    .fullname("_undefined")
+                    .username(username)
+                    .password(password)
+                    .avatar(avatar)
+                    .registerIp(ip)
+                    .ip(ip)
+                    .os("OS X")
+                    .appId(appId)
+                    .device("Computer")
+                    .browser("chrome")
+                    .fg(fingerprint)
+                    .type("BOT")
+                    .build();
+            requestBuilder = HttpRequest.newBuilder()
+                    .uri(URI.create(apiGateway + registrationPath))
+                    .header("Content-Type", "application/json")
+                    .header("Origin", "https://097.stgame.win")
+                    .header("Referer", "https://097.stgame.win");
+        }
 
         String requestBody = mapper.writeValueAsString(request);
+        log.info("[Register] POST {} | X-TOKEN: {} | body: {}",
+                apiGateway + registrationPath, xToken != null ? xToken : "(none)", requestBody);
 
-        /*
-        --header 'Origin: https://097.stgame.win'
-        --header 'Referer: https://097.stgame.win' \
-        **/
-
-        HttpRequest httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(apiGateway + USER_REGISTER_ENDPOINT))
-                .header("Content-Type", "application/json")
-                .header("Origin", "https://097.stgame.win")
-                .header("Referer", "https://097.stgame.win")
+        HttpRequest httpRequest = requestBuilder
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                 .timeout(Duration.ofSeconds(10))
                 .build();
 
-        log.info("Sending request to {} for user {}: {}", apiGateway + USER_REGISTER_ENDPOINT, userNamePrefix + index, requestBody);
         HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
-
         String responseBody = response.body();
-        log.info("Registration response for {}{}: {}", userNamePrefix, index, responseBody);
+        log.info("[Register] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
         UserRegistrationResponse registrationResponse = mapper.readValue(responseBody, UserRegistrationResponse.class);
 
@@ -294,40 +347,47 @@ public class ApiGatewayClient {
                 registrationResponse.getCode());
             throw new RuntimeException(errorMsg);
         }
-    }
 
-    private String generateRandomIp() {
-        return (int)(Math.random() * 255 + 1) + "." +
-               (int)(Math.random() * 255 + 1) + "." +
-               (int)(Math.random() * 255 + 1) + "." +
-               (int)(Math.random() * 255 + 1);
+        var data = registrationResponse.getData().get(0);
+        return new RegistrationResult(data.getToken(), data.getSessionId(), fingerprint);
     }
 
     /**
      * Set or update the display name (fullname) for a user.
      *
-     * @param sessionToken The session token (X-TOKEN) obtained from authentication
+     * @param username     The username (required for B52 endpoint)
+     * @param sessionToken The session token obtained from authentication (used for standard envs)
      * @param displayName  The new display name to set
      * @return true if successful, false if name is already taken
      */
-    public boolean setDisplayName(String sessionToken, String displayName) {
+    public boolean setDisplayName(String username, String sessionToken, String displayName) {
         checkInitialized();
         try {
-            log.info("Setting display name to: {}", displayName);
+            Object body;
+            String headerToken;
+            if (xToken != null) {
+                body = java.util.Map.of("username", username, "fullname", displayName);
+                headerToken = xToken;
+            } else {
+                body = java.util.Map.of("fullname", displayName, "aff_id", "");
+                headerToken = sessionToken;
+            }
 
-            String requestBody = mapper.writeValueAsString(java.util.Map.of("fullname", displayName));
+            String requestBody = mapper.writeValueAsString(body);
+            String url = apiGateway + updateFullnamePath;
+            log.info("[UpdateFullname] POST {} | X-TOKEN: {} | body: {}", url, headerToken, requestBody);
 
             HttpRequest httpRequest = HttpRequest.newBuilder()
-                    .uri(URI.create(apiGateway + USER_UPDATE_ENDPOINT))
+                    .uri(URI.create(url))
                     .header("Content-Type", "application/json")
-                    .header(SESSION_TOKEN_HEADER, sessionToken)
+                    .header(SESSION_TOKEN_HEADER, headerToken)
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .timeout(Duration.ofSeconds(10))
                     .build();
 
             HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
             String responseBody = response.body();
-            log.debug("Set display name response: {}", responseBody);
+            log.info("[UpdateFullname] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
             JsonNode responseJson = mapper.readTree(responseBody);
             String status = responseJson.has("status") ? responseJson.get("status").asText() : null;
@@ -353,11 +413,12 @@ public class ApiGatewayClient {
     /**
      * Set display name with automatic retry on name conflicts.
      *
-     * @param sessionToken The session token from authentication
+     * @param username     The username (required for B52 endpoint)
+     * @param sessionToken The session token from authentication (used for standard envs)
      * @param maxRetries   Maximum retry attempts
      * @return The display name that was set, or null if all attempts failed
      */
-    public String setDisplayNameWithRetry(String sessionToken, int maxRetries) {
+    public String setDisplayNameWithRetry(String username, String sessionToken, int maxRetries) {
         if (!displayNameService.hasDisplayNames()) {
             log.warn("No display names available, skipping display name assignment");
             return null;
@@ -370,7 +431,7 @@ public class ApiGatewayClient {
                 continue;
             }
 
-            if (setDisplayName(sessionToken, displayName)) {
+            if (setDisplayName(username, sessionToken, displayName)) {
                 return displayName;
             }
 
@@ -392,10 +453,13 @@ public class ApiGatewayClient {
     public long getBalance(String authToken, String fingerprint, String username) {
         checkInitialized();
         try {
-            log.info("User {}: Fetching balance from wallet", username);
+            Thread.sleep(500);
+
+            String url = apiGateway + VERIFY_TOKEN_ENDPOINT + "?token=" + authToken + "&fg=" + fingerprint;
+            log.info("[VerifyToken] GET {} | user: {}", url, username);
 
             HttpRequest httpRequest = HttpRequest.newBuilder()
-                    .uri(URI.create(apiGateway + VERIFY_TOKEN_ENDPOINT + "?token=" + authToken + "&fg=" + fingerprint))
+                    .uri(URI.create(url))
                     .header("Cache-Control", "no-cache")
                     .header("Content-Type", "application/json")
                     .header("User-Agent", USER_AGENT)
@@ -405,12 +469,12 @@ public class ApiGatewayClient {
 
             HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
             String responseBody = response.body();
+            log.info("[VerifyToken] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
             JsonNode dataArray = mapper.readTree(responseBody).get("data");
             if (dataArray != null && dataArray.isArray() && !dataArray.isEmpty()) {
                 JsonNode firstElement = dataArray.get(0);
                 long balance = firstElement.get("main_balance").asLong();
-                log.info("User {}: The balance is: {}", username, balance);
                 return balance;
             } else {
                 throw new RuntimeException("User: " + username + ": Data array is missing or empty: " + responseBody);

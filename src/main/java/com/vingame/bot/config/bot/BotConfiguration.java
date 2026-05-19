@@ -26,6 +26,17 @@ public class BotConfiguration {
     String environmentId;
 
     /**
+     * ID of the bot group this bot belongs to
+     */
+    String botGroupId;
+
+    /**
+     * Index of this bot within its group (1-based).
+     * Used for MDC logging context.
+     */
+    int botIndex;
+
+    /**
      * Game configuration containing offset, numberOfOptions, pluginName, md5, etc.
      */
     Game game;

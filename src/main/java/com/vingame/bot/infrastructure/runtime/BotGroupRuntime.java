@@ -1,5 +1,7 @@
 package com.vingame.bot.infrastructure.runtime;
 
+import com.vingame.bot.common.logging.BotMdc;
+import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
@@ -42,6 +44,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class BotGroupRuntime {
 
     private final String groupId;
+    private final String environmentId;
     private final List<Bot> botInstances;
     private final List<Future<?>> botFutures;
     private final ExecutorService executor;
@@ -62,11 +65,13 @@ public class BotGroupRuntime {
     /**
      * Create a new runtime for a bot group.
      *
-     * @param groupId  The bot group ID
-     * @param botCount Number of bots in the group (used for initial capacity, not thread pool sizing)
+     * @param groupId       The bot group ID
+     * @param botCount      Number of bots in the group (used for initial capacity, not thread pool sizing)
+     * @param environmentId The environment ID (used for MDC logging context)
      */
-    public BotGroupRuntime(String groupId, int botCount) {
+    public BotGroupRuntime(String groupId, int botCount, String environmentId) {
         this.groupId = groupId;
+        this.environmentId = environmentId;
         this.botInstances = new ArrayList<>(botCount);
         this.botFutures = new ArrayList<>(botCount);
         this.executor = createExecutor(groupId);
@@ -110,11 +115,21 @@ public class BotGroupRuntime {
      */
     public void startBot(Bot bot) {
         Future<?> future = executor.submit(() -> {
+            BotConfiguration config = bot.getConfiguration();
+            BotMdc.set(
+                    config.getBotGroupId(),
+                    config.getBotIndex(),
+                    config.getEnvironmentId(),
+                    config.getGame().getName(),
+                    bot.getUserName()
+            );
             try {
-                log.info("Bot {} starting in virtual thread {}", bot.getUserName(), Thread.currentThread().getName());
+                log.info("Bot starting in virtual thread {}", Thread.currentThread().getName());
                 bot.start();
             } catch (Exception e) {
-                log.error("Bot {} failed in virtual thread {}", bot.getUserName(), Thread.currentThread().getName(), e);
+                log.error("Bot failed in virtual thread {}", Thread.currentThread().getName(), e);
+            } finally {
+                BotMdc.clear();
             }
         });
 

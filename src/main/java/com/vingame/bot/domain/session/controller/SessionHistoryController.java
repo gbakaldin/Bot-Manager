@@ -7,7 +7,6 @@ import com.vingame.bot.domain.session.model.SessionHistory;
 import com.vingame.bot.domain.session.service.SessionHistoryService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
-import org.jetbrains.annotations.NotNull;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -34,7 +33,7 @@ public class SessionHistoryController {
 
     @Operation(summary = "Find session history by ID")
     @GetMapping("/{id}")
-    public ResponseEntity<@NotNull SessionHistoryDTO> findById(
+    public ResponseEntity<SessionHistoryDTO> findById(
             @PathVariable @Parameter(description = "Session history record ID") String id) {
         try {
             SessionHistory session = service.findById(id);
@@ -48,7 +47,7 @@ public class SessionHistoryController {
 
     @Operation(summary = "Find session history by session ID")
     @GetMapping("/by-session/{sessionId}")
-    public ResponseEntity<@NotNull SessionHistoryDTO> findBySessionId(
+    public ResponseEntity<SessionHistoryDTO> findBySessionId(
             @PathVariable @Parameter(description = "Game session ID") String sessionId) {
         try {
             SessionHistory session = service.findBySessionId(sessionId);
@@ -64,7 +63,7 @@ public class SessionHistoryController {
             summary = "List session history records",
             description = "Returns all session history records, optionally filtered by gameId and/or environmentId")
     @GetMapping("/")
-    public ResponseEntity<@NotNull List<SessionHistoryDTO>> findAll(
+    public ResponseEntity<List<SessionHistoryDTO>> findAll(
             @RequestParam(required = false) @Parameter(description = "Filter by game ID") String gameId,
             @RequestParam(required = false) @Parameter(description = "Filter by environment ID") String environmentId) {
         try {
@@ -91,7 +90,7 @@ public class SessionHistoryController {
 
     @Operation(summary = "List jackpot sessions")
     @GetMapping("/jackpots")
-    public ResponseEntity<@NotNull List<SessionHistoryDTO>> findJackpotSessions() {
+    public ResponseEntity<List<SessionHistoryDTO>> findJackpotSessions() {
         try {
             List<SessionHistoryDTO> dtos = service.findJackpotSessions().stream()
                     .map(mapper::toDTO)
@@ -104,7 +103,7 @@ public class SessionHistoryController {
 
     @Operation(summary = "Delete session history record")
     @DeleteMapping("/{id}")
-    public ResponseEntity<@NotNull Void> delete(
+    public ResponseEntity<Void> delete(
             @PathVariable @Parameter(description = "Session history record ID") String id) {
         try {
             service.delete(id);
