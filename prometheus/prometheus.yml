@@ -1,0 +1,24 @@
+# Prometheus scrape config for the Bot Manager observability pipeline.
+#
+# Bind-mounted into the prometheus container at /etc/prometheus/prometheus.yml
+# (see docker-compose.yml). Editable on the host without root, matching the
+# ./logs and ./grafana/provisioning patterns.
+#
+# Phase 1 of docs/plans/OBSERVABILITY.md: single scrape target, no alerting
+# rules. Bot-side counters/gauges land in Phase 2; this file does not change
+# when they do (Micrometer exposes everything under the same endpoint).
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: bot-manager
+    metrics_path: /actuator/prometheus
+    scrape_interval: 10s
+    static_configs:
+      - targets:
+          # Compose service name + container-internal port. bot-manager listens
+          # on 8085 inside the container (see application.properties:server.port);
+          # the host's 8080 mapping in docker-compose.yml is not used here.
+          - bot-manager:8085
