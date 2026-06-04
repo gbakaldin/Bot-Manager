@@ -96,6 +96,53 @@ class ObservabilityConfigTest {
     }
 
     @Test
+    void botsDeadCurrentlyGauge_readsFromService() {
+        when(behaviorService.countBotsDeadCurrently()).thenReturn(4);
+
+        config.registerAggregateGauges(registry, behaviorService);
+
+        Gauge gauge = registry.find("bots_dead_currently").gauge();
+        assertThat(gauge).isNotNull();
+        assertThat(gauge.value()).isEqualTo(4.0);
+
+        when(behaviorService.countBotsDeadCurrently()).thenReturn(0);
+        assertThat(gauge.value()).isEqualTo(0.0);
+    }
+
+    @Test
+    void groupsDeadCurrentlyGauge_readsFromService() {
+        when(behaviorService.countGroupsDeadCurrently()).thenReturn(2);
+
+        config.registerAggregateGauges(registry, behaviorService);
+
+        Gauge gauge = registry.find("groups_dead_currently").gauge();
+        assertThat(gauge).isNotNull();
+        assertThat(gauge.value()).isEqualTo(2.0);
+    }
+
+    @Test
+    void deadCurrentlyGauges_areOnTheAggregateExclusionList() {
+        // Populate MDC: if the gauges were on the bot_*-prefixed branch they would
+        // pick up these tags. The allow-list (BotMdcTagsMeterFilter) keeps them clean.
+        MDC.put(BotMdc.BOT_GROUP_ID, "group-xyz");
+        MDC.put(BotMdc.ENVIRONMENT_ID, "env-xyz");
+        MDC.put(BotMdc.GAME_TYPE, "BauCua");
+
+        when(behaviorService.countBotsDeadCurrently()).thenReturn(1);
+        when(behaviorService.countGroupsDeadCurrently()).thenReturn(1);
+
+        config.registerAggregateGauges(registry, behaviorService);
+
+        for (String name : new String[]{"bots_dead_currently", "groups_dead_currently"}) {
+            Gauge gauge = registry.find(name).gauge();
+            assertThat(gauge).as("aggregate gauge %s should be registered", name).isNotNull();
+            boolean hasGroup = gauge.getId().getTags().stream()
+                    .anyMatch(t -> BotMdc.BOT_GROUP_ID.equals(t.getKey()));
+            assertThat(hasGroup).as("aggregate gauge %s must not carry botGroupId", name).isFalse();
+        }
+    }
+
+    @Test
     void aggregateGauges_doNotReceiveMdcTags_evenWhenMdcIsPopulated() {
         MDC.put(BotMdc.BOT_GROUP_ID, "group-xyz");
         MDC.put(BotMdc.ENVIRONMENT_ID, "env-xyz");

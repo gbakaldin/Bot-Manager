@@ -57,5 +57,19 @@ public class ObservabilityConfig {
                     .tag("status", status.name())
                     .register(registry);
         }
+
+        // Phase 3: companion gauges to the bot/group dead-seconds counters. These
+        // expose the current snapshot of how many bots/groups are in DEAD right
+        // now — the counter answers "how much downtime", the gauge answers "how
+        // many are down right now". Aggregate; no MDC tags.
+        Gauge.builder("bots_dead_currently", behaviorService,
+                        BotGroupBehaviorService::countBotsDeadCurrently)
+                .description("Number of bots currently in DEAD state across all running groups")
+                .register(registry);
+
+        Gauge.builder("groups_dead_currently", behaviorService,
+                        BotGroupBehaviorService::countGroupsDeadCurrently)
+                .description("Number of bot groups currently in DEAD state")
+                .register(registry);
     }
 }

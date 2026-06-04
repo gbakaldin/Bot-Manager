@@ -12,6 +12,7 @@ import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.service.GameService;
+import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -60,6 +61,9 @@ class BotGroupBehaviorServiceTest {
 
     @Mock
     private BotFactory botFactory;
+
+    @Mock
+    private BotMetrics botMetrics;
 
     @Captor
     private ArgumentCaptor<BotGroup> botGroupCaptor;

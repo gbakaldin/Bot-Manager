@@ -48,7 +48,9 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
             "bots_managed",
             "bot_groups_running",
             "ws_connections_open",
-            "bots_by_status"
+            "bots_by_status",
+            "bots_dead_currently",
+            "groups_dead_currently"
     );
 
     @Override

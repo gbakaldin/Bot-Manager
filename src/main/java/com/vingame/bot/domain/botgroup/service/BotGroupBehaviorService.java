@@ -15,6 +15,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
+import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.websocketparser.auth.AuthClient;
@@ -55,6 +56,7 @@ public class BotGroupBehaviorService {
     private final EnvironmentService environmentService;
     private final GameService gameService;
     private final BotFactory botFactory;
+    private final BotMetrics botMetrics;
 
     /**
      * Max number of bots to create/authenticate simultaneously.
@@ -116,12 +118,14 @@ public class BotGroupBehaviorService {
             BotGroupService botGroupService,
             EnvironmentService environmentService,
             GameService gameService,
-            BotFactory botFactory
+            BotFactory botFactory,
+            BotMetrics botMetrics
     ) {
         this.botGroupService = botGroupService;
         this.environmentService = environmentService;
         this.gameService = gameService;
         this.botFactory = botFactory;
+        this.botMetrics = botMetrics;
 
         // Use virtual threads for scheduled tasks
         this.scheduler = Executors.newScheduledThreadPool(4, Thread.ofVirtual().factory());
@@ -240,7 +244,17 @@ public class BotGroupBehaviorService {
             BotGroupRuntime failedRuntime = runningGroups.remove(id);
             if (failedRuntime != null) {
                 try {
-                    failedRuntime.stopAllBots();
+                    // Re-apply group MDC so any group-level dead-seconds increment
+                    // ends up tagged with botGroupId/environmentId; the catch block
+                    // runs on this same caller thread but may have lost the MDC if
+                    // set earlier in start().
+                    BotMdc.setGroupContext(failedRuntime.getGroupId(),
+                                           failedRuntime.getEnvironmentId());
+                    try {
+                        failedRuntime.stopAllBots(botMetrics);
+                    } finally {
+                        BotMdc.clear();
+                    }
                 } catch (Exception cleanupEx) {
                     log.error("Error cleaning up bots after failed start: {}", cleanupEx.getMessage());
                 }
@@ -374,8 +388,16 @@ public class BotGroupBehaviorService {
         }
 
         try {
-            // Stop all bots and shutdown executor
-            runtime.stopAllBots();
+            // Set group MDC so the group-level dead-seconds increment (if a DEAD
+            // window is open) is tagged with botGroupId/environmentId. Cleared in
+            // the finally so we don't leak MDC into the caller thread.
+            BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
+            try {
+                // Stop all bots and shutdown executor
+                runtime.stopAllBots(botMetrics);
+            } finally {
+                BotMdc.clear();
+            }
 
             // Remove from runtime map
             runningGroups.remove(id);
@@ -531,6 +553,29 @@ public class BotGroupBehaviorService {
             for (Bot bot : runtime.getBotInstances()) {
                 if (bot.getStatus() == status) total++;
             }
+        }
+        return total;
+    }
+
+    /**
+     * Count of bots currently in DEAD state across all running groups.
+     * Backs the {@code bots_dead_currently} aggregate gauge. Equivalent to
+     * {@code countBotsByStatus(BotStatus.DEAD)}; broken out so the gauge name
+     * does not depend on the {@code status} tag value.
+     */
+    public int countBotsDeadCurrently() {
+        return countBotsByStatus(BotStatus.DEAD);
+    }
+
+    /**
+     * Count of bot groups currently in DEAD state (i.e. {@code groupDeadSince}
+     * has been stamped and not yet credited). Backs the
+     * {@code groups_dead_currently} aggregate gauge.
+     */
+    public int countGroupsDeadCurrently() {
+        int total = 0;
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            if (runtime.getGroupDeadSince() != null) total++;
         }
         return total;
     }

@@ -5,10 +5,12 @@ import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.infrastructure.observability.BotMetrics;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.List;
@@ -64,6 +66,12 @@ public class BotGroupRuntime {
 
     // Round-robin index for periodic logout
     private final AtomicInteger logoutIndex = new AtomicInteger(0);
+
+    // Timestamp of the most recent transition INTO DEAD at the group level.
+    // Cleared at stopAllBots() after the dead-window is credited. Volatile because
+    // markAsDead() runs on the health-monitor thread and stopAllBots() runs on the
+    // BehaviorService caller thread.
+    private volatile Instant groupDeadSince;
 
     /**
      * Create a new runtime for a bot group.
@@ -156,10 +164,18 @@ public class BotGroupRuntime {
     }
 
     /**
-     * Mark this bot group as dead due to failures
+     * Mark this bot group as dead due to failures.
+     * <p>
+     * Stamps {@link #groupDeadSince} so the downtime window is credited to
+     * {@code group_dead_seconds_total} at the next {@link #stopAllBots(BotMetrics)}.
+     * Idempotent on the timestamp — re-entry into DEAD without an intervening
+     * stop does not move the stamp forward, preserving the original entry time.
      */
     public void markAsDead() {
         this.actualStatus = BotGroupStatus.DEAD;
+        if (this.groupDeadSince == null) {
+            this.groupDeadSince = Instant.now();
+        }
     }
 
     /**
@@ -177,16 +193,38 @@ public class BotGroupRuntime {
     }
 
     /**
+     * Stop all bot instances and shutdown executor, with no group-level dead-seconds
+     * accounting. Retained for callers that do not have a {@link BotMetrics} reference
+     * (older tests, ad-hoc tooling). Prefer {@link #stopAllBots(BotMetrics)}.
+     */
+    public void stopAllBots() {
+        stopAllBots(null);
+    }
+
+    /**
      * Stop all bot instances and shutdown executor.
      * <p>
      * Shutdown process:
-     * 1. Cleanup all bots (closes WebSocket connections gracefully)
-     * 2. Shutdown executor (waits up to 30s for tasks to complete)
-     * 3. Force shutdown if timeout exceeded
-     * 4. Shutdown health monitor
+     * 1. Credit the open group-DEAD window (if any) to {@code group_dead_seconds_total}.
+     * 2. Cleanup all bots (closes WebSocket connections gracefully). Each bot
+     *    credits its own terminal DEAD window inside {@link Bot#cleanup()}.
+     * 3. Shutdown executor (waits up to 30s for tasks to complete).
+     * 4. Force shutdown if timeout exceeded.
+     * 5. Shutdown health monitor and logout scheduler.
+     *
+     * @param metrics optional Micrometer facade; pass {@code null} to skip the
+     *                group-level dead-seconds increment (bots still credit their
+     *                own DEAD windows via {@code Bot.cleanup()}, which holds its
+     *                own {@code BotMetrics} reference).
      */
-    public void stopAllBots() {
+    public void stopAllBots(BotMetrics metrics) {
         log.info("Stopping all bots for group {}", groupId);
+
+        // Credit the open group-DEAD window before cleanup so the timestamp is
+        // measured against "now" rather than against the deferred shutdown end.
+        // STOPPED itself is excluded by Architecture Decision 3 — only the DEAD
+        // window that preceded the stop counts.
+        creditGroupDeadSeconds(metrics);
 
         // Cleanup all bots (close connections gracefully)
         botInstances.forEach(bot -> {
@@ -225,5 +263,21 @@ public class BotGroupRuntime {
         }
 
         log.info("All bots stopped for group {}", groupId);
+    }
+
+    /**
+     * If a group-level DEAD window is currently open, credit its elapsed seconds
+     * and clear the stamp. Idempotent — a second call without re-entering DEAD
+     * is a no-op. Tags are read from MDC at the callsite; set
+     * {@link BotMdc#BOT_GROUP_ID} (and optionally environment / game) before
+     * calling if per-group time series are required.
+     */
+    private void creditGroupDeadSeconds(BotMetrics metrics) {
+        Instant since = this.groupDeadSince;
+        if (since == null) return;
+        this.groupDeadSince = null;
+        if (metrics == null) return;
+        long seconds = Duration.between(since, Instant.now()).toSeconds();
+        metrics.incGroupDeadSeconds(seconds);
     }
 }

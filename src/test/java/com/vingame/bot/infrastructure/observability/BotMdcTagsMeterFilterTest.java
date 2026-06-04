@@ -57,7 +57,8 @@ class BotMdcTagsMeterFilterTest {
         MDC.put(BotMdc.ENVIRONMENT_ID, "e1");
 
         for (String name : new String[]{
-                "bot_groups_running", "bots_managed", "ws_connections_open", "bots_by_status"}) {
+                "bot_groups_running", "bots_managed", "ws_connections_open", "bots_by_status",
+                "bots_dead_currently", "groups_dead_currently"}) {
             Meter.Id mapped = filter.map(id(name, Tags.empty()));
             boolean hasGroup = mapped.getTags().stream()
                     .anyMatch(t -> BotMdc.BOT_GROUP_ID.equals(t.getKey()));

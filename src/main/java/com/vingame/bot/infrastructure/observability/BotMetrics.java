@@ -52,6 +52,8 @@ public class BotMetrics {
     public static final String BOT_VERIFY_TOKEN_TOTAL = "bot_verify_token_total";
     public static final String BOT_WATCHDOG_EXPIRED_TOTAL = "bot_watchdog_expired_total";
     public static final String BOT_WS_CONNECTIONS_TOTAL = "bot_ws_connections_total";
+    public static final String BOT_DEAD_SECONDS_TOTAL = "bot_dead_seconds_total";
+    public static final String GROUP_DEAD_SECONDS_TOTAL = "group_dead_seconds_total";
 
     private final MeterRegistry registry;
 
@@ -176,5 +178,41 @@ public class BotMetrics {
                 .tags(mdcTags())
                 .register(registry)
                 .increment();
+    }
+
+    /**
+     * Accumulate per-bot DEAD downtime in seconds. Called when a bot exits the DEAD
+     * state (via {@code transitionStatus(prev=DEAD, next != DEAD)}) or when a DEAD
+     * bot is cleaned up (terminal DEAD window). Counter is monotonically increasing
+     * across the bot's lifetime; multiple DEAD windows are summed into the same
+     * series.
+     * <p>
+     * Architecture Decision 3: STOPPED is intentional and does NOT contribute to
+     * this counter — only DEAD windows do. A bot that goes DEAD → STOPPED still
+     * credits the elapsed DEAD-seconds up to the STOPPED transition.
+     * <p>
+     * Non-positive durations are silently dropped (defensive: clock skew or a DEAD
+     * window of <1s rounds to 0 via {@code Duration.toSeconds()}).
+     */
+    public void incBotDeadSeconds(long seconds) {
+        if (seconds <= 0) return;
+        Counter.builder(BOT_DEAD_SECONDS_TOTAL)
+                .tags(mdcTags())
+                .register(registry)
+                .increment(seconds);
+    }
+
+    /**
+     * Accumulate per-group DEAD downtime in seconds. Called when a group exits the
+     * DEAD state (via stop / restart / cleanup at the runtime level). Counter is
+     * monotonically increasing across the group's lifetime. STOPPED is intentional
+     * and excluded (Architecture Decision 3).
+     */
+    public void incGroupDeadSeconds(long seconds) {
+        if (seconds <= 0) return;
+        Counter.builder(GROUP_DEAD_SECONDS_TOTAL)
+                .tags(mdcTags())
+                .register(registry)
+                .increment(seconds);
     }
 }

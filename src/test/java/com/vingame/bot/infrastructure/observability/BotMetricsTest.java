@@ -234,6 +234,54 @@ class BotMetricsTest {
     }
 
     @Test
+    void incBotDeadSeconds_addsAmountAndAttachesMdcTags() {
+        setBotMdc();
+        metrics.incBotDeadSeconds(7);
+        metrics.incBotDeadSeconds(3);
+
+        Counter c = registry.find(BotMetrics.BOT_DEAD_SECONDS_TOTAL)
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
+                .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(10.0);
+    }
+
+    @Test
+    void incBotDeadSeconds_nonPositiveValuesAreIgnored() {
+        setBotMdc();
+        metrics.incBotDeadSeconds(0);
+        metrics.incBotDeadSeconds(-5);
+
+        Counter c = registry.find(BotMetrics.BOT_DEAD_SECONDS_TOTAL).counter();
+        // Defensive contract: zero/negative durations must never reach the registry,
+        // because Counter is monotonic and we don't want phantom-zero series either.
+        assertThat(c).isNull();
+    }
+
+    @Test
+    void incGroupDeadSeconds_addsAmountAndAttachesMdcTags() {
+        setBotMdc();
+        metrics.incGroupDeadSeconds(12);
+
+        Counter c = registry.find(BotMetrics.GROUP_DEAD_SECONDS_TOTAL)
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(12.0);
+    }
+
+    @Test
+    void incGroupDeadSeconds_nonPositiveValuesAreIgnored() {
+        setBotMdc();
+        metrics.incGroupDeadSeconds(0);
+
+        Counter c = registry.find(BotMetrics.GROUP_DEAD_SECONDS_TOTAL).counter();
+        assertThat(c).isNull();
+    }
+
+    @Test
     void counterIdContainsExpectedTagSet() {
         setBotMdc();
         metrics.incBotMessage("subscribe");
