@@ -103,6 +103,12 @@ public abstract class Bot {
                 configuration.getGame().getName(),
                 userName
         );
+        // Snapshot MDC immediately after BotMdc.set(...) so it's available before any
+        // async callback can fire. configureClient(client) registers onWsStatusChange and
+        // onDisconnect listeners that the library can invoke on its own threads as soon as
+        // client.connect() returns; if the snapshot were captured later, those early
+        // callbacks would see a null snapshot and silently skip MDC propagation.
+        this.mdcSnapshot = MDC.getCopyOfContextMap();
         try {
             log.debug("Initializing bot {}", userName);
 
@@ -122,12 +128,6 @@ public abstract class Bot {
 
             log.info("Bot initialized and connected. Client: {}",
                      System.identityHashCode(client));
-
-            // Snapshot MDC while all five bot keys are still populated by BotMdc.set(...)
-            // above. Captured here (not in setConfiguration / setClients) so gameType and
-            // botUserName are guaranteed present. Re-applied via mdcWrap / mdcCall /
-            // mdcSupplier / mdcConsumer on threads that wouldn't otherwise carry MDC.
-            this.mdcSnapshot = MDC.getCopyOfContextMap();
 
             return this;
         } finally {
@@ -194,7 +194,7 @@ public abstract class Bot {
             return;
         }
 
-        gameMsClient.deposit(client.getAgencyToken(), 1_000_000_000L, success -> {
+        gameMsClient.deposit(client.getAgencyToken(), 1_000_000_000L, mdcConsumer(success -> {
             if (success) {
                 log.info("Bot {}: Deposit successful, fetching new balance...", userName);
                 lastFetchedBalance = apiGatewayClient.getBalance(
@@ -207,7 +207,7 @@ public abstract class Bot {
             } else {
                 log.warn("Bot {}: Deposit failed", userName);
             }
-        });
+        }));
     }
 
     protected long checkBalance() {
