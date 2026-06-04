@@ -28,6 +28,7 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -39,13 +40,6 @@ import static com.vingame.websocketparser.scenario.processors.OutboundMessage.bu
 import static com.vingame.websocketparser.scenario.processors.SendMode.INFINITE;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
-/**
- * Concrete bot implementation for all BettingMini game types.
- * Configured via Game entity and BotBehaviorConfig.
- * <p>
- * Supports all games of BettingMini type (BauCua, TaiXiuSeven, etc.)
- * through dynamic configuration rather than subclassing.
- */
 @Slf4j
 public class BettingMiniGameBot extends Bot {
 
@@ -53,7 +47,6 @@ public class BettingMiniGameBot extends Bot {
     @Setter
     private GameMessageTypes messageTypes;
 
-    // Request factory for outbound messages
     private Request request;
 
     // Game state
@@ -68,9 +61,19 @@ public class BettingMiniGameBot extends Bot {
 
     private ScheduledExecutorService scheduler;
 
+    // Watchdog — fires if no game messages arrive within the configured timeout
+    private ScheduledExecutorService watchdogScheduler;
+    private volatile ScheduledFuture<?> watchdogTask;
+    private long watchdogTimeoutMillis;
+
     // Betting state
     private int numberOfBetsInCurrentSession = 0;
-    private final Random random = new Random();
+    private Random random = new Random();
+
+    // Visible for testing — allows deterministic randomness in unit tests.
+    void setRandom(Random random) {
+        this.random = random;
+    }
 
     public BettingMiniGameBot() {
         super();
@@ -82,15 +85,20 @@ public class BettingMiniGameBot extends Bot {
         this.offset = game.getOffset();
         this.sidStore = new SessionIdStore(0L);
 
-        // Create Request factory with game-specific config
         this.request = new Request(
             game.getPluginName(),
             configuration.getZoneName(),
             offset
         );
 
-        log.info("BettingMiniGameBot initialized: game={}, offset={}, options={}, md5={}",
-                game.getName(), offset, game.getNumberOfOptions(), game.isMd5());
+        this.watchdogTimeoutMillis = configuration.getWatchdogTimeoutSeconds() * 1000L;
+        this.watchdogScheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofVirtual().name("watchdog-" + getUserName()).factory()
+        );
+
+        log.info("BettingMiniGameBot initialized: game={}, offset={}, options={}, md5={}, watchdog={}s",
+                game.getName(), offset, game.getNumberOfOptions(), game.isMd5(),
+                configuration.getWatchdogTimeoutSeconds());
     }
 
     private void onNewSession() {
@@ -105,7 +113,6 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private void startRemainingTimeCountDown() {
-        // Use virtual thread for countdown timer (lightweight, scalable to 100k+ bots)
         scheduler = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofVirtual().name("countdown-" + getUserName()).factory()
         );
@@ -118,11 +125,30 @@ public class BettingMiniGameBot extends Bot {
         }, 0L, 1_000L, MILLISECONDS);
     }
 
+    private void scheduleWatchdog() {
+        if (watchdogTask != null && !watchdogTask.isDone()) {
+            watchdogTask.cancel(false);
+        }
+        watchdogTask = watchdogScheduler.schedule(
+                this::onWatchdogExpired,
+                watchdogTimeoutMillis,
+                MILLISECONDS
+        );
+    }
+
+    private void onWatchdogExpired() {
+        if (isStopped()) return;
+        log.warn("Bot {}: no game message in {}s — triggering full reconnect",
+                getUserName(), configuration.getWatchdogTimeoutSeconds());
+        triggerFullReconnect("watchdog timeout (" + configuration.getWatchdogTimeoutSeconds() + "s without game message)");
+    }
+
     private void onSubscribe(ActionResponseMessage<? extends SubscribeMessage> data) {
         markConnectionAuthenticated();
         SubscribeMessage msg = data.getData();
         blockBetTime = msg.getTimeForDecision();
         timeForBetting = msg.getTimeForBetting();
+        scheduleWatchdog();
     }
 
     private void onStartGame(ActionResponseMessage<? extends StartGameMessage> data) {
@@ -136,6 +162,7 @@ public class BettingMiniGameBot extends Bot {
         sidStore.set(msg.getSessionId());
         gameState = BettingMiniGameState.BET;
         numberOfBetsInCurrentSession = 0;
+        scheduleWatchdog();
     }
 
     private void onUpdate(ActionResponseMessage<? extends UpdateBetMessage> data) {
@@ -153,8 +180,35 @@ public class BettingMiniGameBot extends Bot {
             scheduler.shutdownNow();
             scheduler = null;
         }
-
+        scheduleWatchdog();
         onNewSession();
+    }
+
+    @Override
+    protected void beforeReconnect() {
+        if (watchdogTask != null) {
+            watchdogTask.cancel(false);
+            watchdogTask = null;
+        }
+        if (scheduler != null) {
+            scheduler.shutdownNow();
+            scheduler = null;
+        }
+        sidStore.set(0L);
+        gameState = null;
+        remainingTime.set(0L);
+        numberOfBetsInCurrentSession = 0;
+    }
+
+    @Override
+    public void cleanup() {
+        super.cleanup();
+        if (watchdogScheduler != null && !watchdogScheduler.isShutdown()) {
+            watchdogScheduler.shutdownNow();
+        }
+        if (scheduler != null && !scheduler.isShutdown()) {
+            scheduler.shutdownNow();
+        }
     }
 
     private Supplier<ActionRequestMessage> bet() {
@@ -188,7 +242,6 @@ public class BettingMiniGameBot extends Bot {
         BotBehaviorConfig behavior = configuration.getBehaviorConfig();
 
         if (numberOfBetsInCurrentSession < behavior.getMaxBetsPerRound()) {
-            // Skip bet based on configured probability
             if (random.nextInt(100) < behavior.getBetSkipPercentage()) {
                 return false;
             }
@@ -236,12 +289,10 @@ public class BettingMiniGameBot extends Bot {
     protected Scenario botBehaviorScenario() {
         Game game = configuration.getGame();
 
-        // Configure ObjectMapper with dynamic type registrations
         ObjectMapper mapper = new ObjectMapper();
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
         mapper.registerSubtypes(messageTypes.getTypeRegistrations(offset, game.isMd5()));
 
-        // Get message classes - type-safe since abstract classes extend Body
         Class<? extends SubscribeMessage> subscribeClass = messageTypes.subscribeType();
         Class<? extends StartGameMessage> startGameClass = game.isMd5() ? messageTypes.startGameMd5Type() : messageTypes.startGameType();
         Class<? extends UpdateBetMessage> updateBetClass = messageTypes.updateBetType();

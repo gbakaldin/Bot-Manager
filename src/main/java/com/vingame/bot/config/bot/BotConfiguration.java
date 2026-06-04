@@ -53,4 +53,6 @@ public class BotConfiguration {
     String zoneName;
 
     long timeoutMillis;
+
+    long watchdogTimeoutSeconds;
 }

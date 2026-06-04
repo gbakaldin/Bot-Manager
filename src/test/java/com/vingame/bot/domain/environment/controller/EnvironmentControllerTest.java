@@ -400,15 +400,15 @@ class EnvironmentControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 404 Not Found when environment does not exist")
-        void shouldReturnNotFoundWhenEnvironmentDoesNotExist() throws Exception {
+        @DisplayName("Should return 400 Bad Request when delete throws IllegalArgumentException")
+        void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
             // Arrange
             String envId = "non-existent";
             doThrow(new IllegalArgumentException("Not found")).when(service).delete(envId);
 
             // Act & Assert
             mockMvc.perform(delete("/api/v1/environment/{id}", envId))
-                    .andExpect(status().isNotFound());
+                    .andExpect(status().isBadRequest());
         }
     }
 }

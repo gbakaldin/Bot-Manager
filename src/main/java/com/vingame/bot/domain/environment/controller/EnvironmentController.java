@@ -110,7 +110,7 @@ public class EnvironmentController {
                     .toList();
             return ResponseEntity.ok(dtos);
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.notFound().build();
+            return ResponseEntity.badRequest().build();
         } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
         }
@@ -128,7 +128,7 @@ public class EnvironmentController {
             Environment saved = service.save(environment);
             return ResponseEntity.ok(mapper.toDTO(saved));
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.notFound().build();
+            return ResponseEntity.badRequest().build();
         } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
         }
@@ -166,7 +166,7 @@ public class EnvironmentController {
             service.delete(id);
             return ResponseEntity.ok().build();
         } catch (IllegalArgumentException e) {
-            return ResponseEntity.notFound().build();
+            return ResponseEntity.badRequest().build();
         } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
         }

@@ -23,6 +23,7 @@ import org.springframework.data.mongodb.core.query.Query;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -110,8 +111,11 @@ class GameServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("brandCode");
+            // Strengthened: assert the exact value
+            assertThat(capturedQuery.getQueryObject().get("brandCode")).isEqualTo(BrandCode.G2);
         }
 
         @Test
@@ -126,8 +130,11 @@ class GameServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("gameType");
+            // Strengthened: assert the exact value
+            assertThat(capturedQuery.getQueryObject().get("gameType")).isEqualTo(GameType.BETTING_MINI);
         }
 
         @Test
@@ -142,8 +149,15 @@ class GameServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("name");
+            // Strengthened: assert the value is a case-insensitive Pattern containing the quoted input
+            Object nameCriterion = capturedQuery.getQueryObject().get("name");
+            assertThat(nameCriterion).isInstanceOf(Pattern.class);
+            Pattern namePattern = (Pattern) nameCriterion;
+            assertThat(namePattern.flags() & Pattern.CASE_INSENSITIVE).isEqualTo(Pattern.CASE_INSENSITIVE);
+            assertThat(namePattern.pattern()).isEqualTo(Pattern.quote("taixiu"));
         }
 
         @Test
@@ -163,9 +177,13 @@ class GameServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("brandCode");
             assertThat(queryString).contains("productCode");
+            // Strengthened: assert exact values
+            assertThat(capturedQuery.getQueryObject().get("brandCode")).isEqualTo(BrandCode.G2);
+            assertThat(capturedQuery.getQueryObject().get("productCode")).isEqualTo(ProductCode.P_097);
         }
 
         @Test

@@ -22,6 +22,7 @@ import org.springframework.data.mongodb.core.query.Query;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -122,8 +123,11 @@ class EnvironmentServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("type");
+            // Strengthened: assert exact value
+            assertThat(capturedQuery.getQueryObject().get("type")).isEqualTo(EnvironmentType.STAGING);
         }
 
         @Test
@@ -141,8 +145,11 @@ class EnvironmentServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("brandCode");
+            // Strengthened: assert exact value
+            assertThat(capturedQuery.getQueryObject().get("brandCode")).isEqualTo(BrandCode.G2);
         }
 
         @Test
@@ -160,8 +167,15 @@ class EnvironmentServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("name");
+            // Strengthened: assert the value is a case-insensitive anchored Pattern
+            Object nameCriterion = capturedQuery.getQueryObject().get("name");
+            assertThat(nameCriterion).isInstanceOf(Pattern.class);
+            Pattern namePattern = (Pattern) nameCriterion;
+            assertThat(namePattern.flags() & Pattern.CASE_INSENSITIVE).isEqualTo(Pattern.CASE_INSENSITIVE);
+            assertThat(namePattern.pattern()).isEqualTo("^" + Pattern.quote("staging env") + "$");
         }
 
         @Test
@@ -196,9 +210,13 @@ class EnvironmentServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("type");
             assertThat(queryString).contains("brandCode");
+            // Strengthened: assert exact values
+            assertThat(capturedQuery.getQueryObject().get("type")).isEqualTo(EnvironmentType.STAGING);
+            assertThat(capturedQuery.getQueryObject().get("brandCode")).isEqualTo(BrandCode.G2);
         }
     }
 

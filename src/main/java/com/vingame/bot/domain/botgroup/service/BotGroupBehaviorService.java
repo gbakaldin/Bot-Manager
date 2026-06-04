@@ -6,6 +6,7 @@ import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.core.Bot;
+import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
@@ -82,6 +83,18 @@ public class BotGroupBehaviorService {
      */
     @Value("${bot.periodic-logout.reconnect-delay-seconds:5}")
     private int reconnectDelaySeconds;
+
+    /**
+     * Fraction of bots that must be DEAD before the entire group is marked DEAD (0.0–1.0).
+     */
+    @Value("${bot.group.dead.threshold:0.80}")
+    private double deadBotGroupThreshold;
+
+    /**
+     * Seconds without any game message before the watchdog triggers a full bot reconnect.
+     */
+    @Value("${bot.watchdog.timeout.seconds:180}")
+    private long watchdogTimeoutSeconds;
 
     /**
      * Scheduler for timed operations (scheduled restarts, etc.)
@@ -340,6 +353,7 @@ public class BotGroupBehaviorService {
                 .game(game)
                 .behaviorConfig(behaviorConfig)
                 .zoneName(environment.getMiniZoneName())
+                .watchdogTimeoutSeconds(watchdogTimeoutSeconds)
                 .build();
 
         // Create bot using factory (authenticates and creates WebSocket client)
@@ -443,6 +457,7 @@ public class BotGroupBehaviorService {
         List<BotHealthDTO> botDtos = runtime.getBotInstances().stream()
                 .map(bot -> BotHealthDTO.builder()
                         .username(bot.getUserName())
+                        .status(bot.getStatus())
                         .connected(bot.isConnected())
                         .balance(bot.getExpectedBalance())
                         .lastFetchedBalance(bot.getLastFetchedBalance())
@@ -453,6 +468,10 @@ public class BotGroupBehaviorService {
                 .toList();
 
         int connected = (int) botDtos.stream().filter(BotHealthDTO::isConnected).count();
+        int reconnecting = (int) botDtos.stream()
+                .filter(b -> b.getStatus() == BotStatus.RECONNECTING).count();
+        int dead = (int) botDtos.stream()
+                .filter(b -> b.getStatus() == BotStatus.DEAD).count();
 
         return BotGroupHealthDTO.builder()
                 .groupId(id)
@@ -463,7 +482,9 @@ public class BotGroupBehaviorService {
                 .consecutiveFailures(runtime.getConsecutiveFailures())
                 .totalBots(botDtos.size())
                 .connectedBots(connected)
-                .disconnectedBots(botDtos.size() - connected)
+                .reconnectingBots(reconnecting)
+                .deadBots(dead)
+                .disconnectedBots(botDtos.size() - connected - reconnecting - dead)
                 .bots(botDtos)
                 .build();
     }
@@ -528,18 +549,23 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Monitor health of bot group
+     * Monitor health of bot group — logs a summary and marks group DEAD if enough bots have given up.
      */
     private void monitorHealth(BotGroupRuntime runtime) {
-        // Check if majority of bots are disconnected
-        if (runtime.hasMajorityDisconnected()) {
-            runtime.incrementFailures();
+        List<Bot> bots = runtime.getBotInstances();
+        if (bots.isEmpty()) return;
 
-            if (runtime.getConsecutiveFailures() >= 3) {
-                handleBotGroupDeath(runtime);
-            }
-        } else {
-            runtime.resetFailures();
+        long dead = bots.stream().filter(b -> b.getStatus() == BotStatus.DEAD).count();
+        long reconnecting = bots.stream().filter(b -> b.getStatus() == BotStatus.RECONNECTING).count();
+        long playing = bots.stream().filter(Bot::isConnected).count();
+
+        runtime.setConsecutiveFailures((int) dead);
+
+        log.info("Group {} health — playing: {}, reconnecting: {}, dead: {}/{}",
+                runtime.getGroupId(), playing, reconnecting, dead, bots.size());
+
+        if (!runtime.isGroupDead() && (double) dead / bots.size() >= deadBotGroupThreshold) {
+            handleBotGroupDeath(runtime);
         }
     }
 
@@ -667,37 +693,5 @@ public class BotGroupBehaviorService {
             log.error("Periodic logout failed for bot {} in group {}: {}",
                     bot.getUserName(), runtime.getGroupId(), e.getMessage(), e);
         }
-    }
-}
-
-
-// Trading processor
-/*
-    1. Trades must be processed in the order they arrive per accountId.
-    2. Trades from different accounts can be processed in parallel.
-    3. You must use multiple threads for better performance.
-*/
-
-class Trade {
-    String accountId;
-    long timestamp;
-}
-
-class TradingProcessor {
-    private final ExternalClient client;
-
-    public TradingProcessor(ExternalClient client) {
-        this.client = client;
-    }
-
-    // assume it will be called from multiple threads
-    public void process(List<Trade> trades) {
-
-    }
-}
-
-class ExternalClient {
-    public void processTrade(Trade trade) {
-
     }
 }

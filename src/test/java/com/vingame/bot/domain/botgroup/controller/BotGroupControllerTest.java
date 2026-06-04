@@ -2,8 +2,11 @@ package com.vingame.bot.domain.botgroup.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
+import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatusDTO;
+import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
@@ -20,6 +23,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -403,15 +407,15 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 404 Not Found when bot group does not exist")
-        void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
+        @DisplayName("Should return 400 Bad Request when delete throws IllegalArgumentException")
+        void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
             // Arrange
             String groupId = "999";
             doThrow(new IllegalArgumentException("Not found")).when(service).delete(groupId);
 
             // Act & Assert
             mockMvc.perform(delete("/api/v1/bot-group/{id}", groupId))
-                    .andExpect(status().isNotFound());
+                    .andExpect(status().isBadRequest());
         }
     }
 
@@ -432,15 +436,15 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 404 Not Found when bot group does not exist")
-        void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
+        @DisplayName("Should return 400 Bad Request when start throws IllegalArgumentException")
+        void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
             // Arrange
             String groupId = "999";
             doThrow(new IllegalArgumentException("Not found")).when(behaviorService).start(groupId);
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
-                    .andExpect(status().isNotFound());
+                    .andExpect(status().isBadRequest());
         }
 
         @Test
@@ -473,15 +477,15 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 404 Not Found when bot group does not exist")
-        void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
+        @DisplayName("Should return 400 Bad Request when stop throws IllegalArgumentException")
+        void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
             // Arrange
             String groupId = "999";
             doThrow(new IllegalArgumentException("Not found")).when(behaviorService).stop(groupId);
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/stop", groupId))
-                    .andExpect(status().isNotFound());
+                    .andExpect(status().isBadRequest());
         }
     }
 
@@ -502,15 +506,15 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 404 Not Found when bot group does not exist")
-        void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
+        @DisplayName("Should return 400 Bad Request when restart throws IllegalArgumentException")
+        void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
             // Arrange
             String groupId = "999";
             doThrow(new IllegalArgumentException("Not found")).when(behaviorService).restart(groupId);
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/restart", groupId))
-                    .andExpect(status().isNotFound());
+                    .andExpect(status().isBadRequest());
         }
     }
 
@@ -534,8 +538,8 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 404 Not Found when bot group does not exist")
-        void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
+        @DisplayName("Should return 400 Bad Request when scheduleRestart throws IllegalArgumentException")
+        void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
             // Arrange
             String groupId = "999";
             LocalDateTime futureTime = LocalDateTime.now().plusHours(2);
@@ -546,7 +550,7 @@ class BotGroupControllerTest {
             mockMvc.perform(post("/api/v1/bot-group/{id}/schedule-restart", groupId)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(futureTime)))
-                    .andExpect(status().isNotFound());
+                    .andExpect(status().isBadRequest());
         }
     }
 
@@ -612,6 +616,107 @@ class BotGroupControllerTest {
                     .andExpect(jsonPath("$.targetStatus").value("STOPPED"))
                     .andExpect(jsonPath("$.actualStatus").value("STOPPED"))
                     .andExpect(jsonPath("$.playingStatus").doesNotExist());
+        }
+    }
+
+    @Nested
+    @DisplayName("GET /api/v1/bot-group/{id}/health")
+    class GetHealthTests {
+
+        @Test
+        @DisplayName("Should return 200 OK with full BotGroupHealthDTO body")
+        void shouldReturnOkWithBotGroupHealth() throws Exception {
+            // Arrange
+            String groupId = "123";
+
+            BotHealthDTO bot1 = BotHealthDTO.builder()
+                    .username("authtestws1")
+                    .status(BotStatus.STARTED)
+                    .connected(true)
+                    .balance(950_000L)
+                    .lastFetchedBalance(1_000_000L)
+                    .totalBetsPlaced(5)
+                    .totalBetAmount(50_000L)
+                    .lastRoundWinnings(2_500L)
+                    .build();
+
+            BotHealthDTO bot2 = BotHealthDTO.builder()
+                    .username("authtestws2")
+                    .status(BotStatus.RECONNECTING)
+                    .connected(false)
+                    .balance(800_000L)
+                    .lastFetchedBalance(800_000L)
+                    .totalBetsPlaced(3)
+                    .totalBetAmount(30_000L)
+                    .lastRoundWinnings(0L)
+                    .build();
+
+            BotGroupHealthDTO health = BotGroupHealthDTO.builder()
+                    .groupId(groupId)
+                    .groupName("Test Health Group")
+                    .status(BotGroupStatus.ACTIVE)
+                    .playingStatus(BotGroupPlayingStatus.PLAYING)
+                    .startedAt(Instant.parse("2026-01-01T00:00:00Z"))
+                    .consecutiveFailures(0)
+                    .totalBots(2)
+                    .connectedBots(1)
+                    .reconnectingBots(1)
+                    .deadBots(0)
+                    .disconnectedBots(1)
+                    .bots(List.of(bot1, bot2))
+                    .build();
+
+            when(behaviorService.getHealth(groupId)).thenReturn(health);
+
+            // Act & Assert
+            mockMvc.perform(get("/api/v1/bot-group/{id}/health", groupId))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.groupId").value(groupId))
+                    .andExpect(jsonPath("$.groupName").value("Test Health Group"))
+                    .andExpect(jsonPath("$.status").value("ACTIVE"))
+                    .andExpect(jsonPath("$.playingStatus").value("PLAYING"))
+                    .andExpect(jsonPath("$.totalBots").value(2))
+                    .andExpect(jsonPath("$.connectedBots").value(1))
+                    .andExpect(jsonPath("$.reconnectingBots").value(1))
+                    .andExpect(jsonPath("$.deadBots").value(0))
+                    .andExpect(jsonPath("$.disconnectedBots").value(1))
+                    .andExpect(jsonPath("$.consecutiveFailures").value(0))
+                    .andExpect(jsonPath("$.bots").isArray())
+                    .andExpect(jsonPath("$.bots.length()").value(2))
+                    .andExpect(jsonPath("$.bots[0].username").value("authtestws1"))
+                    .andExpect(jsonPath("$.bots[0].status").value("STARTED"))
+                    .andExpect(jsonPath("$.bots[0].connected").value(true))
+                    .andExpect(jsonPath("$.bots[0].balance").value(950_000))
+                    .andExpect(jsonPath("$.bots[0].totalBetsPlaced").value(5))
+                    .andExpect(jsonPath("$.bots[1].username").value("authtestws2"))
+                    .andExpect(jsonPath("$.bots[1].status").value("RECONNECTING"))
+                    .andExpect(jsonPath("$.bots[1].connected").value(false));
+        }
+
+        @Test
+        @DisplayName("Should return 404 Not Found when bot group does not exist")
+        void shouldReturnNotFoundWhenBotGroupDoesNotExist() throws Exception {
+            // Arrange
+            String groupId = "999";
+            when(behaviorService.getHealth(groupId))
+                    .thenThrow(new ResourceNotFoundException("Bot group not found"));
+
+            // Act & Assert
+            mockMvc.perform(get("/api/v1/bot-group/{id}/health", groupId))
+                    .andExpect(status().isNotFound());
+        }
+
+        @Test
+        @DisplayName("Should return 500 Internal Server Error when getHealth throws unexpected exception")
+        void shouldReturnInternalServerErrorWhenGetHealthFails() throws Exception {
+            // Arrange
+            String groupId = "123";
+            when(behaviorService.getHealth(groupId))
+                    .thenThrow(new RuntimeException("Boom"));
+
+            // Act & Assert
+            mockMvc.perform(get("/api/v1/bot-group/{id}/health", groupId))
+                    .andExpect(status().isInternalServerError());
         }
     }
 }

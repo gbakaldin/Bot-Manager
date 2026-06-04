@@ -12,11 +12,17 @@ import com.vingame.websocketparser.scenario.Scenario;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 @Slf4j
 public abstract class Bot {
+
+    // Backoff schedule for WS reconnect (seconds): total ≈ 4:45
+    private static final long[] BACKOFF_SECONDS = {5, 10, 30, 60, 60, 60, 60};
+    // Time to wait after submitting a reconnect to confirm the connection is alive
+    private static final long RECONNECT_CONFIRM_SECONDS = 3;
 
     // Shared environment clients (set via builder-style setters)
     protected ApiGatewayClient apiGatewayClient;
@@ -38,7 +44,7 @@ public abstract class Bot {
     protected String apiGateway;
 
     @Getter
-    protected TokensProvider tokens; // All authentication tokens from ApiGatewayClient
+    protected TokensProvider tokens;
 
     protected volatile long lastFetchedBalance = -1;
     protected final AtomicLong expectedCurrentBalance = new AtomicLong(-100_000_000L);
@@ -54,22 +60,11 @@ public abstract class Bot {
     @Getter
     private volatile BotStatus status = BotStatus.AUTHENTICATING;
 
-    /**
-     * No-arg constructor for factory instantiation.
-     * Factory will use fluent setters to configure, then call initialize().
-     */
-    public Bot() {
-        // Factory will call setClients() and setConfiguration() before initialize()
-    }
+    private final AtomicBoolean reconnecting = new AtomicBoolean(false);
+    private volatile boolean stopped = false;
 
-    /**
-     * Set environment clients (fluent setter for builder pattern).
-     *
-     * @param apiGatewayClient Shared API gateway client
-     * @param gameMsClient Shared GameMS client
-     * @param clientFactory Shared WebSocket client factory
-     * @return this for method chaining
-     */
+    public Bot() {}
+
     public Bot setClients(
         ApiGatewayClient apiGatewayClient,
         GameMsClient gameMsClient,
@@ -82,12 +77,6 @@ public abstract class Bot {
         return this;
     }
 
-    /**
-     * Set bot configuration (fluent setter for builder pattern).
-     *
-     * @param configuration Bot configuration including credentials and behavior
-     * @return this for method chaining
-     */
     public Bot setConfiguration(BotConfiguration configuration) {
         this.configuration = configuration;
         this.credentials = configuration.getCredentials();
@@ -96,19 +85,6 @@ public abstract class Bot {
         return this;
     }
 
-    /**
-     * Initialize bot after clients and configuration are set.
-     * <p>
-     * Lifecycle: new Bot() → setClients() → setConfiguration() → initialize()
-     * <p>
-     * This method:
-     * 1. Authenticates with game server to get auth tokens
-     * 2. Creates WebSocket client with authentication baked in
-     * 3. Calls child-specific initialization
-     * 4. Ready for start() call
-     *
-     * @return this for method chaining
-     */
     public Bot initialize() {
         BotMdc.set(
                 configuration.getBotGroupId(),
@@ -143,23 +119,10 @@ public abstract class Bot {
         }
     }
 
-    /**
-     * Child-specific initialization hook.
-     * Called by parent's initialize() after client is created.
-     * Override this to set up game-specific scenarios, request objects, etc.
-     */
     protected abstract void initializeSubclass();
 
-    /**
-     * Cleanup bot resources.
-     * <p>
-     * Called manually by BotGroupRuntime when:
-     * - BotGroup is stopped
-     * - Application shutdown
-     * <p>
-     * Ensures WebSocket connection is closed gracefully.
-     */
     public void cleanup() {
+        stopped = true;
         log.info("Cleaning up bot {}", userName);
         if (client != null && client.isOpen()) {
             try {
@@ -204,7 +167,6 @@ public abstract class Bot {
     public void logout() {
         try {
             stop();
-            // TODO: Implement explicit logout in ApiGatewayClient if needed
             log.info("Bot {}: Logged out", userName);
         } catch (Exception e) {
             log.error("Bot {}: Logout failed: {}", userName, e.getMessage());
@@ -269,6 +231,10 @@ public abstract class Bot {
         return client != null && client.isOpen();
     }
 
+    public boolean isStopped() {
+        return stopped;
+    }
+
     protected void markConnectionAuthenticated() {
         if (status != BotStatus.CONNECTION_AUTHENTICATED) {
             transitionStatus(BotStatus.CONNECTION_AUTHENTICATED);
@@ -289,10 +255,124 @@ public abstract class Bot {
                 default -> {}
             }
         });
-        wsClient.onDisconnect(() ->
-            log.warn("Bot {}: disconnected (status was {})", userName, status)
-        );
+        wsClient.onDisconnect(() -> {
+            if (!stopped) onWsDisconnected();
+        });
     }
+
+    // ---- Reconnect logic ----
+
+    private void onWsDisconnected() {
+        if (!reconnecting.compareAndSet(false, true)) {
+            return; // reconnect loop already running — it will handle the retry
+        }
+        transitionStatus(BotStatus.RECONNECTING);
+        log.warn("Bot {}: WS disconnected — starting retrial flow", userName);
+        Thread.ofVirtual().name("reconnect-" + userName).start(this::runWsReconnectLoop);
+    }
+
+    // Called from the watchdog in BettingMiniGameBot — skips WS backoff, re-auths immediately
+    protected void triggerFullReconnect(String reason) {
+        if (stopped) return;
+        if (!reconnecting.compareAndSet(false, true)) {
+            return; // reconnect already in progress
+        }
+        transitionStatus(BotStatus.RECONNECTING);
+        log.warn("Bot {}: full reconnect triggered — {}", userName, reason);
+        if (client != null && client.isOpen()) {
+            client.close();
+        }
+        Thread.ofVirtual().name("reconnect-" + userName).start(this::runAuthThenWsLoop);
+    }
+
+    private void runWsReconnectLoop() {
+        int attempt = 0;
+        while (!stopped) {
+            long delaySecs = BACKOFF_SECONDS[Math.min(attempt, BACKOFF_SECONDS.length - 1)];
+            sleep(delaySecs * 1000);
+            if (stopped) return;
+
+            if (tryReconnectWs()) {
+                sleep(RECONNECT_CONFIRM_SECONDS * 1000);
+                if (!stopped && client != null && client.isOpen()) {
+                    log.info("Bot {}: reconnected to WS (attempt {})", userName, attempt + 1);
+                    reconnecting.set(false);
+                    return;
+                }
+                log.debug("Bot {}: reconnect attempt {} did not hold", userName, attempt + 1);
+            }
+
+            attempt++;
+
+            // After full backoff sequence exhausted, re-authenticate and start over
+            if (attempt >= BACKOFF_SECONDS.length) {
+                if (!performReauth()) return; // marks DEAD if auth fails
+                attempt = 0;
+            }
+        }
+    }
+
+    private void runAuthThenWsLoop() {
+        if (stopped) return;
+        if (!performReauth()) return;
+        if (stopped) return;
+
+        if (tryReconnectWs()) {
+            sleep(RECONNECT_CONFIRM_SECONDS * 1000);
+            if (!stopped && client != null && client.isOpen()) {
+                log.info("Bot {}: reconnected after full re-auth", userName);
+                reconnecting.set(false);
+                return;
+            }
+        }
+        runWsReconnectLoop();
+    }
+
+    private boolean performReauth() {
+        try {
+            log.debug("Bot {}: re-authenticating", userName);
+            transitionStatus(BotStatus.AUTHENTICATING);
+            this.tokens = apiGatewayClient.authenticate(credentials);
+            transitionStatus(BotStatus.AUTHENTICATED);
+            return true;
+        } catch (Exception e) {
+            log.error("Bot {}: re-authentication failed — marking DEAD", userName);
+            transitionStatus(BotStatus.DEAD);
+            reconnecting.set(false);
+            return false;
+        }
+    }
+
+    private boolean tryReconnectWs() {
+        try {
+            if (client != null && client.isOpen()) {
+                client.close();
+            }
+            this.client = clientFactory.newClient(tokens, userName);
+            configureClient(client);
+            transitionStatus(BotStatus.CONNECTING);
+            client.connect();
+            beforeReconnect();
+            start();
+            return true;
+        } catch (Exception e) {
+            log.debug("Bot {}: WS reconnect attempt failed: {}", userName, e.getMessage());
+            return false;
+        }
+    }
+
+    // Hook for subclasses to clean up game state before scenarios are re-added on reconnect
+    protected void beforeReconnect() {}
+
+    protected void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    // ---- Abstract & template methods ----
 
     protected abstract long resolveBetAmount();
 
@@ -309,13 +389,9 @@ public abstract class Bot {
     public final void start() {
         log.debug("Bot starting. Client: {} | Thread: {}",
                  System.identityHashCode(client), Thread.currentThread().getName());
-
-        // Connection and authentication already happened in initialize()
-        // Just run the bot logic
         onStart();
         transitionStatus(BotStatus.STARTED);
     }
 
     protected abstract void onStart();
-
 }

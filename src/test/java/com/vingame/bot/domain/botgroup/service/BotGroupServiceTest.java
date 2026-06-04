@@ -25,10 +25,12 @@ import org.springframework.data.mongodb.core.query.Query;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -139,9 +141,12 @@ class BotGroupServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("environmentId");
             assertThat(queryString).contains("env-a");
+            // Strengthened: assert exact value
+            assertThat(capturedQuery.getQueryObject().get("environmentId")).isEqualTo("env-a");
         }
 
         @Test
@@ -157,8 +162,15 @@ class BotGroupServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("name");
+            // Strengthened: assert the value is a case-insensitive anchored Pattern
+            Object nameCriterion = capturedQuery.getQueryObject().get("name");
+            assertThat(nameCriterion).isInstanceOf(Pattern.class);
+            Pattern namePattern = (Pattern) nameCriterion;
+            assertThat(namePattern.flags() & Pattern.CASE_INSENSITIVE).isEqualTo(Pattern.CASE_INSENSITIVE);
+            assertThat(namePattern.pattern()).isEqualTo("^" + Pattern.quote("test group") + "$");
         }
 
         @Test
@@ -174,9 +186,12 @@ class BotGroupServiceTest {
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
-            String queryString = queryCaptor.getValue().toString();
+            Query capturedQuery = queryCaptor.getValue();
+            String queryString = capturedQuery.toString();
             assertThat(queryString).contains("gameId");
             assertThat(queryString).contains("game-1");
+            // Strengthened: assert exact value
+            assertThat(capturedQuery.getQueryObject().get("gameId")).isEqualTo("game-1");
         }
 
         @Test
@@ -306,6 +321,111 @@ class BotGroupServiceTest {
 
             assertThat(result.getId()).isEqualTo("existing-id");
             verify(clientRegistry, never()).getClients(anyString());
+            verify(repository).save(group);
+        }
+    }
+
+    @Nested
+    @DisplayName("save - skipRegistration=true overload")
+    class SaveSkipRegistrationTests {
+
+        @Test
+        @DisplayName("Should generate ID and skip user registration for new group when skipRegistration=true")
+        void shouldGenerateIdAndSkipRegistration() {
+            BotGroup group = BotGroup.builder()
+                    .name("Migrated Group")
+                    .environmentId("env-1")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(5)
+                    .build();
+
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.save(group, true);
+
+            // An id was generated even though we skipped registration
+            assertThat(result.getId()).isNotNull().isNotEmpty();
+
+            // No environment client was looked up, no users registered
+            verify(clientRegistry, never()).getClients(anyString());
+            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
+            verify(repository).save(group);
+        }
+
+        @Test
+        @DisplayName("Should still register users for new group when skipRegistration=false (overload)")
+        void shouldRegisterWhenSkipFalse() {
+            BotGroup group = BotGroup.builder()
+                    .name("Plain Group")
+                    .environmentId("env-1")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(3)
+                    .build();
+
+            UserRegistrationResult successResult = UserRegistrationResult.builder()
+                    .totalRequested(3)
+                    .successCount(3)
+                    .failureCount(0)
+                    .build();
+
+            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
+            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
+            when(apiGatewayClient.registerUsers("bot", "pass", 3)).thenReturn(successResult);
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.save(group, false);
+
+            assertThat(result.getId()).isNotNull().isNotEmpty();
+            verify(apiGatewayClient).registerUsers("bot", "pass", 3);
+            verify(repository).save(group);
+        }
+
+        @Test
+        @DisplayName("Should not register users when skipRegistration=true even on existing group (id preserved)")
+        void shouldNotRegisterOnExistingGroupWithSkipTrue() {
+            BotGroup group = BotGroup.builder()
+                    .id("existing-id")
+                    .name("Existing Group")
+                    .environmentId("env-1")
+                    .build();
+
+            when(repository.save(group)).thenReturn(group);
+
+            BotGroup result = service.save(group, true);
+
+            assertThat(result.getId()).isEqualTo("existing-id");
+            verify(clientRegistry, never()).getClients(anyString());
+            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
+            verify(repository).save(group);
+        }
+
+        @Test
+        @DisplayName("Two-arg save(group) delegates to save(group, false) — registers users for a new group")
+        void twoArgSaveDelegatesToSkipFalse() {
+            BotGroup group = BotGroup.builder()
+                    .name("Two-Arg Group")
+                    .environmentId("env-1")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(2)
+                    .build();
+
+            UserRegistrationResult successResult = UserRegistrationResult.builder()
+                    .totalRequested(2)
+                    .successCount(2)
+                    .failureCount(0)
+                    .build();
+
+            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
+            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
+            when(apiGatewayClient.registerUsers("bot", "pass", 2)).thenReturn(successResult);
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            service.save(group);
+
+            verify(apiGatewayClient).registerUsers("bot", "pass", 2);
             verify(repository).save(group);
         }
     }

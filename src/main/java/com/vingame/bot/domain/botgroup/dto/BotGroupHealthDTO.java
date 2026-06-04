@@ -26,6 +26,8 @@ public class BotGroupHealthDTO {
 
     private int totalBots;
     private int connectedBots;
+    private int reconnectingBots;
+    private int deadBots;
     private int disconnectedBots;
 
     private List<BotHealthDTO> bots;

@@ -1,0 +1,61 @@
+# BOT
+
+###
+# @name Create user
+POST https://api-gw52.sgame.us/gwms/v1/bot/register.aspx
+    X-TOKEN: 58bc2820612d23c34fe43d0b2c6f7223
+Content-Type: application/json
+
+{
+    "username": "botb521111",
+    "password": "Aa123456",
+    "ip": "129.34.254.27",
+    "register_ip": "129.34.254.27",
+    "os": "OS X",
+    "device": "Computer",
+    "browser": "WEB",
+    "app_id": "bc114098",
+    "source": "bc114098"
+}
+
+###
+# @name Login
+POST https://api-gw52.sgame.us/gwms/v1/bot/login.aspx
+    X-TOKEN: 58bc2820612d23c34fe43d0b2c6f7223
+Content-Type: application/json
+
+{
+    "username": "botb521111",
+    "password": "Aa123456",
+    "app_id": "bc114098",
+    "os": "OS X",
+    "device": "Computer",
+    "browser": "chrome",
+    "fg": "8a6c3768356c5a8d35db24f9736fac92",
+    "aff_id": "",
+    "apVer": "0.0.1197",
+    "version": "0.0.1197",
+    "ip": "129.34.254.27"
+}
+
+###
+# @name Update fullname
+POST https://api-gw52.sgame.us/gwms/v1/bot/update-fullname.aspx
+    X-TOKEN: 58bc2820612d23c34fe43d0b2c6f7223
+Content-Type: application/json
+
+{
+    "username": "botb521111",
+    "fullname": "FNBost11111"
+}
+
+###
+# @name Depost
+POST https://api-gw52.sgame.us/gwms/v1/bot/deposit.aspx
+    X-TOKEN: 58bc2820612d23c34fe43d0b2c6f7223
+Content-Type: application/json
+
+{
+    "username": "botb521111",
+    "amount": 1000000
+}

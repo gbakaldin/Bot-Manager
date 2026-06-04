@@ -148,18 +148,8 @@ public class BotGroupRuntime {
                 .count();
     }
 
-    /**
-     * Check if more than half of bots are disconnected.
-     *
-     * @return true if >50% bots are disconnected
-     */
-    public boolean hasMajorityDisconnected() {
-        long disconnectedCount = botInstances.stream()
-                .filter(bot -> bot.getClient() == null || !bot.getClient().isOpen())
-                .count();
-
-        double disconnectedPercentage = (double) disconnectedCount / botInstances.size();
-        return disconnectedPercentage > 0.5;
+    public boolean isGroupDead() {
+        return this.actualStatus == BotGroupStatus.DEAD;
     }
 
     /**
@@ -167,20 +157,6 @@ public class BotGroupRuntime {
      */
     public void markAsDead() {
         this.actualStatus = BotGroupStatus.DEAD;
-    }
-
-    /**
-     * Increment failure counter
-     */
-    public void incrementFailures() {
-        this.consecutiveFailures++;
-    }
-
-    /**
-     * Reset failure counter (e.g., after successful operation)
-     */
-    public void resetFailures() {
-        this.consecutiveFailures = 0;
     }
 
     /**
