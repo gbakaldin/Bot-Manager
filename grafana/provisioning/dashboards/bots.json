@@ -846,7 +846,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (gameType) (rate(bot_winnings_total[5m])) / sum by (gameType) (rate(bot_bet_amount_total[5m]))",
+          "expr": "(sum by (gameType) (rate(bot_winnings_total[5m])) / sum by (gameType) (rate(bot_bet_amount_total[5m]))) or vector(0)",
           "legendFormat": "{{gameType}}"
         }
       ]

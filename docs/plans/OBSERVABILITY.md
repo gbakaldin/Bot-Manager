@@ -908,3 +908,52 @@ Step 9 verifies Phase 4 counters are registered. Step 10 verifies Phase 5 counte
 ### Bundling guidance for Dev
 
 Phases 4 and 5 should be ONE Dev invocation. They share the same wiring callsite (`BettingMiniGameBot.onEndGame`), the same code path, the same test infrastructure, and the same review surface. Splitting them would force Dev to re-Read `BettingMiniGameBot.java` and re-read `BotMetrics.java` twice; the combined review surface is on the order of ~100 lines added across 3 files. If the first review surfaces unexpected complexity (e.g. test-harness flakiness around MDC + Counter caching), split into two: Phase 4 first (winnings + jackpot), Phase 5 second (game-totals). Default: ONE invocation.
+
+---
+
+## Amendment — 2026-06-04 (Phase 4 + 5 compliance review)
+
+Two surgical corrections applied during the Phase 4 + 5 compliance review (verdict PLAN_AMENDED at commit `07d6e28`). Both reflect codebase constraints the Architect missed when drafting Phase 4 + 5 / AD 11.
+
+### Amendment 10 — Phase 5 method renamed `getTotalBetAmount()` → `getRoundTotalBetAmount()`
+
+**Why the original name was wrong.** `Bot.java:71-72` declares:
+
+```java
+@Getter
+protected final AtomicLong totalBetAmount = new AtomicLong(0);
+```
+
+Lombok generates a `public AtomicLong getTotalBetAmount()` on `Bot`. The plan's `protected long getTotalBetAmount()` on `BettingMiniGameBot extends Bot` is not a valid Java override — both the access modifier (protected vs public) and the return type (`long` vs `AtomicLong`) are incompatible. The compiler rejects the declaration outright. The original name is structurally impossible.
+
+**Corrected method signature in AD 11 and Phase 5:**
+
+```java
+/** Sum of all players' bets for the just-completed round.
+ *  Only meaningful when {@link #canCheckTotalWinnings()} is true. Default 0.
+ *
+ *  Renamed from getTotalBetAmount() to avoid collision with the Lombok-generated
+ *  Bot.getTotalBetAmount() (returns AtomicLong for the per-bot lifetime accumulator
+ *  read by BotHealthDTO). The two are semantically distinct: per-round game total
+ *  vs. per-bot lifetime total. Keeping the Bot-level accessor stable preserves
+ *  the BotHealthDTO contract.
+ */
+protected long getRoundTotalBetAmount() { return 0L; }
+```
+
+**Status:** Real codebase constraint, not a Dev preference. Dev's chosen name is also more semantically precise. The plan's AD 11 "new meter names" list is unaffected — only the method name on `BettingMiniGameBot` changes.
+
+### Amendment 11 — `lastRoundWinnings` is written unconditionally in Phase 4
+
+The Phase 4 body originally specified:
+
+```java
+if (winnings > 0) {
+    metrics.incBotWinnings(winnings);
+    lastRoundWinnings = winnings;
+}
+```
+
+The shipped implementation writes both unconditionally (the `> 0` gate is dropped). This is a deliberate user-endorsed choice and is semantically correct: `lastRoundWinnings` means "the latest round's winnings" — when the bot didn't win this round, the field should reflect 0, not stick at the previous round's max. The behavior is also consistent with the field name and with how `BotHealthDTO.lastRoundWinnings` is consumed (a snapshot of the most recent round). Jackpot remains gated on `> 0` because emitting a jackpot count of 0 would still consume a meter slot per round.
+
+**Status:** Plan body bullet at the Phase 4 wiring snippet is hereby loosened — the `> 0` guard around the winnings increment + `lastRoundWinnings` write is OPTIONAL. The jackpot gate stays mandatory.
