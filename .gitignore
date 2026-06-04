@@ -40,3 +40,6 @@ build/
 
 ### Local scripts ###
 startup.sh
+
+### Deploy-generated env file (HOST_UID/HOST_GID written by deploy.sh) ###
+.env

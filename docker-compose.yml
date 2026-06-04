@@ -15,6 +15,7 @@ services:
 
   bot-manager:
     image: vingame-bot:latest
+    user: "${HOST_UID}:${HOST_GID}"
     ports:
       - "8080:8085"
     environment:
