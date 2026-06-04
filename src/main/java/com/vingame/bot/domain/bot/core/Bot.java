@@ -270,6 +270,7 @@ public abstract class Bot {
 
     private void transitionStatus(BotStatus next) {
         BotStatus prev = this.status;
+        if (prev == next) return; // idempotent re-entry — no log churn, no double-counting
         this.status = next;
         log.info("Bot {}: {} → {}", userName, prev, next);
         if (next == BotStatus.DEAD && metrics != null) {
@@ -312,6 +313,9 @@ public abstract class Bot {
         }
         transitionStatus(BotStatus.RECONNECTING);
         log.warn("Bot {}: WS disconnected — starting retrial flow", userName);
+        // One increment per reconnect EVENT, tagged by the originating reason.
+        // Internal escalations (loop fall-through, performReauth) must not increment.
+        if (metrics != null) metrics.incBotReconnect("ws-disconnect");
         Thread.ofVirtual().name("reconnect-" + userName).start(mdcWrap(this::runWsReconnectLoop));
     }
 
@@ -344,7 +348,10 @@ public abstract class Bot {
     }
 
     private void runWsReconnectLoop() {
-        if (metrics != null) metrics.incBotReconnect("ws-disconnect");
+        // No metric increment here: the reconnect event was already counted by
+        // onWsDisconnected (reason=ws-disconnect) or triggerFullReconnect (reason=
+        // watchdog). This loop is the worker that retries; falling through from
+        // runAuthThenWsLoop must not double-count either.
         int attempt = 0;
         while (!stopped) {
             long delaySecs = BACKOFF_SECONDS[Math.min(attempt, BACKOFF_SECONDS.length - 1)];
@@ -372,7 +379,10 @@ public abstract class Bot {
     }
 
     private void runAuthThenWsLoop() {
-        if (metrics != null) metrics.incBotReconnect("reauth-cycle");
+        // No metric increment here either: triggerFullReconnect counted this event
+        // with its originating reason (typically watchdog). The "reauth-cycle"
+        // tag is unused in current code; if a future caller needs it, increment
+        // at that callsite before spawning this loop.
         if (stopped) return;
         if (!performReauth()) return;
         if (stopped) return;

@@ -10,7 +10,7 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.time.Instant;
-import java.util.ArrayList;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -45,6 +45,9 @@ public class BotGroupRuntime {
 
     private final String groupId;
     private final String environmentId;
+    // CopyOnWriteArrayList: bot creation writes infrequently while the Prometheus
+    // scrape thread reads via gauge suppliers in ObservabilityConfig. Avoids CME
+    // without coarse external locking.
     private final List<Bot> botInstances;
     private final List<Future<?>> botFutures;
     private final ExecutorService executor;
@@ -72,8 +75,8 @@ public class BotGroupRuntime {
     public BotGroupRuntime(String groupId, int botCount, String environmentId) {
         this.groupId = groupId;
         this.environmentId = environmentId;
-        this.botInstances = new ArrayList<>(botCount);
-        this.botFutures = new ArrayList<>(botCount);
+        this.botInstances = new CopyOnWriteArrayList<>();
+        this.botFutures = new CopyOnWriteArrayList<>();
         this.executor = createExecutor(groupId);
         this.actualStatus = BotGroupStatus.ACTIVE;
         this.playingStatus = BotGroupPlayingStatus.IDLE;
