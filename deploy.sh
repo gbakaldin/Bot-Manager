@@ -20,4 +20,4 @@ HOST_UID=$(id -u)
 HOST_GID=$(id -g)
 EOF
 
-docker-compose up -d
+docker compose up -d
