@@ -60,7 +60,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(bot_login_total{outcome=\"success\"}[5m])) / sum(rate(bot_login_total[5m]))",
+          "expr": "(sum(rate(bot_login_total{outcome=\"success\"}[5m])) / sum(rate(bot_login_total[5m]))) or vector(0)",
           "legendFormat": "login success"
         }
       ]
@@ -103,7 +103,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(bot_verify_token_total{outcome=\"success\"}[5m])) / sum(rate(bot_verify_token_total[5m]))",
+          "expr": "(sum(rate(bot_verify_token_total{outcome=\"success\"}[5m])) / sum(rate(bot_verify_token_total[5m]))) or vector(0)",
           "legendFormat": "verify-token success"
         }
       ]
