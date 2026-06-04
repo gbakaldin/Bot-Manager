@@ -44,7 +44,7 @@ class ObservabilityConfigTest {
     void botGroupsRunningGauge_readsFromService() {
         when(behaviorService.getRunningGroupCount()).thenReturn(3);
 
-        config.registerAggregateGauges(registry, behaviorService);
+        config.botAggregateGauges(behaviorService).bindTo(registry);
 
         Gauge gauge = registry.find("bot_groups_running").gauge();
         assertThat(gauge).isNotNull();
@@ -58,7 +58,7 @@ class ObservabilityConfigTest {
     void botsManagedGauge_readsFromService() {
         when(behaviorService.getTotalManagedBots()).thenReturn(42);
 
-        config.registerAggregateGauges(registry, behaviorService);
+        config.botAggregateGauges(behaviorService).bindTo(registry);
 
         Gauge gauge = registry.find("bots_managed").gauge();
         assertThat(gauge).isNotNull();
@@ -69,7 +69,7 @@ class ObservabilityConfigTest {
     void wsConnectionsOpenGauge_readsFromService() {
         when(behaviorService.getOpenWsConnectionCount()).thenReturn(15);
 
-        config.registerAggregateGauges(registry, behaviorService);
+        config.botAggregateGauges(behaviorService).bindTo(registry);
 
         Gauge gauge = registry.find("ws_connections_open").gauge();
         assertThat(gauge).isNotNull();
@@ -82,7 +82,7 @@ class ObservabilityConfigTest {
             when(behaviorService.countBotsByStatus(s)).thenReturn(s == BotStatus.DEAD ? 2 : 0);
         }
 
-        config.registerAggregateGauges(registry, behaviorService);
+        config.botAggregateGauges(behaviorService).bindTo(registry);
 
         for (BotStatus s : BotStatus.values()) {
             Gauge g = registry.find("bots_by_status").tag("status", s.name()).gauge();
@@ -99,7 +99,7 @@ class ObservabilityConfigTest {
     void botsDeadCurrentlyGauge_readsFromService() {
         when(behaviorService.countBotsDeadCurrently()).thenReturn(4);
 
-        config.registerAggregateGauges(registry, behaviorService);
+        config.botAggregateGauges(behaviorService).bindTo(registry);
 
         Gauge gauge = registry.find("bots_dead_currently").gauge();
         assertThat(gauge).isNotNull();
@@ -113,7 +113,7 @@ class ObservabilityConfigTest {
     void groupsDeadCurrentlyGauge_readsFromService() {
         when(behaviorService.countGroupsDeadCurrently()).thenReturn(2);
 
-        config.registerAggregateGauges(registry, behaviorService);
+        config.botAggregateGauges(behaviorService).bindTo(registry);
 
         Gauge gauge = registry.find("groups_dead_currently").gauge();
         assertThat(gauge).isNotNull();
@@ -131,7 +131,7 @@ class ObservabilityConfigTest {
         when(behaviorService.countBotsDeadCurrently()).thenReturn(1);
         when(behaviorService.countGroupsDeadCurrently()).thenReturn(1);
 
-        config.registerAggregateGauges(registry, behaviorService);
+        config.botAggregateGauges(behaviorService).bindTo(registry);
 
         for (String name : new String[]{"bots_dead_currently", "groups_dead_currently"}) {
             Gauge gauge = registry.find(name).gauge();
@@ -152,7 +152,7 @@ class ObservabilityConfigTest {
         when(behaviorService.getTotalManagedBots()).thenReturn(5);
         when(behaviorService.getOpenWsConnectionCount()).thenReturn(5);
 
-        config.registerAggregateGauges(registry, behaviorService);
+        config.botAggregateGauges(behaviorService).bindTo(registry);
 
         for (String name : new String[]{"bot_groups_running", "bots_managed", "ws_connections_open"}) {
             Gauge gauge = registry.find(name).gauge();
