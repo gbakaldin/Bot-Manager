@@ -11,9 +11,13 @@ import com.vingame.websocketparser.auth.TokensProvider;
 import com.vingame.websocketparser.scenario.Scenario;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 
+import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 @Slf4j
@@ -48,6 +52,12 @@ public abstract class Bot {
 
     protected volatile long lastFetchedBalance = -1;
     protected final AtomicLong expectedCurrentBalance = new AtomicLong(-100_000_000L);
+
+    // Snapshot of MDC keys captured at the end of initialize() so that work scheduled
+    // onto threads with no MDC (Netty IO loop, library reconnect virtual threads,
+    // PipelineStage schedulers, our own reconnect threads, watchdog/countdown schedulers)
+    // can re-apply the bot's identity context around their log emissions.
+    protected volatile Map<String, String> mdcSnapshot;
 
     // Health metrics
     @Getter
@@ -112,6 +122,12 @@ public abstract class Bot {
 
             log.info("Bot initialized and connected. Client: {}",
                      System.identityHashCode(client));
+
+            // Snapshot MDC while all five bot keys are still populated by BotMdc.set(...)
+            // above. Captured here (not in setConfiguration / setClients) so gameType and
+            // botUserName are guaranteed present. Re-applied via mdcWrap / mdcCall /
+            // mdcSupplier / mdcConsumer on threads that wouldn't otherwise carry MDC.
+            this.mdcSnapshot = MDC.getCopyOfContextMap();
 
             return this;
         } finally {
@@ -370,6 +386,89 @@ public abstract class Bot {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    // ---- MDC wrap helpers ----
+    //
+    // Contract (Architecture Decision 7 in docs/plans/LOGGING_PIPELINE_FIX.md):
+    //   1. Stash the caller's current MDC via MDC.getCopyOfContextMap().
+    //   2. If mdcSnapshot is non-null, apply it via MDC.setContextMap(snapshot).
+    //      If mdcSnapshot is null (snapshot not yet captured), leave MDC alone.
+    //   3. Run the wrapped action.
+    //   4. In finally: if the stashed map was non-null restore it via setContextMap;
+    //      otherwise MDC.clear(). This keeps the wrap re-entrant and safe on threads
+    //      that already had a different MDC.
+
+    protected Runnable mdcWrap(Runnable r) {
+        return () -> {
+            Map<String, String> stash = MDC.getCopyOfContextMap();
+            if (mdcSnapshot != null) {
+                MDC.setContextMap(mdcSnapshot);
+            }
+            try {
+                r.run();
+            } finally {
+                if (stash != null) {
+                    MDC.setContextMap(stash);
+                } else {
+                    MDC.clear();
+                }
+            }
+        };
+    }
+
+    protected <T> Callable<T> mdcCall(Callable<T> c) {
+        return () -> {
+            Map<String, String> stash = MDC.getCopyOfContextMap();
+            if (mdcSnapshot != null) {
+                MDC.setContextMap(mdcSnapshot);
+            }
+            try {
+                return c.call();
+            } finally {
+                if (stash != null) {
+                    MDC.setContextMap(stash);
+                } else {
+                    MDC.clear();
+                }
+            }
+        };
+    }
+
+    protected <T> Supplier<T> mdcSupplier(Supplier<T> s) {
+        return () -> {
+            Map<String, String> stash = MDC.getCopyOfContextMap();
+            if (mdcSnapshot != null) {
+                MDC.setContextMap(mdcSnapshot);
+            }
+            try {
+                return s.get();
+            } finally {
+                if (stash != null) {
+                    MDC.setContextMap(stash);
+                } else {
+                    MDC.clear();
+                }
+            }
+        };
+    }
+
+    protected <T> Consumer<T> mdcConsumer(Consumer<T> c) {
+        return t -> {
+            Map<String, String> stash = MDC.getCopyOfContextMap();
+            if (mdcSnapshot != null) {
+                MDC.setContextMap(mdcSnapshot);
+            }
+            try {
+                c.accept(t);
+            } finally {
+                if (stash != null) {
+                    MDC.setContextMap(stash);
+                } else {
+                    MDC.clear();
+                }
+            }
+        };
     }
 
     // ---- Abstract & template methods ----
