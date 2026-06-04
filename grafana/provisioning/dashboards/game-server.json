@@ -3,7 +3,7 @@
   "title": "Game server",
   "tags": ["bot-manager", "observability"],
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "graphTooltip": 1,
   "fiscalYearStartMonth": 0,
@@ -298,6 +298,122 @@
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "expr": "sum by (outcome) (rate(bot_verify_token_total[5m]))",
           "legendFormat": "verify-token {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Bot bet share per game (5m)",
+      "description": "Share of game's total bet volume attributable to bots. Requires per-game canCheckTotalWinnings() override; renders 0 for games without it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never"
+          },
+          "color": { "mode": "palette-classic" },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (gameType) (rate(bot_bet_amount_total[5m])) / clamp_min(sum by (gameType) (rate(game_total_bet_amount_total[5m])), 1)",
+          "legendFormat": "{{gameType}}"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Real-player bet share per game (5m)",
+      "description": "1 - bot bet share. Renders 0 for games without canCheckTotalWinnings() override (denominator clamp_min'd to 1).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 30,
+            "showPoints": "never"
+          },
+          "color": { "mode": "palette-classic" },
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "1 - (sum by (gameType) (rate(bot_bet_amount_total[5m])) / clamp_min(sum by (gameType) (rate(game_total_bet_amount_total[5m])), 1))",
+          "legendFormat": "{{gameType}}"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Real-player RTP per game (5m)",
+      "description": "Real-player winnings over real-player bets (game-aggregate minus bot-aggregate). Compare with Bot RTP on the Bots dashboard.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "color": { "mode": "palette-classic" },
+          "unit": "percentunit",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true, "calcs": [] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "(sum by (gameType) (rate(game_total_winnings_total[5m])) - sum by (gameType) (rate(bot_winnings_total[5m]))) / clamp_min(sum by (gameType) (rate(game_total_bet_amount_total[5m])) - sum by (gameType) (rate(bot_bet_amount_total[5m])), 1)",
+          "legendFormat": "{{gameType}}"
         }
       ]
     }

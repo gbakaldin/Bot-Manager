@@ -14,6 +14,7 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.websocketparser.message.properties.MessageCategory;
 import com.vingame.websocketparser.message.response.ActionResponseMessage;
 import org.junit.jupiter.api.AfterEach;
@@ -35,8 +36,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import org.mockito.InOrder;
 
 @DisplayName("BettingMiniGameBot")
 class BettingMiniGameBotTest {
@@ -501,6 +506,169 @@ class BettingMiniGameBotTest {
             } finally {
                 shutdownSchedulers(trackingBot);
             }
+        }
+    }
+
+    /* ----- Phase 4 + 5 — winnings, jackpot, game-total wiring in onEndGame ----- */
+
+    @Nested
+    @DisplayName("onEndGame metrics wiring (Phase 4 + 5)")
+    class OnEndGameMetricsTests {
+
+        @Test
+        @DisplayName("Default base class: incBotWinnings(0) is called, no jackpot, no game-totals")
+        void shouldCallWinningsZeroAndSkipJackpotAndGameTotalsByDefault() throws Exception {
+            BotMetrics metrics = mock(BotMetrics.class);
+            bot.setMetrics(metrics);
+
+            setLastFetchedBalance(50_000_000L);
+            setExpectedCurrentBalance(50_000_000L);
+            setGameState(BettingMiniGameState.BET);
+
+            EndGameMessage msg = mock(EndGameMessage.class);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+            // endGame message counter fires first, then winnings counter at 0.
+            InOrder order = inOrder(metrics);
+            order.verify(metrics).incBotMessage("endGame");
+            order.verify(metrics).incBotWinnings(0L);
+            // No jackpot, no game-totals — default getJackpot()/canCheckTotalWinnings() are 0/false.
+            verify(metrics, never()).incBotJackpot(org.mockito.ArgumentMatchers.anyLong());
+            verify(metrics, never()).incGameTotalWinnings(org.mockito.ArgumentMatchers.anyLong());
+            verify(metrics, never()).incGameTotalBetAmount(org.mockito.ArgumentMatchers.anyLong());
+
+            // lastRoundWinnings reflects the read of getWinnings() (0L).
+            assertThat(((Bot) bot).getLastRoundWinnings()).isEqualTo(0L);
+        }
+
+        @Test
+        @DisplayName("Subclass with non-zero getWinnings + getJackpot: both metrics fire, lastRoundWinnings updates")
+        void shouldEmitWinningsAndJackpotWhenSubclassOverrides() throws Exception {
+            BotMetrics metrics = mock(BotMetrics.class);
+            BettingMiniGameBot subclassed = newSubclassWithWinnings(750L, 10_000L, false, 0L, 0L);
+            subclassed.setMetrics(metrics);
+            seedBalance(subclassed, 50_000_000L);
+
+            EndGameMessage msg = mock(EndGameMessage.class);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            try {
+                invokePrivateOn(subclassed, "onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+                InOrder order = inOrder(metrics);
+                order.verify(metrics).incBotMessage("endGame");
+                order.verify(metrics).incBotWinnings(750L);
+                order.verify(metrics).incBotJackpot(10_000L);
+                verify(metrics, never()).incGameTotalWinnings(org.mockito.ArgumentMatchers.anyLong());
+                verify(metrics, never()).incGameTotalBetAmount(org.mockito.ArgumentMatchers.anyLong());
+
+                assertThat(((Bot) subclassed).getLastRoundWinnings()).isEqualTo(750L);
+            } finally {
+                shutdownSchedulers(subclassed);
+            }
+        }
+
+        @Test
+        @DisplayName("Subclass with canCheckTotalWinnings=true: game-aggregate counters fire after bot counters")
+        void shouldEmitGameTotalsWhenCapabilityGateOpen() throws Exception {
+            BotMetrics metrics = mock(BotMetrics.class);
+            // Bot wins 200; round-wide total bets 5000, round-wide total winnings 4750 (RTP 95%).
+            BettingMiniGameBot subclassed = newSubclassWithWinnings(200L, 0L, true, 4750L, 5000L);
+            subclassed.setMetrics(metrics);
+            seedBalance(subclassed, 50_000_000L);
+
+            EndGameMessage msg = mock(EndGameMessage.class);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            try {
+                invokePrivateOn(subclassed, "onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+                InOrder order = inOrder(metrics);
+                order.verify(metrics).incBotMessage("endGame");
+                order.verify(metrics).incBotWinnings(200L);
+                order.verify(metrics).incGameTotalWinnings(4750L);
+                order.verify(metrics).incGameTotalBetAmount(5000L);
+                verify(metrics, never()).incBotJackpot(org.mockito.ArgumentMatchers.anyLong());
+            } finally {
+                shutdownSchedulers(subclassed);
+            }
+        }
+
+        @Test
+        @DisplayName("Null metrics: onEndGame still runs without NPE (no-op wiring)")
+        void shouldNoOpWhenMetricsNull() throws Exception {
+            bot.setMetrics(null);
+
+            setLastFetchedBalance(50_000_000L);
+            setExpectedCurrentBalance(50_000_000L);
+            setGameState(BettingMiniGameState.BET);
+
+            EndGameMessage msg = mock(EndGameMessage.class);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            // Must not throw.
+            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+            assertThat(readField("gameState")).isEqualTo(BettingMiniGameState.PAYOUT);
+        }
+    }
+
+    /**
+     * Build a {@link BettingMiniGameBot} subclass whose Phase 4/5 capability hooks
+     * return the supplied constants. Used to assert the {@code onEndGame} wiring
+     * forwards subclass values verbatim to {@link BotMetrics}.
+     */
+    private BettingMiniGameBot newSubclassWithWinnings(long winnings, long jackpot,
+                                                       boolean canCheckTotals,
+                                                       long totalWinnings, long totalBet) {
+        BettingMiniGameBot b = new BettingMiniGameBot() {
+            @Override protected long getWinnings()              { return winnings; }
+            @Override protected long getJackpot()               { return jackpot; }
+            @Override protected boolean canCheckTotalWinnings() { return canCheckTotals; }
+            @Override protected long getTotalWinnings()         { return totalWinnings; }
+            @Override protected long getRoundTotalBetAmount()   { return totalBet; }
+        };
+        BotCredentials credentials = BotCredentials.builder()
+                .username("subclassbot").password("pw").fingerprint("fp").build();
+        Game game = Game.builder()
+                .id("g1").name("BauCua").pluginName("BauCua")
+                .offset(2000).numberOfOptions(6).build();
+        BotBehaviorConfig behavior = BotBehaviorConfig.builder()
+                .minBet(100).maxBet(1000).betIncrement(100)
+                .maxTotalBetPerRound(10_000).minBetsPerRound(1).maxBetsPerRound(3)
+                .chatEnabled(false).autoDepositEnabled(false).betSkipPercentage(0)
+                .build();
+        BotConfiguration cfg = BotConfiguration.builder()
+                .credentials(credentials)
+                .environmentId("env-1").botGroupId("group-1").botIndex(1)
+                .game(game).behaviorConfig(behavior)
+                .zoneName("Z").timeoutMillis(60_000L)
+                .watchdogTimeoutSeconds(120L)
+                .build();
+        b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
+        b.setConfiguration(cfg);
+        b.setRandom(mock(Random.class));
+        b.initializeSubclass();
+        b.setRandom(mock(Random.class));
+        return b;
+    }
+
+    private static void seedBalance(BettingMiniGameBot b, long balance) {
+        try {
+            Field f = Bot.class.getDeclaredField("lastFetchedBalance");
+            f.setAccessible(true);
+            f.setLong(b, balance);
+            Field f2 = Bot.class.getDeclaredField("expectedCurrentBalance");
+            f2.setAccessible(true);
+            ((AtomicLong) f2.get(b)).set(balance);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 

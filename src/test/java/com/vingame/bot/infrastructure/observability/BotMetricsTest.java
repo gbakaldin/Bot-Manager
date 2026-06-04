@@ -300,4 +300,92 @@ class BotMetricsTest {
         // Cardinality control: bot identity must NOT include per-bot tags.
         assertThat(keys).doesNotContain(BotMdc.BOT_USER_NAME, BotMdc.BOT_ID);
     }
+
+    /* ----- Phase 4 — bot winnings + jackpot ----- */
+
+    @Test
+    void incBotWinnings_attachesMdcTags() {
+        setBotMdc();
+        metrics.incBotWinnings(500L);
+        metrics.incBotWinnings(250L);
+
+        Counter c = registry.find(BotMetrics.BOT_WINNINGS_TOTAL)
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
+                .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(750.0);
+    }
+
+    @Test
+    void incBotJackpot_incrementsBothCountAndAmount() {
+        setBotMdc();
+        metrics.incBotJackpot(10_000L);
+        metrics.incBotJackpot(5_000L);
+
+        Counter count = registry.find(BotMetrics.BOT_JACKPOTS_TOTAL)
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .counter();
+        Counter amount = registry.find(BotMetrics.BOT_JACKPOT_AMOUNT_TOTAL)
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .counter();
+
+        assertThat(count).isNotNull();
+        assertThat(count.count()).isEqualTo(2.0);
+        assertThat(amount).isNotNull();
+        assertThat(amount.count()).isEqualTo(15_000.0);
+    }
+
+    /* ----- Phase 5 — game-aggregate counters with gameType-only tags ----- */
+
+    @Test
+    void incGameTotalWinnings_attachesOnlyGameTypeTag() {
+        setBotMdc(); // populate all MDC keys, including botGroupId & environmentId
+        metrics.incGameTotalWinnings(1_000L);
+
+        Counter c = registry.find(BotMetrics.GAME_TOTAL_WINNINGS_TOTAL)
+                .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(1_000.0);
+
+        // Critical: AD 5 — botGroupId / environmentId MUST NOT be tagged.
+        var keys = c.getId().getTags().stream().map(Tag::getKey).toList();
+        assertThat(keys).doesNotContain(BotMdc.BOT_GROUP_ID, BotMdc.ENVIRONMENT_ID,
+                BotMdc.BOT_USER_NAME, BotMdc.BOT_ID);
+        // gameType IS present.
+        assertThat(keys).contains(BotMdc.GAME_TYPE);
+    }
+
+    @Test
+    void incGameTotalBetAmount_attachesOnlyGameTypeTag() {
+        setBotMdc();
+        metrics.incGameTotalBetAmount(2_500L);
+
+        Counter c = registry.find(BotMetrics.GAME_TOTAL_BET_AMOUNT_TOTAL)
+                .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(2_500.0);
+
+        var keys = c.getId().getTags().stream().map(Tag::getKey).toList();
+        assertThat(keys).doesNotContain(BotMdc.BOT_GROUP_ID, BotMdc.ENVIRONMENT_ID,
+                BotMdc.BOT_USER_NAME, BotMdc.BOT_ID);
+        assertThat(keys).contains(BotMdc.GAME_TYPE);
+    }
+
+    @Test
+    void incGameTotalWinnings_emptyMdc_omitsGameTypeTag() {
+        // No MDC set — Tags should be empty, but registration must still succeed.
+        metrics.incGameTotalWinnings(100L);
+
+        Counter c = registry.find(BotMetrics.GAME_TOTAL_WINNINGS_TOTAL).counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(100.0);
+
+        boolean hasGameType = c.getId().getTags().stream()
+                .anyMatch(t -> BotMdc.GAME_TYPE.equals(t.getKey()));
+        assertThat(hasGameType).isFalse();
+    }
 }

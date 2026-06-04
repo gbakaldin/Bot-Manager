@@ -55,6 +55,18 @@ public class BotMetrics {
     public static final String BOT_DEAD_SECONDS_TOTAL = "bot_dead_seconds_total";
     public static final String GROUP_DEAD_SECONDS_TOTAL = "group_dead_seconds_total";
 
+    // Phase 4 — bot's own winnings + jackpot. Same per-bot tag shape as the
+    // existing bot_* meters (botGroupId, environmentId, gameType via mdcTags()).
+    public static final String BOT_WINNINGS_TOTAL = "bot_winnings_total";
+    public static final String BOT_JACKPOTS_TOTAL = "bot_jackpots_total";
+    public static final String BOT_JACKPOT_AMOUNT_TOTAL = "bot_jackpot_amount_total";
+
+    // Phase 5 — real-player share aggregates. Carry ONLY the gameType tag
+    // (AD 5). Bot-identity tags (botGroupId, environmentId) are intentionally
+    // omitted — these are per-game-aggregate metrics, not per-bot.
+    public static final String GAME_TOTAL_WINNINGS_TOTAL = "game_total_winnings_total";
+    public static final String GAME_TOTAL_BET_AMOUNT_TOTAL = "game_total_bet_amount_total";
+
     private final MeterRegistry registry;
 
     public BotMetrics(MeterRegistry registry) {
@@ -80,6 +92,21 @@ public class BotMetrics {
         if (value != null && !value.isEmpty()) {
             tags.add(Tag.of(key, value));
         }
+    }
+
+    /**
+     * Read ONLY the {@code gameType} tag from MDC for game-aggregate meters
+     * (Phase 5 {@code game_total_*} counters). Bot-identity tags ({@code botGroupId},
+     * {@code environmentId}) are intentionally omitted — these meters are
+     * per-game aggregates, not per-bot (Architecture Decision 5). The
+     * {@link BotMdcTagsMeterFilter} allow-list is the second line of defense.
+     */
+    private Tags gameTypeTagOnly() {
+        String gameType = MDC.get(BotMdc.GAME_TYPE);
+        if (gameType == null || gameType.isEmpty()) {
+            return Tags.empty();
+        }
+        return Tags.of(BotMdc.GAME_TYPE, gameType);
     }
 
     /**
@@ -158,6 +185,66 @@ public class BotMetrics {
                 .increment();
         Counter.builder(BOT_BET_AMOUNT_TOTAL)
                 .tags(tags)
+                .register(registry)
+                .increment(amount);
+    }
+
+    /**
+     * Per-bot gross winnings counter; increments {@code bot_winnings_total} by
+     * {@code amount} (Phase 4). Same per-bot tag shape as {@link #incBetPlaced(long)}.
+     * <p>
+     * Called unconditionally from {@code BettingMiniGameBot.onEndGame} — the
+     * default {@code getWinnings() == 0L} produces a no-op increment but still
+     * registers the counter on first call, which is required so the Grafana
+     * RTP panel renders without a datasource-missing error.
+     */
+    public void incBotWinnings(long amount) {
+        Counter.builder(BOT_WINNINGS_TOTAL)
+                .tags(mdcTags())
+                .register(registry)
+                .increment(amount);
+    }
+
+    /**
+     * Per-bot jackpot: increments {@code bot_jackpots_total} by 1 (count of
+     * jackpot-winning rounds) AND {@code bot_jackpot_amount_total} by
+     * {@code amount} (sum of jackpot value won). Same per-bot tag shape.
+     * Caller guards on {@code amount > 0}.
+     */
+    public void incBotJackpot(long amount) {
+        Tags tags = mdcTags();
+        Counter.builder(BOT_JACKPOTS_TOTAL)
+                .tags(tags)
+                .register(registry)
+                .increment();
+        Counter.builder(BOT_JACKPOT_AMOUNT_TOTAL)
+                .tags(tags)
+                .register(registry)
+                .increment(amount);
+    }
+
+    /**
+     * Per-game-aggregate total winnings counter (Phase 5). Carries ONLY the
+     * {@code gameType} tag (Architecture Decision 5) — bot-identity tags are
+     * intentionally omitted because these meters describe the game server, not
+     * any particular bot. Real-player RTP is derived in PromQL as
+     * {@code (game_total_winnings - sum_by_gameType(bot_winnings)) /
+     * (game_total_bet_amount - sum_by_gameType(bot_bet_amount))}.
+     */
+    public void incGameTotalWinnings(long amount) {
+        Counter.builder(GAME_TOTAL_WINNINGS_TOTAL)
+                .tags(gameTypeTagOnly())
+                .register(registry)
+                .increment(amount);
+    }
+
+    /**
+     * Per-game-aggregate total bet amount counter (Phase 5). Carries ONLY the
+     * {@code gameType} tag (Architecture Decision 5).
+     */
+    public void incGameTotalBetAmount(long amount) {
+        Counter.builder(GAME_TOTAL_BET_AMOUNT_TOTAL)
+                .tags(gameTypeTagOnly())
                 .register(registry)
                 .increment(amount);
     }

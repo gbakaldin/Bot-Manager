@@ -58,11 +58,34 @@ class BotMdcTagsMeterFilterTest {
 
         for (String name : new String[]{
                 "bot_groups_running", "bots_managed", "ws_connections_open", "bots_by_status",
-                "bots_dead_currently", "groups_dead_currently"}) {
+                "bots_dead_currently", "groups_dead_currently",
+                "game_total_winnings_total", "game_total_bet_amount_total"}) {
             Meter.Id mapped = filter.map(id(name, Tags.empty()));
             boolean hasGroup = mapped.getTags().stream()
                     .anyMatch(t -> BotMdc.BOT_GROUP_ID.equals(t.getKey()));
+            boolean hasEnv = mapped.getTags().stream()
+                    .anyMatch(t -> BotMdc.ENVIRONMENT_ID.equals(t.getKey()));
             assertThat(hasGroup).as("aggregate gauge %s must not get botGroupId", name).isFalse();
+            assertThat(hasEnv).as("aggregate gauge %s must not get environmentId", name).isFalse();
+        }
+    }
+
+    @Test
+    void map_gameTotalMeter_withGameTypePreTagged_keepsGameTypeButRejectsBotIdentity() {
+        // BotMetrics applies gameType directly via gameTypeTagOnly(); the filter
+        // allow-list (defense-in-depth) ensures botGroupId/environmentId are NOT
+        // auto-stamped even if MDC is populated when a game_total_* meter is created.
+        MDC.put(BotMdc.BOT_GROUP_ID, "g1");
+        MDC.put(BotMdc.ENVIRONMENT_ID, "e1");
+        MDC.put(BotMdc.GAME_TYPE, "BauCua");
+
+        for (String name : new String[]{"game_total_winnings_total", "game_total_bet_amount_total"}) {
+            Meter.Id mapped = filter.map(id(name, Tags.of(BotMdc.GAME_TYPE, "BauCua")));
+            var keys = mapped.getTags().stream().map(t -> t.getKey()).toList();
+            assertThat(keys).as("%s keeps gameType pre-tagged by BotMetrics", name)
+                    .contains(BotMdc.GAME_TYPE);
+            assertThat(keys).as("%s does NOT receive botGroupId from MDC", name)
+                    .doesNotContain(BotMdc.BOT_GROUP_ID, BotMdc.ENVIRONMENT_ID);
         }
     }
 

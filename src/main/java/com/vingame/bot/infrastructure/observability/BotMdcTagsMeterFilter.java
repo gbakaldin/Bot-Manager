@@ -43,6 +43,12 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
      * Meter names that must NOT receive MDC-derived tags. These are aggregate gauges
      * registered in {@link ObservabilityConfig} that read across all bot groups and
      * therefore have no single owning group/env/game.
+     * <p>
+     * Phase 5 amendment: {@code game_total_*} counters are per-game aggregates that
+     * carry ONLY the {@code gameType} tag (Architecture Decision 5). The
+     * name-prefix check below ({@code startsWith("bot_")}) already excludes them
+     * from MDC tagging since they begin with {@code game_}, but the allow-list is
+     * belt-and-braces in case the prefix policy ever flips to include {@code game_*}.
      */
     private static final Set<String> AGGREGATE_METER_NAMES = Set.of(
             "bots_managed",
@@ -50,7 +56,9 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
             "ws_connections_open",
             "bots_by_status",
             "bots_dead_currently",
-            "groups_dead_currently"
+            "groups_dead_currently",
+            "game_total_winnings_total",
+            "game_total_bet_amount_total"
     );
 
     @Override
