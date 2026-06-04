@@ -264,16 +264,21 @@ public abstract class Bot {
     }
 
     private void configureClient(VingameWebSocketClient wsClient) {
-        wsClient.onWsStatusChange(wsStatus -> {
+        // Both callbacks may fire on threads with no MDC: onWsStatusChange runs on the
+        // Netty IO loop (multiThreadIoEventLoopGroup-2-N) and on the library's
+        // reconnect-<name> virtual thread; onDisconnect always runs on the library's
+        // reconnect-<name> virtual thread. Wrap them so transitionStatus() / log lines
+        // emitted inside carry the bot's identity.
+        wsClient.onWsStatusChange(mdcConsumer(wsStatus -> {
             switch (wsStatus) {
                 case CONNECTED -> transitionStatus(BotStatus.CONNECTED);
                 case AUTHENTICATING_WS -> transitionStatus(BotStatus.AUTHENTICATING_CONNECTION);
                 default -> {}
             }
-        });
-        wsClient.onDisconnect(() -> {
+        }));
+        wsClient.onDisconnect(mdcWrap(() -> {
             if (!stopped) onWsDisconnected();
-        });
+        }));
     }
 
     // ---- Reconnect logic ----
@@ -284,7 +289,7 @@ public abstract class Bot {
         }
         transitionStatus(BotStatus.RECONNECTING);
         log.warn("Bot {}: WS disconnected — starting retrial flow", userName);
-        Thread.ofVirtual().name("reconnect-" + userName).start(this::runWsReconnectLoop);
+        Thread.ofVirtual().name("reconnect-" + userName).start(mdcWrap(this::runWsReconnectLoop));
     }
 
     // Called from the watchdog in BettingMiniGameBot — skips WS backoff, re-auths immediately
@@ -298,7 +303,7 @@ public abstract class Bot {
         if (client != null && client.isOpen()) {
             client.close();
         }
-        Thread.ofVirtual().name("reconnect-" + userName).start(this::runAuthThenWsLoop);
+        Thread.ofVirtual().name("reconnect-" + userName).start(mdcWrap(this::runAuthThenWsLoop));
     }
 
     private void runWsReconnectLoop() {

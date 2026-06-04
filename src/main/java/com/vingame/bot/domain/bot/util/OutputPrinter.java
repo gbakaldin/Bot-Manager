@@ -8,8 +8,10 @@ import com.vingame.websocketparser.scenario.PipelineStage;
 import com.vingame.websocketparser.scenario.Scenario;
 import com.vingame.websocketparser.scenario.matchers.Qualifier;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
 import static com.vingame.websocketparser.scenario.Scenario.pipeline;
@@ -32,8 +34,49 @@ public class OutputPrinter {
         return outputPrinter(cmd, log::info, context);
     }
 
-    public static Scenario debugOutputPrinter(List<Integer> cmd, String name, PipelineContext context) {
-        return outputPrinter(cmd, s -> log.info("User {}: {}", name, s), context);
+    /**
+     * Builds a debug printer scenario whose log lines carry the supplied MDC snapshot.
+     * The {@code peek} consumer runs on the per-client {@code netty-ws-message-processor-ws-<userName>}
+     * pool, which has no MDC of its own. Wrapping the consumer here ensures every
+     * {@code User <name>: ...} line in {@code console.log} is tagged with
+     * {@code botGroupId}, {@code environmentId}, {@code gameType}, etc., so Promtail
+     * can promote them to Loki labels.
+     *
+     * @param mdcSnapshot snapshot taken from {@code Bot.mdcSnapshot} at the end of
+     *                    {@code Bot.initialize()}; may be {@code null}, in which case
+     *                    log lines fall through with whatever MDC the calling thread has.
+     */
+    public static Scenario debugOutputPrinter(List<Integer> cmd, String name,
+                                              PipelineContext context,
+                                              Map<String, String> mdcSnapshot) {
+        Consumer<String> printer = s -> log.info("User {}: {}", name, s);
+        return outputPrinter(cmd, withMdc(printer, mdcSnapshot), context);
+    }
+
+    /**
+     * Wraps a {@code Consumer<String>} so the bot's MDC snapshot is applied around
+     * each invocation. Mirrors the contract of {@code Bot.mdcConsumer} but inlined
+     * here so {@code OutputPrinter} does not need a {@code Bot} reference. See
+     * Architecture Decision 7 in {@code docs/plans/LOGGING_PIPELINE_FIX.md}.
+     */
+    private static Consumer<String> withMdc(Consumer<String> delegate,
+                                            Map<String, String> snapshot) {
+        if (snapshot == null) {
+            return delegate;
+        }
+        return s -> {
+            Map<String, String> stash = MDC.getCopyOfContextMap();
+            MDC.setContextMap(snapshot);
+            try {
+                delegate.accept(s);
+            } finally {
+                if (stash != null) {
+                    MDC.setContextMap(stash);
+                } else {
+                    MDC.clear();
+                }
+            }
+        };
     }
 
     private static Scenario outputPrinter(List<Integer> cmd, Consumer<String> printer, PipelineContext context) {

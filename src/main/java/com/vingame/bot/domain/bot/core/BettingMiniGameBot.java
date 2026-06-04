@@ -118,19 +118,25 @@ public class BettingMiniGameBot extends Bot {
         );
 
         remainingTime.set(timeForBetting);
-        scheduler.scheduleAtFixedRate(() -> {
+        // Wrap with mdcWrap so any future log lines from this countdown task carry the
+        // bot's identity. The countdown-<userName> virtual thread is created with an
+        // empty MDC; today the body is logging-free but the wrap is cheap insurance.
+        scheduler.scheduleAtFixedRate(mdcWrap(() -> {
             if (remainingTime.get() > 0) {
                 remainingTime.addAndGet(-1_000L);
             }
-        }, 0L, 1_000L, MILLISECONDS);
+        }), 0L, 1_000L, MILLISECONDS);
     }
 
     private void scheduleWatchdog() {
         if (watchdogTask != null && !watchdogTask.isDone()) {
             watchdogTask.cancel(false);
         }
+        // Wrap with mdcWrap so the warn-log + triggerFullReconnect() inside
+        // onWatchdogExpired carry the bot's MDC. The watchdog-<userName> virtual
+        // thread is created with an empty MDC.
         watchdogTask = watchdogScheduler.schedule(
-                this::onWatchdogExpired,
+                mdcWrap(this::onWatchdogExpired),
                 watchdogTimeoutMillis,
                 MILLISECONDS
         );
@@ -298,20 +304,25 @@ public class BettingMiniGameBot extends Bot {
         Class<? extends UpdateBetMessage> updateBetClass = messageTypes.updateBetType();
         Class<? extends EndGameMessage> endGameClass = messageTypes.endGameType();
 
+        // onMessage handlers run on the per-client netty-ws-message-processor-ws-<userName>
+        // pool; sendAsync's supplier + condition run on a scenario-owned pool-N-thread-1.
+        // None of these threads carry MDC by default — wrap each callback so its
+        // log lines (and the OutputPrinter-emitted lines that share the pool) carry
+        // the bot's identity.
         return pipeline(buildContext("[Betting Mini][" + configuration.getGame().getName() + "]", mapper))
                 .waitFor(1_000L)
                 .send(request::subscribe)
                 .waitForMessage(cmd(GameMessageTypes.SUBSCRIBE_CODE + offset).and(typeOf(RECEIVED)))
-                .onMessage(subscribeClass, this::onSubscribe)
-                .onMessage(startGameClass, this::onStartGame)
-                .onMessage(updateBetClass, this::onUpdate)
+                .onMessage(subscribeClass, mdcConsumer(this::onSubscribe))
+                .onMessage(startGameClass, mdcConsumer(this::onStartGame))
+                .onMessage(updateBetClass, mdcConsumer(this::onUpdate))
                 .sendAsync(buildMessage()
-                        .messageSupplier(bet())
+                        .messageSupplier(mdcSupplier(bet()))
                         .mode(INFINITE)
-                        .condition(resolveBetCondition())
+                        .condition(mdcSupplier(resolveBetCondition()))
                         .interval(resolveIntervalBetweenBets(), MILLISECONDS)
                         .build())
-                .onMessage(endGameClass, this::onEndGame)
+                .onMessage(endGameClass, mdcConsumer(this::onEndGame))
                 .compile();
     }
 
@@ -330,10 +341,14 @@ public class BettingMiniGameBot extends Bot {
             GameMessageTypes.START_GAME_CODE + offset,
             GameMessageTypes.END_GAME_CODE + offset
         );
+        // Pass the bot's MDC snapshot so the "User <name>: ..." log lines emitted
+        // from the netty-ws-message-processor-ws-<userName> pool carry botGroupId,
+        // environmentId, gameType, etc. for Promtail to promote to Loki labels.
         getClient().addScenario(OutputPrinter.debugOutputPrinter(
             cmdList,
             getUserName(),
-            buildContext("OutputPrinter", ObjectMapperProvider.getDefault())
+            buildContext("OutputPrinter", ObjectMapperProvider.getDefault()),
+            mdcSnapshot
         ));
 
         getClient().addScenario(botBehaviorScenario());
