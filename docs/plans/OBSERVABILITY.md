@@ -110,11 +110,12 @@ Surface bot-health and game-server-health metrics in Grafana so the Friday demo 
 
 9. **Host bind-mount pattern for new infra files.** Any `prometheus` container added in Phase 1 mounts its config as a bind-mount (`./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro`) so `sgame` can edit on Bot-1 without root, matching the logs/ pattern. The `grafana/provisioning` directory is already a bind-mount (`docker-compose.yml:64`). No `user:` directive needed on prometheus or grafana — they only read config; their write paths are named/volume-mounted (`grafana-data` volume).
 
-10. **(NEW) Metric tags via MDC-aware `MeterFilter`, not per-callsite tagging.** Since `LOGGING_PIPELINE_FIX` Phase 3 propagates MDC to virtually every thread that increments a counter, register a single Micrometer `MeterFilter` at startup that reads `botGroupId`, `environmentId`, `gameType` from MDC (`MDC.get(...)`) and attaches them as common tags on every meter touched in that thread. Counters and gauges are defined once with stable names; tag values are populated automatically. Rationale:
-    - Avoids passing `groupId`/`envId`/`gameType` through every method signature.
-    - Avoids registering a separate `Counter` instance per tag combination from each callsite (Micrometer does this internally by `name + tags` interning).
-    - Cleanly handles "metric touched by a thread with no MDC" — `MeterFilter` substitutes empty-string tags, which prometheus-formats as `{...,botGroupId=""}` and remains queryable.
-    - Edge case: gauges that aggregate across all bots (e.g., `bot_groups_running`, `bots_managed`) must explicitly opt out of these tags. Implement by registering them in a code path with MDC cleared, or via a per-meter exclusion in the `MeterFilter`.
+10. **(NEW, AMENDED 2026-06-04) Metric tags via per-callsite MDC read on `Counter.Builder`; `MeterFilter` is defense-in-depth only.** Since `LOGGING_PIPELINE_FIX` Phase 3 propagates MDC to virtually every thread that increments a counter, the bot-identity tags (`botGroupId`, `environmentId`, `gameType`) are read from MDC at each `BotMetrics.inc*()` call and attached to the `Counter.Builder` BEFORE `register(registry)`. Rationale (revised — see Amendment block at the bottom of this plan):
+
+    - **Why per-callsite, not filter-only.** Micrometer's `AbstractMeterRegistry#getOrCreateMeter` consults its `preFilterIdToMeterMap` cache by the *pre-filter* `Meter.Id` before running the filter chain (verified at `micrometer-core 1.14.5` `MeterRegistry.java:637-647`). If two callsites register the same name+tags under different MDC values, both resolve to the same cached Counter and the filter only ever runs for the first one. A filter-only mechanism therefore cannot produce per-group time series for counters that share a name+tags shape. The correct mechanism is for `BotMetrics` to call `MDC.get(...)` per increment and stamp the MDC values onto the `Counter.Builder` so the pre-filter id is distinct per group.
+    - **`MeterFilter` is retained as defense-in-depth + aggregate-gauge allow-list.** Any future `bot_*` meter created outside `BotMetrics` still picks up MDC tags via the filter. The filter also enforces that aggregate gauges (`bot_groups_running`, `bots_managed`, `ws_connections_open`, `bots_by_status`) do NOT receive MDC-derived tags even if registered from a thread that happens to have MDC populated.
+    - Avoids passing `groupId`/`envId`/`gameType` through every method signature: `BotMetrics` does the MDC read internally.
+    - Empty / missing MDC values are skipped (no `{botGroupId=""}` series) — they would be noisy and non-queryable in practice.
 
     **Counters where MDC is unreliable** (gauges sampled by Spring/Actuator's poll thread, login counters fired before the bot snapshot is captured): pass the tags explicitly via `Tags.of(...)`. These are a small minority and Dev will flag any case during implementation.
 
@@ -203,7 +204,8 @@ curl -fsS -u admin:admin http://localhost:3000/api/datasources | jq '.[].name'
   - In `creditBalance(long amount)` (line 487) — call `metrics.incBetPlaced(amount)` after the existing AtomicLong updates.
   - In `transitionStatus(BotStatus next)` (line 260-264) — on `next == DEAD`, call `metrics.incBotFailure()`.
   - In `triggerFullReconnect(String reason)` (line 296) — call `metrics.incBotReconnect(reason)` after the status transition. Map the free-form `reason` string to a small enum-like string normalization here (e.g., starts-with "watchdog" → "watchdog"; default → "ws-disconnect").
-  - In `runWsReconnectLoop` (line 309) start — `metrics.incBotReconnect("reauth-cycle")` once per loop entry.
+  - In `runWsReconnectLoop` (line 309) start — `metrics.incBotReconnect("ws-disconnect")` once per loop entry. (See Amendment 2026-06-04 below — the original phrasing here said "reauth-cycle", which inverted the two loops; the corrected mapping is `runWsReconnectLoop` → `ws-disconnect`, `runAuthThenWsLoop` → `reauth-cycle`.)
+  - In `runAuthThenWsLoop` start — `metrics.incBotReconnect("reauth-cycle")` once per loop entry.
   - In `deposit()` (line 192) `mdcConsumer` callback — `metrics.incBotAutoDeposit(success)`.
   - In `configureClient`'s `onWsStatusChange` switch (line 272-278) — `metrics.incBotWsEvent("connected")` on `CONNECTED`, `metrics.incBotWsEvent("authenticating")` on `AUTHENTICATING_WS`. In `onDisconnect` (line 279) — `metrics.incBotWsEvent("disconnected")`.
 - `/Users/gleb/IdeaProjects/Bot/src/main/java/com/vingame/bot/domain/bot/core/BettingMiniGameBot.java`:
@@ -566,3 +568,70 @@ curl -X POST -fsS http://Bot-1:8080/api/v1/bot-group/$GID/stop
 Expect: HTTP 200.
 
 If any of steps 1–8 fail, the demo is at risk and Architect must be re-engaged before Friday. Steps 9 and 10 are informational only.
+
+---
+
+## Amendment — 2026-06-04
+
+Two surgical corrections applied during Phase 2 compliance review (verdict PLAN_AMENDED).
+
+### Amendment 1 — Architecture Decision 10 corrected: per-callsite MDC read, not filter-only
+
+**Original AD 10 claim:** "register a single Micrometer `MeterFilter` at startup that reads … from MDC (`MDC.get(...)`) and attaches them as common tags on every meter touched in that thread."
+
+**Why it was wrong:** Micrometer's `AbstractMeterRegistry#getOrCreateMeter` (verified in `micrometer-core 1.14.5` `MeterRegistry.java:637-647`) caches Counter handles by the **pre-filter** `Meter.Id`. Once a Counter named `bot_messages_total{cmd=endGame}` is registered, subsequent calls with the same pre-filter id resolve to the cached Counter without re-running the filter chain. This means a filter that reads MDC produces the MDC-derived tags only for the **first** registration; every later increment under a different MDC reuses the same cached Counter, collapsing per-group time series into one. Dev caught this with a failing test (`BotMetricsTest.differentGroupsCreateSeparateTimeSeries`).
+
+**Corrected mechanism (now in AD 10 above):**
+- `BotMetrics` reads `MDC.get(botGroupId / environmentId / gameType)` per `inc*()` call and attaches the values to the `Counter.Builder` via `.tags(...)` before `.register(registry)`. This makes the pre-filter id distinct per group, so the registry caches one Counter per `(name × tags × group × env × game)` tuple — which is exactly the per-group time series shape the dashboards need.
+- `BotMdcTagsMeterFilter` is retained as defense-in-depth (catches any future `bot_*` meter that bypasses `BotMetrics`) and to enforce the aggregate-gauge exclusion allow-list (`bot_groups_running`, `bots_managed`, `ws_connections_open`, `bots_by_status` never get MDC tags).
+
+**Status:** This is a genuine Micrometer-API quirk, not a Dev preference. The plan's original mechanism was structurally incapable of producing per-group time series for shared-name counters; the correction is required, not optional.
+
+### Amendment 2 — Reconnect reason mapping corrected (Phase 2)
+
+
+The Phase 2 body originally said:
+> In `runWsReconnectLoop` (line 309) start — `metrics.incBotReconnect("reauth-cycle")` once per loop entry.
+
+That mapping is inverted relative to the code semantics. Verified in `Bot.java`:
+- `runWsReconnectLoop` is started by `onWsDisconnected` (line 315) — a WebSocket disconnect triggered the loop. Correct reason: **`ws-disconnect`**.
+- `runAuthThenWsLoop` is started by `triggerFullReconnect` (line 332) — a full reauth + WS reconnect cycle. Correct reason: **`reauth-cycle`**.
+- `triggerFullReconnect("watchdog timeout …")` normalizes via `normalizeReconnectReason` (starts-with "watchdog") → **`watchdog`**.
+
+The Phase 2 body bullet has been corrected in place to reflect the right mapping. Dev's implementation already matches the corrected mapping; this amendment makes the plan match Dev's code (which is semantically correct).
+
+---
+
+## Amendment — 2026-06-04 (Phase 6 compliance review)
+
+Two further surgical corrections applied during the Phase 6 compliance review (verdict PLAN_AMENDED). Both close gaps between the originally-drafted Phase 6 panel list / acceptance criteria and the actual state of the pipeline after the Phase 1 polish (`caaf0e1`) and the Phase 3 gauge additions.
+
+### Amendment 3 — Datasource referenced by pinned UID, not by name (Phase 6 acceptance)
+
+**Original Phase 6 acceptance bullet:**
+> Dashboards reference the provisioned `Prometheus` datasource by name (not by UID) so they survive a datasource-recreate.
+
+**And the matching Implementation Notes bullet:**
+> Grafana dashboards reference the datasource by name (`Prometheus`), not UID. Provisioning generates a stable UID from the datasource name; dashboards that hardcode a UID break when the datasource is recreated. Use `${datasource}` panel variables or by-name references.
+
+**Why this is now stale.** The Phase 1 polish at commit `caaf0e1` (`Phase 1 polish: pin stable uids on Loki and Prometheus datasources`) explicitly pinned `uid: prometheus` in `grafana/provisioning/datasources/prometheus.yml` and `uid: loki` in `loki.yml`. With pinned UIDs, dashboards that hardcode `"uid": "prometheus"` survive a recreate (the UID is fixed in the provisioning YAML, not generated from a hash). The "by name to survive recreate" guidance was correct under Grafana's default UID-from-hash behaviour but is no longer the right default after the Phase 1 polish.
+
+**Corrected guidance:**
+- Phase 6 dashboards reference the Prometheus datasource by the pinned UID `prometheus` (and, where Loki panels are added later, by the pinned UID `loki`). The pin is what guarantees recreate-resilience; no panel variable indirection is required.
+- The Implementation Notes bullet is superseded: hardcoded UID references against pinned UIDs are the preferred pattern. If a future datasource is added without a pinned UID, then-and-only-then revert to `${datasource}` variables for those panels.
+
+**Status:** Dev's Phase 6 JSONs already use the pinned-UID pattern; this amendment makes the plan match the (now-correct) implementation. No code change needed.
+
+### Amendment 4 — Phase 6 panel list extended with Phase 3 aggregate gauges
+
+**Gap.** Phase 3 (commit `44ba23b`) registered two aggregate gauges that the Phase 6 panel list (drafted before Phase 3) does not mention:
+- `bots_dead_currently` — count of bots whose `deadSince != null`.
+- `groups_dead_currently` — count of runtimes whose `groupDeadSince != null`.
+
+These are aggregate gauges (no MDC tags by AD 10), they answer a question the demo absolutely wants to be able to answer at a glance ("how many bots / groups are dead right now?"), and they shipped in Phase 3 without a corresponding Phase 6 panel entry. The Phase 6 commit `ba33234` faithfully implements the panel list as written, but the list itself is incomplete.
+
+**Corrected Phase 6 panel additions:**
+- `grafana/provisioning/dashboards/bots.json` — add stat panel "Currently DEAD bots" with expression `bots_dead_currently`. Same threshold pattern as the existing "Bot DEAD seconds (last 1h)" stat (green 0, yellow ≥1, red ≥5 — Dev to tune).
+- `grafana/provisioning/dashboards/game-server.json` — add stat panel "Currently DEAD groups" with expression `groups_dead_currently`. Same threshold pattern.
+
+**Status:** This is a follow-up micro-task for Dev (one short JSON edit per dashboard). It is NOT a SEND_BACK_TO_DEV against the Phase 6 commit because Dev faithfully implemented the panel list as it was written at the time. The amendment closes the Phase-3/Phase-6 sync gap so the follow-up edit is explicit.

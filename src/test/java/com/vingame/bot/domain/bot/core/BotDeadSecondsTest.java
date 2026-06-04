@@ -171,6 +171,31 @@ class BotDeadSecondsTest {
         assertThat(c.count()).isGreaterThanOrEqualTo(3.0);
     }
 
+    @Test
+    @DisplayName("Multiple DEAD-revive cycles sum independently into the same counter")
+    void multipleDeadReviveCyclesSumIndependently() throws Exception {
+        // Cycle 1: DEAD for ~4s, then revive.
+        forceStatus(BotStatus.DEAD);
+        setDeadSince(Instant.now().minusSeconds(4));
+        invokeTransition(BotStatus.CONNECTING);
+
+        Counter c = registry.find(BotMetrics.BOT_DEAD_SECONDS_TOTAL).counter();
+        assertThat(c).isNotNull();
+        double afterCycle1 = c.count();
+        assertThat(afterCycle1).isGreaterThanOrEqualTo(4.0).isLessThan(15.0);
+
+        // Cycle 2: DEAD again for ~6s, then revive. Stamp must have been cleared
+        // by cycle 1's exit branch — otherwise this cycle would credit a stale window.
+        invokeTransition(BotStatus.DEAD);
+        setDeadSince(Instant.now().minusSeconds(6));
+        invokeTransition(BotStatus.CONNECTING);
+
+        double afterCycle2 = c.count();
+        // Each cycle credits independently — second cycle adds ~6s on top of cycle 1.
+        assertThat(afterCycle2 - afterCycle1).isGreaterThanOrEqualTo(6.0).isLessThan(15.0);
+        assertThat(readDeadSince()).isNull();
+    }
+
     /* ---- reflection helpers ---- */
 
     private static org.assertj.core.data.TemporalUnitOffset within10s() {
