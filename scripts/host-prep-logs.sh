@@ -25,7 +25,9 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 LOGS_DIR="/home/sgame/bot-java/logs"
-BACKUP_DIR="/home/sgame/bot-java/logs.bak.$(date +%Y%m%d)"
+# Second-precision timestamp so a same-day re-run doesn't collide on `mv` and
+# abort under `set -e`.
+BACKUP_DIR="/home/sgame/bot-java/logs.bak.$(date +%Y%m%d-%H%M%S)"
 
 # Move stale files aside (if any). Preserve, do not delete.
 if [ -d "$LOGS_DIR" ] && [ -n "$(ls -A "$LOGS_DIR" 2>/dev/null || true)" ]; then

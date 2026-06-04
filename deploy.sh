@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Run from the repo root so relative paths (./logs, docker-compose.yml) resolve
+# to the same place regardless of where the operator invoked the script.
+cd "$(dirname "$(readlink -f "$0")")"
+
 docker ps --filter "name=bot-" --format "{{.ID}}" | xargs -r docker kill
 
 mkdir -p logs
