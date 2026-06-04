@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.bot.service;
 
 import com.vingame.bot.infrastructure.client.ClientFactory;
+import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
@@ -59,11 +60,15 @@ public class BotFactory {
 
     private final EnvironmentClientRegistry clientRegistry;
     private final EventLoopGroup eventLoopGroup;
+    private final BotMetrics botMetrics;
 
     @Autowired
-    public BotFactory(EnvironmentClientRegistry clientRegistry, EventLoopGroup eventLoopGroup) {
+    public BotFactory(EnvironmentClientRegistry clientRegistry,
+                      EventLoopGroup eventLoopGroup,
+                      BotMetrics botMetrics) {
         this.clientRegistry = clientRegistry;
         this.eventLoopGroup = eventLoopGroup;
+        this.botMetrics = botMetrics;
     }
 
     /**
@@ -116,6 +121,7 @@ public class BotFactory {
                 freshClientFactory
             )
             .setConfiguration(configuration)
+            .setMetrics(botMetrics)
             .initialize();
 
         log.info("Successfully created bot {} for environment {}",

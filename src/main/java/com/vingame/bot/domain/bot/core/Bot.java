@@ -4,6 +4,7 @@ import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.websocketparser.VingameWebSocketClient;
@@ -32,6 +33,9 @@ public abstract class Bot {
     protected ApiGatewayClient apiGatewayClient;
     protected GameMsClient gameMsClient;
     protected ClientFactory clientFactory;
+
+    // Observability — set via builder-style setter (BotFactory wires the singleton bean).
+    protected BotMetrics metrics;
 
     // Bot runtime configuration (set via builder-style setters)
     @Getter
@@ -92,6 +96,11 @@ public abstract class Bot {
         this.credentials = configuration.getCredentials();
         this.userName = credentials.getUsername();
         log.debug("Bot {} configured", userName);
+        return this;
+    }
+
+    public Bot setMetrics(BotMetrics metrics) {
+        this.metrics = metrics;
         return this;
     }
 
@@ -197,6 +206,7 @@ public abstract class Bot {
         gameMsClient.deposit(client.getAgencyToken(), 1_000_000_000L, mdcConsumer(success -> {
             if (success) {
                 log.info("Bot {}: Deposit successful, fetching new balance...", userName);
+                if (metrics != null) metrics.incBotAutoDeposit(true);
                 lastFetchedBalance = apiGatewayClient.getBalance(
                     getClient().getAuthToken(),
                     credentials.getFingerprint(),
@@ -206,6 +216,7 @@ public abstract class Bot {
                 log.info("Bot {}: New balance: {}", userName, expectedCurrentBalance);
             } else {
                 log.warn("Bot {}: Deposit failed", userName);
+                if (metrics != null) metrics.incBotAutoDeposit(false);
             }
         }));
     }
@@ -261,6 +272,9 @@ public abstract class Bot {
         BotStatus prev = this.status;
         this.status = next;
         log.info("Bot {}: {} → {}", userName, prev, next);
+        if (next == BotStatus.DEAD && metrics != null) {
+            metrics.incBotFailure();
+        }
     }
 
     private void configureClient(VingameWebSocketClient wsClient) {
@@ -271,8 +285,17 @@ public abstract class Bot {
         // emitted inside carry the bot's identity.
         wsClient.onWsStatusChange(mdcConsumer(wsStatus -> {
             switch (wsStatus) {
-                case CONNECTED -> transitionStatus(BotStatus.CONNECTED);
-                case AUTHENTICATING_WS -> transitionStatus(BotStatus.AUTHENTICATING_CONNECTION);
+                case CONNECTED -> {
+                    transitionStatus(BotStatus.CONNECTED);
+                    if (metrics != null) metrics.incBotWsEvent("connected");
+                }
+                case AUTHENTICATING_WS -> {
+                    transitionStatus(BotStatus.AUTHENTICATING_CONNECTION);
+                    if (metrics != null) metrics.incBotWsEvent("authenticating");
+                }
+                case DISCONNECTED -> {
+                    if (metrics != null) metrics.incBotWsEvent("disconnected");
+                }
                 default -> {}
             }
         }));
@@ -300,13 +323,28 @@ public abstract class Bot {
         }
         transitionStatus(BotStatus.RECONNECTING);
         log.warn("Bot {}: full reconnect triggered — {}", userName, reason);
+        if (metrics != null) {
+            metrics.incBotReconnect(normalizeReconnectReason(reason));
+        }
         if (client != null && client.isOpen()) {
             client.close();
         }
         Thread.ofVirtual().name("reconnect-" + userName).start(mdcWrap(this::runAuthThenWsLoop));
     }
 
+    /**
+     * Normalize the free-form reconnect reason string to a small bounded enum-like value
+     * used as the {@code reason} tag on {@code bot_reconnects_total}. Cardinality budget
+     * (Architecture Decision 7): {@code watchdog | ws-disconnect | reauth-cycle}.
+     */
+    private static String normalizeReconnectReason(String raw) {
+        if (raw == null) return "ws-disconnect";
+        if (raw.startsWith("watchdog")) return "watchdog";
+        return "ws-disconnect";
+    }
+
     private void runWsReconnectLoop() {
+        if (metrics != null) metrics.incBotReconnect("ws-disconnect");
         int attempt = 0;
         while (!stopped) {
             long delaySecs = BACKOFF_SECONDS[Math.min(attempt, BACKOFF_SECONDS.length - 1)];
@@ -334,6 +372,7 @@ public abstract class Bot {
     }
 
     private void runAuthThenWsLoop() {
+        if (metrics != null) metrics.incBotReconnect("reauth-cycle");
         if (stopped) return;
         if (!performReauth()) return;
         if (stopped) return;
@@ -488,6 +527,7 @@ public abstract class Bot {
         this.expectedCurrentBalance.addAndGet(-amount);
         this.totalBetsPlaced.incrementAndGet();
         this.totalBetAmount.addAndGet(amount);
+        if (metrics != null) metrics.incBetPlaced(amount);
     }
 
     public final void start() {

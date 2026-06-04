@@ -146,10 +146,12 @@ public class BettingMiniGameBot extends Bot {
         if (isStopped()) return;
         log.warn("Bot {}: no game message in {}s — triggering full reconnect",
                 getUserName(), configuration.getWatchdogTimeoutSeconds());
+        if (metrics != null) metrics.incBotWatchdogExpired();
         triggerFullReconnect("watchdog timeout (" + configuration.getWatchdogTimeoutSeconds() + "s without game message)");
     }
 
     private void onSubscribe(ActionResponseMessage<? extends SubscribeMessage> data) {
+        if (metrics != null) metrics.incBotMessage("subscribe");
         markConnectionAuthenticated();
         SubscribeMessage msg = data.getData();
         blockBetTime = msg.getTimeForDecision();
@@ -158,6 +160,7 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private void onStartGame(ActionResponseMessage<? extends StartGameMessage> data) {
+        if (metrics != null) metrics.incBotMessage("startGame");
         if (scheduler != null) {
             scheduler.shutdownNow();
             scheduler = null;
@@ -172,6 +175,7 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private void onUpdate(ActionResponseMessage<? extends UpdateBetMessage> data) {
+        if (metrics != null) metrics.incBotMessage("updateBet");
         UpdateBetMessage msg = data.getData();
         int gameStateId = msg.getGameState();
 
@@ -181,6 +185,7 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private void onEndGame(ActionResponseMessage<? extends EndGameMessage> data) {
+        if (metrics != null) metrics.incBotMessage("endGame");
         gameState = BettingMiniGameState.PAYOUT;
         if (scheduler != null) {
             scheduler.shutdownNow();

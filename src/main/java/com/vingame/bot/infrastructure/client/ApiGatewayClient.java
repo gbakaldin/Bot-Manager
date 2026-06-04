@@ -6,6 +6,7 @@ import com.vingame.bot.infrastructure.auth.AuthProfile;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationRequest;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResponse;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
+import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.websocketparser.auth.AuthClient;
 import com.vingame.websocketparser.auth.AuthContext;
@@ -51,6 +52,7 @@ public class ApiGatewayClient {
     private static final String SESSION_TOKEN_HEADER = "X-TOKEN";
 
     private final DisplayNameService displayNameService;
+    private final BotMetrics metrics;
     private final HttpClient httpClient;
 
     /**
@@ -74,8 +76,9 @@ public class ApiGatewayClient {
     private boolean initialized = false;
 
     @Autowired
-    public ApiGatewayClient(DisplayNameService displayNameService) {
+    public ApiGatewayClient(DisplayNameService displayNameService, BotMetrics metrics) {
         this.displayNameService = displayNameService;
+        this.metrics = metrics;
         this.httpClient = HttpClient.newHttpClient();
     }
 
@@ -136,11 +139,18 @@ public class ApiGatewayClient {
             log.warn("[Login] Could not serialize login request for logging: {}", e.getMessage());
         }
 
-        TokensProvider tokens = new AuthClient(ctx, loginRequestFactory).authenticate();
-        log.info("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
-                tokens.getAgencyToken(), tokens.getAuthToken(), tokens.getJwtToken());
-
-        return tokens;
+        try {
+            TokensProvider tokens = new AuthClient(ctx, loginRequestFactory).authenticate();
+            log.info("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
+                    tokens.getAgencyToken(), tokens.getAuthToken(), tokens.getJwtToken());
+            metrics.incLogin(true);
+            return tokens;
+        } catch (RuntimeException e) {
+            // Counter increment must not change error semantics — BotFactory relies on
+            // the exception propagating up so the bot creation pipeline records the failure.
+            metrics.incLogin(false);
+            throw e;
+        }
     }
 
     /**
@@ -475,12 +485,23 @@ public class ApiGatewayClient {
             if (dataArray != null && dataArray.isArray() && !dataArray.isEmpty()) {
                 JsonNode firstElement = dataArray.get(0);
                 long balance = firstElement.get("main_balance").asLong();
+                metrics.incVerifyToken(true);
                 return balance;
             } else {
+                metrics.incVerifyToken(false);
                 throw new RuntimeException("User: " + username + ": Data array is missing or empty: " + responseBody);
             }
         } catch (IOException | InterruptedException e) {
+            metrics.incVerifyToken(false);
             throw new RuntimeException("Failed to fetch balance for user: " + username, e);
+        } catch (RuntimeException e) {
+            // Catch the RuntimeException we threw above so it's not double-incremented,
+            // but anything else (e.g. JSON parse failures, NPE on missing fields) is
+            // also a verify-token failure — increment and rethrow.
+            if (e.getMessage() == null || !e.getMessage().startsWith("User: ")) {
+                metrics.incVerifyToken(false);
+            }
+            throw e;
         }
     }
 

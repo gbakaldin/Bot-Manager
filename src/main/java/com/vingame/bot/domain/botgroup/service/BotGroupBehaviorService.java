@@ -497,6 +497,44 @@ public class BotGroupBehaviorService {
         return runtime != null && runtime.getActualStatus() == BotGroupStatus.ACTIVE;
     }
 
+    // ---- Aggregate accessors for observability gauges (used by ObservabilityConfig) ----
+
+    /** Number of bot groups currently in the running map. */
+    public int getRunningGroupCount() {
+        return runningGroups.size();
+    }
+
+    /** Total number of managed bot instances across all running groups. */
+    public int getTotalManagedBots() {
+        int total = 0;
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            total += runtime.getBotInstances().size();
+        }
+        return total;
+    }
+
+    /** Total number of bots with an open WebSocket connection across all running groups. */
+    public int getOpenWsConnectionCount() {
+        int total = 0;
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            for (Bot bot : runtime.getBotInstances()) {
+                if (bot.isConnected()) total++;
+            }
+        }
+        return total;
+    }
+
+    /** Count of bots currently in the given status across all running groups. */
+    public int countBotsByStatus(BotStatus status) {
+        int total = 0;
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            for (Bot bot : runtime.getBotInstances()) {
+                if (bot.getStatus() == status) total++;
+            }
+        }
+        return total;
+    }
+
     /**
      * Get the number of running bots for a specific group.
      * Returns 0 if the group is not running.

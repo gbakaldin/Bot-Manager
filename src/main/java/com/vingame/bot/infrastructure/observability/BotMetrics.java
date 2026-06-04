@@ -1,0 +1,180 @@
+package com.vingame.bot.infrastructure.observability;
+
+import com.vingame.bot.common.logging.BotMdc;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Tag;
+import io.micrometer.core.instrument.Tags;
+import org.slf4j.MDC;
+import org.springframework.stereotype.Component;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Central holder for all bot-emitted Micrometer counters.
+ * <p>
+ * On every {@code inc*} call, this class reads bot identity ({@code botGroupId},
+ * {@code environmentId}, {@code gameType}) from MDC and attaches them as tags on
+ * the Counter builder. The registry interns counters by {@code name + tags}, so
+ * each unique combination of MDC values produces a distinct time series with
+ * effectively zero per-call overhead after first creation.
+ * <p>
+ * <b>Why read MDC here instead of letting {@link BotMdcTagsMeterFilter} do it?</b>
+ * Micrometer's {@code MeterRegistry} caches Counter handles by the <i>pre-filter</i>
+ * {@code Meter.Id} (see {@code AbstractMeterRegistry#getOrCreateMeter}: it consults
+ * {@code preFilterIdToMeterMap} before applying any filter). That means if the
+ * pre-filter id is identical across calls (e.g. {@code bot_messages_total{cmd=endGame}}),
+ * Micrometer returns the same cached Counter regardless of what the filter would do
+ * with the current MDC. To get per-group time series, the MDC tags must be present
+ * on the Counter.Builder BEFORE registration. The {@link BotMdcTagsMeterFilter}
+ * still serves as defense-in-depth for any future {@code bot_*} meter created outside
+ * this class, and enforces the aggregate-gauge exclusion list.
+ * <p>
+ * Naming convention (Architecture Decision 11):
+ * <ul>
+ *   <li>{@code bot_*} — per-bot semantics (carries MDC-driven group/env/game tags).</li>
+ *   <li>All counters end in {@code _total}.</li>
+ * </ul>
+ * Cardinality cap (Architecture Decision 5): only {@code botGroupId},
+ * {@code environmentId}, {@code gameType} are exposed. No per-bot tags.
+ */
+@Component
+public class BotMetrics {
+
+    public static final String BOT_MESSAGES_TOTAL = "bot_messages_total";
+    public static final String BOT_FAILURES_TOTAL = "bot_failures_total";
+    public static final String BOT_RECONNECTS_TOTAL = "bot_reconnects_total";
+    public static final String BOT_AUTO_DEPOSITS_TOTAL = "bot_auto_deposits_total";
+    public static final String BOT_BETS_PLACED_TOTAL = "bot_bets_placed_total";
+    public static final String BOT_BET_AMOUNT_TOTAL = "bot_bet_amount_total";
+    public static final String BOT_LOGIN_TOTAL = "bot_login_total";
+    public static final String BOT_VERIFY_TOKEN_TOTAL = "bot_verify_token_total";
+    public static final String BOT_WATCHDOG_EXPIRED_TOTAL = "bot_watchdog_expired_total";
+    public static final String BOT_WS_CONNECTIONS_TOTAL = "bot_ws_connections_total";
+
+    private final MeterRegistry registry;
+
+    public BotMetrics(MeterRegistry registry) {
+        this.registry = registry;
+    }
+
+    /**
+     * Read bot identity tags from MDC. Returns an empty {@link Tags} if no MDC keys
+     * are populated (e.g. when called from a non-bot-owned thread). Empty-string MDC
+     * values are skipped — they would prometheus-format as {@code key=""} which is
+     * legal but noisy.
+     */
+    private Tags mdcTags() {
+        List<Tag> tags = new ArrayList<>(3);
+        addIfPresent(tags, BotMdc.BOT_GROUP_ID);
+        addIfPresent(tags, BotMdc.ENVIRONMENT_ID);
+        addIfPresent(tags, BotMdc.GAME_TYPE);
+        return tags.isEmpty() ? Tags.empty() : Tags.of(tags);
+    }
+
+    private static void addIfPresent(List<Tag> tags, String key) {
+        String value = MDC.get(key);
+        if (value != null && !value.isEmpty()) {
+            tags.add(Tag.of(key, value));
+        }
+    }
+
+    /**
+     * Increment the per-bot message counter for the given protocol command.
+     *
+     * @param cmd one of {@code subscribe|startGame|updateBet|endGame}
+     */
+    public void incBotMessage(String cmd) {
+        Counter.builder(BOT_MESSAGES_TOTAL)
+                .tag("cmd", cmd)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /** Increment the per-bot failure counter (fires on transition into DEAD). */
+    public void incBotFailure() {
+        Counter.builder(BOT_FAILURES_TOTAL)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * Increment the per-bot reconnect counter.
+     *
+     * @param reason normalized reason: {@code watchdog|ws-disconnect|reauth-cycle}
+     */
+    public void incBotReconnect(String reason) {
+        Counter.builder(BOT_RECONNECTS_TOTAL)
+                .tag("reason", reason)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /** Increment the per-bot auto-deposit counter, tagged with outcome. */
+    public void incBotAutoDeposit(boolean success) {
+        Counter.builder(BOT_AUTO_DEPOSITS_TOTAL)
+                .tag("outcome", success ? "success" : "failure")
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /** Increment the watchdog-expired counter. */
+    public void incBotWatchdogExpired() {
+        Counter.builder(BOT_WATCHDOG_EXPIRED_TOTAL)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * Increment the per-bot WebSocket lifecycle event counter.
+     *
+     * @param event one of {@code connected|authenticating|disconnected}
+     */
+    public void incBotWsEvent(String event) {
+        Counter.builder(BOT_WS_CONNECTIONS_TOTAL)
+                .tag("event", event)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * Record a bet placement: increments {@code bot_bets_placed_total} by 1 and
+     * {@code bot_bet_amount_total} by {@code amount}.
+     */
+    public void incBetPlaced(long amount) {
+        Tags tags = mdcTags();
+        Counter.builder(BOT_BETS_PLACED_TOTAL)
+                .tags(tags)
+                .register(registry)
+                .increment();
+        Counter.builder(BOT_BET_AMOUNT_TOTAL)
+                .tags(tags)
+                .register(registry)
+                .increment(amount);
+    }
+
+    /** Increment the login counter tagged with outcome. */
+    public void incLogin(boolean success) {
+        Counter.builder(BOT_LOGIN_TOTAL)
+                .tag("outcome", success ? "success" : "failure")
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /** Increment the verify-token counter tagged with outcome. */
+    public void incVerifyToken(boolean success) {
+        Counter.builder(BOT_VERIFY_TOKEN_TOTAL)
+                .tag("outcome", success ? "success" : "failure")
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+}
