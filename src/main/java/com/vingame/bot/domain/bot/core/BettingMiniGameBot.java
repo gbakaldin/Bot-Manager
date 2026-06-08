@@ -13,7 +13,6 @@ import com.vingame.bot.domain.bot.message.GameMessageTypes;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.HasJackpot;
-import com.vingame.bot.domain.bot.message.HasRoundTotals;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
@@ -211,12 +210,6 @@ public class BettingMiniGameBot extends Bot {
                 metrics.incBetsPlaced(bt.betCountFor(getUserName()),
                         bt.betAmountFor(getUserName()));
             }
-            if (msg instanceof HasRoundTotals hr) {
-                long tBet = hr.totalBetAmount();
-                long tWin = hr.totalWinnings();
-                if (tBet > 0) metrics.incGameTotalBetAmount(tBet);
-                if (tWin > 0) metrics.incGameTotalWinnings(tWin);
-            }
 
             // === Legacy capability-hook dispatch — REMOVED IN PHASE C ===
             // Phase 4 — bot's own winnings + jackpot. Defaults below return 0 / no-op,
@@ -232,14 +225,11 @@ public class BettingMiniGameBot extends Bot {
                 metrics.incBotJackpot(jackpot);
             }
 
-            // Phase 5 — real-player share aggregates. Gated by canCheckTotalWinnings()
-            // which defaults to false. Subclasses that can read protocol-level
-            // round-aggregate fields (Bom/B52/Nohu `bs` arrays) opt in by overriding
-            // these three methods. Counters are tagged with gameType ONLY (AD 5).
-            if (canCheckTotalWinnings()) {
-                metrics.incGameTotalWinnings(getTotalWinnings());
-                metrics.incGameTotalBetAmount(getRoundTotalBetAmount());
-            }
+            // Phase 5 game-aggregate dispatch removed by ENDGAME_METRICS Phase A.5
+            // (game-total counter methods deleted from BotMetrics). The legacy
+            // capability hooks canCheckTotalWinnings / getTotalWinnings /
+            // getRoundTotalBetAmount remain on the class until Phase C; they are
+            // unreachable from production now.
         }
 
         gameState = BettingMiniGameState.PAYOUT;
