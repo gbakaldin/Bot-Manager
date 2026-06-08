@@ -122,6 +122,67 @@ class BotMetricsTest {
         assertThat(amount.count()).isEqualTo(750_000.0);
     }
 
+    /* ----- ENDGAME_METRICS Phase A — batch overload for HasBetTotals dispatch ----- */
+
+    @Test
+    void incBetsPlaced_batchIncrementsCountAndAmountSums() {
+        setBotMdc();
+        metrics.incBetsPlaced(3, 500L);
+        metrics.incBetsPlaced(2, 250L);
+
+        Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL)
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
+                .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .counter();
+        Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL)
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
+                .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .counter();
+
+        // Both sums must be exact — the batch overload preserves the two-counter
+        // math without any per-bet averaging.
+        assertThat(bets).isNotNull();
+        assertThat(bets.count()).isEqualTo(5.0);
+        assertThat(amount).isNotNull();
+        assertThat(amount.count()).isEqualTo(750.0);
+    }
+
+    @Test
+    void incBetsPlaced_zeroOrNegativeCountIsNoOpAndCreatesNoCounter() {
+        setBotMdc();
+        metrics.incBetsPlaced(0, 0L);
+        metrics.incBetsPlaced(-3, 100L);
+
+        Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
+        Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
+
+        // Defensive contract: zero/negative count must never reach the registry,
+        // mirroring the dead-seconds silent-drop pattern.
+        assertThat(bets).isNull();
+        assertThat(amount).isNull();
+    }
+
+    @Test
+    void incBetsPlaced_sharesTimeSeriesWithSingleBetIncBetPlaced() {
+        // Both incBetPlaced(long) and incBetsPlaced(int, long) target the same
+        // two meters with the same MDC tag shape — they must aggregate into the
+        // same time series (no series split when the bet-counter callsite
+        // migrates from creditBalance to onEndGame in Phase B).
+        setBotMdc();
+        metrics.incBetPlaced(100L);
+        metrics.incBetsPlaced(2, 300L);
+
+        Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
+        Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
+
+        assertThat(bets).isNotNull();
+        assertThat(bets.count()).isEqualTo(3.0);  // 1 + 2
+        assertThat(amount).isNotNull();
+        assertThat(amount.count()).isEqualTo(400.0); // 100 + 300
+    }
+
     @Test
     void incLogin_tagsOutcome() {
         setBotMdc();

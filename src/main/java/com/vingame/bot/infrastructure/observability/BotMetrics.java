@@ -190,6 +190,40 @@ public class BotMetrics {
     }
 
     /**
+     * Record a batch of bets confirmed by the server's {@code EndGame} payload:
+     * increments {@code bot_bets_placed_total} by {@code count} and
+     * {@code bot_bet_amount_total} by {@code totalAmount}. Same per-bot tag
+     * shape as {@link #incBetPlaced(long)}.
+     * <p>
+     * Per-bet average is {@code bot_bet_amount_total / bot_bets_placed_total}
+     * in PromQL and is accurate as long as both sums are accurate — this method
+     * preserves both sums exactly without making any per-bet-amount assumption.
+     * No loop, no averaging.
+     * <p>
+     * Dispatched from {@link com.vingame.bot.domain.bot.core.BettingMiniGameBot}'s
+     * {@code onEndGame} {@code HasBetTotals} branch. The local AtomicLong
+     * accumulators on {@code Bot} (read by {@code BotHealthDTO}) still count
+     * bets sent, so the two values can legitimately diverge when the server
+     * rejects bets — see {@code docs/plans/ENDGAME_METRICS.md} AD-4.
+     * <p>
+     * Caller guard: this method silently no-ops when {@code count <= 0} so the
+     * bot-side dispatch can call it unconditionally with whatever the message
+     * extractor returned. No counter is created on a zero-count call.
+     */
+    public void incBetsPlaced(int count, long totalAmount) {
+        if (count <= 0) return;
+        Tags tags = mdcTags();
+        Counter.builder(BOT_BETS_PLACED_TOTAL)
+                .tags(tags)
+                .register(registry)
+                .increment(count);
+        Counter.builder(BOT_BET_AMOUNT_TOTAL)
+                .tags(tags)
+                .register(registry)
+                .increment(totalAmount);
+    }
+
+    /**
      * Per-bot gross winnings counter; increments {@code bot_winnings_total} by
      * {@code amount} (Phase 4). Same per-bot tag shape as {@link #incBetPlaced(long)}.
      * <p>
