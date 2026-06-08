@@ -10,6 +10,10 @@ import com.vingame.bot.domain.bot.util.SessionIdStore;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.GameMessageTypes;
+import com.vingame.bot.domain.bot.message.HasBetTotals;
+import com.vingame.bot.domain.bot.message.HasBotWinnings;
+import com.vingame.bot.domain.bot.message.HasJackpot;
+import com.vingame.bot.domain.bot.message.HasRoundTotals;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
@@ -19,7 +23,6 @@ import com.vingame.websocketparser.message.request.ActionRequestMessage;
 import com.vingame.websocketparser.message.response.ActionResponseMessage;
 import com.vingame.websocketparser.scenario.PipelineContext;
 import com.vingame.websocketparser.scenario.Scenario;
-import com.vingame.websocketparser.scenario.processors.OutboundMessage;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -187,11 +190,39 @@ public class BettingMiniGameBot extends Bot {
     private void onEndGame(ActionResponseMessage<? extends EndGameMessage> data) {
         if (metrics != null) metrics.incBotMessage("endGame");
 
-        // Phase 4 — bot's own winnings + jackpot. Defaults below return 0 / no-op,
-        // so unless a per-game subclass overrides getWinnings() / getJackpot() this
-        // is a free pass. lastRoundWinnings (Bot.java:74) is repurposed here so the
-        // existing BotHealthDTO winnings field reflects the per-round payout.
+        EndGameMessage msg = data.getData();
         if (metrics != null) {
+            // === New marker-interface dispatch (ENDGAME_METRICS plan, Phase A) ===
+            // Per-message extraction. Independent `if` checks — a message may
+            // implement multiple interfaces. Per-bot branches run before the
+            // round-aggregate branch (AD-5).
+            if (msg instanceof HasBotWinnings hw) {
+                long w = hw.winningsFor(getUserName());
+                if (w > 0) metrics.incBotWinnings(w);
+                lastRoundWinnings = w;
+            }
+            if (msg instanceof HasJackpot hj) {
+                long j = hj.jackpotFor(getUserName());
+                if (j > 0) metrics.incBotJackpot(j);
+            }
+            if (msg instanceof HasBetTotals bt) {
+                // Batch increment: bot_bets_placed_total += count,
+                // bot_bet_amount_total += amount. Two-counter math, no average.
+                metrics.incBetsPlaced(bt.betCountFor(getUserName()),
+                        bt.betAmountFor(getUserName()));
+            }
+            if (msg instanceof HasRoundTotals hr) {
+                long tBet = hr.totalBetAmount();
+                long tWin = hr.totalWinnings();
+                if (tBet > 0) metrics.incGameTotalBetAmount(tBet);
+                if (tWin > 0) metrics.incGameTotalWinnings(tWin);
+            }
+
+            // === Legacy capability-hook dispatch — REMOVED IN PHASE C ===
+            // Phase 4 — bot's own winnings + jackpot. Defaults below return 0 / no-op,
+            // so unless a per-game subclass overrides getWinnings() / getJackpot() this
+            // is a free pass. lastRoundWinnings (Bot.java:74) is repurposed here so the
+            // existing BotHealthDTO winnings field reflects the per-round payout.
             long winnings = getWinnings();
             metrics.incBotWinnings(winnings);
             lastRoundWinnings = winnings;

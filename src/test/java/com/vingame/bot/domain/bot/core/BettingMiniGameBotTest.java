@@ -4,6 +4,10 @@ import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
+import com.vingame.bot.domain.bot.message.HasBetTotals;
+import com.vingame.bot.domain.bot.message.HasBotWinnings;
+import com.vingame.bot.domain.bot.message.HasJackpot;
+import com.vingame.bot.domain.bot.message.HasRoundTotals;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
@@ -36,6 +40,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -617,6 +623,316 @@ class BettingMiniGameBotTest {
 
             assertThat(readField("gameState")).isEqualTo(BettingMiniGameState.PAYOUT);
         }
+    }
+
+    /* ----- ENDGAME_METRICS Phase A — new marker-interface dispatch in onEndGame ----- */
+
+    @Nested
+    @DisplayName("onEndGame marker-interface dispatch (ENDGAME_METRICS Phase A)")
+    class OnEndGameMarkerDispatchTests {
+
+        @Test
+        @DisplayName("Vanilla EndGameMessage (no markers): only incBotMessage(\"endGame\") fires from the new dispatch")
+        void shouldEmitNothingForVanillaEndGameMessage() throws Exception {
+            BotMetrics metrics = mock(BotMetrics.class);
+            bot.setMetrics(metrics);
+
+            setLastFetchedBalance(50_000_000L);
+            setExpectedCurrentBalance(50_000_000L);
+            setGameState(BettingMiniGameState.BET);
+
+            // Plain mock of EndGameMessage — implements none of the marker interfaces.
+            EndGameMessage msg = mock(EndGameMessage.class);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+            verify(metrics).incBotMessage("endGame");
+            // None of the new dispatch branches fired.
+            verify(metrics, never()).incBetsPlaced(anyInt(), anyLong());
+            // incBotWinnings(0L) still fires because the LEGACY capability-hook block
+            // remains in place during Phase A (deleted in Phase C). Marker dispatch
+            // contributed nothing: verify by asserting only the legacy default-0 call.
+            verify(metrics).incBotWinnings(0L);
+            verify(metrics, never()).incBotWinnings(org.mockito.ArgumentMatchers.longThat(v -> v > 0L));
+            verify(metrics, never()).incBotJackpot(anyLong());
+            verify(metrics, never()).incGameTotalWinnings(anyLong());
+            verify(metrics, never()).incGameTotalBetAmount(anyLong());
+        }
+
+        @Test
+        @DisplayName("HasBotWinnings: incBotWinnings(N) is called when N > 0")
+        void shouldExtractFromHasBotWinnings() throws Exception {
+            BotMetrics metrics = mock(BotMetrics.class);
+            bot.setMetrics(metrics);
+            setLastFetchedBalance(50_000_000L);
+            setExpectedCurrentBalance(50_000_000L);
+            setGameState(BettingMiniGameState.BET);
+
+            EndGameMessage msg = new StubEndGameMessage()
+                    .withWinningsFor(bot.getUserName(), 750L);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+            // The new HasBotWinnings dispatch fires incBotWinnings(750L). The legacy
+            // capability-hook block (still present in Phase A, deleted in Phase C)
+            // ALSO fires incBotWinnings(0L) from the default getWinnings() — that's
+            // an independent call to the same method with a different value, so
+            // Mockito treats them as distinct invocations.
+            verify(metrics).incBotWinnings(750L);
+            // lastRoundWinnings is overwritten by the legacy block in Phase A
+            // (last-write-wins, defaults to 0). The Phase 4 contract — write every
+            // round even at 0 — is preserved end-to-end; the per-round-payout-visible
+            // assertion belongs in Phase C tests once the legacy block is gone.
+        }
+
+        @Test
+        @DisplayName("HasJackpot returning N>0: incBotJackpot(N) fires; returning 0: no incBotJackpot call")
+        void shouldExtractFromHasJackpot() throws Exception {
+            // Case 1 — jackpot > 0 fires the counter.
+            BotMetrics metrics = mock(BotMetrics.class);
+            bot.setMetrics(metrics);
+            setLastFetchedBalance(50_000_000L);
+            setExpectedCurrentBalance(50_000_000L);
+            setGameState(BettingMiniGameState.BET);
+
+            EndGameMessage msgWithJackpot = new StubEndGameMessage()
+                    .withJackpotFor(bot.getUserName(), 10_000L);
+            ActionResponseMessage<EndGameMessage> resp1 =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msgWithJackpot);
+
+            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp1);
+            verify(metrics).incBotJackpot(10_000L);
+
+            // Case 2 — jackpot == 0 must NOT fire incBotJackpot (caller-side > 0 guard, AD-7).
+            BotMetrics metrics2 = mock(BotMetrics.class);
+            BettingMiniGameBot bot2 = newBareBot("zerojkbot");
+            bot2.setMetrics(metrics2);
+            try {
+                EndGameMessage msgZero = new StubEndGameMessage()
+                        .withJackpotFor(bot2.getUserName(), 0L);
+                ActionResponseMessage<EndGameMessage> resp2 =
+                        new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msgZero);
+                invokePrivateOn(bot2, "onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp2);
+                verify(metrics2, never()).incBotJackpot(anyLong());
+            } finally {
+                shutdownSchedulers(bot2);
+            }
+        }
+
+        @Test
+        @DisplayName("HasRoundTotals: both incGameTotalWinnings + incGameTotalBetAmount fire (each gated on > 0)")
+        void shouldExtractFromHasRoundTotals() throws Exception {
+            BotMetrics metrics = mock(BotMetrics.class);
+            bot.setMetrics(metrics);
+            setLastFetchedBalance(50_000_000L);
+            setExpectedCurrentBalance(50_000_000L);
+            setGameState(BettingMiniGameState.BET);
+
+            EndGameMessage msg = new StubEndGameMessage()
+                    .withRoundTotals(5000L, 4750L);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+            verify(metrics).incGameTotalBetAmount(5000L);
+            verify(metrics).incGameTotalWinnings(4750L);
+        }
+
+        @Test
+        @DisplayName("HasBetTotals (count=3, amount=500): incBetsPlaced(3, 500) called exactly once")
+        void shouldExtractFromHasBetTotals() throws Exception {
+            BotMetrics metrics = mock(BotMetrics.class);
+            bot.setMetrics(metrics);
+            setLastFetchedBalance(50_000_000L);
+            setExpectedCurrentBalance(50_000_000L);
+            setGameState(BettingMiniGameState.BET);
+
+            EndGameMessage msg = new StubEndGameMessage()
+                    .withBetTotalsFor(bot.getUserName(), 3, 500L);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+            verify(metrics).incBetsPlaced(3, 500L);
+        }
+
+        @Test
+        @DisplayName("All four interfaces implemented: every counter path fires in order (winnings -> jackpot -> bets -> round-totals)")
+        void shouldDispatchAllInterfacesIfImplemented() throws Exception {
+            BotMetrics metrics = mock(BotMetrics.class);
+            bot.setMetrics(metrics);
+            setLastFetchedBalance(50_000_000L);
+            setExpectedCurrentBalance(50_000_000L);
+            setGameState(BettingMiniGameState.BET);
+
+            EndGameMessage msg = new StubEndGameMessage()
+                    .withWinningsFor(bot.getUserName(), 200L)
+                    .withJackpotFor(bot.getUserName(), 1_500L)
+                    .withBetTotalsFor(bot.getUserName(), 2, 300L)
+                    .withRoundTotals(5_000L, 4_750L);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+            InOrder order = inOrder(metrics);
+            order.verify(metrics).incBotMessage("endGame");
+            // New marker dispatch order: winnings -> jackpot -> bets -> round-totals (AD-5).
+            order.verify(metrics).incBotWinnings(200L);
+            order.verify(metrics).incBotJackpot(1_500L);
+            order.verify(metrics).incBetsPlaced(2, 300L);
+            order.verify(metrics).incGameTotalBetAmount(5_000L);
+            order.verify(metrics).incGameTotalWinnings(4_750L);
+        }
+
+        @Test
+        @DisplayName("Null metrics with all four interfaces implemented: no NPE, gameState transitions to PAYOUT")
+        void shouldNoOpOnAllInterfacesWhenMetricsNull() throws Exception {
+            bot.setMetrics(null);
+            setLastFetchedBalance(50_000_000L);
+            setExpectedCurrentBalance(50_000_000L);
+            setGameState(BettingMiniGameState.BET);
+
+            EndGameMessage msg = new StubEndGameMessage()
+                    .withWinningsFor(bot.getUserName(), 500L)
+                    .withJackpotFor(bot.getUserName(), 100L)
+                    .withBetTotalsFor(bot.getUserName(), 1, 50L)
+                    .withRoundTotals(1_000L, 900L);
+            ActionResponseMessage<EndGameMessage> resp =
+                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+
+            // Must not throw.
+            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
+
+            assertThat(readField("gameState")).isEqualTo(BettingMiniGameState.PAYOUT);
+        }
+
+        // TODO(observability): once a per-game EndGameMessage subtype implements
+        // any of HasBotWinnings / HasJackpot / HasBetTotals / HasRoundTotals (e.g.
+        // BomEndGameMessage), add an integration-style test that deserializes
+        // src/test/resources/messages/bom/endGame.json and exercises the real
+        // dispatch through this method.
+    }
+
+    /**
+     * Test-only {@link EndGameMessage} subtype that implements all four marker
+     * interfaces from the ENDGAME_METRICS Phase A redesign. Each {@code withX}
+     * method opts a marker IN for a single bot identifier; unset markers return
+     * zero, mirroring the "no implementer = stays at 0" contract (AD-8).
+     * <p>
+     * A named class (not anonymous) is required because anonymous classes in
+     * Java cannot add interfaces to an instantiation — see
+     * {@code docs/plans/ENDGAME_METRICS.md} implementation note 8.
+     */
+    private static class StubEndGameMessage extends EndGameMessage
+            implements HasBotWinnings, HasJackpot, HasBetTotals, HasRoundTotals {
+
+        private String winningsUser;
+        private long winningsValue = 0L;
+
+        private String jackpotUser;
+        private long jackpotValue = 0L;
+
+        private String betUser;
+        private int betCount = 0;
+        private long betAmount = 0L;
+
+        private long roundTotalBetAmount = 0L;
+        private long roundTotalWinnings = 0L;
+
+        StubEndGameMessage() {
+            super(0);
+        }
+
+        StubEndGameMessage withWinningsFor(String userName, long winnings) {
+            this.winningsUser = userName;
+            this.winningsValue = winnings;
+            return this;
+        }
+
+        StubEndGameMessage withJackpotFor(String userName, long jackpot) {
+            this.jackpotUser = userName;
+            this.jackpotValue = jackpot;
+            return this;
+        }
+
+        StubEndGameMessage withBetTotalsFor(String userName, int count, long amount) {
+            this.betUser = userName;
+            this.betCount = count;
+            this.betAmount = amount;
+            return this;
+        }
+
+        StubEndGameMessage withRoundTotals(long totalBet, long totalWin) {
+            this.roundTotalBetAmount = totalBet;
+            this.roundTotalWinnings = totalWin;
+            return this;
+        }
+
+        @Override
+        public long winningsFor(String userName) {
+            return userName != null && userName.equals(winningsUser) ? winningsValue : 0L;
+        }
+
+        @Override
+        public long jackpotFor(String userName) {
+            return userName != null && userName.equals(jackpotUser) ? jackpotValue : 0L;
+        }
+
+        @Override
+        public long betAmountFor(String userName) {
+            return userName != null && userName.equals(betUser) ? betAmount : 0L;
+        }
+
+        @Override
+        public int betCountFor(String userName) {
+            return userName != null && userName.equals(betUser) ? betCount : 0;
+        }
+
+        @Override
+        public long totalBetAmount() {
+            return roundTotalBetAmount;
+        }
+
+        @Override
+        public long totalWinnings() {
+            return roundTotalWinnings;
+        }
+    }
+
+    /** Build a vanilla {@link BettingMiniGameBot} for tests needing a second bot instance. */
+    private BettingMiniGameBot newBareBot(String userName) {
+        BettingMiniGameBot b = new BettingMiniGameBot();
+        BotCredentials credentials = BotCredentials.builder()
+                .username(userName).password("pw").fingerprint("fp").build();
+        Game game = Game.builder()
+                .id("g1").name("BauCua").pluginName("BauCua")
+                .offset(2000).numberOfOptions(6).build();
+        BotBehaviorConfig behavior = BotBehaviorConfig.builder()
+                .minBet(100).maxBet(1000).betIncrement(100)
+                .maxTotalBetPerRound(10_000).minBetsPerRound(1).maxBetsPerRound(3)
+                .chatEnabled(false).autoDepositEnabled(false).betSkipPercentage(0)
+                .build();
+        BotConfiguration cfg = BotConfiguration.builder()
+                .credentials(credentials)
+                .environmentId("env-1").botGroupId("group-1").botIndex(1)
+                .game(game).behaviorConfig(behavior)
+                .zoneName("Z").timeoutMillis(60_000L)
+                .watchdogTimeoutSeconds(120L)
+                .build();
+        b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
+        b.setConfiguration(cfg);
+        b.setRandom(mock(Random.class));
+        b.initializeSubclass();
+        b.setRandom(mock(Random.class));
+        seedBalance(b, 50_000_000L);
+        return b;
     }
 
     /**
