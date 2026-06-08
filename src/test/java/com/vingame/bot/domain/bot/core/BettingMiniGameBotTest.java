@@ -7,7 +7,6 @@ import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.HasJackpot;
-import com.vingame.bot.domain.bot.message.HasRoundTotals;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
@@ -541,10 +540,8 @@ class BettingMiniGameBotTest {
             InOrder order = inOrder(metrics);
             order.verify(metrics).incBotMessage("endGame");
             order.verify(metrics).incBotWinnings(0L);
-            // No jackpot, no game-totals — default getJackpot()/canCheckTotalWinnings() are 0/false.
+            // No jackpot — default getJackpot() is 0.
             verify(metrics, never()).incBotJackpot(org.mockito.ArgumentMatchers.anyLong());
-            verify(metrics, never()).incGameTotalWinnings(org.mockito.ArgumentMatchers.anyLong());
-            verify(metrics, never()).incGameTotalBetAmount(org.mockito.ArgumentMatchers.anyLong());
 
             // lastRoundWinnings reflects the read of getWinnings() (0L).
             assertThat(((Bot) bot).getLastRoundWinnings()).isEqualTo(0L);
@@ -569,37 +566,8 @@ class BettingMiniGameBotTest {
                 order.verify(metrics).incBotMessage("endGame");
                 order.verify(metrics).incBotWinnings(750L);
                 order.verify(metrics).incBotJackpot(10_000L);
-                verify(metrics, never()).incGameTotalWinnings(org.mockito.ArgumentMatchers.anyLong());
-                verify(metrics, never()).incGameTotalBetAmount(org.mockito.ArgumentMatchers.anyLong());
 
                 assertThat(((Bot) subclassed).getLastRoundWinnings()).isEqualTo(750L);
-            } finally {
-                shutdownSchedulers(subclassed);
-            }
-        }
-
-        @Test
-        @DisplayName("Subclass with canCheckTotalWinnings=true: game-aggregate counters fire after bot counters")
-        void shouldEmitGameTotalsWhenCapabilityGateOpen() throws Exception {
-            BotMetrics metrics = mock(BotMetrics.class);
-            // Bot wins 200; round-wide total bets 5000, round-wide total winnings 4750 (RTP 95%).
-            BettingMiniGameBot subclassed = newSubclassWithWinnings(200L, 0L, true, 4750L, 5000L);
-            subclassed.setMetrics(metrics);
-            seedBalance(subclassed, 50_000_000L);
-
-            EndGameMessage msg = mock(EndGameMessage.class);
-            ActionResponseMessage<EndGameMessage> resp =
-                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
-
-            try {
-                invokePrivateOn(subclassed, "onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
-
-                InOrder order = inOrder(metrics);
-                order.verify(metrics).incBotMessage("endGame");
-                order.verify(metrics).incBotWinnings(200L);
-                order.verify(metrics).incGameTotalWinnings(4750L);
-                order.verify(metrics).incGameTotalBetAmount(5000L);
-                verify(metrics, never()).incBotJackpot(org.mockito.ArgumentMatchers.anyLong());
             } finally {
                 shutdownSchedulers(subclassed);
             }
@@ -657,8 +625,6 @@ class BettingMiniGameBotTest {
             verify(metrics).incBotWinnings(0L);
             verify(metrics, never()).incBotWinnings(org.mockito.ArgumentMatchers.longThat(v -> v > 0L));
             verify(metrics, never()).incBotJackpot(anyLong());
-            verify(metrics, never()).incGameTotalWinnings(anyLong());
-            verify(metrics, never()).incGameTotalBetAmount(anyLong());
         }
 
         @Test
@@ -724,26 +690,6 @@ class BettingMiniGameBotTest {
         }
 
         @Test
-        @DisplayName("HasRoundTotals: both incGameTotalWinnings + incGameTotalBetAmount fire (each gated on > 0)")
-        void shouldExtractFromHasRoundTotals() throws Exception {
-            BotMetrics metrics = mock(BotMetrics.class);
-            bot.setMetrics(metrics);
-            setLastFetchedBalance(50_000_000L);
-            setExpectedCurrentBalance(50_000_000L);
-            setGameState(BettingMiniGameState.BET);
-
-            EndGameMessage msg = new StubEndGameMessage()
-                    .withRoundTotals(5000L, 4750L);
-            ActionResponseMessage<EndGameMessage> resp =
-                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
-
-            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
-
-            verify(metrics).incGameTotalBetAmount(5000L);
-            verify(metrics).incGameTotalWinnings(4750L);
-        }
-
-        @Test
         @DisplayName("HasBetTotals (count=3, amount=500): incBetsPlaced(3, 500) called exactly once")
         void shouldExtractFromHasBetTotals() throws Exception {
             BotMetrics metrics = mock(BotMetrics.class);
@@ -763,7 +709,7 @@ class BettingMiniGameBotTest {
         }
 
         @Test
-        @DisplayName("All four interfaces implemented: every counter path fires in order (winnings -> jackpot -> bets -> round-totals)")
+        @DisplayName("All three surviving interfaces implemented: every counter path fires in order (winnings -> jackpot -> bets)")
         void shouldDispatchAllInterfacesIfImplemented() throws Exception {
             BotMetrics metrics = mock(BotMetrics.class);
             bot.setMetrics(metrics);
@@ -774,8 +720,7 @@ class BettingMiniGameBotTest {
             EndGameMessage msg = new StubEndGameMessage()
                     .withWinningsFor(bot.getUserName(), 200L)
                     .withJackpotFor(bot.getUserName(), 1_500L)
-                    .withBetTotalsFor(bot.getUserName(), 2, 300L)
-                    .withRoundTotals(5_000L, 4_750L);
+                    .withBetTotalsFor(bot.getUserName(), 2, 300L);
             ActionResponseMessage<EndGameMessage> resp =
                     new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
 
@@ -783,16 +728,15 @@ class BettingMiniGameBotTest {
 
             InOrder order = inOrder(metrics);
             order.verify(metrics).incBotMessage("endGame");
-            // New marker dispatch order: winnings -> jackpot -> bets -> round-totals (AD-5).
+            // New marker dispatch order: winnings -> jackpot -> bets (AD-5;
+            // round-totals arm dropped by Phase A.5).
             order.verify(metrics).incBotWinnings(200L);
             order.verify(metrics).incBotJackpot(1_500L);
             order.verify(metrics).incBetsPlaced(2, 300L);
-            order.verify(metrics).incGameTotalBetAmount(5_000L);
-            order.verify(metrics).incGameTotalWinnings(4_750L);
         }
 
         @Test
-        @DisplayName("Null metrics with all four interfaces implemented: no NPE, gameState transitions to PAYOUT")
+        @DisplayName("Null metrics with all three surviving interfaces implemented: no NPE, gameState transitions to PAYOUT")
         void shouldNoOpOnAllInterfacesWhenMetricsNull() throws Exception {
             bot.setMetrics(null);
             setLastFetchedBalance(50_000_000L);
@@ -802,8 +746,7 @@ class BettingMiniGameBotTest {
             EndGameMessage msg = new StubEndGameMessage()
                     .withWinningsFor(bot.getUserName(), 500L)
                     .withJackpotFor(bot.getUserName(), 100L)
-                    .withBetTotalsFor(bot.getUserName(), 1, 50L)
-                    .withRoundTotals(1_000L, 900L);
+                    .withBetTotalsFor(bot.getUserName(), 1, 50L);
             ActionResponseMessage<EndGameMessage> resp =
                     new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
 
@@ -814,24 +757,25 @@ class BettingMiniGameBotTest {
         }
 
         // TODO(observability): once a per-game EndGameMessage subtype implements
-        // any of HasBotWinnings / HasJackpot / HasBetTotals / HasRoundTotals (e.g.
+        // any of HasBotWinnings / HasJackpot / HasBetTotals (e.g.
         // BomEndGameMessage), add an integration-style test that deserializes
         // src/test/resources/messages/bom/endGame.json and exercises the real
         // dispatch through this method.
     }
 
     /**
-     * Test-only {@link EndGameMessage} subtype that implements all four marker
-     * interfaces from the ENDGAME_METRICS Phase A redesign. Each {@code withX}
-     * method opts a marker IN for a single bot identifier; unset markers return
-     * zero, mirroring the "no implementer = stays at 0" contract (AD-8).
+     * Test-only {@link EndGameMessage} subtype that implements the three surviving
+     * marker interfaces from the ENDGAME_METRICS Phase A redesign
+     * (round-totals marker dropped by Phase A.5). Each {@code withX} method
+     * opts a marker IN for a single bot identifier; unset markers return zero,
+     * mirroring the "no implementer = stays at 0" contract (AD-8).
      * <p>
      * A named class (not anonymous) is required because anonymous classes in
      * Java cannot add interfaces to an instantiation — see
      * {@code docs/plans/ENDGAME_METRICS.md} implementation note 8.
      */
     private static class StubEndGameMessage extends EndGameMessage
-            implements HasBotWinnings, HasJackpot, HasBetTotals, HasRoundTotals {
+            implements HasBotWinnings, HasJackpot, HasBetTotals {
 
         private String winningsUser;
         private long winningsValue = 0L;
@@ -842,9 +786,6 @@ class BettingMiniGameBotTest {
         private String betUser;
         private int betCount = 0;
         private long betAmount = 0L;
-
-        private long roundTotalBetAmount = 0L;
-        private long roundTotalWinnings = 0L;
 
         StubEndGameMessage() {
             super(0);
@@ -869,12 +810,6 @@ class BettingMiniGameBotTest {
             return this;
         }
 
-        StubEndGameMessage withRoundTotals(long totalBet, long totalWin) {
-            this.roundTotalBetAmount = totalBet;
-            this.roundTotalWinnings = totalWin;
-            return this;
-        }
-
         @Override
         public long winningsFor(String userName) {
             return userName != null && userName.equals(winningsUser) ? winningsValue : 0L;
@@ -893,16 +828,6 @@ class BettingMiniGameBotTest {
         @Override
         public int betCountFor(String userName) {
             return userName != null && userName.equals(betUser) ? betCount : 0;
-        }
-
-        @Override
-        public long totalBetAmount() {
-            return roundTotalBetAmount;
-        }
-
-        @Override
-        public long totalWinnings() {
-            return roundTotalWinnings;
         }
     }
 
