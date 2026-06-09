@@ -131,6 +131,16 @@ class BomGameMessageTypesTest {
     }
 
     @Test
+    @DisplayName("HasJackpot: returns tJpV when iJp=true, 0 otherwise")
+    void hasJackpot() {
+        BomEndGameMessage noJp = new BomEndGameMessage(5006, 0, 0, 0, null, 0, 7500, false, 0, 0, null, null);
+        BomEndGameMessage withJp = new BomEndGameMessage(5006, 0, 0, 0, null, 0, 7500, true, 0, 0, null, null);
+
+        assertThat(noJp.jackpotFor("any-bot")).isZero();
+        assertThat(withJp.jackpotFor("any-bot")).isEqualTo(7500L);
+    }
+
+    @Test
     @DisplayName("Cross-product guard: a Bom-only mapper rejects Nohu cmd values")
     void shouldNotDispatchAcrossProducts() throws Exception {
         // Mapper configured ONLY with BOM (offset 2000); the Nohu subscribe fixture uses cmd=7000,
