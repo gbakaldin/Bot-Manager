@@ -2,6 +2,7 @@ package com.vingame.bot.infrastructure.auth;
 
 import com.vingame.bot.domain.bot.auth.B52LoginRequest;
 import com.vingame.bot.domain.bot.auth.BomLoginRequest;
+import com.vingame.bot.domain.bot.auth.TipLoginRequest;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.websocketparser.auth.DefaultLoginRequest;
@@ -21,12 +22,19 @@ public class AuthStrategyFactory {
         }
 
         return switch (productCode) {
-            case P_103, P_105, P_114, P_116, P_118, P_119, P_222, P_066 -> new AuthProfile(
+            case P_103, P_105, P_114, P_118, P_119, P_222, P_066 -> new AuthProfile(
                     "/user/login.aspx",
                     "/user/register.aspx",
                     "/user/update.aspx",
                     null,
                     ctx -> new DefaultLoginRequest(ctx.userName(), ctx.password(), ctx.appId(), ctx.fingerprint())
+            );
+            case P_116 -> new AuthProfile(
+                    "/user/login.aspx",
+                    "/user/register.aspx",
+                    "/user/update.aspx",
+                    null,
+                    ctx -> new TipLoginRequest(ctx.userName(), ctx.password(), ctx.fingerprint())
             );
             case P_097 -> new AuthProfile(
                     "/gwms/v1/bot/login.aspx",

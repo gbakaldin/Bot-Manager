@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.bot.message;
 
 import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
+import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.nohu.NohuGameMessageTypes;
 import com.vingame.bot.domain.brand.model.ProductCode;
 
@@ -25,8 +26,9 @@ public class GameMessageTypesResolver {
         return switch (productCode) {
             case P_097 -> new BomGameMessageTypes();
             case P_098 -> new BomGameMessageTypes();
+            case P_116 -> new TipGameMessageTypes();
             case P_118 -> new NohuGameMessageTypes();
-            case P_066, P_103, P_105, P_114, P_116, P_119, P_222 ->
+            case P_066, P_103, P_105, P_114, P_119, P_222 ->
                 throw new IllegalArgumentException(
                     "GameMessageTypes not yet implemented for product code: " + productCode.getCode() +
                     ". Please create a GameMessageTypes implementation for this product.");
