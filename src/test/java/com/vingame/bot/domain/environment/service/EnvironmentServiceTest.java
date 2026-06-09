@@ -19,6 +19,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.HashMap;
 import java.util.List;
@@ -314,6 +315,39 @@ class EnvironmentServiceTest {
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("Origin");
             verify(repository, never()).save(any(Environment.class));
+        }
+
+        @Test
+        @DisplayName("Should populate periodicLogout defaults from app config when null")
+        void shouldPopulatePeriodicLogoutDefaults() {
+            ReflectionTestUtils.setField(service, "defaultPeriodicLogoutEnabled", true);
+            ReflectionTestUtils.setField(service, "defaultPeriodicLogoutIntervalMinutes", 60);
+            Environment env = Environment.builder().name("New Env").headers(minimalHeaders()).build();
+            when(repository.save(any(Environment.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Environment result = service.save(env);
+
+            assertThat(result.getPeriodicLogoutEnabled()).isTrue();
+            assertThat(result.getPeriodicLogoutIntervalMinutes()).isEqualTo(60);
+        }
+
+        @Test
+        @DisplayName("Should preserve explicit periodicLogout values from frontend")
+        void shouldPreserveExplicitPeriodicLogoutValues() {
+            ReflectionTestUtils.setField(service, "defaultPeriodicLogoutEnabled", true);
+            ReflectionTestUtils.setField(service, "defaultPeriodicLogoutIntervalMinutes", 60);
+            Environment env = Environment.builder()
+                    .name("New Env")
+                    .headers(minimalHeaders())
+                    .periodicLogoutEnabled(false)
+                    .periodicLogoutIntervalMinutes(15)
+                    .build();
+            when(repository.save(any(Environment.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Environment result = service.save(env);
+
+            assertThat(result.getPeriodicLogoutEnabled()).isFalse();
+            assertThat(result.getPeriodicLogoutIntervalMinutes()).isEqualTo(15);
         }
 
         @Test

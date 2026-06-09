@@ -10,6 +10,7 @@ import com.vingame.bot.domain.environment.model.EnvironmentFilter;
 import com.vingame.bot.domain.environment.model.EnvironmentType;
 import com.vingame.bot.domain.environment.repository.EnvironmentRepository;
 import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
@@ -28,6 +29,12 @@ public class EnvironmentService {
     private final EnvironmentRepository repository;
     private final EnvironmentMapper mapper;
     private final MongoTemplate mongoTemplate;
+
+    @Value("${bot.periodic-logout.enabled:true}")
+    private boolean defaultPeriodicLogoutEnabled;
+
+    @Value("${bot.periodic-logout.interval-minutes:60}")
+    private int defaultPeriodicLogoutIntervalMinutes;
 
     public EnvironmentService(EnvironmentRepository repository, EnvironmentMapper mapper, MongoTemplate mongoTemplate) {
         this.repository = repository;
@@ -63,10 +70,20 @@ public class EnvironmentService {
 
     public Environment save(Environment environment) {
         environment.setHeaders(validateAndMergeWsHeaders(environment.getHeaders()));
+        applyPeriodicLogoutDefaults(environment);
         if (environment.getId() == null || environment.getId().isEmpty()) {
             environment.setId(UUID.randomUUID().toString());
         }
         return repository.save(environment);
+    }
+
+    private void applyPeriodicLogoutDefaults(Environment environment) {
+        if (environment.getPeriodicLogoutEnabled() == null) {
+            environment.setPeriodicLogoutEnabled(defaultPeriodicLogoutEnabled);
+        }
+        if (environment.getPeriodicLogoutIntervalMinutes() == null) {
+            environment.setPeriodicLogoutIntervalMinutes(defaultPeriodicLogoutIntervalMinutes);
+        }
     }
 
     public Environment update(String id, EnvironmentDTO updateDTO) {
