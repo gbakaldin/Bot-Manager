@@ -3,6 +3,7 @@ package com.vingame.bot.domain.botgroup.controller;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatusDTO;
+import com.vingame.bot.common.dto.ErrorResponse;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
@@ -14,6 +15,7 @@ import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -100,7 +102,7 @@ public class BotGroupController {
             description = "Returns the freshly created bot group complete with the actual id. " +
                     "Set existingGroup=true to skip user registration (for migrating existing bots).")
     @PostMapping("/")
-    public ResponseEntity<BotGroupDTO> save(
+    public ResponseEntity<?> save(
             @Parameter(description = "Bot group body to save in the database")
             @RequestBody BotGroupDTO botGroupDTO) {
         try {
@@ -110,6 +112,12 @@ public class BotGroupController {
             return ResponseEntity.ok(mapper.toDTO(saved));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().build();
+        } catch (IllegalStateException e) {
+            // Upstream game/auth server rejected the request (e.g., all user
+            // registrations failed). Forward the underlying error message so
+            // the operator can act on it instead of guessing from an empty 5xx.
+            return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
+                    .body(new ErrorResponse("Game server error", e.getMessage()));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().build();
         }
