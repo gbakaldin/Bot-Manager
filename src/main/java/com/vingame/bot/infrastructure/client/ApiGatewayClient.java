@@ -305,7 +305,7 @@ public class ApiGatewayClient {
                     .os("OS X")
                     .appId(appId)
                     .device("Computer")
-                    .browser("chrome")
+                    .browser("WEB")
                     .source(appId)
                     .build();
             requestBuilder = HttpRequest.newBuilder()
