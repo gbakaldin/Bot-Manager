@@ -119,9 +119,14 @@ public class EnvironmentClientRegistry {
         // Fetch environment configuration
         Environment env = environmentService.findById(environmentId);
 
-        // Get prototype ApiGatewayClient from Spring and initialize with environment config
+        // Get prototype ApiGatewayClient from Spring and initialize with environment config.
+        // appId is brand-static; prefer the value baked into ProductCode and fall back to the
+        // Environment record for any product whose ProductCode.appId has not been populated yet.
+        String appId = env.getProductCode() != null && env.getProductCode().getAppId() != null
+                ? env.getProductCode().getAppId()
+                : env.getAppId();
         ApiGatewayClient apiGatewayClient = apiGatewayClientProvider.getObject();
-        apiGatewayClient.init(env.getApiGatewayUrl(), env.getAppId(), authStrategyFactory.getAuthProfile(env));
+        apiGatewayClient.init(env.getApiGatewayUrl(), appId, authStrategyFactory.getAuthProfile(env));
 
         // Create shared GameMsClient (stateless) with global GameMS URL
         GameMsClient gameMsClient = new GameMsClient(gameMsUrl);

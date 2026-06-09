@@ -6,23 +6,25 @@ import com.fasterxml.jackson.annotation.JsonFormat;
 @JsonFormat(shape = JsonFormat.Shape.OBJECT)
 public enum ProductCode {
 
-    P_066("066", "KCLUB"),
-    P_097("097", "BOM"),
-    P_098("098", "B52"),
-    P_103("103", "HIT"),
-    P_105("105", "IWIN"),
-    P_114("114", "RIK"),
-    P_116("116", "TIP"),
-    P_118("118", "NOHU"),
-    P_119("119", "WIN79"),
-    P_222("222", "BKK WIN");
+    P_066("066", "KCLUB", null),
+    P_097("097", "BOM", "bc114097"),
+    P_098("098", "B52", "bc114098"),
+    P_103("103", "HIT", null),
+    P_105("105", "IWIN", null),
+    P_114("114", "RIK", null),
+    P_116("116", "TIP", "bc115116"),
+    P_118("118", "NOHU", null),
+    P_119("119", "WIN79", null),
+    P_222("222", "BKK WIN", null);
 
     private final String code;
     private final String name;
+    private final String appId;
 
-    ProductCode(String code, String name) {
+    ProductCode(String code, String name, String appId) {
         this.code = code;
         this.name = name;
+        this.appId = appId;
     }
 
     public String getCode() {
@@ -31,6 +33,15 @@ public enum ProductCode {
 
     public String getName() {
         return name;
+    }
+
+    /**
+     * Static per-brand app_id used in auth gateway register/login payloads.
+     * Returns {@code null} for products where the value has not been confirmed
+     * yet — callers should fall back to {@code Environment.getAppId()}.
+     */
+    public String getAppId() {
+        return appId;
     }
 
     @JsonCreator

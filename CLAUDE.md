@@ -269,6 +269,8 @@ Every client that shows this 3-line pattern will be dropped by the server. Clien
 - [ ] Replace all deprecated API usage, remove deprecated classes and methods
 - [ ] Review `Bot.java` methods (`connectToSocket`, `restart`, etc.) - determine if still needed or can be simplified
 - [ ] Pre-flight username length validation in `BotGroupService.save` — auth gateway caps usernames per product (Tip/P_116 = 12 chars). Reject `namePrefix.length() + String.valueOf(botCount).length() > cap` before fan-out to save N wasted auth calls and surface a clean 400 instead of forwarding all N upstream errors.
+- [ ] Restart lifecycle bug — bots that authenticated cleanly on initial auto-start fail on `/restart` with `ValidationException: Authentication configuration is required`. Observed 2026-06-09 on group `0c9a93cb-20d6-4f57-9dbc-5c315dcf52e2`: 18 bots succeeded at 10:01:09 auto-start, all 18 failed at 10:02:55 restart (same code path that created them 1m46s earlier). Likely cause: `EnvironmentClientRegistry` or `BotCredentials` not rebuilt after `BotGroupRuntime.shutdown`. Investigate the restart path in `BotGroupBehaviorService`.
+- [ ] Remove `Environment.appId` field — once `ProductCode.appId` is populated for all 10 products (P_097/P_098/P_116 done as of 2026-06-09; remaining: P_066, P_103, P_105, P_114, P_118, P_119, P_222), drop the field from `Environment`, `EnvironmentDTO`, the mapper, and the fallback at `EnvironmentClientRegistry.java:124`. Mongo will keep the stale field as harmless extra data. Same applies for hardcoded appId values inside `TipLoginRequest` / `BomLoginRequest` — they should read from the resolved appId on the login context instead of duplicating brand knowledge.
 
 **Monitoring:**
 - [ ] Add API endpoints for monitoring
