@@ -12,11 +12,6 @@ public class TipLoginRequest implements LoginRequest {
     private final String username;
     private final String password;
 
-    @JsonProperty("fg")
-    private final String fingerprint;
-
-    private final String ip;
-
     @JsonProperty("app_id")
     private final String appId = "bc115116";
 
@@ -24,9 +19,16 @@ public class TipLoginRequest implements LoginRequest {
     private final String device = "Computer";
     private final String browser = "chrome";
 
+    @JsonProperty("fg")
+    private final String fingerprint;
+
     @JsonProperty("aff_id")
     private final String affId = "";
 
     @JsonProperty("apVer")
     private final String apVer = "0.0.912";
+
+    private final String version = "0.0.912";
+
+    private final String ip;
 }
