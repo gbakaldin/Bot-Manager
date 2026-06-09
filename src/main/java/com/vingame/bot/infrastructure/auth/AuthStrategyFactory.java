@@ -23,16 +23,16 @@ public class AuthStrategyFactory {
 
         return switch (productCode) {
             case P_103, P_105, P_114, P_118, P_119, P_222, P_066 -> new AuthProfile(
-                    "/user/login.aspx",
-                    "/user/register.aspx",
-                    "/user/update.aspx",
+                    "/gwms/v1/bot/login.aspx",
+                    "/gwms/v1/bot/register.aspx",
+                    "/gwms/v1/bot/update-fullname.aspx",
                     "58bc2820612d23c34fe43d0b2c6f7223",
                     ctx -> new DefaultLoginRequest(ctx.userName(), ctx.password(), ctx.appId(), ctx.fingerprint())
             );
             case P_116 -> new AuthProfile(
-                    "/user/login.aspx",
-                    "/user/register.aspx",
-                    "/user/update.aspx",
+                    "/gwms/v1/bot/login.aspx",
+                    "/gwms/v1/bot/register.aspx",
+                    "/gwms/v1/bot/update-fullname.aspx",
                     "58bc2820612d23c34fe43d0b2c6f7223",
                     ctx -> new TipLoginRequest(ctx.userName(), ctx.password(), ctx.fingerprint(), botIp)
             );
