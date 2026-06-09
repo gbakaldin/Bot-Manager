@@ -26,14 +26,14 @@ public class AuthStrategyFactory {
                     "/user/login.aspx",
                     "/user/register.aspx",
                     "/user/update.aspx",
-                    null,
+                    "58bc2820612d23c34fe43d0b2c6f7223",
                     ctx -> new DefaultLoginRequest(ctx.userName(), ctx.password(), ctx.appId(), ctx.fingerprint())
             );
             case P_116 -> new AuthProfile(
                     "/user/login.aspx",
                     "/user/register.aspx",
                     "/user/update.aspx",
-                    null,
+                    "58bc2820612d23c34fe43d0b2c6f7223",
                     ctx -> new TipLoginRequest(ctx.userName(), ctx.password(), ctx.fingerprint(), botIp)
             );
             case P_097 -> new AuthProfile(
