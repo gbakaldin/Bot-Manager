@@ -34,7 +34,7 @@ public class AuthStrategyFactory {
                     "/user/register.aspx",
                     "/user/update.aspx",
                     null,
-                    ctx -> new TipLoginRequest(ctx.userName(), ctx.password(), ctx.fingerprint())
+                    ctx -> new TipLoginRequest(ctx.userName(), ctx.password(), ctx.fingerprint(), botIp)
             );
             case P_097 -> new AuthProfile(
                     "/gwms/v1/bot/login.aspx",
