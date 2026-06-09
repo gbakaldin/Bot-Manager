@@ -20,7 +20,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
@@ -28,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -224,10 +227,17 @@ class EnvironmentServiceTest {
     @DisplayName("save")
     class SaveTests {
 
+        private Map<String, String> minimalHeaders() {
+            Map<String, String> h = new HashMap<>();
+            h.put("Host", "nohusk.sgame.club");
+            h.put("Origin", "https://118.stgame.win");
+            return h;
+        }
+
         @Test
         @DisplayName("Should generate UUID when ID is null")
         void shouldGenerateIdWhenNull() {
-            Environment env = Environment.builder().name("New Env").build();
+            Environment env = Environment.builder().name("New Env").headers(minimalHeaders()).build();
             when(repository.save(any(Environment.class))).thenAnswer(inv -> inv.getArgument(0));
 
             Environment result = service.save(env);
@@ -238,7 +248,7 @@ class EnvironmentServiceTest {
         @Test
         @DisplayName("Should generate UUID when ID is empty")
         void shouldGenerateIdWhenEmpty() {
-            Environment env = Environment.builder().id("").name("New Env").build();
+            Environment env = Environment.builder().id("").name("New Env").headers(minimalHeaders()).build();
             when(repository.save(any(Environment.class))).thenAnswer(inv -> inv.getArgument(0));
 
             Environment result = service.save(env);
@@ -249,7 +259,7 @@ class EnvironmentServiceTest {
         @Test
         @DisplayName("Should keep existing ID when already set")
         void shouldKeepExistingId() {
-            Environment env = Environment.builder().id("existing-id").name("Existing Env").build();
+            Environment env = Environment.builder().id("existing-id").name("Existing Env").headers(minimalHeaders()).build();
             when(repository.save(env)).thenReturn(env);
 
             Environment result = service.save(env);
@@ -260,12 +270,73 @@ class EnvironmentServiceTest {
         @Test
         @DisplayName("Should call repository.save")
         void shouldCallRepositorySave() {
-            Environment env = Environment.builder().id("id").build();
+            Environment env = Environment.builder().id("id").headers(minimalHeaders()).build();
             when(repository.save(env)).thenReturn(env);
 
             service.save(env);
 
             verify(repository).save(env);
+        }
+
+        @Test
+        @DisplayName("Should reject save when headers are null")
+        void shouldRejectNullHeaders() {
+            Environment env = Environment.builder().name("Bad Env").build();
+
+            assertThatThrownBy(() -> service.save(env))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Host")
+                    .hasMessageContaining("Origin");
+            verify(repository, never()).save(any(Environment.class));
+        }
+
+        @Test
+        @DisplayName("Should reject save when Host header is missing")
+        void shouldRejectMissingHost() {
+            Map<String, String> h = new HashMap<>();
+            h.put("Origin", "https://118.stgame.win");
+            Environment env = Environment.builder().name("Bad Env").headers(h).build();
+
+            assertThatThrownBy(() -> service.save(env))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Host");
+            verify(repository, never()).save(any(Environment.class));
+        }
+
+        @Test
+        @DisplayName("Should reject save when Origin header is missing")
+        void shouldRejectMissingOrigin() {
+            Map<String, String> h = new HashMap<>();
+            h.put("Host", "nohusk.sgame.club");
+            Environment env = Environment.builder().name("Bad Env").headers(h).build();
+
+            assertThatThrownBy(() -> service.save(env))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("Origin");
+            verify(repository, never()).save(any(Environment.class));
+        }
+
+        @Test
+        @DisplayName("Should merge frontend headers with defaults; frontend wins on conflict")
+        void shouldMergeWithDefaults() {
+            Map<String, String> h = new HashMap<>();
+            h.put("Host", "nohusk.sgame.club");
+            h.put("Origin", "https://118.stgame.win");
+            h.put("Pragma", "frontend-override");           // override a default
+            h.put("X-Custom", "custom-value");                // arbitrary custom
+            Environment env = Environment.builder().name("New Env").headers(h).build();
+            when(repository.save(any(Environment.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Environment result = service.save(env);
+
+            assertThat(result.getHeaders())
+                    .containsEntry("Host", "nohusk.sgame.club")
+                    .containsEntry("Origin", "https://118.stgame.win")
+                    .containsEntry("Pragma", "frontend-override")  // frontend wins
+                    .containsEntry("X-Custom", "custom-value")
+                    .containsEntry("Cache-Control", "no-cache")     // default kept
+                    .containsEntry("Upgrade", "websocket")
+                    .containsEntry("Sec-WebSocket-Version", "13");
         }
     }
 
