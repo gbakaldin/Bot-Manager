@@ -61,6 +61,11 @@ public class BotMetrics {
     public static final String BOT_JACKPOTS_TOTAL = "bot_jackpots_total";
     public static final String BOT_JACKPOT_AMOUNT_TOTAL = "bot_jackpot_amount_total";
 
+    // RESTART_LIFECYCLE_FIX — per-bot creation failures during group start.
+    // Tag {@code reason} is bounded: validation | auth | unknown (Architecture
+    // Decision 5). Same MDC-driven per-bot tag shape as the rest.
+    public static final String BOT_CREATION_FAILURES_TOTAL = "bot_creation_failures_total";
+
     private final MeterRegistry registry;
 
     public BotMetrics(MeterRegistry registry) {
@@ -126,6 +131,21 @@ public class BotMetrics {
     public void incBotAutoDeposit(boolean success) {
         Counter.builder(BOT_AUTO_DEPOSITS_TOTAL)
                 .tag("outcome", success ? "success" : "failure")
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * Increment the per-bot creation-failure counter. Fired from
+     * {@code BotGroupBehaviorService.createBotsInParallel}'s catch block when a
+     * single bot fails to be created during group start.
+     *
+     * @param reason bounded label: {@code validation | auth | unknown}.
+     */
+    public void incBotCreationFailure(String reason) {
+        Counter.builder(BOT_CREATION_FAILURES_TOTAL)
+                .tag("reason", reason)
                 .tags(mdcTags())
                 .register(registry)
                 .increment();

@@ -313,17 +313,45 @@ public class BotGroupBehaviorService {
                 Bot bot = futures.get(i).join();
                 bots.add(bot);
             } catch (Exception e) {
-                log.error("Failed to create bot {}/{}: {}", i + 1, botCount, e.getMessage());
+                // Unwrap CompletionException → real cause; users care about the
+                // actual auth/validation failure, not the wrapper.
+                Throwable cause = e.getCause() != null ? e.getCause() : e;
+                log.error("Failed to create bot {}/{} for group {} (env {}): {}",
+                        i + 1, botCount, group.getId(), group.getEnvironmentId(),
+                        cause.toString(), cause);
+                botMetrics.incBotCreationFailure(classifyCreationFailure(cause));
                 errors.add(e);
             }
         }
 
         if (!errors.isEmpty()) {
-            log.warn("Created {}/{} bots successfully ({} failures)",
-                    bots.size(), botCount, errors.size());
+            log.warn("Created {}/{} bots successfully ({} failures) for group {}",
+                    bots.size(), botCount, errors.size(), group.getId());
         }
 
         return bots;
+    }
+
+    /**
+     * Classify a bot-creation failure into a bounded reason tag for
+     * {@code bot_creation_failures_total}. Bounded labels keep Prometheus
+     * cardinality low. RESTART_LIFECYCLE_FIX Architecture Decision 5.
+     */
+    private static String classifyCreationFailure(Throwable cause) {
+        if (cause instanceof IllegalStateException || cause instanceof IllegalArgumentException) {
+            return "validation";
+        }
+        // Match common auth-failure markers without forcing a hard dependency on
+        // any specific exception type — websocket-parser throws ValidationException
+        // (caught above) but ApiGatewayClient may throw various IOExceptions /
+        // RuntimeExceptions wrapping the upstream auth failure.
+        String className = cause.getClass().getSimpleName().toLowerCase();
+        String message = cause.getMessage() != null ? cause.getMessage().toLowerCase() : "";
+        if (className.contains("auth") || message.contains("auth")
+                || message.contains("login") || message.contains("token")) {
+            return "auth";
+        }
+        return "unknown";
     }
 
     /**
@@ -366,7 +394,7 @@ public class BotGroupBehaviorService {
                 .botIndex(botIndex)
                 .game(game)
                 .behaviorConfig(behaviorConfig)
-                .zoneName(environment.getMiniZoneName())
+                .zoneName(environment.resolveZoneName(game))
                 .watchdogTimeoutSeconds(watchdogTimeoutSeconds)
                 .build();
 
@@ -417,7 +445,15 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Restart a bot group (even if DEAD)
+     * Restart a bot group (even if DEAD).
+     * <p>
+     * RESTART_LIFECYCLE_FIX Architecture Decision 6: if the subsequent {@code start}
+     * produces zero live bots while the group's {@code botCount} is positive, throw
+     * {@link IllegalStateException}. {@code start()} itself swallows per-bot failures
+     * intentionally — the controller layer needs an explicit signal that a restart
+     * (which begins with a healthy running group) silently went to zero bots, since
+     * "zero bots with targetStatus=ACTIVE" was the symptom that originally hid the
+     * 2026-06-09 outage.
      */
     public void restart(String id) {
         log.info("Restarting bot group {}", id);
@@ -431,6 +467,19 @@ public class BotGroupBehaviorService {
         }
 
         start(id);
+
+        // Verify post-start runtime is populated. If start() produced zero bots
+        // despite a non-zero botCount, surface that as an exception. The controller
+        // already returns 500 on Exception; this turns silent failure into an
+        // entry the operator can grep for and metrics they can alert on.
+        BotGroup group = botGroupService.findById(id);
+        BotGroupRuntime runtime = runningGroups.get(id);
+        int alive = runtime != null ? runtime.getBotInstances().size() : 0;
+        if (group.getBotCount() > 0 && alive == 0) {
+            throw new IllegalStateException(String.format(
+                    "Restart of group %s produced %d/%d bots; check logs and %s metric for cause",
+                    id, alive, group.getBotCount(), BotMetrics.BOT_CREATION_FAILURES_TOTAL));
+        }
     }
 
     /**

@@ -210,6 +210,14 @@ class BotGroupBehaviorServiceTest {
     @DisplayName("start - createBot failure behavior")
     class StartCreateBotFailureTests {
 
+        // NOTE: This test exercises the direct {@code start} path only.
+        // {@code restart} (RESTART_LIFECYCLE_FIX Architecture Decision 6) is
+        // stricter — it throws IllegalStateException when start produces zero
+        // bots, because a restart begins with a healthy running group and
+        // "zero bots with targetStatus=ACTIVE" is the exact symptom that hid
+        // the 2026-06-09 outage. See BotGroupBehaviorServiceRestartTest.
+        // Direct {@code start} remains tolerant (e.g. first-time start of a
+        // freshly-configured group where some bot rows may legitimately fail).
         @Test
         @DisplayName("Should still complete start with zero bots when every createBot throws (per-bot failures are swallowed by createBotsInParallel)")
         void shouldCompleteWithZeroBotsWhenAllCreateBotsFail() {

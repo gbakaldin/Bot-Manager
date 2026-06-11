@@ -90,10 +90,33 @@ public class BotFactory {
         EnvironmentClients environmentClients = clientRegistry.getClients(environmentId);
 
         Environment env = environmentClients.getEnvironment();
+        // Resolve effective zoneName for this (env, game) pair. When the env is not
+        // customZone=true, this returns product defaults ("MiniGame"/"Simms") rather
+        // than the null miniZoneName that historically caused VingameWebSocketClient
+        // to throw "Authentication configuration is required" at builder.build().
+        // See RESTART_LIFECYCLE_FIX.
+        String resolvedZoneName = env.resolveZoneName(game);
+        if (resolvedZoneName == null || resolvedZoneName.isBlank()) {
+            // Only reachable when customZone=true with a blank custom field — a real
+            // env misconfiguration. Fail loud with full context so the operator can
+            // identify the bad env without grepping every bot's auth log.
+            throw new IllegalStateException(String.format(
+                    "Cannot create bot %s: resolved zoneName is null/blank " +
+                            "(environmentId=%s, gameType=%s, customZone=%s, " +
+                            "miniZoneName=%s, cardZoneName=%s). " +
+                            "When customZone=true the matching custom field must be populated.",
+                    configuration.getCredentials().getUsername(),
+                    environmentId,
+                    game.getGameType(),
+                    env.isCustomZone(),
+                    env.getMiniZoneName(),
+                    env.getCardZoneName()
+            ));
+        }
         ClientFactory freshClientFactory = new ClientFactory();
         freshClientFactory.setUri(URI.create(env.getWebSocketMiniUrl()));
         freshClientFactory.setHeaders(env.getHeaders());
-        freshClientFactory.setZoneName(env.getMiniZoneName());
+        freshClientFactory.setZoneName(resolvedZoneName);
         freshClientFactory.setEncryption(env.getEncryptionKey() != null && env.getEncryptionIv() != null);
         freshClientFactory.setEncryptionKey(env.getEncryptionKey());
         freshClientFactory.setEncryptionIv(env.getEncryptionIv());
