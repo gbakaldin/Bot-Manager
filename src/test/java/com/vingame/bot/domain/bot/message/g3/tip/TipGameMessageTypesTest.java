@@ -3,12 +3,17 @@ package com.vingame.bot.domain.bot.message.g3.tip;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.domain.bot.message.BettingMiniMessage;
+import com.vingame.bot.domain.bot.message.HasBetTotals;
+import com.vingame.bot.domain.bot.message.HasBotWinnings;
+import com.vingame.bot.domain.bot.message.HasJackpot;
 import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -155,5 +160,96 @@ class TipGameMessageTypesTest {
         assertThat(tip.getPs()).hasSize(2);
         assertThat(tip.getPs().get(0).getUid()).isEqualTo("bot1");
         assertThat(tip.getPs().get(0).getWm()).isEqualTo(1500L);
+    }
+
+    /* ----- Capability interfaces — ENDGAME_METRICS marker dispatch ----- */
+
+    @Test
+    @DisplayName("HasBotWinnings: returns root wm regardless of userName arg (payload is personalized)")
+    void hasBotWinnings() {
+        TipEndGameMessage end = newEndGame(/*iJp*/ false, /*jpV*/ 0L, /*tJpV*/ 0L, /*wm*/ 750L,
+                List.of(new TipSubscribeMessage.BetInfoWithTotal(0, 1, 100L, 500L)));
+        // userName is ignored — Tip delivers EndGame personalized to the recipient.
+        assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isEqualTo(750L);
+        assertThat(((HasBotWinnings) end).winningsFor(null)).isEqualTo(750L);
+    }
+
+    @Test
+    @DisplayName("HasJackpot: returns jpV (per-user) when iJp=true, 0 otherwise; tJpV ignored")
+    void hasJackpot() {
+        // iJp=true -> jpV is the per-user payout (default choice; see Javadoc on
+        // TipEndGameMessage.jackpotFor pending iJp=false sample).
+        TipEndGameMessage withJp = newEndGame(true, 1_603_000L, 200_000L, 1500L,
+                List.<TipSubscribeMessage.BetInfoWithTotal>of());
+        assertThat(((HasJackpot) withJp).jackpotFor("any-bot")).isEqualTo(1_603_000L);
+
+        // iJp=false -> 0 even when tJpV > 0 (tJpV is the pool/tier, not a payout).
+        TipEndGameMessage noJp = newEndGame(false, 0L, 200_000L, 0L,
+                List.<TipSubscribeMessage.BetInfoWithTotal>of());
+        assertThat(((HasJackpot) noJp).jackpotFor("any-bot")).isZero();
+    }
+
+    @Test
+    @DisplayName("HasBetTotals: betAmountFor sums bs[].b (per-user), betCountFor sums bs[].bc")
+    void hasBetTotals() {
+        TipEndGameMessage end = newEndGame(false, 0L, 0L, 0L, List.of(
+                new TipSubscribeMessage.BetInfoWithTotal(0, 2, 2000L, 8000L),
+                new TipSubscribeMessage.BetInfoWithTotal(1, 1, 500L, 3500L),
+                new TipSubscribeMessage.BetInfoWithTotal(2, 3, 100L, 9000L)
+        ));
+        HasBetTotals totals = (HasBetTotals) end;
+        // Sum of bs[].b — per-user staked amounts, not the v aggregate.
+        assertThat(totals.betAmountFor("any-bot")).isEqualTo(2600L);
+        // Sum of bs[].bc — per-user bet counts.
+        assertThat(totals.betCountFor("any-bot")).isEqualTo(6);
+    }
+
+    @Test
+    @DisplayName("HasBetTotals: empty/null bs[] yields 0 amount and 0 count")
+    void hasBetTotalsEmpty() {
+        TipEndGameMessage emptyBs = newEndGame(false, 0L, 0L, 0L, List.<TipSubscribeMessage.BetInfoWithTotal>of());
+        assertThat(((HasBetTotals) emptyBs).betAmountFor("any-bot")).isZero();
+        assertThat(((HasBetTotals) emptyBs).betCountFor("any-bot")).isZero();
+
+        TipEndGameMessage nullBs = newEndGame(false, 0L, 0L, 0L, null);
+        assertThat(((HasBetTotals) nullBs).betAmountFor("any-bot")).isZero();
+        assertThat(((HasBetTotals) nullBs).betCountFor("any-bot")).isZero();
+    }
+
+    @Test
+    @DisplayName("Deserialized endGame.json fixture exercises all three capability interfaces end-to-end")
+    void capabilityInterfacesFromFixture() throws Exception {
+        ObjectMapper mapper = newMapper(false);
+        TipEndGameMessage tip = (TipEndGameMessage) mapper.readValue(
+                loadFixture("endGame.json"), BettingMiniMessage.class);
+
+        assertThat(((HasBotWinnings) tip).winningsFor("bot1")).isEqualTo(1500L);
+        assertThat(((HasJackpot) tip).jackpotFor("bot1")).isEqualTo(1_603_000L);
+        // bs[]: (eid=0, bc=2, b=2000) + (eid=1, bc=1, b=500) -> count 3, amount 2500.
+        assertThat(((HasBetTotals) tip).betAmountFor("bot1")).isEqualTo(2500L);
+        assertThat(((HasBetTotals) tip).betCountFor("bot1")).isEqualTo(3);
+    }
+
+    /** Minimal builder for TipEndGameMessage covering the fields read by the capability methods. */
+    private static TipEndGameMessage newEndGame(boolean iJp, long jpV, long tJpV, long wm,
+                                                List<TipSubscribeMessage.BetInfoWithTotal> bs) {
+        return new TipEndGameMessage(
+                /*cmd*/ 11006,
+                /*iJ*/ false,
+                /*gid*/ 1,
+                /*ps*/ null,
+                /*tJpV*/ tJpV,
+                /*eIn*/ null,
+                /*d1*/ 0, /*d2*/ 0, /*d3*/ 0,
+                /*iJp*/ iJp,
+                /*sid*/ 0L,
+                /*bs*/ bs,
+                /*jpV*/ jpV,
+                /*tJpv2*/ 0L,
+                /*jPTp*/ 0,
+                /*jpCD*/ null,
+                /*wm*/ wm,
+                /*sDi*/ null
+        );
     }
 }

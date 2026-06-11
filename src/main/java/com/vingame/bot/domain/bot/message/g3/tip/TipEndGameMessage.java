@@ -3,6 +3,9 @@ package com.vingame.bot.domain.bot.message.g3.tip;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
+import com.vingame.bot.domain.bot.message.HasBetTotals;
+import com.vingame.bot.domain.bot.message.HasBotWinnings;
+import com.vingame.bot.domain.bot.message.HasJackpot;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -10,7 +13,82 @@ import java.util.List;
 
 @Getter
 @Setter
-public class TipEndGameMessage extends EndGameMessage {
+public class TipEndGameMessage extends EndGameMessage
+        implements HasBotWinnings, HasJackpot, HasBetTotals {
+
+    /**
+     * This bot's gross winnings for the just-completed round. Source: root {@code wm}
+     * field on the EndGame payload — confirmed in
+     * {@code docs/plans/ROUND_DATA_COLLECTION_FINDINGS.md} as "win money of the user."
+     * <p>
+     * Tip's EndGame is delivered personalized to the recipient; {@code wm} is already
+     * this bot's value, so the {@code userName} argument is ignored.
+     */
+    @Override
+    public long winningsFor(String userName) {
+        return wm;
+    }
+
+    /**
+     * This bot's jackpot payout for the just-completed round; {@code 0} when no
+     * jackpot was won ({@code iJp == false}).
+     * <p>
+     * <b>Field choice (defensible default pending iJp=false sample).</b>
+     * Tip carries two jackpot-shaped fields on EndGame: {@code jpV} and {@code tJpV}.
+     * The only sample available at implementation time
+     * ({@code docs/plans/ROUND_DATA_COLLECTION_FINDINGS.md}) showed both non-zero with
+     * {@code iJp=true} ({@code jpV=1603000}, {@code tJpV=200000}). Hypothesis: {@code jpV}
+     * is the per-user jackpot payout for this round, {@code tJpV} is the remaining
+     * jackpot pool or total tier (consistent with Tip's {@code t}-prefix convention on
+     * fields like {@code tFB}, {@code tFD}, {@code tTU} meaning "time for/total ...").
+     * {@code jpV} is therefore chosen as the per-user payout.
+     * <p>
+     * <b>Open question (per ROUND_DATA_COLLECTION_FINDINGS.md):</b> need a second
+     * sample with {@code iJp=false} to confirm this hypothesis. If {@code tJpV} stays
+     * fixed across rounds with {@code iJp=false} and {@code jpV} reads 0, the choice
+     * is correct; if both move, revisit. Until then, this method publishes {@code jpV}
+     * to the {@code bot_jackpots_total} / {@code bot_jackpot_amount_total} counters.
+     */
+    @Override
+    public long jackpotFor(String userName) {
+        return iJp ? jpV : 0L;
+    }
+
+    /**
+     * Total amount this bot staked across all positions in the just-completed round.
+     * <p>
+     * Source: {@code sum(bs[].b)} — per
+     * {@code docs/plans/ROUND_DATA_COLLECTION_FINDINGS.md}, {@code bs[i].b} is "this
+     * user's bet on this option" (confirmed); the matching {@code bs[i].v} is the
+     * round-wide aggregate across all players and is intentionally not summed here.
+     * <p>
+     * {@code userName} ignored — Tip's payload is recipient-personalized.
+     */
+    @Override
+    public long betAmountFor(String userName) {
+        if (bs == null) return 0L;
+        long total = 0L;
+        for (TipSubscribeMessage.BetInfoWithTotal info : bs) {
+            total += info.getB();
+        }
+        return total;
+    }
+
+    /**
+     * Number of bets this bot placed across all positions in the just-completed round.
+     * Source: {@code sum(bs[].bc)} — per ROUND_DATA_COLLECTION_FINDINGS.md, {@code bc}
+     * is the per-user bet count on each option (symmetric with the per-user amount
+     * field {@code b}).
+     */
+    @Override
+    public int betCountFor(String userName) {
+        if (bs == null) return 0;
+        int total = 0;
+        for (TipSubscribeMessage.BetInfoWithTotal info : bs) {
+            total += info.getBc();
+        }
+        return total;
+    }
 
     private boolean iJ;
     private int gid;
