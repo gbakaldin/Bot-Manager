@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.botgroup.service;
 
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.UpstreamRegistrationException;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
@@ -274,7 +275,7 @@ class BotGroupServiceTest {
             when(apiGatewayClient.registerUsers("bot", "pass", 5)).thenReturn(failResult);
 
             assertThatThrownBy(() -> service.save(group))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(UpstreamRegistrationException.class)
                     .hasMessageContaining("Failed to register any users");
 
             verify(repository, never()).save(any());

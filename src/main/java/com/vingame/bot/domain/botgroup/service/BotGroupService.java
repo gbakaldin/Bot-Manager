@@ -4,6 +4,7 @@ import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.UpstreamRegistrationException;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
@@ -100,7 +101,8 @@ public class BotGroupService {
      * @param botGroup The bot group to save or update
      * @param skipRegistration If true, skips user registration (for migrating existing bots)
      * @return The saved/updated bot group
-     * @throws IllegalStateException if user registration completely fails (new groups only)
+     * @throws UpstreamRegistrationException if user registration completely fails (new groups only);
+     *         mapped to HTTP 502 by {@link com.vingame.bot.common.exception.RestExceptionHandler}.
      * @throws ResourceNotFoundException if the environment doesn't exist
      */
     public BotGroup save(BotGroup botGroup, boolean skipRegistration) {
@@ -133,7 +135,7 @@ public class BotGroupService {
                         String.join("; ", registrationResult.getErrors())
                     );
                     log.error(errorMsg);
-                    throw new IllegalStateException(errorMsg);
+                    throw new UpstreamRegistrationException(errorMsg);
                 }
 
                 if (registrationResult.isPartialSuccess()) {
