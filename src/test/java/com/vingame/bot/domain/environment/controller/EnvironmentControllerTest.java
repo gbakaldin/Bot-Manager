@@ -132,18 +132,22 @@ class EnvironmentControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 500 Internal Server Error with body when service throws unexpected exception")
+        @DisplayName("Should return 500 Internal Server Error with sanitised body when service throws unexpected exception")
         void shouldReturnInternalServerErrorWithBody() throws Exception {
-            // Arrange
+            // Confirms the terminal Exception handler in the advice produces
+            // a sanitised structured body — the raw "db down" message (or
+            // any Mongo / driver detail that would normally land here) must
+            // not reach the client. The full exception is logged server-side.
             String envId = "env-1";
             when(service.findById(envId)).thenThrow(new RuntimeException("db down"));
 
-            // Act & Assert — confirms the terminal Exception handler in the
-            // advice produces a structured body for this controller too.
             mockMvc.perform(get("/api/v1/environment/{id}", envId))
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.type").value("Internal error"))
-                    .andExpect(jsonPath("$.msg").value("db down"));
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Internal server error")))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("db down"))));
         }
     }
 

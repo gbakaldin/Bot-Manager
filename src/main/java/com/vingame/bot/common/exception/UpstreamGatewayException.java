@@ -6,8 +6,13 @@ package com.vingame.bot.common.exception;
  * {@link RestExceptionHandler}.
  * <p>
  * Carries a short {@code type} discriminator (copied verbatim into the response
- * body's {@code type} field) so the frontend can render different upstream
- * failure categories without parsing the message string.
+ * body's {@code type} field). All current subclasses emit
+ * {@code "Game server error"} as the {@code type} — the frontend distinguishes
+ * the specific upstream interaction (registration vs. login vs. …) via the
+ * {@code msg} string, not via {@code type}. New subclasses should keep the
+ * {@code "Game server error"} discriminator unless coordinated with the
+ * frontend; the field is preserved as a stable hook in case a future need
+ * arises for finer-grained UI branching.
  * <p>
  * Abstract — callers must pick a leaf subclass that names the specific upstream
  * interaction (registration / login / etc.).

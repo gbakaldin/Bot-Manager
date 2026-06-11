@@ -187,6 +187,12 @@ public class BotGroupBehaviorService {
         BotGroup group = botGroupService.findById(id);
 
         boolean started = false;
+        // Capture the in-flight failure so the cleanup log in the finally
+        // block can attach the cause. Without this, the failure-path log
+        // line would lose the exception type, message, and stacktrace —
+        // critical detail for the auto-start path on application ready,
+        // where there is no advice in the call chain.
+        Throwable failure = null;
         try {
             // Verify environment exists
             if (group.getEnvironmentId() == null) {
@@ -241,12 +247,14 @@ public class BotGroupBehaviorService {
             log.info("Bot group {} started successfully with {} bots", group.getName(), bots.size());
             started = true;
 
+        } catch (Throwable t) {
+            // Capture for the finally-block log and rethrow unchanged — the
+            // typed exception still propagates to RestExceptionHandler.
+            // Wrapping in RuntimeException would erase the type and force
+            // every failure into the generic 500 bucket.
+            failure = t;
+            throw t;
         } finally {
-            // try/finally (not try/catch) — the original exception propagates
-            // unchanged to RestExceptionHandler, which maps it to the right
-            // HTTP status (BadRequestException -> 400, ResourceNotFoundException
-            // -> 404, etc.). Wrapping in RuntimeException would erase the type
-            // and force every failure to land in the generic 500 bucket.
             if (!started) {
                 BotGroupRuntime failedRuntime = runningGroups.remove(id);
                 if (failedRuntime != null) {
@@ -264,11 +272,19 @@ public class BotGroupBehaviorService {
                             BotMdc.clear();
                         }
                     } catch (Exception cleanupEx) {
+                        // Pass cleanupEx as the final arg so SLF4J attaches
+                        // the trace — otherwise an executor-shutdown failure
+                        // would surface as a one-liner with no diagnostic.
                         log.error("Error cleaning up bots after failed start of group {}: {}",
-                                group.getName(), cleanupEx.getMessage());
+                                group.getName(), cleanupEx.getMessage(), cleanupEx);
                     }
                 }
-                log.error("Failed to start bot group {}", group.getName());
+                // Attach the captured failure so operators grepping for
+                // "Failed to start bot group" see the cause inline. Matters
+                // for the auto-start path (PostConstruct) where no advice
+                // logs the exception elsewhere.
+                log.error("Failed to start bot group {}: {}", group.getName(),
+                        failure != null ? failure.toString() : "(unknown)", failure);
             }
         }
     }

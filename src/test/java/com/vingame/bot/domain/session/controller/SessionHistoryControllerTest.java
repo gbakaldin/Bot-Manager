@@ -319,18 +319,23 @@ class SessionHistoryControllerTest {
     class AdviceIntegrationTests {
 
         @Test
-        @DisplayName("Unhandled RuntimeException on findById -> 500 with {type, msg} body via RestExceptionHandler")
+        @DisplayName("Unhandled RuntimeException on findById -> 500 with sanitised {type, msg} body via RestExceptionHandler")
         void shouldReturnInternalServerErrorWithBody() throws Exception {
             // Confirms the advice fires through this controller's error path
             // (catch ladders were removed in Phase B — without the advice, this
-            // would either propagate raw or return a bodyless 500).
+            // would either propagate raw or return a bodyless 500). The 500
+            // body is sanitised: raw exception messages may carry Mongo
+            // hostnames / bean wiring failures and must stay server-log-only.
             String id = "sess-1";
             when(service.findById(id)).thenThrow(new RuntimeException("db down"));
 
             mockMvc.perform(get("/api/v1/session-history/{id}", id))
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.type").value("Internal error"))
-                    .andExpect(jsonPath("$.msg").value("db down"));
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Internal server error")))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("db down"))));
         }
 
         @Test

@@ -513,17 +513,22 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 500 Internal Server Error with body when start fails")
+        @DisplayName("Should return 500 Internal Server Error with sanitised body when start fails")
         void shouldReturnInternalServerErrorWhenStartFails() throws Exception {
-            // Arrange
+            // The 500 fallback in RestExceptionHandler intentionally does not
+            // echo e.getMessage() to the client — raw exception messages can
+            // carry Mongo hostnames, Spring wiring failures, JDK HttpClient
+            // infra details. The full exception is logged server-side.
             String groupId = "123";
             doThrow(new RuntimeException("Start failed")).when(behaviorService).start(groupId);
 
-            // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.type").value("Internal error"))
-                    .andExpect(jsonPath("$.msg").value("Start failed"));
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Internal server error")))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("Start failed"))));
         }
 
         @Test
@@ -789,18 +794,21 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 500 Internal Server Error with body when getHealth throws unexpected exception")
+        @DisplayName("Should return 500 Internal Server Error with sanitised body when getHealth throws unexpected exception")
         void shouldReturnInternalServerErrorWhenGetHealthFails() throws Exception {
-            // Arrange
+            // Sanitised 500 fallback — body never echoes the raw exception
+            // message. Server log carries the trace.
             String groupId = "123";
             when(behaviorService.getHealth(groupId))
                     .thenThrow(new RuntimeException("Boom"));
 
-            // Act & Assert
             mockMvc.perform(get("/api/v1/bot-group/{id}/health", groupId))
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.type").value("Internal error"))
-                    .andExpect(jsonPath("$.msg").value("Boom"));
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Internal server error")))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("Boom"))));
         }
     }
 }

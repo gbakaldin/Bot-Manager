@@ -93,21 +93,37 @@ class RestExceptionHandlerTest {
     }
 
     @Test
-    @DisplayName("IllegalStateException -> 500 with {type:'Internal error', msg} (transitional)")
-    void illegalState_returns500WithBody() throws Exception {
+    @DisplayName("IllegalStateException -> 500 with sanitised body (msg does not echo e.getMessage())")
+    void illegalState_returns500WithSanitisedBody() throws Exception {
+        // Security: raw IllegalStateException messages from initialization
+        // checks ("ApiGatewayClient not initialized...") carry internal class
+        // state and must not reach the client. The full exception is logged
+        // server-side via log.error(..., e); operators correlate via the
+        // request URI in the log line.
         mockMvc.perform(get("/__test/illegal-state"))
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.type").value("Internal error"))
-                .andExpect(jsonPath("$.msg").value("not initialized"));
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("not initialized"))))
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.containsString("Internal server error")));
     }
 
     @Test
-    @DisplayName("Generic Exception -> 500 with {type:'Internal error', msg}")
-    void anyException_returns500WithBody() throws Exception {
+    @DisplayName("Generic Exception -> 500 with sanitised body (msg does not echo e.getMessage())")
+    void anyException_returns500WithSanitisedBody() throws Exception {
+        // Same rationale as illegalState_returns500WithSanitisedBody: the
+        // generic 500 fallback regularly catches Mongo connection failures,
+        // Spring bean wiring failures, JDK HttpClient infra errors — all of
+        // which carry hostnames, ports, class names. The body is sanitised;
+        // the server log carries the trace.
         mockMvc.perform(get("/__test/generic"))
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.type").value("Internal error"))
-                .andExpect(jsonPath("$.msg").value("boom"));
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("boom"))))
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.containsString("Internal server error")));
     }
 
     @Test
@@ -135,15 +151,16 @@ class RestExceptionHandlerTest {
     }
 
     @Test
-    @DisplayName("Terminal Exception fallback uses class simple name when getMessage() is null")
-    void nullMessageException_returns500WithClassSimpleName() throws Exception {
-        // Cover the AD-6 null-message branch in handleAny — without this arm,
-        // the JSON body would carry "msg":null and operators would lose all
-        // signal on what blew up.
+    @DisplayName("Terminal Exception fallback always emits the sanitised msg, even when e.getMessage() is null")
+    void nullMessageException_returns500WithSanitisedBody() throws Exception {
+        // The fixed sanitised message is unconditional — both null and
+        // non-null exception messages take the same body path. Operators
+        // still get the class name in the server log via log.error(..., e).
         mockMvc.perform(get("/__test/null-message"))
                 .andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.type").value("Internal error"))
-                .andExpect(jsonPath("$.msg").value("RuntimeException"));
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.containsString("Internal server error")));
     }
 
     @Test
@@ -157,6 +174,73 @@ class RestExceptionHandlerTest {
         mockMvc.perform(get("/__test/not-found"))
                 .andExpect(status().isNotFound())
                 .andExpect(content().bytes(new byte[0]));
+    }
+
+    @Test
+    @DisplayName("Sanitised 500: Mongo-style infra hostname in e.getMessage() never reaches the response body")
+    void anyException_doesNotLeakInfraHostnameInBody() throws Exception {
+        // Concrete security regression: a Mongo connection failure exposing
+        // the internal cluster hostname must not appear in the response body.
+        // The same shape covers Spring BeanCreationException, JDK
+        // UnknownHostException, etc. — anything that bubbles to handleAny.
+        mockMvc.perform(get("/__test/leaky-mongo"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.type").value("Internal error"))
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("mongo.internal"))))
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.containsString("Internal server error")));
+    }
+
+    @Test
+    @DisplayName("Sanitised 500: IllegalStateException carrying an infra hostname does not leak it in the body")
+    void illegalState_doesNotLeakInfraHostnameInBody() throws Exception {
+        // Mirrors handleAny coverage for the dedicated IllegalStateException
+        // arm — e.g. ApiGatewayClient.checkInitialized today throws an ISE
+        // whose message carries class state. Same sanitisation contract.
+        mockMvc.perform(get("/__test/leaky-illegal-state"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.type").value("Internal error"))
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.not(org.hamcrest.Matchers.containsString("mongo.internal"))))
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.containsString("Internal server error")));
+    }
+
+    /* ---- Spring's default 4xx mappings preserved (advice extends ResponseEntityExceptionHandler) ---- */
+
+    @Test
+    @DisplayName("Wrong HTTP method -> 405 with {type:'Method not allowed', msg}")
+    void wrongMethod_returns405WithBody() throws Exception {
+        // /__test/echo is mapped to POST only; a GET must surface as 405,
+        // not 500 (which is what would happen if the terminal Exception arm
+        // swallowed Spring's HttpRequestMethodNotSupportedException).
+        mockMvc.perform(get("/__test/echo"))
+                .andExpect(status().isMethodNotAllowed())
+                .andExpect(jsonPath("$.type").value("Method not allowed"));
+    }
+
+    @Test
+    @DisplayName("Unsupported content type -> 415 with {type:'Unsupported media type', msg}")
+    void unsupportedMediaType_returns415WithBody() throws Exception {
+        // /__test/echo consumes application/json; a text/plain body must
+        // produce 415, not 500.
+        mockMvc.perform(post("/__test/echo")
+                        .contentType(MediaType.TEXT_PLAIN)
+                        .content("plain text"))
+                .andExpect(status().isUnsupportedMediaType())
+                .andExpect(jsonPath("$.type").value("Unsupported media type"));
+    }
+
+    @Test
+    @DisplayName("Missing required @RequestParam -> 400 with {type:'Bad request', msg}")
+    void missingRequiredQueryParam_returns400WithBody() throws Exception {
+        // /__test/needs-param requires @RequestParam(name="q", required=true).
+        // Spring raises MissingServletRequestParameterException; the advice
+        // must keep this at 400, not promote it to 500.
+        mockMvc.perform(get("/__test/needs-param"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.type").value("Bad request"));
     }
 
     @Test
@@ -230,7 +314,7 @@ class RestExceptionHandlerTest {
             throw new RuntimeException();
         }
 
-        @PostMapping("/__test/echo")
+        @PostMapping(value = "/__test/echo", consumes = MediaType.APPLICATION_JSON_VALUE)
         public String echo(@RequestBody java.util.Map<String, Object> body) {
             return body.toString();
         }
@@ -242,6 +326,36 @@ class RestExceptionHandlerTest {
             // just for this test.
             throw new UpstreamGatewayException("Custom upstream type",
                     "custom upstream failure") {};
+        }
+
+        @GetMapping("/__test/leaky-mongo")
+        public String leakyMongo() {
+            // Models a Mongo connection failure whose message carries the
+            // internal cluster hostname. The sanitised handler must not let
+            // this reach the response body.
+            throw new RuntimeException(
+                    "Timed out after 30000 ms while waiting for a server that matches " +
+                            "WritableServerSelector. Client view of cluster state is " +
+                            "{type=UNKNOWN, servers=[{address=mongo.internal:27017, ...}]}");
+        }
+
+        @GetMapping("/__test/leaky-illegal-state")
+        public String leakyIllegalState() {
+            // Same shape as leakyMongo but routed through the dedicated
+            // IllegalStateException arm — covers the
+            // ApiGatewayClient.checkInitialized leak path.
+            throw new IllegalStateException(
+                    "ApiGatewayClient not initialized for cluster " +
+                            "mongo.internal:27017");
+        }
+
+        @GetMapping("/__test/needs-param")
+        public String needsParam(@org.springframework.web.bind.annotation.RequestParam(
+                name = "q", required = true) String q) {
+            // Forces MissingServletRequestParameterException when called
+            // without ?q=... — Spring's default 400 mapping should survive
+            // the advice's reformatting.
+            return q;
         }
     }
 }

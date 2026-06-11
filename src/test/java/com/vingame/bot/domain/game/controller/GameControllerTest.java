@@ -197,20 +197,23 @@ class GameControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 500 Internal Server Error when service throws")
+        @DisplayName("Should return 500 Internal Server Error with sanitised body when service throws")
         void shouldReturnInternalServerErrorWhenServiceThrows() throws Exception {
-            // Arrange
             when(service.findByBrandAndProduct(BrandCode.G2, ProductCode.P_097))
                     .thenThrow(new RuntimeException("boom"));
 
-            // Act & Assert — must carry the structured {type, msg} body so the
-            // operator sees the upstream message instead of an empty 500.
-            // Without the @Import(RestExceptionHandler.class) hookup, the body
-            // assertions below would fail (Spring's default 500 has no body).
+            // Must carry the structured {type, msg} body so the advice is
+            // proven wired into this controller (without @Import the body
+            // would be empty). The 500 fallback intentionally sanitises the
+            // msg — raw RuntimeException messages can carry Mongo hostnames,
+            // bean wiring failures, etc.
             mockMvc.perform(get("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097"))
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.type").value("Internal error"))
-                    .andExpect(jsonPath("$.msg").value("boom"));
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Internal server error")))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("boom"))));
         }
     }
 

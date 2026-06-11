@@ -434,6 +434,75 @@ class BotGroupBehaviorServiceRestartTest {
         }
     }
 
+    @Test
+    @DisplayName("start() failure log carries the cause type and message (API_ERROR_FORWARDING reviewer fix)")
+    void start_failureLogCarriesCauseTypeAndMessage() {
+        // API_ERROR_FORWARDING reviewer finding: Phase B's refactor swapped
+        // the outer catch(Exception) for try/finally + boolean started,
+        // losing the `e` reference in the failure log line. The fix
+        // captures the in-flight exception into a Throwable variable so
+        // operators grepping for "Failed to start bot group" see the cause
+        // inline — critical for the auto-start path (PostConstruct) where
+        // no RestExceptionHandler logs the exception elsewhere.
+        BotGroup group = BotGroup.builder()
+                .id("group-failurelog").name("Group-failurelog")
+                .environmentId("env-failurelog").gameId("game-1")
+                .botCount(1).namePrefix("bot").password("pass").build();
+
+        when(botGroupService.findById("group-failurelog")).thenReturn(group);
+        // Force the overall failure by making environmentService throw — that
+        // bubbles straight out of the try-block with a distinctive type and
+        // message so we can assert the failure-log carries them.
+        RuntimeException upstreamFailure = new RuntimeException(
+                "auth gateway returned 503 — circuit breaker open");
+        when(environmentService.findById("env-failurelog")).thenThrow(upstreamFailure);
+
+        CapturingAppender appender = new CapturingAppender(
+                "CapturingAppender-failure-log");
+        appender.start();
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        String loggerName = BotGroupBehaviorService.class.getName();
+        LoggerConfig loggerConfig = ctx.getConfiguration().getLoggerConfig(loggerName);
+        Level prev = loggerConfig.getLevel();
+        loggerConfig.addAppender(appender, Level.ALL, null);
+        loggerConfig.setLevel(Level.ALL);
+        ctx.updateLoggers();
+        try {
+            assertThatThrownBy(() -> service.start("group-failurelog"))
+                    .isSameAs(upstreamFailure);
+        } finally {
+            loggerConfig.removeAppender(appender.getName());
+            loggerConfig.setLevel(prev);
+            ctx.updateLoggers();
+            appender.stop();
+        }
+
+        List<LogEvent> errors = appender.events().stream()
+                .filter(e -> e.getLevel() == Level.ERROR)
+                .filter(e -> e.getMessage().getFormattedMessage()
+                        .contains("Failed to start bot group"))
+                .toList();
+
+        assertThat(errors)
+                .as("expected an ERROR log line for the start() failure")
+                .isNotEmpty();
+
+        LogEvent failureLog = errors.get(0);
+        String formatted = failureLog.getMessage().getFormattedMessage();
+        assertThat(formatted)
+                .as("failure log must carry the group name")
+                .contains("Group-failurelog");
+        assertThat(formatted)
+                .as("failure log must carry the cause type")
+                .contains("RuntimeException");
+        assertThat(formatted)
+                .as("failure log must carry the cause message")
+                .contains("auth gateway returned 503");
+        assertThat(failureLog.getThrown())
+                .as("failure log must attach the throwable so SLF4J can render the stacktrace")
+                .isSameAs(upstreamFailure);
+    }
+
     /**
      * Minimal in-memory log4j2 appender so we can assert on emitted log events.
      * Lives as a static nested class to keep the test file self-contained.
