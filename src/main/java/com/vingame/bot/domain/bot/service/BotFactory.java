@@ -97,9 +97,13 @@ public class BotFactory {
         // See RESTART_LIFECYCLE_FIX.
         String resolvedZoneName = env.resolveZoneName(game);
         if (resolvedZoneName == null || resolvedZoneName.isBlank()) {
-            // Only reachable when customZone=true with a blank custom field — a real
-            // env misconfiguration. Fail loud with full context so the operator can
-            // identify the bad env without grepping every bot's auth log.
+            // Reachable when customZone=true with a blank custom field — a real
+            // env misconfiguration. Also defensively reachable if game==null
+            // slipped through (resolveZoneName is documented null-safe on game),
+            // so we guard the gameType lookup to avoid NPE-while-formatting that
+            // would mask the real cause. Fail loud with full context so the
+            // operator can identify the bad env without grepping every bot's
+            // auth log.
             throw new IllegalStateException(String.format(
                     "Cannot create bot %s: resolved zoneName is null/blank " +
                             "(environmentId=%s, gameType=%s, customZone=%s, " +
@@ -107,7 +111,7 @@ public class BotFactory {
                             "When customZone=true the matching custom field must be populated.",
                     configuration.getCredentials().getUsername(),
                     environmentId,
-                    game.getGameType(),
+                    game != null ? game.getGameType() : null,
                     env.isCustomZone(),
                     env.getMiniZoneName(),
                     env.getCardZoneName()

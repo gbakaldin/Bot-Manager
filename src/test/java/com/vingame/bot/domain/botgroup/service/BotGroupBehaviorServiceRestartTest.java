@@ -8,7 +8,12 @@ import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.service.GameService;
+import com.vingame.bot.common.logging.BotMdc;
+import com.vingame.bot.infrastructure.observability.BotMdcTagsMeterFilter;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -293,6 +298,82 @@ class BotGroupBehaviorServiceRestartTest {
                 .as("expected ERROR line containing group id, env id, and root cause message; saw: "
                         + errors.stream().map(e -> e.getMessage().getFormattedMessage()).toList())
                 .isTrue();
+    }
+
+    @Test
+    @DisplayName("bot_creation_failures_total carries botGroupId + environmentId tags " +
+            "(MDC must be set on the result-collection loop's caller thread, not just the worker thread)")
+    void incBotCreationFailure_seriesIsTaggedWithBotGroupIdAndEnvironmentId() {
+        // Reviewer finding: createBotsInParallel's result-collection loop runs on
+        // the caller thread of start(), not on the per-bot virtual thread where
+        // MDC was set inside the lambda and cleared in finally. Without an
+        // explicit setGroupContext on the caller thread, the counter is
+        // registered without botGroupId/environmentId tags — defeating the
+        // per-group cardinality goal of Architecture Decision 5.
+        //
+        // This test wires a real MeterRegistry + BotMetrics through the service
+        // so we can assert on the actual registered series, not just on a mock
+        // invocation of incBotCreationFailure(reason).
+        MeterRegistry registry = new SimpleMeterRegistry();
+        registry.config().meterFilter(new BotMdcTagsMeterFilter());
+        BotMetrics realMetrics = new BotMetrics(registry);
+
+        BotGroupBehaviorService realMetricsService = new BotGroupBehaviorService(
+                botGroupService, environmentService, gameService, botFactory, realMetrics);
+        ReflectionTestUtils.setField(realMetricsService, "deadBotGroupThreshold", 0.80);
+        ReflectionTestUtils.setField(realMetricsService, "botCreationParallelism", 10);
+        ReflectionTestUtils.setField(realMetricsService, "watchdogTimeoutSeconds", 180L);
+        ReflectionTestUtils.setField(realMetricsService, "periodicLogoutEnabled", false);
+        ReflectionTestUtils.setField(realMetricsService, "periodicLogoutIntervalMinutes", 60);
+        ReflectionTestUtils.setField(realMetricsService, "reconnectDelaySeconds", 5);
+
+        BotGroup group = BotGroup.builder()
+                .id("group-tagged").name("Group").environmentId("env-tagged").gameId("game-1")
+                .botCount(2).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-tagged").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("group-tagged")).thenReturn(group);
+        when(environmentService.findById("env-tagged")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new RuntimeException("network unreachable"));
+
+        try {
+            realMetricsService.start("group-tagged");
+
+            Counter tagged = registry.find(BotMetrics.BOT_CREATION_FAILURES_TOTAL)
+                    .tag("reason", "unknown")
+                    .tag(BotMdc.BOT_GROUP_ID, "group-tagged")
+                    .tag(BotMdc.ENVIRONMENT_ID, "env-tagged")
+                    .counter();
+            assertThat(tagged)
+                    .as("bot_creation_failures_total must carry botGroupId + environmentId " +
+                            "tags so Prometheus can slice by group/env (Architecture Decision 5)")
+                    .isNotNull();
+            assertThat(tagged.count()).isEqualTo(2.0);
+
+            // Defense-in-depth: assert no series with the same name+reason was registered
+            // *without* the botGroupId tag. If the MDC wasn't set on the caller thread,
+            // we would see exactly that — an untagged "reason=unknown" series.
+            long untagged = registry.find(BotMetrics.BOT_CREATION_FAILURES_TOTAL)
+                    .tag("reason", "unknown")
+                    .counters()
+                    .stream()
+                    .filter(c -> c.getId().getTags().stream()
+                            .noneMatch(t -> BotMdc.BOT_GROUP_ID.equals(t.getKey())))
+                    .count();
+            assertThat(untagged)
+                    .as("no untagged bot_creation_failures_total series should exist — " +
+                            "the result-collection loop must set MDC on the caller thread")
+                    .isZero();
+        } finally {
+            try {
+                realMetricsService.shutdown();
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     /**
