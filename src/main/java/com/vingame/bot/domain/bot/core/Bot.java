@@ -575,7 +575,12 @@ public abstract class Bot {
         this.expectedCurrentBalance.addAndGet(-amount);
         this.totalBetsPlaced.incrementAndGet();
         this.totalBetAmount.addAndGet(amount);
-        if (metrics != null) metrics.incBetPlaced(amount);
+        // Bet counters (bot_bets_placed_total, bot_bet_amount_total) moved to
+        // BettingMiniGameBot.onEndGame's HasBetTotals branch — authoritative
+        // server-side recording (see docs/plans/ENDGAME_METRICS.md AD-4).
+        // The local AtomicLong accumulators above still count bets SENT and
+        // remain readable via BotHealthDTO; the Prometheus counters now count
+        // bets CONFIRMED by the server's EndGame payload.
     }
 
     public final void start() {
