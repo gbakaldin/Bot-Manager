@@ -13,18 +13,29 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.LoggerConfig;
+import org.apache.logging.log4j.core.layout.PatternLayout;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -161,5 +172,148 @@ class BotGroupBehaviorServiceRestartTest {
         assertThatThrownBy(() -> service.restart("g-1"))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("0/3");
+    }
+
+    /* ----- Per-failure metric + log assertions (Architecture Decisions 5) ----- */
+
+    @Test
+    @DisplayName("createBotsInParallel increments bot_creation_failures_total with reason=\"validation\" for IllegalStateException")
+    void start_classifiesIllegalStateExceptionAsValidationReason() {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(2).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new IllegalStateException("resolved zoneName is null/blank"));
+
+        service.start("g-1");
+
+        // Both bots failed with IllegalStateException → both must be classified as "validation".
+        verify(botMetrics, times(2)).incBotCreationFailure(eq("validation"));
+    }
+
+    @Test
+    @DisplayName("createBotsInParallel increments bot_creation_failures_total with reason=\"auth\" for auth-flavoured exceptions")
+    void start_classifiesAuthMessageAsAuthReason() {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(1).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        // Message contains "auth" — classifier route via message-substring match.
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new RuntimeException("auth failed: upstream 401"));
+
+        service.start("g-1");
+
+        verify(botMetrics).incBotCreationFailure(eq("auth"));
+    }
+
+    @Test
+    @DisplayName("createBotsInParallel increments bot_creation_failures_total with reason=\"unknown\" for non-classified exceptions")
+    void start_classifiesGenericRuntimeAsUnknownReason() {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(1).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        // Neither class name nor message hits the auth heuristic.
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new RuntimeException("network unreachable"));
+
+        service.start("g-1");
+
+        verify(botMetrics).incBotCreationFailure(eq("unknown"));
+    }
+
+    @Test
+    @DisplayName("Per-bot failure is logged at ERROR with bot index, group id, env id, and the cause class/message")
+    void createBotsInParallel_logsErrorWithFullContextOnEveryFailure() {
+        BotGroup group = BotGroup.builder()
+                .id("group-9").name("Group").environmentId("env-9").gameId("game-1")
+                .botCount(1).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-9").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("group-9")).thenReturn(group);
+        when(environmentService.findById("env-9")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new RuntimeException("upstream 500 from auth gateway"));
+
+        // Attach an in-memory log4j2 appender to BotGroupBehaviorService's logger.
+        CapturingAppender appender = new CapturingAppender("CapturingAppender-restart-test");
+        appender.start();
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        String loggerName = BotGroupBehaviorService.class.getName();
+        LoggerConfig loggerConfig = ctx.getConfiguration().getLoggerConfig(loggerName);
+        Level prev = loggerConfig.getLevel();
+        loggerConfig.addAppender(appender, Level.ALL, null);
+        loggerConfig.setLevel(Level.ALL);
+        ctx.updateLoggers();
+        try {
+            service.start("group-9");
+        } finally {
+            loggerConfig.removeAppender(appender.getName());
+            loggerConfig.setLevel(prev);
+            ctx.updateLoggers();
+            appender.stop();
+        }
+
+        List<LogEvent> errors = appender.events().stream()
+                .filter(e -> e.getLevel() == Level.ERROR)
+                .toList();
+        assertThat(errors).as("expected at least one ERROR log line for bot-creation failure").isNotEmpty();
+
+        boolean matched = errors.stream().anyMatch(e -> {
+            String fm = e.getMessage().getFormattedMessage();
+            return fm.contains("Failed to create bot")
+                    && fm.contains("group-9")
+                    && fm.contains("env-9")
+                    && fm.contains("upstream 500 from auth gateway");
+        });
+        assertThat(matched)
+                .as("expected ERROR line containing group id, env id, and root cause message; saw: "
+                        + errors.stream().map(e -> e.getMessage().getFormattedMessage()).toList())
+                .isTrue();
+    }
+
+    /**
+     * Minimal in-memory log4j2 appender so we can assert on emitted log events.
+     * Lives as a static nested class to keep the test file self-contained.
+     */
+    private static final class CapturingAppender extends AbstractAppender {
+        private final List<LogEvent> events = new CopyOnWriteArrayList<>();
+
+        CapturingAppender(String name) {
+            super(name, null, PatternLayout.createDefaultLayout(), false, null);
+        }
+
+        @Override
+        public void append(LogEvent event) {
+            // toImmutable() so the event survives outside the logger's reusable buffer.
+            events.add(event.toImmutable());
+        }
+
+        List<LogEvent> events() {
+            return new ArrayList<>(events);
+        }
     }
 }

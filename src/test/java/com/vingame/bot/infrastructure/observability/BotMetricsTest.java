@@ -398,4 +398,55 @@ class BotMetricsTest {
         assertThat(amount.count()).isEqualTo(15_000.0);
     }
 
+    /* ----- RESTART_LIFECYCLE_FIX — bot-creation failure counter ----- */
+
+    @Test
+    void incBotCreationFailure_attachesReasonTagAndMdcTags() {
+        setBotMdc();
+        metrics.incBotCreationFailure("validation");
+
+        Counter c = registry.find(BotMetrics.BOT_CREATION_FAILURES_TOTAL)
+                .tag("reason", "validation")
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
+                .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void incBotCreationFailure_separatesReasonsIntoDistinctSeries() {
+        setBotMdc();
+        metrics.incBotCreationFailure("validation");
+        metrics.incBotCreationFailure("auth");
+        metrics.incBotCreationFailure("auth");
+        metrics.incBotCreationFailure("unknown");
+
+        Counter validation = registry.find(BotMetrics.BOT_CREATION_FAILURES_TOTAL)
+                .tag("reason", "validation").counter();
+        Counter auth = registry.find(BotMetrics.BOT_CREATION_FAILURES_TOTAL)
+                .tag("reason", "auth").counter();
+        Counter unknown = registry.find(BotMetrics.BOT_CREATION_FAILURES_TOTAL)
+                .tag("reason", "unknown").counter();
+
+        assertThat(validation).isNotNull();
+        assertThat(validation.count()).isEqualTo(1.0);
+        assertThat(auth).isNotNull();
+        assertThat(auth.count()).isEqualTo(2.0);
+        assertThat(unknown).isNotNull();
+        assertThat(unknown.count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void incBotCreationFailure_withoutMdcDoesNotAttachPhantomTagsAndStillRecords() {
+        // MDC already cleared in @BeforeEach.
+        metrics.incBotCreationFailure("unknown");
+
+        Counter c = registry.find(BotMetrics.BOT_CREATION_FAILURES_TOTAL)
+                .tag("reason", "unknown").counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(1.0);
+    }
+
 }
