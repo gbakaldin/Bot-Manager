@@ -485,9 +485,10 @@ public class BotGroupBehaviorService {
      * <p>
      * <b>Operator recovery procedure.</b> POST {@code /stop} to clear the
      * inconsistent runtime + persist {@code targetStatus=STOPPED}, then POST
-     * {@code /start} to retry. Retrying POST {@code /restart} directly will
-     * short-circuit at the "already running" early-return in {@link #start(String)}
-     * because {@code runningGroups.containsKey(id)} is still true.
+     * {@code /start} to retry. The underlying cause (e.g. misconfigured
+     * environment, auth gateway outage) should be investigated before retrying;
+     * blindly re-issuing {@code /restart} will mechanically re-run the
+     * {@code stop} + {@code start} sequence and is likely to fail the same way.
      */
     public void restart(String id) {
         log.info("Restarting bot group {}", id);
