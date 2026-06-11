@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.service;
 
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
@@ -185,10 +186,11 @@ public class BotGroupBehaviorService {
 
         BotGroup group = botGroupService.findById(id);
 
+        boolean started = false;
         try {
             // Verify environment exists
             if (group.getEnvironmentId() == null) {
-                throw new IllegalStateException(
+                throw new BadRequestException(
                         "BotGroup " + group.getName() + " has no environmentId set. " +
                                 "Please assign an environment before starting the bot group."
                 );
@@ -196,7 +198,7 @@ public class BotGroupBehaviorService {
 
             // Verify game exists
             if (group.getGameId() == null) {
-                throw new IllegalStateException(
+                throw new BadRequestException(
                         "BotGroup " + group.getName() + " has no gameId set. " +
                                 "Please assign a game before starting the bot group."
                 );
@@ -237,31 +239,37 @@ public class BotGroupBehaviorService {
             botGroupService.save(group);
 
             log.info("Bot group {} started successfully with {} bots", group.getName(), bots.size());
+            started = true;
 
-        } catch (Exception e) {
-            log.error("Failed to start bot group {}: {}", group.getName(), e.getMessage(), e);
-
-            // Cleanup runtime if it was created
-            BotGroupRuntime failedRuntime = runningGroups.remove(id);
-            if (failedRuntime != null) {
-                try {
-                    // Re-apply group MDC so any group-level dead-seconds increment
-                    // ends up tagged with botGroupId/environmentId; the catch block
-                    // runs on this same caller thread but may have lost the MDC if
-                    // set earlier in start().
-                    BotMdc.setGroupContext(failedRuntime.getGroupId(),
-                                           failedRuntime.getEnvironmentId());
+        } finally {
+            // try/finally (not try/catch) — the original exception propagates
+            // unchanged to RestExceptionHandler, which maps it to the right
+            // HTTP status (BadRequestException -> 400, ResourceNotFoundException
+            // -> 404, etc.). Wrapping in RuntimeException would erase the type
+            // and force every failure to land in the generic 500 bucket.
+            if (!started) {
+                BotGroupRuntime failedRuntime = runningGroups.remove(id);
+                if (failedRuntime != null) {
                     try {
-                        failedRuntime.stopAllBots(botMetrics);
-                    } finally {
-                        BotMdc.clear();
+                        // Re-apply group MDC so any group-level dead-seconds
+                        // increment ends up tagged with
+                        // botGroupId/environmentId; the finally block runs on
+                        // the same caller thread but may have lost the MDC if
+                        // set earlier in start().
+                        BotMdc.setGroupContext(failedRuntime.getGroupId(),
+                                               failedRuntime.getEnvironmentId());
+                        try {
+                            failedRuntime.stopAllBots(botMetrics);
+                        } finally {
+                            BotMdc.clear();
+                        }
+                    } catch (Exception cleanupEx) {
+                        log.error("Error cleaning up bots after failed start of group {}: {}",
+                                group.getName(), cleanupEx.getMessage());
                     }
-                } catch (Exception cleanupEx) {
-                    log.error("Error cleaning up bots after failed start: {}", cleanupEx.getMessage());
                 }
+                log.error("Failed to start bot group {}", group.getName());
             }
-
-            throw new RuntimeException("Failed to start bot group: " + e.getMessage(), e);
         }
     }
 
@@ -351,7 +359,15 @@ public class BotGroupBehaviorService {
      * cardinality low. RESTART_LIFECYCLE_FIX Architecture Decision 5.
      */
     private static String classifyCreationFailure(Throwable cause) {
-        if (cause instanceof IllegalStateException || cause instanceof IllegalArgumentException) {
+        // UpstreamLoginException is the typed auth-failure path (API_ERROR_-
+        // FORWARDING Phase B). Match it explicitly so it lands in "auth"
+        // without depending on the message-substring heuristic below.
+        if (cause instanceof com.vingame.bot.common.exception.UpstreamLoginException) {
+            return "auth";
+        }
+        if (cause instanceof BadRequestException
+                || cause instanceof IllegalStateException
+                || cause instanceof IllegalArgumentException) {
             return "validation";
         }
         // websocket-parser's ValidationException (e.g. "Authentication configuration
@@ -437,33 +453,30 @@ public class BotGroupBehaviorService {
             return;
         }
 
+        // No outer try/catch — let the original exception propagate to
+        // RestExceptionHandler. Wrapping in RuntimeException would lose the
+        // exception type and erase the structured response body.
+        // Set group MDC so the group-level dead-seconds increment (if a DEAD
+        // window is open) is tagged with botGroupId/environmentId. Cleared in
+        // the finally so we don't leak MDC into the caller thread.
+        BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
         try {
-            // Set group MDC so the group-level dead-seconds increment (if a DEAD
-            // window is open) is tagged with botGroupId/environmentId. Cleared in
-            // the finally so we don't leak MDC into the caller thread.
-            BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
-            try {
-                // Stop all bots and shutdown executor
-                runtime.stopAllBots(botMetrics);
-            } finally {
-                BotMdc.clear();
-            }
-
-            // Remove from runtime map
-            runningGroups.remove(id);
-
-            // Update entity
-            BotGroup group = botGroupService.findById(id);
-            group.setTargetStatus(BotGroupStatus.STOPPED);
-            group.setLastStoppedAt(LocalDateTime.now());
-            botGroupService.save(group);
-
-            log.info("Bot group {} stopped successfully", id);
-
-        } catch (Exception e) {
-            log.error("Error stopping bot group {}: {}", id, e.getMessage(), e);
-            throw new RuntimeException("Failed to stop bot group", e);
+            // Stop all bots and shutdown executor
+            runtime.stopAllBots(botMetrics);
+        } finally {
+            BotMdc.clear();
         }
+
+        // Remove from runtime map
+        runningGroups.remove(id);
+
+        // Update entity
+        BotGroup group = botGroupService.findById(id);
+        group.setTargetStatus(BotGroupStatus.STOPPED);
+        group.setLastStoppedAt(LocalDateTime.now());
+        botGroupService.save(group);
+
+        log.info("Bot group {} stopped successfully", id);
     }
 
     /**
@@ -526,7 +539,7 @@ public class BotGroupBehaviorService {
         long delayMillis = Duration.between(LocalDateTime.now(), time).toMillis();
 
         if (delayMillis <= 0) {
-            throw new IllegalArgumentException("Scheduled time must be in the future");
+            throw new BadRequestException("Scheduled time must be in the future");
         }
 
         scheduler.schedule(() -> {

@@ -2,6 +2,7 @@ package com.vingame.bot.domain.session.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.domain.session.dto.SessionHistoryDTO;
 import com.vingame.bot.domain.session.mapper.SessionHistoryMapper;
 import com.vingame.bot.domain.session.model.SessionHistory;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -27,6 +29,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(SessionHistoryController.class)
+@Import(RestExceptionHandler.class)
 @DisplayName("SessionHistoryController")
 class SessionHistoryControllerTest {
 

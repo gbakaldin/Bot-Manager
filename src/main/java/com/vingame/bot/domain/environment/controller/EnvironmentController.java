@@ -4,7 +4,6 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import com.vingame.bot.domain.environment.dto.EnvironmentDTO;
-import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.environment.mapper.EnvironmentMapper;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.model.EnvironmentFilter;
@@ -26,6 +25,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+/**
+ * Exception handling is delegated to
+ * {@link com.vingame.bot.common.exception.RestExceptionHandler}.
+ */
 @RestController
 @RequestMapping("api/v1/environment")
 public class EnvironmentController {
@@ -50,19 +53,10 @@ public class EnvironmentController {
     @GetMapping("/{id}")
     public ResponseEntity<EnvironmentDTO> findById(
             @PathVariable @Parameter(description = "ID of the environment to retrieve", example = "123") String id) {
-
-        try {
-            Environment environment = service.findById(id);
-            EnvironmentDTO dto = mapper.toDTO(environment);
-            enrichWithBotGroupStats(dto, botGroupService.findByEnvironmentId(id));
-            return ResponseEntity.ok(dto);
-        } catch (ResourceNotFoundException e) {
-            return ResponseEntity.notFound().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        Environment environment = service.findById(id);
+        EnvironmentDTO dto = mapper.toDTO(environment);
+        enrichWithBotGroupStats(dto, botGroupService.findByEnvironmentId(id));
+        return ResponseEntity.ok(dto);
     }
 
     @Operation(
@@ -70,22 +64,18 @@ public class EnvironmentController {
             description = "Returns a list of all environments, does not support paging yet")
     @GetMapping("/")
     public ResponseEntity<List<EnvironmentDTO>> findAll() {
-        try {
-            List<Environment> environments = service.findAll();
-            Map<String, List<BotGroup>> groupsByEnv = botGroupService.findAll().stream()
-                    .collect(Collectors.groupingBy(BotGroup::getEnvironmentId));
+        List<Environment> environments = service.findAll();
+        Map<String, List<BotGroup>> groupsByEnv = botGroupService.findAll().stream()
+                .collect(Collectors.groupingBy(BotGroup::getEnvironmentId));
 
-            List<EnvironmentDTO> dtos = environments.stream()
-                    .map(env -> {
-                        EnvironmentDTO dto = mapper.toDTO(env);
-                        enrichWithBotGroupStats(dto, groupsByEnv.getOrDefault(env.getId(), List.of()));
-                        return dto;
-                    })
-                    .toList();
-            return ResponseEntity.ok(dtos);
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        List<EnvironmentDTO> dtos = environments.stream()
+                .map(env -> {
+                    EnvironmentDTO dto = mapper.toDTO(env);
+                    enrichWithBotGroupStats(dto, groupsByEnv.getOrDefault(env.getId(), List.of()));
+                    return dto;
+                })
+                .toList();
+        return ResponseEntity.ok(dtos);
     }
 
     @Operation(
@@ -95,25 +85,18 @@ public class EnvironmentController {
     public ResponseEntity<List<EnvironmentDTO>> filter(
             @Parameter(description = "The filter to query the environments by", example = "N/A") //TODO: pending example
             @RequestBody EnvironmentFilter filter) {
+        List<Environment> environments = service.filter(filter);
+        Map<String, List<BotGroup>> groupsByEnv = botGroupService.findAll().stream()
+                .collect(Collectors.groupingBy(BotGroup::getEnvironmentId));
 
-        try {
-            List<Environment> environments = service.filter(filter);
-            Map<String, List<BotGroup>> groupsByEnv = botGroupService.findAll().stream()
-                    .collect(Collectors.groupingBy(BotGroup::getEnvironmentId));
-
-            List<EnvironmentDTO> dtos = environments.stream()
-                    .map(env -> {
-                        EnvironmentDTO dto = mapper.toDTO(env);
-                        enrichWithBotGroupStats(dto, groupsByEnv.getOrDefault(env.getId(), List.of()));
-                        return dto;
-                    })
-                    .toList();
-            return ResponseEntity.ok(dtos);
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        List<EnvironmentDTO> dtos = environments.stream()
+                .map(env -> {
+                    EnvironmentDTO dto = mapper.toDTO(env);
+                    enrichWithBotGroupStats(dto, groupsByEnv.getOrDefault(env.getId(), List.of()));
+                    return dto;
+                })
+                .toList();
+        return ResponseEntity.ok(dtos);
     }
 
     @Operation(
@@ -123,15 +106,9 @@ public class EnvironmentController {
     public ResponseEntity<EnvironmentDTO> save(
             @Parameter(description = "Environment body to save in the database", example = "N/A") //TODO: pending example
             @RequestBody EnvironmentDTO environmentDTO) {
-        try {
-            Environment environment = mapper.toEntity(environmentDTO);
-            Environment saved = service.save(environment);
-            return ResponseEntity.ok(mapper.toDTO(saved));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        Environment environment = mapper.toEntity(environmentDTO);
+        Environment saved = service.save(environment);
+        return ResponseEntity.ok(mapper.toDTO(saved));
     }
 
     @Operation(
@@ -142,17 +119,8 @@ public class EnvironmentController {
             @PathVariable @Parameter(description = "ID of the environment to update", example = "123") String id,
             @Parameter(description = "Environment DTO containing the fields that need updating (only non-empty Optional fields will be updated)", example = "N/A") //TODO: pending example
             @RequestBody EnvironmentDTO environmentDTO) {
-
-        try {
-            Environment updated = service.update(id, environmentDTO);
-            return ResponseEntity.ok(mapper.toDTO(updated));
-        } catch (ResourceNotFoundException e) {
-            return ResponseEntity.notFound().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        Environment updated = service.update(id, environmentDTO);
+        return ResponseEntity.ok(mapper.toDTO(updated));
     }
 
     @Operation(
@@ -161,15 +129,8 @@ public class EnvironmentController {
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(
             @PathVariable @Parameter(description = "ID to use for deletion", example = "24") String id) {
-
-        try {
-            service.delete(id);
-            return ResponseEntity.ok().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        service.delete(id);
+        return ResponseEntity.ok().build();
     }
 
     private void enrichWithBotGroupStats(EnvironmentDTO dto, List<BotGroup> groups) {

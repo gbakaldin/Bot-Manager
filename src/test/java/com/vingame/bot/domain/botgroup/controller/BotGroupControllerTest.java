@@ -1,7 +1,11 @@
 package com.vingame.bot.domain.botgroup.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.RestExceptionHandler;
+import com.vingame.bot.common.exception.UpstreamLoginException;
+import com.vingame.bot.common.exception.UpstreamRegistrationException;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
@@ -19,6 +23,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -40,6 +45,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(BotGroupController.class)
+@Import(RestExceptionHandler.class)
 @DisplayName("BotGroupController")
 class BotGroupControllerTest {
 
@@ -347,7 +353,7 @@ class BotGroupControllerTest {
 
             when(mapper.toEntity(any(BotGroupDTO.class))).thenReturn(entity);
             when(service.save(any(BotGroup.class), eq(false)))
-                    .thenThrow(new IllegalStateException(
+                    .thenThrow(new UpstreamRegistrationException(
                             "Failed to register any users for bot group 'Demo 116 BC'. " +
                                     "Errors: Tên đăng nhập không được nhiều hơn 12 ký tự"));
 
@@ -358,6 +364,33 @@ class BotGroupControllerTest {
                     .andExpect(jsonPath("$.type").value("Game server error"))
                     .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
                             "Tên đăng nhập không được nhiều hơn 12 ký tự")));
+        }
+
+        @Test
+        @DisplayName("Should return 400 Bad Request with body when service throws BadRequestException")
+        void shouldReturnBadRequestWithBodyWhenBadRequestException() throws Exception {
+            BotGroupDTO inputDto = BotGroupDTO.builder()
+                    .name("Bad")
+                    .namePrefix("longprefix")
+                    .password("p")
+                    .botCount(99)
+                    .environmentId("env-tip")
+                    .build();
+
+            BotGroup entity = BotGroup.builder().name("Bad").build();
+
+            when(mapper.toEntity(any(BotGroupDTO.class))).thenReturn(entity);
+            when(service.save(any(BotGroup.class), eq(false)))
+                    .thenThrow(new BadRequestException(
+                            "Username too long for product P_116: ..."));
+
+            mockMvc.perform(post("/api/v1/bot-group/")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(inputDto)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Username too long for product P_116")));
         }
     }
 
@@ -480,7 +513,7 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 500 Internal Server Error when start fails")
+        @DisplayName("Should return 500 Internal Server Error with body when start fails")
         void shouldReturnInternalServerErrorWhenStartFails() throws Exception {
             // Arrange
             String groupId = "123";
@@ -488,7 +521,24 @@ class BotGroupControllerTest {
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
-                    .andExpect(status().isInternalServerError());
+                    .andExpect(status().isInternalServerError())
+                    .andExpect(jsonPath("$.type").value("Internal error"))
+                    .andExpect(jsonPath("$.msg").value("Start failed"));
+        }
+
+        @Test
+        @DisplayName("Should return 502 Bad Gateway when start surfaces UpstreamLoginException")
+        void shouldReturnBadGatewayWhenUpstreamLogin() throws Exception {
+            String groupId = "123";
+            doThrow(new UpstreamLoginException(
+                    "Login failed for user 'authtest1': No data in response"))
+                    .when(behaviorService).start(groupId);
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
+                    .andExpect(status().isBadGateway())
+                    .andExpect(jsonPath("$.type").value("Game server error"))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Login failed for user 'authtest1'")));
         }
     }
 
@@ -739,7 +789,7 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 500 Internal Server Error when getHealth throws unexpected exception")
+        @DisplayName("Should return 500 Internal Server Error with body when getHealth throws unexpected exception")
         void shouldReturnInternalServerErrorWhenGetHealthFails() throws Exception {
             // Arrange
             String groupId = "123";
@@ -748,7 +798,9 @@ class BotGroupControllerTest {
 
             // Act & Assert
             mockMvc.perform(get("/api/v1/bot-group/{id}/health", groupId))
-                    .andExpect(status().isInternalServerError());
+                    .andExpect(status().isInternalServerError())
+                    .andExpect(jsonPath("$.type").value("Internal error"))
+                    .andExpect(jsonPath("$.msg").value("Boom"));
         }
     }
 }
