@@ -103,9 +103,8 @@ class BotTest {
             assertThat(bot.getExpectedBalance()).isEqualTo(initialExpected - 500);
             assertThat(bot.getTotalBetsPlaced().get()).isEqualTo(1);
             assertThat(bot.getTotalBetAmount().get()).isEqualTo(500);
-            // ENDGAME_METRICS Phase B: bet-counter metrics moved to onEndGame's
+            // ENDGAME_METRICS Phase B/C: bet-counter metrics moved to onEndGame's
             // HasBetTotals branch — creditBalance must not touch BotMetrics.
-            verify(metrics, never()).incBetPlaced(anyLong());
             verify(metrics, never()).incBetsPlaced(anyInt(), anyLong());
         }
 
@@ -120,7 +119,6 @@ class BotTest {
             assertThat(bot.getExpectedBalance()).isEqualTo(initialExpected - 350);
             assertThat(bot.getTotalBetsPlaced().get()).isEqualTo(2);
             assertThat(bot.getTotalBetAmount().get()).isEqualTo(350);
-            verify(metrics, never()).incBetPlaced(anyLong());
             verify(metrics, never()).incBetsPlaced(anyInt(), anyLong());
         }
 

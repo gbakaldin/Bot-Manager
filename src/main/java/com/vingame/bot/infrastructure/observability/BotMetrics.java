@@ -173,26 +173,9 @@ public class BotMetrics {
     }
 
     /**
-     * Record a bet placement: increments {@code bot_bets_placed_total} by 1 and
-     * {@code bot_bet_amount_total} by {@code amount}.
-     */
-    public void incBetPlaced(long amount) {
-        Tags tags = mdcTags();
-        Counter.builder(BOT_BETS_PLACED_TOTAL)
-                .tags(tags)
-                .register(registry)
-                .increment();
-        Counter.builder(BOT_BET_AMOUNT_TOTAL)
-                .tags(tags)
-                .register(registry)
-                .increment(amount);
-    }
-
-    /**
      * Record a batch of bets confirmed by the server's {@code EndGame} payload:
      * increments {@code bot_bets_placed_total} by {@code count} and
-     * {@code bot_bet_amount_total} by {@code totalAmount}. Same per-bot tag
-     * shape as {@link #incBetPlaced(long)}.
+     * {@code bot_bet_amount_total} by {@code totalAmount}.
      * <p>
      * Per-bet average is {@code bot_bet_amount_total / bot_bets_placed_total}
      * in PromQL and is accurate as long as both sums are accurate — this method
@@ -200,10 +183,10 @@ public class BotMetrics {
      * No loop, no averaging.
      * <p>
      * Dispatched from {@link com.vingame.bot.domain.bot.core.BettingMiniGameBot}'s
-     * {@code onEndGame} {@code HasBetTotals} branch. The local AtomicLong
-     * accumulators on {@code Bot} (read by {@code BotHealthDTO}) still count
-     * bets sent, so the two values can legitimately diverge when the server
-     * rejects bets — see {@code docs/plans/ENDGAME_METRICS.md} AD-4.
+     * {@code onEndGame} when the message implements {@code HasBetTotals}. The
+     * local AtomicLong accumulators on {@code Bot} (read by {@code BotHealthDTO})
+     * still count bets sent, so the two values can legitimately diverge when the
+     * server rejects bets — see {@code docs/plans/ENDGAME_METRICS.md} AD-4.
      * <p>
      * Caller guard: this method silently no-ops when {@code count <= 0} so the
      * bot-side dispatch can call it unconditionally with whatever the message
@@ -224,12 +207,11 @@ public class BotMetrics {
 
     /**
      * Per-bot gross winnings counter; increments {@code bot_winnings_total} by
-     * {@code amount} (Phase 4). Same per-bot tag shape as {@link #incBetPlaced(long)}.
+     * {@code amount} (Phase 4). Same per-bot tag shape as the bet counters.
      * <p>
-     * Called unconditionally from {@code BettingMiniGameBot.onEndGame} — the
-     * default {@code getWinnings() == 0L} produces a no-op increment but still
-     * registers the counter on first call, which is required so the Grafana
-     * RTP panel renders without a datasource-missing error.
+     * Called from {@code BettingMiniGameBot.onEndGame} when the EndGame message
+     * implements {@link com.vingame.bot.domain.bot.message.HasBotWinnings}. Caller
+     * guards on {@code amount > 0}.
      */
     public void incBotWinnings(long amount) {
         Counter.builder(BOT_WINNINGS_TOTAL)
@@ -242,7 +224,10 @@ public class BotMetrics {
      * Per-bot jackpot: increments {@code bot_jackpots_total} by 1 (count of
      * jackpot-winning rounds) AND {@code bot_jackpot_amount_total} by
      * {@code amount} (sum of jackpot value won). Same per-bot tag shape.
-     * Caller guards on {@code amount > 0}.
+     * <p>
+     * Called from {@code BettingMiniGameBot.onEndGame} when the EndGame message
+     * implements {@link com.vingame.bot.domain.bot.message.HasJackpot}. Caller
+     * guards on {@code amount > 0}.
      */
     public void incBotJackpot(long amount) {
         Tags tags = mdcTags();

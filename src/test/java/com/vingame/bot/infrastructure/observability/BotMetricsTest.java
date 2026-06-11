@@ -107,22 +107,7 @@ class BotMetricsTest {
         assertThat(failure.count()).isEqualTo(1.0);
     }
 
-    @Test
-    void incBetPlaced_incrementsBothCountAndAmount() {
-        setBotMdc();
-        metrics.incBetPlaced(500_000L);
-        metrics.incBetPlaced(250_000L);
-
-        Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
-        Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
-
-        assertThat(bets).isNotNull();
-        assertThat(bets.count()).isEqualTo(2.0);
-        assertThat(amount).isNotNull();
-        assertThat(amount.count()).isEqualTo(750_000.0);
-    }
-
-    /* ----- ENDGAME_METRICS Phase A — batch overload for HasBetTotals dispatch ----- */
+    /* ----- ENDGAME_METRICS — batch overload for HasBetTotals dispatch ----- */
 
     @Test
     void incBetsPlaced_batchIncrementsCountAndAmountSums() {
@@ -165,13 +150,12 @@ class BotMetricsTest {
     }
 
     @Test
-    void incBetsPlaced_sharesTimeSeriesWithSingleBetIncBetPlaced() {
-        // Both incBetPlaced(long) and incBetsPlaced(int, long) target the same
-        // two meters with the same MDC tag shape — they must aggregate into the
-        // same time series (no series split when the bet-counter callsite
-        // migrates from creditBalance to onEndGame in Phase B).
+    void incBetsPlaced_multipleCallsSumIntoTheSameTimeSeries() {
+        // Two consecutive batches must aggregate into the same per-MDC counter
+        // pair — no series split when the bot-side dispatch fires repeatedly
+        // across rounds.
         setBotMdc();
-        metrics.incBetPlaced(100L);
+        metrics.incBetsPlaced(1, 100L);
         metrics.incBetsPlaced(2, 300L);
 
         Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
