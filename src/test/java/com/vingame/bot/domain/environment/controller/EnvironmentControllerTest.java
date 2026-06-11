@@ -117,15 +117,33 @@ class EnvironmentControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 400 Bad Request when ID is malformed")
+        @DisplayName("Should return 400 Bad Request with body when ID is malformed")
         void shouldReturnBadRequestWhenIdIsMalformed() throws Exception {
             // Arrange
             String envId = "bad-id";
             when(service.findById(envId)).thenThrow(new IllegalArgumentException("Invalid ID"));
 
-            // Act & Assert
+            // Act & Assert — body assertion proves the advice fired (rather
+            // than Spring's bodyless 400 default).
             mockMvc.perform(get("/api/v1/environment/{id}", envId))
-                    .andExpect(status().isBadRequest());
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value("Invalid ID"));
+        }
+
+        @Test
+        @DisplayName("Should return 500 Internal Server Error with body when service throws unexpected exception")
+        void shouldReturnInternalServerErrorWithBody() throws Exception {
+            // Arrange
+            String envId = "env-1";
+            when(service.findById(envId)).thenThrow(new RuntimeException("db down"));
+
+            // Act & Assert — confirms the terminal Exception handler in the
+            // advice produces a structured body for this controller too.
+            mockMvc.perform(get("/api/v1/environment/{id}", envId))
+                    .andExpect(status().isInternalServerError())
+                    .andExpect(jsonPath("$.type").value("Internal error"))
+                    .andExpect(jsonPath("$.msg").value("db down"));
         }
     }
 

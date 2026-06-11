@@ -203,9 +203,14 @@ class GameControllerTest {
             when(service.findByBrandAndProduct(BrandCode.G2, ProductCode.P_097))
                     .thenThrow(new RuntimeException("boom"));
 
-            // Act & Assert
+            // Act & Assert — must carry the structured {type, msg} body so the
+            // operator sees the upstream message instead of an empty 500.
+            // Without the @Import(RestExceptionHandler.class) hookup, the body
+            // assertions below would fail (Spring's default 500 has no body).
             mockMvc.perform(get("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097"))
-                    .andExpect(status().isInternalServerError());
+                    .andExpect(status().isInternalServerError())
+                    .andExpect(jsonPath("$.type").value("Internal error"))
+                    .andExpect(jsonPath("$.msg").value("boom"));
         }
     }
 
@@ -342,7 +347,7 @@ class GameControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 400 Bad Request when save throws IllegalArgumentException")
+        @DisplayName("Should return 400 Bad Request with structured body when save throws IllegalArgumentException")
         void shouldReturnBadRequestWhenSaveThrowsIllegalArgument() throws Exception {
             // Arrange
             GameDTO inputDto = GameDTO.builder().name("BadGame").build();
@@ -351,11 +356,14 @@ class GameControllerTest {
             when(mapper.toEntity(any(GameDTO.class))).thenReturn(entity);
             when(service.save(any(Game.class))).thenThrow(new IllegalArgumentException("Invalid game"));
 
-            // Act & Assert
+            // Act & Assert — body shape verifies the advice handler actually
+            // fired (rather than Spring's bodyless 400 fallback).
             mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(inputDto)))
-                    .andExpect(status().isBadRequest());
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value("Invalid game"));
         }
 
         @Test

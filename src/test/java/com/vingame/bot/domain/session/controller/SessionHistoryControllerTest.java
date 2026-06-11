@@ -313,4 +313,36 @@ class SessionHistoryControllerTest {
             verify(service).delete(id);
         }
     }
+
+    @Nested
+    @DisplayName("Advice integration — structured error body on failures")
+    class AdviceIntegrationTests {
+
+        @Test
+        @DisplayName("Unhandled RuntimeException on findById -> 500 with {type, msg} body via RestExceptionHandler")
+        void shouldReturnInternalServerErrorWithBody() throws Exception {
+            // Confirms the advice fires through this controller's error path
+            // (catch ladders were removed in Phase B — without the advice, this
+            // would either propagate raw or return a bodyless 500).
+            String id = "sess-1";
+            when(service.findById(id)).thenThrow(new RuntimeException("db down"));
+
+            mockMvc.perform(get("/api/v1/session-history/{id}", id))
+                    .andExpect(status().isInternalServerError())
+                    .andExpect(jsonPath("$.type").value("Internal error"))
+                    .andExpect(jsonPath("$.msg").value("db down"));
+        }
+
+        @Test
+        @DisplayName("IllegalArgumentException on findById -> 400 with {type, msg} body via RestExceptionHandler")
+        void shouldReturnBadRequestWithBody() throws Exception {
+            String id = "bad";
+            when(service.findById(id)).thenThrow(new IllegalArgumentException("Invalid id"));
+
+            mockMvc.perform(get("/api/v1/session-history/{id}", id))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value("Invalid id"));
+        }
+    }
 }
