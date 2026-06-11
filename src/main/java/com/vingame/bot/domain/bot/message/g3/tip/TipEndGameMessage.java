@@ -37,11 +37,18 @@ public class TipEndGameMessage extends EndGameMessage
      * Tip carries two jackpot-shaped fields on EndGame: {@code jpV} and {@code tJpV}.
      * The only sample available at implementation time
      * ({@code docs/plans/ROUND_DATA_COLLECTION_FINDINGS.md}) showed both non-zero with
-     * {@code iJp=true} ({@code jpV=1603000}, {@code tJpV=200000}). Hypothesis: {@code jpV}
-     * is the per-user jackpot payout for this round, {@code tJpV} is the remaining
-     * jackpot pool or total tier (consistent with Tip's {@code t}-prefix convention on
-     * fields like {@code tFB}, {@code tFD}, {@code tTU} meaning "time for/total ...").
-     * {@code jpV} is therefore chosen as the per-user payout.
+     * {@code iJp=true} ({@code jpV=1603000}, {@code tJpV=200000}). The ~8x magnitude
+     * gap is the empirical lever: a per-user round payout is plausibly the larger
+     * of the two when {@code iJp=true}, with {@code tJpV} reading as the remaining
+     * pool or accumulated tier. {@code jpV} is therefore chosen as the per-user payout.
+     * <p>
+     * <b>No cross-product convention applies here.</b> The same field name
+     * {@code tJpV} carries the <i>opposite</i> meaning in Bom and Nohu, whose
+     * EndGame implementations both return {@code iJp ? tJpV : 0L} as the per-user
+     * jackpot payout (see {@code BomEndGameMessage}, {@code NohuEndGameMessage}).
+     * Tip's choice of {@code jpV} is therefore not a generalizable convention —
+     * it's a Tip-specific reading of the available sample. Do not rely on
+     * Bom/Nohu shape when adding a fourth product.
      * <p>
      * <b>Open question (per ROUND_DATA_COLLECTION_FINDINGS.md):</b> need a second
      * sample with {@code iJp=false} to confirm this hypothesis. If {@code tJpV} stays

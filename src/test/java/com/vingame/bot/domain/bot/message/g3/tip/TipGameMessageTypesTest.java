@@ -148,7 +148,7 @@ class TipGameMessageTypesTest {
         // Root wm = this bot's winnings — drives HasBotWinnings.
         assertThat(tip.getWm()).isEqualTo(1500L);
         // iJp + jpV / tJpV — drives HasJackpot. jpV chosen as the per-user jackpot value
-        // per Javadoc on TipEndGameMessage.getJackpot() (default pending iJp=false sample).
+        // per Javadoc on TipEndGameMessage.jackpotFor(String) (default pending iJp=false sample).
         assertThat(tip.isIJp()).isTrue();
         assertThat(tip.getJpV()).isEqualTo(1_603_000L);
         assertThat(tip.getTJpV()).isEqualTo(200_000L);

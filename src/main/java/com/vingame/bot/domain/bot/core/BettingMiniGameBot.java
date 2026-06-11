@@ -190,18 +190,21 @@ public class BettingMiniGameBot extends Bot {
         if (metrics != null) metrics.incBotMessage("endGame");
 
         EndGameMessage msg = data.getData();
+        // Marker-interface dispatch (ENDGAME_METRICS plan, Phase A/C).
+        // Per-message extraction. Independent `if` checks — a message may
+        // implement multiple interfaces. The pre-Phase-A capability hooks
+        // (getWinnings / getJackpot / canCheckTotalWinnings / getTotalWinnings
+        // / getRoundTotalBetAmount) were deleted in Phase C; the message
+        // payload now owns extraction.
+        // Extraction (local-accumulator updates) runs unconditionally — those
+        // fields back BotHealthDTO and are independent of Prometheus wiring.
+        // Only the metric emission is gated on `metrics != null`.
+        if (msg instanceof HasBotWinnings hw) {
+            long w = hw.winningsFor(getUserName());
+            lastRoundWinnings = w;
+            if (metrics != null && w > 0) metrics.incBotWinnings(w);
+        }
         if (metrics != null) {
-            // Marker-interface dispatch (ENDGAME_METRICS plan, Phase A/C).
-            // Per-message extraction. Independent `if` checks — a message may
-            // implement multiple interfaces. The pre-Phase-A capability hooks
-            // (getWinnings / getJackpot / canCheckTotalWinnings / getTotalWinnings
-            // / getRoundTotalBetAmount) were deleted in Phase C; the message
-            // payload now owns extraction.
-            if (msg instanceof HasBotWinnings hw) {
-                long w = hw.winningsFor(getUserName());
-                if (w > 0) metrics.incBotWinnings(w);
-                lastRoundWinnings = w;
-            }
             if (msg instanceof HasJackpot hj) {
                 long j = hj.jackpotFor(getUserName());
                 if (j > 0) metrics.incBotJackpot(j);

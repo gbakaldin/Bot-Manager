@@ -648,7 +648,7 @@ class BettingMiniGameBotTest {
         }
 
         @Test
-        @DisplayName("Null metrics with all three surviving interfaces implemented: no NPE, gameState transitions to PAYOUT")
+        @DisplayName("Null metrics with all three surviving interfaces implemented: no NPE, gameState transitions to PAYOUT, lastRoundWinnings still updates")
         void shouldNoOpOnAllInterfacesWhenMetricsNull() throws Exception {
             bot.setMetrics(null);
             setLastFetchedBalance(50_000_000L);
@@ -666,6 +666,13 @@ class BettingMiniGameBotTest {
             invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
 
             assertThat(readField("gameState")).isEqualTo(BettingMiniGameState.PAYOUT);
+            // lastRoundWinnings is a local accumulator backing BotHealthDTO and is
+            // functionally independent of Prometheus wiring (same family as
+            // totalBetsPlaced / totalBetAmount). Per the Phase B/C narrative, local
+            // accumulators stay regardless of `metrics`; only the metric emission
+            // is gated. With metrics null and a HasBotWinnings payload of 500,
+            // lastRoundWinnings must still update.
+            assertThat(((Bot) bot).getLastRoundWinnings()).isEqualTo(500L);
         }
 
         // TODO(observability): once a per-game EndGameMessage subtype implements

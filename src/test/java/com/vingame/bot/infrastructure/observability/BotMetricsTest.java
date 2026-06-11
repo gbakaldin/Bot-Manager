@@ -135,18 +135,52 @@ class BotMetricsTest {
     }
 
     @Test
-    void incBetsPlaced_zeroOrNegativeCountIsNoOpAndCreatesNoCounter() {
+    void incBetsPlaced_bothZeroOrNegativeIsNoOpAndCreatesNoCounter() {
         setBotMdc();
         metrics.incBetsPlaced(0, 0L);
-        metrics.incBetsPlaced(-3, 100L);
+        metrics.incBetsPlaced(-3, -100L);
 
         Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
         Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
 
-        // Defensive contract: zero/negative count must never reach the registry,
-        // mirroring the dead-seconds silent-drop pattern.
+        // Defensive contract: a fully-zero (or fully-negative) call creates no
+        // counters — mirrors the dead-seconds silent-drop pattern. Asymmetric
+        // calls (one positive, one zero) are covered by the independent-guard
+        // tests below.
         assertThat(bets).isNull();
         assertThat(amount).isNull();
+    }
+
+    @Test
+    void incBetsPlaced_zeroCountWithPositiveAmountStillRecordsAmount() {
+        // Reviewer fix: prior version's `if (count <= 0) return;` early-out
+        // silently dropped a non-zero amount. Future HasBetTotals implementers
+        // may legitimately emit (count=0, amount=N>0) — the amount counter must
+        // still increment.
+        setBotMdc();
+        metrics.incBetsPlaced(0, 500L);
+
+        Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
+        Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
+
+        assertThat(bets).isNull();              // count guard correctly skipped
+        assertThat(amount).isNotNull();
+        assertThat(amount.count()).isEqualTo(500.0);
+    }
+
+    @Test
+    void incBetsPlaced_positiveCountWithZeroAmountStillRecordsCount() {
+        // Mirror of the above: count > 0 with amount == 0 must still increment
+        // the count counter independently. Guards are symmetric.
+        setBotMdc();
+        metrics.incBetsPlaced(3, 0L);
+
+        Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
+        Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
+
+        assertThat(bets).isNotNull();
+        assertThat(bets.count()).isEqualTo(3.0);
+        assertThat(amount).isNull();            // amount guard correctly skipped
     }
 
     @Test

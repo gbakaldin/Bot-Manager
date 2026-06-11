@@ -188,21 +188,30 @@ public class BotMetrics {
      * still count bets sent, so the two values can legitimately diverge when the
      * server rejects bets — see {@code docs/plans/ENDGAME_METRICS.md} AD-4.
      * <p>
-     * Caller guard: this method silently no-ops when {@code count <= 0} so the
-     * bot-side dispatch can call it unconditionally with whatever the message
-     * extractor returned. No counter is created on a zero-count call.
+     * Caller-side contract: the two arguments are guarded independently. The count
+     * counter is incremented iff {@code count > 0}; the amount counter is
+     * incremented iff {@code totalAmount > 0}. This deliberately tolerates future
+     * {@code HasBetTotals} implementers that emit one without the other — e.g. a
+     * {@code (count=0, totalAmount=N>0)} payload still records the amount instead
+     * of silently dropping it. A {@code (0, 0)} call creates no counters. Negative
+     * values are treated as zero (silent drop).
      */
     public void incBetsPlaced(int count, long totalAmount) {
-        if (count <= 0) return;
-        Tags tags = mdcTags();
-        Counter.builder(BOT_BETS_PLACED_TOTAL)
-                .tags(tags)
-                .register(registry)
-                .increment(count);
-        Counter.builder(BOT_BET_AMOUNT_TOTAL)
-                .tags(tags)
-                .register(registry)
-                .increment(totalAmount);
+        Tags tags = null;
+        if (count > 0) {
+            tags = mdcTags();
+            Counter.builder(BOT_BETS_PLACED_TOTAL)
+                    .tags(tags)
+                    .register(registry)
+                    .increment(count);
+        }
+        if (totalAmount > 0) {
+            if (tags == null) tags = mdcTags();
+            Counter.builder(BOT_BET_AMOUNT_TOTAL)
+                    .tags(tags)
+                    .register(registry)
+                    .increment(totalAmount);
+        }
     }
 
     /**
