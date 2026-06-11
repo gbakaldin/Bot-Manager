@@ -293,51 +293,25 @@ public class ApiGatewayClient {
         String username = userNamePrefix + index;
         String fingerprint = AuthClient.generateFingerprint();
 
-        UserRegistrationRequest request;
-        HttpRequest.Builder requestBuilder;
-
-        if (xToken != null) {
-            request = UserRegistrationRequest.builder()
-                    .username(username)
-                    .password(password)
-                    .ip(ip)
-                    .registerIp(ip)
-                    .os("OS X")
-                    .appId(appId)
-                    .device("Computer")
-                    .browser("WEB")
-                    .source(appId)
-                    .build();
-            requestBuilder = HttpRequest.newBuilder()
-                    .uri(URI.create(apiGateway + registrationPath))
-                    .header("Content-Type", "application/json")
-                    .header(SESSION_TOKEN_HEADER, xToken);
-        } else {
-            String avatar = "Avatar" + (int) (Math.random() * 45 + 1);
-            request = UserRegistrationRequest.builder()
-                    .fullname("_undefined")
-                    .username(username)
-                    .password(password)
-                    .avatar(avatar)
-                    .registerIp(ip)
-                    .ip(ip)
-                    .os("OS X")
-                    .appId(appId)
-                    .device("Computer")
-                    .browser("chrome")
-                    .fg(fingerprint)
-                    .type("BOT")
-                    .build();
-            requestBuilder = HttpRequest.newBuilder()
-                    .uri(URI.create(apiGateway + registrationPath))
-                    .header("Content-Type", "application/json")
-                    .header("Origin", "https://097.stgame.win")
-                    .header("Referer", "https://097.stgame.win");
-        }
+        UserRegistrationRequest request = UserRegistrationRequest.builder()
+                .username(username)
+                .password(password)
+                .ip(ip)
+                .registerIp(ip)
+                .os("OS X")
+                .appId(appId)
+                .device("Computer")
+                .browser("WEB")
+                .source(appId)
+                .build();
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(URI.create(apiGateway + registrationPath))
+                .header("Content-Type", "application/json")
+                .header(SESSION_TOKEN_HEADER, xToken);
 
         String requestBody = mapper.writeValueAsString(request);
         log.info("[Register] POST {} | X-TOKEN: {} | body: {}",
-                apiGateway + registrationPath, xToken != null ? xToken : "(none)", requestBody);
+                apiGateway + registrationPath, xToken, requestBody);
 
         HttpRequest httpRequest = requestBuilder
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
