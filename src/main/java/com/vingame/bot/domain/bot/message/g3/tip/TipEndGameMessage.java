@@ -33,28 +33,23 @@ public class TipEndGameMessage extends EndGameMessage
      * This bot's jackpot payout for the just-completed round; {@code 0} when no
      * jackpot was won ({@code iJp == false}).
      * <p>
-     * <b>Field choice (defensible default pending iJp=false sample).</b>
-     * Tip carries two jackpot-shaped fields on EndGame: {@code jpV} and {@code tJpV}.
-     * The only sample available at implementation time
-     * ({@code docs/plans/ROUND_DATA_COLLECTION_FINDINGS.md}) showed both non-zero with
-     * {@code iJp=true} ({@code jpV=1603000}, {@code tJpV=200000}). The ~8x magnitude
-     * gap is the empirical lever: a per-user round payout is plausibly the larger
-     * of the two when {@code iJp=true}, with {@code tJpV} reading as the remaining
-     * pool or accumulated tier. {@code jpV} is therefore chosen as the per-user payout.
+     * <b>Field semantics (confirmed).</b> Tip carries two jackpot-shaped fields
+     * on EndGame:
+     * <ul>
+     *   <li>{@code jpV} = {@code jackpotValue} — this player's earned jackpot in the
+     *       current round. Non-zero only when {@code iJp=true}.</li>
+     *   <li>{@code tJpV} = {@code totalJackpotValue} — the total winnable jackpot
+     *       displayed in the game UI, distributed across all players according to
+     *       their share of the bet placed on the jackpot-winning option.</li>
+     * </ul>
+     * {@code jpV} is therefore the correct field for the per-user payout that feeds
+     * {@code bot_jackpots_total} / {@code bot_jackpot_amount_total}.
      * <p>
      * <b>No cross-product convention applies here.</b> The same field name
      * {@code tJpV} carries the <i>opposite</i> meaning in Bom and Nohu, whose
      * EndGame implementations both return {@code iJp ? tJpV : 0L} as the per-user
      * jackpot payout (see {@code BomEndGameMessage}, {@code NohuEndGameMessage}).
-     * Tip's choice of {@code jpV} is therefore not a generalizable convention —
-     * it's a Tip-specific reading of the available sample. Do not rely on
-     * Bom/Nohu shape when adding a fourth product.
-     * <p>
-     * <b>Open question (per ROUND_DATA_COLLECTION_FINDINGS.md):</b> need a second
-     * sample with {@code iJp=false} to confirm this hypothesis. If {@code tJpV} stays
-     * fixed across rounds with {@code iJp=false} and {@code jpV} reads 0, the choice
-     * is correct; if both move, revisit. Until then, this method publishes {@code jpV}
-     * to the {@code bot_jackpots_total} / {@code bot_jackpot_amount_total} counters.
+     * Do not rely on Bom/Nohu shape when adding a fourth product.
      */
     @Override
     public long jackpotFor(String userName) {
