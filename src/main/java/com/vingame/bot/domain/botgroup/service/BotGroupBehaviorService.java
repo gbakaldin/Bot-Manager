@@ -858,7 +858,11 @@ public class BotGroupBehaviorService {
             return;
         }
 
-        log.debug("Periodic logout starting for bot {} in group {}",
+        // INFO (not DEBUG) so the operator has the "why" for the subsequent
+        // `Bot {userName}: restart requested` INFO line at Bot.java:176. Without this
+        // context, the restart INFO is opaque. Per-bot but bounded — fires at most once
+        // per scheduler interval per group.
+        log.info("Periodic logout starting for bot {} in group {}",
                 bot.getUserName(), runtime.getGroupId());
 
         try {

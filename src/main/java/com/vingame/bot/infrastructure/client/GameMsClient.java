@@ -103,7 +103,15 @@ public class GameMsClient {
                 boolean success = response.statusCode() == 200;
                 onComplete.accept(success);
 
-                log.debug("Response code: {} | response body: {}", response.statusCode(), response.body());
+                if (success) {
+                    log.debug("Response code: {} | response body: {}", response.statusCode(), response.body());
+                } else {
+                    // Non-200 deposit response: the caller in Bot.java logs a one-line WARN
+                    // without any upstream context. Surface status + body at WARN here so the
+                    // operator can diagnose without flipping the logger to DEBUG.
+                    log.warn("Deposit non-200 response — status: {} | body: {}",
+                            response.statusCode(), response.body());
+                }
 
             } catch (IOException | InterruptedException e) {
                 onComplete.accept(false);
