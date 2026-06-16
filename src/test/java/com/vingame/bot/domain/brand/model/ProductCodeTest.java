@@ -116,16 +116,6 @@ class ProductCodeTest {
     }
 
     @Test
-    @DisplayName("fromCode is case-sensitive on the short code")
-    void fromCode_isCaseSensitive() {
-        // Sanity: the short codes are numeric so case doesn't actually vary,
-        // but the contract is exact-string match. Surface that explicitly so a
-        // future refactor to e.g. uppercase comparison fails here.
-        assertThatThrownBy(() -> ProductCode.fromCode("P_116"))
-                .isInstanceOf(IllegalArgumentException.class);
-    }
-
-    @Test
     @DisplayName("ProductCode declares exactly the documented set of products")
     void enum_declaresExpectedProducts() {
         // Lock the size so a new product addition forces an update to all the

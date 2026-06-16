@@ -93,8 +93,8 @@ class DisplayNameServiceTest {
         }
 
         @Test
-        @DisplayName("init() is idempotent — calling twice does not duplicate entries when underlying list is reset")
-        void init_doesNotDoubleLoadWhenCalledTwiceFromScratch() {
+        @DisplayName("init() is additive — calling twice doubles entries (regression pin)")
+        void init_isAdditive_calledTwiceDoublesEntries() {
             DisplayNameService service = new DisplayNameService();
             service.init();
             int countAfterFirst = service.getDisplayNameCount();
