@@ -9,6 +9,9 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
+import com.vingame.bot.domain.brand.model.ProductCode;
+import com.vingame.bot.domain.environment.model.Environment;
+import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
 import org.junit.jupiter.api.DisplayName;
@@ -49,6 +52,9 @@ class BotGroupServiceTest {
 
     @Mock
     private EnvironmentClientRegistry clientRegistry;
+
+    @Mock
+    private EnvironmentService environmentService;
 
     @Mock
     private MongoTemplate mongoTemplate;
@@ -231,6 +237,7 @@ class BotGroupServiceTest {
                     .failureCount(0)
                     .build();
 
+            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
             when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
             when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
             when(apiGatewayClient.registerUsers("bot", "pass", 5)).thenReturn(successResult);
@@ -261,6 +268,7 @@ class BotGroupServiceTest {
                     .errors(List.of("Connection refused"))
                     .build();
 
+            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
             when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
             when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
             when(apiGatewayClient.registerUsers("bot", "pass", 5)).thenReturn(failResult);
@@ -290,6 +298,7 @@ class BotGroupServiceTest {
                     .errors(List.of("User already exists"))
                     .build();
 
+            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
             when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
             when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
             when(apiGatewayClient.registerUsers("bot", "pass", 5)).thenReturn(partialResult);
@@ -370,6 +379,7 @@ class BotGroupServiceTest {
                     .failureCount(0)
                     .build();
 
+            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
             when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
             when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
             when(apiGatewayClient.registerUsers("bot", "pass", 3)).thenReturn(successResult);
@@ -418,6 +428,7 @@ class BotGroupServiceTest {
                     .failureCount(0)
                     .build();
 
+            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
             when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
             when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
             when(apiGatewayClient.registerUsers("bot", "pass", 2)).thenReturn(successResult);
@@ -470,5 +481,135 @@ class BotGroupServiceTest {
 
             verify(repository).deleteById("123");
         }
+    }
+
+    @Nested
+    @DisplayName("save - username length pre-flight")
+    class UsernameLengthValidationTests {
+
+        @Test
+        @DisplayName("Should accept when prefix + botCount fits the product cap (Tip, cap=12)")
+        void shouldAcceptWhenWithinCap() {
+            // Tip cap is 12. prefix "authtest" (8) + 9999 (4 digits) = 12, exactly at the cap.
+            BotGroup group = BotGroup.builder()
+                    .name("Tip Group")
+                    .environmentId("env-tip")
+                    .namePrefix("authtest")
+                    .password("pass")
+                    .botCount(9999)
+                    .build();
+
+            UserRegistrationResult successResult = UserRegistrationResult.builder()
+                    .totalRequested(9999)
+                    .successCount(9999)
+                    .failureCount(0)
+                    .build();
+
+            when(environmentService.findById("env-tip")).thenReturn(envWithProductCode(ProductCode.P_116));
+            when(clientRegistry.getClients("env-tip")).thenReturn(environmentClients);
+            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
+            when(apiGatewayClient.registerUsers("authtest", "pass", 9999)).thenReturn(successResult);
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.save(group);
+
+            assertThat(result.getId()).isNotNull().isNotEmpty();
+            verify(apiGatewayClient).registerUsers("authtest", "pass", 9999);
+            verify(repository).save(group);
+        }
+
+        @Test
+        @DisplayName("Should reject with IllegalArgumentException when prefix + botCount exceeds the cap")
+        void shouldRejectWhenExceedsCap() {
+            // Tip cap is 12. prefix "authtestws" (10) + 999 (3 digits) = 13, one over.
+            BotGroup group = BotGroup.builder()
+                    .name("Tip Overflow Group")
+                    .environmentId("env-tip")
+                    .namePrefix("authtestws")
+                    .password("pass")
+                    .botCount(999)
+                    .build();
+
+            when(environmentService.findById("env-tip")).thenReturn(envWithProductCode(ProductCode.P_116));
+
+            assertThatThrownBy(() -> service.save(group))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("P_116")
+                    .hasMessageContaining("authtestws")
+                    .hasMessageContaining("999")
+                    .hasMessageContaining("13")
+                    .hasMessageContaining("12");
+
+            // Pre-flight must run BEFORE any auth/registration fan-out and BEFORE persistence.
+            verify(clientRegistry, never()).getClients(anyString());
+            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("Should accept any length when product has no documented cap")
+        void shouldAcceptWhenProductHasNoCap() {
+            // P_097 (BOM) has no documented username cap — should pass even with a very long prefix.
+            BotGroup group = BotGroup.builder()
+                    .name("Bom Long Prefix Group")
+                    .environmentId("env-bom")
+                    .namePrefix("aRidiculouslyLongNamePrefixThatWouldNeverPassATipCap")
+                    .password("pass")
+                    .botCount(50)
+                    .build();
+
+            UserRegistrationResult successResult = UserRegistrationResult.builder()
+                    .totalRequested(50)
+                    .successCount(50)
+                    .failureCount(0)
+                    .build();
+
+            when(environmentService.findById("env-bom")).thenReturn(envWithProductCode(ProductCode.P_097));
+            when(clientRegistry.getClients("env-bom")).thenReturn(environmentClients);
+            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
+            when(apiGatewayClient.registerUsers(anyString(), eq("pass"), eq(50))).thenReturn(successResult);
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.save(group);
+
+            assertThat(result.getId()).isNotNull().isNotEmpty();
+            verify(repository).save(group);
+        }
+
+        @Test
+        @DisplayName("Should skip validation entirely on the skipRegistration=true migration path")
+        void shouldSkipValidationOnMigrationPath() {
+            // Even a username that would blow the Tip cap must be accepted when migrating
+            // existing bots — the auth gateway is not contacted on this path.
+            BotGroup group = BotGroup.builder()
+                    .name("Migrated Tip Group")
+                    .environmentId("env-tip")
+                    .namePrefix("authtestws")
+                    .password("pass")
+                    .botCount(999)
+                    .build();
+
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.save(group, true);
+
+            assertThat(result.getId()).isNotNull().isNotEmpty();
+            verify(environmentService, never()).findById(anyString());
+            verify(clientRegistry, never()).getClients(anyString());
+            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
+        }
+    }
+
+    /**
+     * Helper: an Environment whose ProductCode has no documented cap, so the pre-flight
+     * length check is a no-op. Used by all pre-existing save tests that don't care about
+     * the cap.
+     */
+    private Environment envWithoutCap() {
+        return envWithProductCode(ProductCode.P_097); // BOM — no cap declared
+    }
+
+    private Environment envWithProductCode(ProductCode code) {
+        return Environment.builder().id("env-stub").productCode(code).build();
     }
 }

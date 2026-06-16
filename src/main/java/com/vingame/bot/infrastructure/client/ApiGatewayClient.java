@@ -134,7 +134,7 @@ public class ApiGatewayClient {
         try {
             String requestBody = mapper.writeValueAsString(loginRequestFactory.apply(ctx));
             log.info("[Login] POST {} | X-TOKEN: {} | body: {}",
-                    apiGateway + loginPath, xToken != null ? xToken : "(none)", requestBody);
+                    apiGateway + loginPath, xToken, requestBody);
         } catch (Exception e) {
             log.warn("[Login] Could not serialize login request for logging: {}", e.getMessage());
         }
@@ -234,7 +234,6 @@ public class ApiGatewayClient {
      * This method is called in parallel from registerUsers().
      * <p>
      * Uses tokens returned directly from the register response — no re-authentication needed.
-     * A 500ms delay before verifytoken gives the auth server time to reach internal consistency.
      *
      * @param userNamePrefix Username prefix
      * @param password       Password
@@ -250,10 +249,6 @@ public class ApiGatewayClient {
 
             if (displayNameService.hasDisplayNames()) {
                 try {
-                    if (xToken == null) {
-                        Thread.sleep(500);
-                        verifyToken(result.authToken(), result.fingerprint());
-                    }
                     String displayName = setDisplayNameWithRetry(username, result.authToken(), 5);
                     if (displayName != null) {
                         log.info("Set display name '{}' for user {}", displayName, username);
@@ -269,23 +264,6 @@ public class ApiGatewayClient {
         }
     }
 
-    /**
-     * Call verifytoken to activate the session after registration.
-     * The response is not used — the call is made purely to allow the auth server
-     * to complete internal session setup before subsequent operations.
-     */
-    private void verifyToken(String authToken, String fingerprint) throws IOException, InterruptedException {
-        HttpRequest httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(apiGateway + VERIFY_TOKEN_ENDPOINT + "?token=" + authToken + "&fg=" + fingerprint))
-                .header("Cache-Control", "no-cache")
-                .header("Content-Type", "application/json")
-                .header("User-Agent", USER_AGENT)
-                .GET()
-                .timeout(Duration.ofSeconds(10))
-                .build();
-        httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
-    }
-
     private record RegistrationResult(String agencyToken, String authToken, String fingerprint) {}
 
     private RegistrationResult registerSingleUser(String userNamePrefix, String password, int index) throws IOException, InterruptedException {
@@ -293,51 +271,25 @@ public class ApiGatewayClient {
         String username = userNamePrefix + index;
         String fingerprint = AuthClient.generateFingerprint();
 
-        UserRegistrationRequest request;
-        HttpRequest.Builder requestBuilder;
-
-        if (xToken != null) {
-            request = UserRegistrationRequest.builder()
-                    .username(username)
-                    .password(password)
-                    .ip(ip)
-                    .registerIp(ip)
-                    .os("OS X")
-                    .appId(appId)
-                    .device("Computer")
-                    .browser("WEB")
-                    .source(appId)
-                    .build();
-            requestBuilder = HttpRequest.newBuilder()
-                    .uri(URI.create(apiGateway + registrationPath))
-                    .header("Content-Type", "application/json")
-                    .header(SESSION_TOKEN_HEADER, xToken);
-        } else {
-            String avatar = "Avatar" + (int) (Math.random() * 45 + 1);
-            request = UserRegistrationRequest.builder()
-                    .fullname("_undefined")
-                    .username(username)
-                    .password(password)
-                    .avatar(avatar)
-                    .registerIp(ip)
-                    .ip(ip)
-                    .os("OS X")
-                    .appId(appId)
-                    .device("Computer")
-                    .browser("chrome")
-                    .fg(fingerprint)
-                    .type("BOT")
-                    .build();
-            requestBuilder = HttpRequest.newBuilder()
-                    .uri(URI.create(apiGateway + registrationPath))
-                    .header("Content-Type", "application/json")
-                    .header("Origin", "https://097.stgame.win")
-                    .header("Referer", "https://097.stgame.win");
-        }
+        UserRegistrationRequest request = UserRegistrationRequest.builder()
+                .username(username)
+                .password(password)
+                .ip(ip)
+                .registerIp(ip)
+                .os("OS X")
+                .appId(appId)
+                .device("Computer")
+                .browser("WEB")
+                .source(appId)
+                .build();
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
+                .uri(URI.create(apiGateway + registrationPath))
+                .header("Content-Type", "application/json")
+                .header(SESSION_TOKEN_HEADER, xToken);
 
         String requestBody = mapper.writeValueAsString(request);
         log.info("[Register] POST {} | X-TOKEN: {} | body: {}",
-                apiGateway + registrationPath, xToken != null ? xToken : "(none)", requestBody);
+                apiGateway + registrationPath, xToken, requestBody);
 
         HttpRequest httpRequest = requestBuilder
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
@@ -366,31 +318,23 @@ public class ApiGatewayClient {
      * Set or update the display name (fullname) for a user.
      *
      * @param username     The username (required for B52 endpoint)
-     * @param sessionToken The session token obtained from authentication (used for standard envs)
+     * @param sessionToken Retained for signature compatibility; no longer used (X-TOKEN is always used).
      * @param displayName  The new display name to set
      * @return true if successful, false if name is already taken
      */
     public boolean setDisplayName(String username, String sessionToken, String displayName) {
         checkInitialized();
         try {
-            Object body;
-            String headerToken;
-            if (xToken != null) {
-                body = java.util.Map.of("username", username, "fullname", displayName);
-                headerToken = xToken;
-            } else {
-                body = java.util.Map.of("fullname", displayName, "aff_id", "");
-                headerToken = sessionToken;
-            }
+            Object body = java.util.Map.of("username", username, "fullname", displayName);
 
             String requestBody = mapper.writeValueAsString(body);
             String url = apiGateway + updateFullnamePath;
-            log.info("[UpdateFullname] POST {} | X-TOKEN: {} | body: {}", url, headerToken, requestBody);
+            log.info("[UpdateFullname] POST {} | X-TOKEN: {} | body: {}", url, xToken, requestBody);
 
             HttpRequest httpRequest = HttpRequest.newBuilder()
                     .uri(URI.create(url))
                     .header("Content-Type", "application/json")
-                    .header(SESSION_TOKEN_HEADER, headerToken)
+                    .header(SESSION_TOKEN_HEADER, xToken)
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .timeout(Duration.ofSeconds(10))
                     .build();
