@@ -707,8 +707,20 @@ class BettingMiniGameBotTest {
         private int betCount = 0;
         private long betAmount = 0L;
 
+        private long sessionId = 0L;
+
         StubEndGameMessage() {
             super(0);
+        }
+
+        StubEndGameMessage withSessionId(long sessionId) {
+            this.sessionId = sessionId;
+            return this;
+        }
+
+        @Override
+        public long getSessionId() {
+            return sessionId;
         }
 
         StubEndGameMessage withWinningsFor(String userName, long winnings) {

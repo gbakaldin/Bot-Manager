@@ -18,6 +18,11 @@ public class B52EndGameMessage extends EndGameMessage implements HasJackpot {
         return iJp ? tJpV : 0L;
     }
 
+    @Override
+    public long getSessionId() {
+        return sid;
+    }
+
     private int d1;
     private int d2;
     private int d3;

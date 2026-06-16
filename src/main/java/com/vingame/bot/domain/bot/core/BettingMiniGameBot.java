@@ -3,6 +3,7 @@ package com.vingame.bot.domain.bot.core;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.domain.bot.message.request.Request;
+import com.vingame.bot.domain.bot.strategy.BotMemory;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
 import com.vingame.bot.domain.bot.util.GameState;
 import com.vingame.bot.domain.bot.util.OutputPrinter;
@@ -27,6 +28,7 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -72,6 +74,12 @@ public class BettingMiniGameBot extends Bot {
     private int numberOfBetsInCurrentSession = 0;
     private Random random = new Random();
 
+    // Factual rolling history (Phase 2 of BETTING_STRATEGIES). Populated from
+    // incoming WS messages in onStartGame/onEndGame and from outbound bets in
+    // bet(). Not yet consumed by any strategy — that's Phase 3+.
+    @Getter
+    private BotMemory memory;
+
     // Visible for testing — allows deterministic randomness in unit tests.
     void setRandom(Random random) {
         this.random = random;
@@ -92,6 +100,11 @@ public class BettingMiniGameBot extends Bot {
             configuration.getZoneName(),
             offset
         );
+
+        // BotMemory is built after `game` is set so its captured Game reference is
+        // non-null. Capacity defaults to BotMemory.DEFAULT_CAPACITY (50, per
+        // BETTING_STRATEGIES Architecture Decision 3 — hardcoded for v1).
+        this.memory = new BotMemory(game);
 
         this.watchdogTimeoutMillis = configuration.getWatchdogTimeoutSeconds() * 1000L;
         this.watchdogScheduler = Executors.newSingleThreadScheduledExecutor(
@@ -173,6 +186,11 @@ public class BettingMiniGameBot extends Bot {
         sidStore.set(msg.getSessionId());
         gameState = BettingMiniGameState.BET;
         numberOfBetsInCurrentSession = 0;
+        // Phase 2 of BETTING_STRATEGIES: kick off the in-flight RoundState for
+        // bet→result correlation. Balance snapshot mirrors expectedCurrentBalance.
+        if (memory != null) {
+            memory.beginRound(msg.getSessionId(), expectedCurrentBalance.get());
+        }
         scheduleWatchdog();
     }
 
@@ -199,8 +217,10 @@ public class BettingMiniGameBot extends Bot {
         // Extraction (local-accumulator updates) runs unconditionally — those
         // fields back BotHealthDTO and are independent of Prometheus wiring.
         // Only the metric emission is gated on `metrics != null`.
+        long payout = 0L;
         if (msg instanceof HasBotWinnings hw) {
             long w = hw.winningsFor(getUserName());
+            payout = w;
             lastRoundWinnings = w;
             if (metrics != null && w > 0) metrics.incBotWinnings(w);
         }
@@ -215,6 +235,16 @@ public class BettingMiniGameBot extends Bot {
                 metrics.incBetsPlaced(bt.betCountFor(getUserName()),
                         bt.betAmountFor(getUserName()));
             }
+        }
+
+        // Phase 2 of BETTING_STRATEGIES: finalize the in-flight RoundState into
+        // a RoundResult and push onto BotMemory.lastResults. v1 cannot yet
+        // extract winningOption (no HasWinningOption marker exists — Implementation
+        // Note 4); pass Optional.empty(). globalRecentWins stays empty for v1.
+        if (memory != null) {
+            Optional<Integer> winningOption = Optional.empty();
+            memory.completeRound(msg.getSessionId(), winningOption, payout);
+            memory.recordGlobalWin(winningOption);
         }
 
         gameState = BettingMiniGameState.PAYOUT;
@@ -259,7 +289,13 @@ public class BettingMiniGameBot extends Bot {
             creditBalance(nextBetAmount);
 
             int entryToBet = resolveNextEntryToBet();
-            return request.bet(nextBetAmount, entryToBet, sidStore.get());
+            long currentSid = sidStore.get();
+            // Phase 2 of BETTING_STRATEGIES: accumulate bet→result correlation.
+            // Strategy is not yet consumed (Phase 5); this is data-plumbing only.
+            if (memory != null) {
+                memory.recordBetSent(currentSid, entryToBet, nextBetAmount);
+            }
+            return request.bet(nextBetAmount, entryToBet, currentSid);
         };
     }
 
