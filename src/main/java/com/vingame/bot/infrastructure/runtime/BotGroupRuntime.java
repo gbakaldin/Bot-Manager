@@ -172,6 +172,7 @@ public class BotGroupRuntime {
      * stop does not move the stamp forward, preserving the original entry time.
      */
     public void markAsDead() {
+        log.warn("Bot group {} entering DEAD state", groupId);
         this.actualStatus = BotGroupStatus.DEAD;
         if (this.groupDeadSince == null) {
             this.groupDeadSince = Instant.now();

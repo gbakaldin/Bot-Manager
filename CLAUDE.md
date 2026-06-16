@@ -29,6 +29,42 @@ The main entry point is `com.vingame.bot.Starter` (Spring Boot application).
 - **OpenAPI/Swagger** (SpringDoc) at `/swagger-ui.html`
 - **WebSocket Parser** (custom library: `vingame:websocket-parser:1.0-SNAPSHOT`)
 
+## Logging Guidelines
+
+Normative levels for `com.vingame.bot.*`. Production currently runs at DEBUG; the
+audit reclassified per-bot/per-message detail so the threshold can be safely
+raised to INFO without losing lifecycle context. MDC (`botGroupId`, `botId`,
+`gameType`) is on every per-bot line — operators drill in via
+`POST /actuator/loggers/com.vingame.bot {"configuredLevel":"DEBUG"}`.
+
+- **INFO** — Group-level lifecycle visible at default level on a healthy
+  system. Application startup, bot group create / start / stop / restart,
+  group state transitions, scheduled-restart firing, periodic-logout
+  scheduler started/stopped, periodic-logout cycle starting (the "why" for
+  the per-bot restart that follows). A 30-bot group running for an hour
+  should produce low tens of INFO lines, not thousands. Do **not** use for
+  per-bot status transitions, per-HTTP-call envelopes, balance checks, or
+  per-message dispatch.
+- **DEBUG** — Per-bot / per-message detail. Per-bot status transitions,
+  per-bot deposit success/failure, HTTP request/response bodies (login,
+  register, verifytoken, updateFullname, deposit success path), reconnect
+  attempt success, balance fetch, per-bot periodic-logout completion.
+- **WARN** — Recoverable anomalies that warrant investigation if they
+  persist. Bot WS disconnect (triggers retry), watchdog expiry, partial
+  registration result, deposit failure for a single bot, deposit non-200
+  HTTP response (status + body), periodic logout interrupted. Do **not**
+  use for expected outcomes — those stay at INFO via the exception handler.
+- **ERROR** — Failures requiring operator attention. Bot group marked DEAD,
+  re-authentication failed (bot lost), 5xx upstream, failed to load display
+  names, executor interrupted during shutdown. Page-on-ERROR is reasonable;
+  keep volume low.
+- **TRACE** — Reserved for wire-level / packet-level detail. Currently
+  unused; do not adopt as a verbose-DEBUG junk drawer.
+
+When demoting INFO→DEBUG, keep the MDC tag on the line — that is what makes
+the demotion safe. WARN/ERROR are out of scope for routine reclassification;
+they're invisibly coupled to downstream alerting.
+
 ## Package Structure
 
 ```
