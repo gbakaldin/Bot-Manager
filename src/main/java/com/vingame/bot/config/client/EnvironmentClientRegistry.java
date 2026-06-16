@@ -131,11 +131,17 @@ public class EnvironmentClientRegistry {
         // Create shared GameMsClient (stateless) with global GameMS URL
         GameMsClient gameMsClient = new GameMsClient(gameMsUrl);
 
-        // Create shared ClientFactory with shared EventLoopGroup
+        // Create shared ClientFactory with shared EventLoopGroup.
+        // NOTE: zoneName is intentionally NOT set on this cached factory. The
+        // cached factory is shared across all games for an environment and is
+        // never used to build WebSocket clients directly — BotFactory.createBot
+        // constructs its own ClientFactory per bot and resolves zoneName from
+        // the (Environment, Game) pair via Environment.resolveZoneName(game).
+        // Setting a single zoneName here would be misleading because the
+        // resolved value depends on the game type. See RESTART_LIFECYCLE_FIX.
         ClientFactory clientFactory = new ClientFactory();
         clientFactory.setUri(URI.create(env.getWebSocketMiniUrl()));
         clientFactory.setHeaders(env.getHeaders());
-        clientFactory.setZoneName(env.getMiniZoneName());
         clientFactory.setEncryption(true);
         clientFactory.setIgnoreJwtToken(!env.isUseJwtAuth());
         clientFactory.setEventLoopGroup(eventLoopGroup); // CRITICAL: Share EventLoopGroup across all bots

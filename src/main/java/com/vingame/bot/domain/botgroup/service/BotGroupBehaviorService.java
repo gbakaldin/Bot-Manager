@@ -19,6 +19,7 @@ import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.websocketparser.auth.AuthClient;
+import com.vingame.websocketparser.exception.ValidationException;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -308,22 +309,71 @@ public class BotGroupBehaviorService {
         List<Bot> bots = new ArrayList<>(botCount);
         List<Throwable> errors = new ArrayList<>();
 
-        for (int i = 0; i < futures.size(); i++) {
-            try {
-                Bot bot = futures.get(i).join();
-                bots.add(bot);
-            } catch (Exception e) {
-                log.error("Failed to create bot {}/{}: {}", i + 1, botCount, e.getMessage());
-                errors.add(e);
+        // The result-collection loop runs on the caller thread of start(), NOT on
+        // the per-bot virtual thread (where MDC was set inside the supplyAsync
+        // lambda and cleared in its finally). Without an explicit group MDC here,
+        // bot_creation_failures_total would register without botGroupId/
+        // environmentId tags — defeating Decision 5's per-group cardinality goal.
+        // Mirror the same try/finally pattern used by start()'s outer catch
+        // (lines 251-256) and stop() (lines 422-427).
+        BotMdc.setGroupContext(group.getId(), group.getEnvironmentId());
+        try {
+            for (int i = 0; i < futures.size(); i++) {
+                try {
+                    Bot bot = futures.get(i).join();
+                    bots.add(bot);
+                } catch (Exception e) {
+                    // Unwrap CompletionException → real cause; users care about the
+                    // actual auth/validation failure, not the wrapper.
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    log.error("Failed to create bot {}/{} for group {} (env {}): {}",
+                            i + 1, botCount, group.getId(), group.getEnvironmentId(),
+                            cause.toString(), cause);
+                    botMetrics.incBotCreationFailure(classifyCreationFailure(cause));
+                    errors.add(e);
+                }
             }
+        } finally {
+            BotMdc.clear();
         }
 
         if (!errors.isEmpty()) {
-            log.warn("Created {}/{} bots successfully ({} failures)",
-                    bots.size(), botCount, errors.size());
+            log.warn("Created {}/{} bots successfully ({} failures) for group {}",
+                    bots.size(), botCount, errors.size(), group.getId());
         }
 
         return bots;
+    }
+
+    /**
+     * Classify a bot-creation failure into a bounded reason tag for
+     * {@code bot_creation_failures_total}. Bounded labels keep Prometheus
+     * cardinality low. RESTART_LIFECYCLE_FIX Architecture Decision 5.
+     */
+    private static String classifyCreationFailure(Throwable cause) {
+        if (cause instanceof IllegalStateException || cause instanceof IllegalArgumentException) {
+            return "validation";
+        }
+        // websocket-parser's ValidationException (e.g. "Authentication configuration
+        // is required...") is semantically validation, not auth. Without this
+        // explicit arm it would land in the "auth" bucket below because its
+        // message contains "auth". Post-RESTART_LIFECYCLE_FIX this path is
+        // unreachable (BotFactory now throws IllegalStateException first), but
+        // any future regression that re-introduces a builder-validation path
+        // would otherwise silently mislabel as "auth".
+        if (cause instanceof ValidationException) {
+            return "validation";
+        }
+        // Match common auth-failure markers without forcing a hard dependency on
+        // any specific exception type — ApiGatewayClient may throw various
+        // IOExceptions / RuntimeExceptions wrapping the upstream auth failure.
+        String className = cause.getClass().getSimpleName().toLowerCase();
+        String message = cause.getMessage() != null ? cause.getMessage().toLowerCase() : "";
+        if (className.contains("auth") || message.contains("auth")
+                || message.contains("login") || message.contains("token")) {
+            return "auth";
+        }
+        return "unknown";
     }
 
     /**
@@ -366,7 +416,7 @@ public class BotGroupBehaviorService {
                 .botIndex(botIndex)
                 .game(game)
                 .behaviorConfig(behaviorConfig)
-                .zoneName(environment.getMiniZoneName())
+                .zoneName(environment.resolveZoneName(game))
                 .watchdogTimeoutSeconds(watchdogTimeoutSeconds)
                 .build();
 
@@ -417,7 +467,28 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Restart a bot group (even if DEAD)
+     * Restart a bot group (even if DEAD).
+     * <p>
+     * RESTART_LIFECYCLE_FIX Architecture Decision 6: if the subsequent {@code start}
+     * produces zero live bots while the group's {@code botCount} is positive, throw
+     * {@link IllegalStateException}. {@code start()} itself swallows per-bot failures
+     * intentionally — the controller layer needs an explicit signal that a restart
+     * (which begins with a healthy running group) silently went to zero bots, since
+     * "zero bots with targetStatus=ACTIVE" was the symptom that originally hid the
+     * 2026-06-09 outage.
+     * <p>
+     * <b>Post-throw state.</b> When the zero-bot exception fires, {@code start()}
+     * has already persisted {@code targetStatus=ACTIVE} and inserted a (zero-bot)
+     * runtime into {@code runningGroups}. The DB and runtime are "lying" exactly
+     * as before; the only difference is that the failure is now visible via the
+     * exception + ERROR log + {@code bot_creation_failures_total} metric.
+     * <p>
+     * <b>Operator recovery procedure.</b> POST {@code /stop} to clear the
+     * inconsistent runtime + persist {@code targetStatus=STOPPED}, then POST
+     * {@code /start} to retry. The underlying cause (e.g. misconfigured
+     * environment, auth gateway outage) should be investigated before retrying;
+     * blindly re-issuing {@code /restart} will mechanically re-run the
+     * {@code stop} + {@code start} sequence and is likely to fail the same way.
      */
     public void restart(String id) {
         log.info("Restarting bot group {}", id);
@@ -431,6 +502,19 @@ public class BotGroupBehaviorService {
         }
 
         start(id);
+
+        // Verify post-start runtime is populated. If start() produced zero bots
+        // despite a non-zero botCount, surface that as an exception. The controller
+        // already returns 500 on Exception; this turns silent failure into an
+        // entry the operator can grep for and metrics they can alert on.
+        BotGroup group = botGroupService.findById(id);
+        BotGroupRuntime runtime = runningGroups.get(id);
+        int alive = runtime != null ? runtime.getBotInstances().size() : 0;
+        if (group.getBotCount() > 0 && alive == 0) {
+            throw new IllegalStateException(String.format(
+                    "Restart of group %s produced %d/%d bots; check logs and %s metric for cause",
+                    id, alive, group.getBotCount(), BotMetrics.BOT_CREATION_FAILURES_TOTAL));
+        }
     }
 
     /**
