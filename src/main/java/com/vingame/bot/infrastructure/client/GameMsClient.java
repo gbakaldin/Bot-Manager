@@ -75,7 +75,7 @@ public class GameMsClient {
 
         Thread t = new Thread(() -> {
             try {
-                log.info("Depositing {} for agency token {}", amount, agencyToken);
+                log.debug("Depositing {} for agency token {}", amount, agencyToken);
 
                 DepositRequest requestBody = DepositRequest.builder()
                         .token(agencyToken)
@@ -103,7 +103,7 @@ public class GameMsClient {
                 boolean success = response.statusCode() == 200;
                 onComplete.accept(success);
 
-                log.info("Response code: {} | response body: {}", response.statusCode(), response.body());
+                log.debug("Response code: {} | response body: {}", response.statusCode(), response.body());
 
             } catch (IOException | InterruptedException e) {
                 onComplete.accept(false);
@@ -128,10 +128,10 @@ public class GameMsClient {
      */
     public TokenDetails fetchTokenDetails(String agencyToken) {
         try {
-            log.info("Fetching token details for agency token {}", agencyToken);
+            log.debug("Fetching token details for agency token {}", agencyToken);
 
             String urlString = gameMsUrl + AGENCY_VERIFY_TOKEN_ENDPOINT + agencyToken;
-            log.info("URI {}", urlString);
+            log.debug("URI {}", urlString);
 
             // Build HTTP request using Java 11+ HttpClient
             HttpRequest httpRequest = HttpRequest.newBuilder()
@@ -149,7 +149,7 @@ public class GameMsClient {
             String responseBody = response.body();
             JsonNode dataArray = mapper.readTree(responseBody).get("data");
 
-            log.info("Token details: {}", responseBody);
+            log.debug("Token details: {}", responseBody);
 
             String uuid = dataArray.get(0).get("uid").asText();
             String memberId = dataArray.get(0).get("member_id").asText();

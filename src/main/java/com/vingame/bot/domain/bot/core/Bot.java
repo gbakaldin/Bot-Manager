@@ -143,7 +143,7 @@ public abstract class Bot {
                      tokens.getAuthToken().substring(0, 10));
             client.connect();
 
-            log.info("Bot initialized and connected. Client: {}",
+            log.debug("Bot initialized and connected. Client: {}",
                      System.identityHashCode(client));
 
             return this;
@@ -156,7 +156,7 @@ public abstract class Bot {
 
     public void cleanup() {
         stopped = true;
-        log.info("Cleaning up bot {}", userName);
+        log.debug("Cleaning up bot {}", userName);
         if (client != null && client.isOpen()) {
             try {
                 stop();
@@ -184,7 +184,7 @@ public abstract class Bot {
     }
 
     public void stop() {
-        log.info("Bot {} stopping. Closing client instance: {}",
+        log.debug("Bot {} stopping. Closing client instance: {}",
                  userName, System.identityHashCode(client));
         client.close();
     }
@@ -206,7 +206,7 @@ public abstract class Bot {
     public void logout() {
         try {
             stop();
-            log.info("Bot {}: Logged out", userName);
+            log.debug("Bot {}: Logged out", userName);
         } catch (Exception e) {
             log.error("Bot {}: Logout failed: {}", userName, e.getMessage());
         }
@@ -219,7 +219,7 @@ public abstract class Bot {
 
         gameMsClient.deposit(client.getAgencyToken(), 1_000_000_000L, mdcConsumer(success -> {
             if (success) {
-                log.info("Bot {}: Deposit successful, fetching new balance...", userName);
+                log.debug("Bot {}: Deposit successful, fetching new balance...", userName);
                 if (metrics != null) metrics.incBotAutoDeposit(true);
                 lastFetchedBalance = apiGatewayClient.getBalance(
                     getClient().getAuthToken(),
@@ -227,7 +227,7 @@ public abstract class Bot {
                     userName
                 );
                 expectedCurrentBalance.set(lastFetchedBalance);
-                log.info("Bot {}: New balance: {}", userName, expectedCurrentBalance);
+                log.debug("Bot {}: New balance: {}", userName, expectedCurrentBalance);
             } else {
                 log.warn("Bot {}: Deposit failed", userName);
                 if (metrics != null) metrics.incBotAutoDeposit(false);
@@ -286,7 +286,7 @@ public abstract class Bot {
         BotStatus prev = this.status;
         if (prev == next) return; // idempotent re-entry — no log churn, no double-counting
         this.status = next;
-        log.info("Bot {}: {} → {}", userName, prev, next);
+        log.debug("Bot {}: {} → {}", userName, prev, next);
         if (next == BotStatus.DEAD) {
             // Stamp the start of this DEAD window. deadSince is cleared on exit
             // (below) or at cleanup() — so seeing a non-null value here would mean
@@ -399,7 +399,7 @@ public abstract class Bot {
             if (tryReconnectWs()) {
                 sleep(RECONNECT_CONFIRM_SECONDS * 1000);
                 if (!stopped && client != null && client.isOpen()) {
-                    log.info("Bot {}: reconnected to WS (attempt {})", userName, attempt + 1);
+                    log.debug("Bot {}: reconnected to WS (attempt {})", userName, attempt + 1);
                     reconnecting.set(false);
                     return;
                 }
@@ -428,7 +428,7 @@ public abstract class Bot {
         if (tryReconnectWs()) {
             sleep(RECONNECT_CONFIRM_SECONDS * 1000);
             if (!stopped && client != null && client.isOpen()) {
-                log.info("Bot {}: reconnected after full re-auth", userName);
+                log.debug("Bot {}: reconnected after full re-auth", userName);
                 reconnecting.set(false);
                 return;
             }

@@ -134,7 +134,7 @@ public class ApiGatewayClient {
 
         try {
             String requestBody = mapper.writeValueAsString(loginRequestFactory.apply(ctx));
-            log.info("[Login] POST {} | X-TOKEN: {} | body: {}",
+            log.debug("[Login] POST {} | X-TOKEN: {} | body: {}",
                     apiGateway + loginPath, xToken, requestBody);
         } catch (Exception e) {
             log.warn("[Login] Could not serialize login request for logging: {}", e.getMessage());
@@ -142,7 +142,7 @@ public class ApiGatewayClient {
 
         try {
             TokensProvider tokens = new AuthClient(ctx, loginRequestFactory).authenticate();
-            log.info("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
+            log.debug("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
                     tokens.getAgencyToken(), tokens.getAuthToken(), tokens.getJwtToken());
             metrics.incLogin(true);
             return tokens;
@@ -254,13 +254,13 @@ public class ApiGatewayClient {
 
         try {
             RegistrationResult result = registerSingleUser(userNamePrefix, password, index);
-            log.info("Successfully registered user {}/{}: {}", index, totalCount, username);
+            log.debug("Successfully registered user {}/{}: {}", index, totalCount, username);
 
             if (displayNameService.hasDisplayNames()) {
                 try {
                     String displayName = setDisplayNameWithRetry(username, result.authToken(), 5);
                     if (displayName != null) {
-                        log.info("Set display name '{}' for user {}", displayName, username);
+                        log.debug("Set display name '{}' for user {}", displayName, username);
                     } else {
                         log.warn("Could not set display name for user {}", username);
                     }
@@ -297,7 +297,7 @@ public class ApiGatewayClient {
                 .header(SESSION_TOKEN_HEADER, xToken);
 
         String requestBody = mapper.writeValueAsString(request);
-        log.info("[Register] POST {} | X-TOKEN: {} | body: {}",
+        log.debug("[Register] POST {} | X-TOKEN: {} | body: {}",
                 apiGateway + registrationPath, xToken, requestBody);
 
         HttpRequest httpRequest = requestBuilder
@@ -307,7 +307,7 @@ public class ApiGatewayClient {
 
         HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
         String responseBody = response.body();
-        log.info("[Register] response HTTP {} | body: {}", response.statusCode(), responseBody);
+        log.debug("[Register] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
         UserRegistrationResponse registrationResponse = mapper.readValue(responseBody, UserRegistrationResponse.class);
 
@@ -338,7 +338,7 @@ public class ApiGatewayClient {
 
             String requestBody = mapper.writeValueAsString(body);
             String url = apiGateway + updateFullnamePath;
-            log.info("[UpdateFullname] POST {} | X-TOKEN: {} | body: {}", url, xToken, requestBody);
+            log.debug("[UpdateFullname] POST {} | X-TOKEN: {} | body: {}", url, xToken, requestBody);
 
             HttpRequest httpRequest = HttpRequest.newBuilder()
                     .uri(URI.create(url))
@@ -350,7 +350,7 @@ public class ApiGatewayClient {
 
             HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
             String responseBody = response.body();
-            log.info("[UpdateFullname] response HTTP {} | body: {}", response.statusCode(), responseBody);
+            log.debug("[UpdateFullname] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
             JsonNode responseJson = mapper.readTree(responseBody);
             String status = responseJson.has("status") ? responseJson.get("status").asText() : null;
@@ -361,7 +361,7 @@ public class ApiGatewayClient {
             }
 
             if ("OK".equals(status)) {
-                log.info("Display name set successfully to: {}", displayName);
+                log.debug("Display name set successfully to: {}", displayName);
                 return true;
             }
 
@@ -398,7 +398,7 @@ public class ApiGatewayClient {
                 return displayName;
             }
 
-            log.info("Retrying with different name (attempt {}/{})", attempt + 1, maxRetries);
+            log.debug("Retrying with different name (attempt {}/{})", attempt + 1, maxRetries);
         }
 
         log.error("Failed to set display name after {} attempts", maxRetries);
@@ -419,7 +419,7 @@ public class ApiGatewayClient {
             Thread.sleep(500);
 
             String url = apiGateway + VERIFY_TOKEN_ENDPOINT + "?token=" + authToken + "&fg=" + fingerprint;
-            log.info("[VerifyToken] GET {} | user: {}", url, username);
+            log.debug("[VerifyToken] GET {} | user: {}", url, username);
 
             HttpRequest httpRequest = HttpRequest.newBuilder()
                     .uri(URI.create(url))
@@ -432,7 +432,7 @@ public class ApiGatewayClient {
 
             HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
             String responseBody = response.body();
-            log.info("[VerifyToken] response HTTP {} | body: {}", response.statusCode(), responseBody);
+            log.debug("[VerifyToken] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
             JsonNode dataArray = mapper.readTree(responseBody).get("data");
             if (dataArray != null && dataArray.isArray() && !dataArray.isEmpty()) {

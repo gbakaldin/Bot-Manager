@@ -455,7 +455,7 @@ public class BotGroupBehaviorService {
         // Create bot using factory (authenticates and creates WebSocket client)
         Bot bot = botFactory.createBot(group.getEnvironmentId(), configuration);
 
-        log.info("Created bot {} ({}/{})", username, botIndex, group.getBotCount());
+        log.debug("Created bot {} ({}/{})", username, botIndex, group.getBotCount());
         return bot;
     }
 
@@ -757,7 +757,7 @@ public class BotGroupBehaviorService {
 
         runtime.setConsecutiveFailures((int) dead);
 
-        log.info("Group {} health — playing: {}, reconnecting: {}, dead: {}/{}",
+        log.debug("Group {} health — playing: {}, reconnecting: {}, dead: {}/{}",
                 runtime.getGroupId(), playing, reconnecting, dead, bots.size());
 
         if (!runtime.isGroupDead() && (double) dead / bots.size() >= deadBotGroupThreshold) {
@@ -854,11 +854,11 @@ public class BotGroupBehaviorService {
 
         // Skip if bot is already disconnected
         if (bot.getClient() == null || !bot.getClient().isOpen()) {
-            log.info("Bot {} already disconnected, skipping periodic logout", bot.getUserName());
+            log.debug("Bot {} already disconnected, skipping periodic logout", bot.getUserName());
             return;
         }
 
-        log.info("Periodic logout starting for bot {} in group {}",
+        log.debug("Periodic logout starting for bot {} in group {}",
                 bot.getUserName(), runtime.getGroupId());
 
         try {
@@ -870,7 +870,7 @@ public class BotGroupBehaviorService {
 
             // Check again if group is still active before reconnecting
             if (runtime.getActualStatus() != BotGroupStatus.ACTIVE) {
-                log.info("Group {} stopped during logout delay, skipping reconnect for bot {}",
+                log.debug("Group {} stopped during logout delay, skipping reconnect for bot {}",
                         runtime.getGroupId(), bot.getUserName());
                 return;
             }
@@ -878,7 +878,7 @@ public class BotGroupBehaviorService {
             // Reconnect
             bot.restart();
 
-            log.info("Periodic logout completed for bot {} in group {}",
+            log.debug("Periodic logout completed for bot {} in group {}",
                     bot.getUserName(), runtime.getGroupId());
 
         } catch (InterruptedException e) {
