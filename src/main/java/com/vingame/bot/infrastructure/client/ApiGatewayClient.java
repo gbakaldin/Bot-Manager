@@ -320,6 +320,8 @@ public class ApiGatewayClient {
         }
 
         var data = registrationResponse.getData().get(0);
+        log.debug("Registered user {} with sessionId={} (fingerprint={})",
+                username, data.getSessionId(), fingerprint);
         return new RegistrationResult(data.getToken(), data.getSessionId(), fingerprint);
     }
 

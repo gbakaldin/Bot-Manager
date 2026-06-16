@@ -173,6 +173,7 @@ public abstract class Bot {
     }
 
     public void restart() {
+        log.info("Bot {}: restart requested", userName);
         if (client != null && client.isOpen()) {
             client.close();
         }
@@ -198,6 +199,7 @@ public abstract class Bot {
     public void authenticate() {
         try {
             this.tokens = apiGatewayClient.authenticate(credentials);
+            log.debug("Bot {}: authentication succeeded", userName);
         } catch (Exception e) {
             log.error("Bot {}: Authentication failed: {}", userName, e.getMessage());
         }
