@@ -452,6 +452,20 @@ class GameControllerTest {
     }
 
     @Nested
+    @DisplayName("GET /api/v1/game/types")
+    class GetGameTypesTests {
+
+        @Test
+        @DisplayName("Should return all GameType enum values")
+        void shouldReturnAllGameTypeEnumValues() throws Exception {
+            mockMvc.perform(get("/api/v1/game/types"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.length()").value(GameType.values().length))
+                    .andExpect(jsonPath("$[*]").value(org.hamcrest.Matchers.hasItem("BETTING_MINI")));
+        }
+    }
+
+    @Nested
     @DisplayName("DELETE /api/v1/game/{id}")
     class DeleteTests {
 

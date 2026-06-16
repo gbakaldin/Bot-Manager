@@ -3,6 +3,7 @@ package com.vingame.bot.domain.bot.message;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g2.bom.BomStartGameMd5Message;
+import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.nohu.NohuGameMessageTypes;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import org.junit.jupiter.api.DisplayName;
@@ -45,6 +46,14 @@ class GameMessageTypesResolverTest {
     }
 
     @Test
+    @DisplayName("Should resolve P_116 to TipGameMessageTypes")
+    void shouldResolveP116ToTip() {
+        GameMessageTypes result = GameMessageTypesResolver.resolve(ProductCode.P_116);
+
+        assertThat(result).isInstanceOf(TipGameMessageTypes.class);
+    }
+
+    @Test
     @DisplayName("Should throw IllegalArgumentException when productCode is null")
     void shouldThrowWhenNull() {
         assertThatThrownBy(() -> GameMessageTypesResolver.resolve(null))
@@ -53,7 +62,7 @@ class GameMessageTypesResolverTest {
     }
 
     @ParameterizedTest(name = "resolve({0}) -> IllegalArgumentException")
-    @EnumSource(value = ProductCode.class, names = {"P_066", "P_103", "P_105", "P_114", "P_116", "P_119", "P_222"})
+    @EnumSource(value = ProductCode.class, names = {"P_066", "P_103", "P_105", "P_114", "P_119", "P_222"})
     @DisplayName("Should throw IllegalArgumentException for unimplemented product codes")
     void shouldThrowForUnimplementedProductCodes(ProductCode productCode) {
         assertThatThrownBy(() -> GameMessageTypesResolver.resolve(productCode))

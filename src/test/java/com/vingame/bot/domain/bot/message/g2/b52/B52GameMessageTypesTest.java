@@ -125,4 +125,14 @@ class B52GameMessageTypesTest {
         assertThat(b52.isIJp()).isTrue();
         assertThat(b52.getJpT()).isEqualTo(2);
     }
+
+    @Test
+    @DisplayName("HasJackpot: returns tJpV when iJp=true, 0 otherwise")
+    void hasJackpot() {
+        B52EndGameMessage noJp = new B52EndGameMessage(9006, 0, 0, 0, null, 0, 12000, false, 0, 0, null, null);
+        B52EndGameMessage withJp = new B52EndGameMessage(9006, 0, 0, 0, null, 0, 12000, true, 0, 0, null, null);
+
+        assertThat(noJp.jackpotFor("any-bot")).isZero();
+        assertThat(withJp.jackpotFor("any-bot")).isEqualTo(12000L);
+    }
 }

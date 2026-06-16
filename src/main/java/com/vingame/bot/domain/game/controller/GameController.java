@@ -7,6 +7,7 @@ import com.vingame.bot.domain.game.dto.GameDTO;
 import com.vingame.bot.domain.game.mapper.GameMapper;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameFilter;
+import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -34,6 +35,14 @@ public class GameController {
     public GameController(GameService service, GameMapper mapper) {
         this.service = service;
         this.mapper = mapper;
+    }
+
+    @Operation(
+            summary = "List supported game types",
+            description = "Returns all values of the GameType enum. Frontend uses this to populate the game-type selector before creating a new Game.")
+    @GetMapping("/types")
+    public ResponseEntity<List<GameType>> getGameTypes() {
+        return ResponseEntity.ok(List.of(GameType.values()));
     }
 
     @Operation(

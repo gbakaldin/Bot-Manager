@@ -3,6 +3,7 @@ package com.vingame.bot.domain.bot.message.g4.nohu;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
+import com.vingame.bot.domain.bot.message.HasJackpot;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -10,7 +11,12 @@ import java.util.List;
 
 @Getter
 @Setter
-public class NohuEndGameMessage extends EndGameMessage {
+public class NohuEndGameMessage extends EndGameMessage implements HasJackpot {
+
+    @Override
+    public long jackpotFor(String userName) {
+        return iJp ? tJpV : 0L;
+    }
 
     private int d1;
     private int d2;

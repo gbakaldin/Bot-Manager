@@ -4,6 +4,7 @@ import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.websocketparser.VingameWebSocketClient;
@@ -13,6 +14,8 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -32,6 +35,9 @@ public abstract class Bot {
     protected ApiGatewayClient apiGatewayClient;
     protected GameMsClient gameMsClient;
     protected ClientFactory clientFactory;
+
+    // Observability — set via builder-style setter (BotFactory wires the singleton bean).
+    protected BotMetrics metrics;
 
     // Bot runtime configuration (set via builder-style setters)
     @Getter
@@ -70,6 +76,12 @@ public abstract class Bot {
     @Getter
     private volatile BotStatus status = BotStatus.AUTHENTICATING;
 
+    // Timestamp of the most recent transition INTO DEAD. Cleared when the bot exits
+    // DEAD (transition to any other status) or when its DEAD window is credited at
+    // cleanup(). Volatile because transitionStatus may be invoked from many threads
+    // (Netty IO, reconnect virtual threads, scenario pool, watchdog scheduler).
+    private volatile Instant deadSince;
+
     private final AtomicBoolean reconnecting = new AtomicBoolean(false);
     private volatile boolean stopped = false;
 
@@ -92,6 +104,11 @@ public abstract class Bot {
         this.credentials = configuration.getCredentials();
         this.userName = credentials.getUsername();
         log.debug("Bot {} configured", userName);
+        return this;
+    }
+
+    public Bot setMetrics(BotMetrics metrics) {
+        this.metrics = metrics;
         return this;
     }
 
@@ -147,6 +164,12 @@ public abstract class Bot {
                 log.error("Error stopping bot {} during cleanup", userName, e);
             }
         }
+        // Credit the terminal DEAD window, if any. cleanup() is invoked from
+        // BotGroupRuntime.stopAllBots() on the BehaviorService thread, which has no
+        // MDC. Re-apply the bot's snapshot so the dead-seconds counter is tagged
+        // with the same {botGroupId,environmentId,gameType} as the rest of this
+        // bot's meters. mdcWrap is null-safe on missing snapshot.
+        mdcWrap(this::creditDeadSeconds).run();
     }
 
     public void restart() {
@@ -197,6 +220,7 @@ public abstract class Bot {
         gameMsClient.deposit(client.getAgencyToken(), 1_000_000_000L, mdcConsumer(success -> {
             if (success) {
                 log.info("Bot {}: Deposit successful, fetching new balance...", userName);
+                if (metrics != null) metrics.incBotAutoDeposit(true);
                 lastFetchedBalance = apiGatewayClient.getBalance(
                     getClient().getAuthToken(),
                     credentials.getFingerprint(),
@@ -206,6 +230,7 @@ public abstract class Bot {
                 log.info("Bot {}: New balance: {}", userName, expectedCurrentBalance);
             } else {
                 log.warn("Bot {}: Deposit failed", userName);
+                if (metrics != null) metrics.incBotAutoDeposit(false);
             }
         }));
     }
@@ -259,8 +284,36 @@ public abstract class Bot {
 
     private void transitionStatus(BotStatus next) {
         BotStatus prev = this.status;
+        if (prev == next) return; // idempotent re-entry — no log churn, no double-counting
         this.status = next;
         log.info("Bot {}: {} → {}", userName, prev, next);
+        if (next == BotStatus.DEAD) {
+            // Stamp the start of this DEAD window. deadSince is cleared on exit
+            // (below) or at cleanup() — so seeing a non-null value here would mean
+            // the previous exit branch missed; we still re-stamp defensively.
+            this.deadSince = Instant.now();
+            if (metrics != null) metrics.incBotFailure();
+        } else if (prev == BotStatus.DEAD) {
+            // Bot revived: credit the just-closed DEAD window and clear the stamp.
+            // Note: BotStatus.DEAD is terminal in current code (no revive path exists);
+            // this branch is defensive in case a future REST endpoint or manual
+            // recovery adds one. The terminal-DEAD-on-cleanup path is in cleanup().
+            creditDeadSeconds();
+        }
+    }
+
+    /**
+     * If a DEAD window is currently open, credit its elapsed seconds to
+     * {@code bot_dead_seconds_total} and clear the stamp. Idempotent — calling
+     * twice without a new DEAD entry is a no-op.
+     */
+    private void creditDeadSeconds() {
+        Instant since = this.deadSince;
+        if (since == null) return;
+        this.deadSince = null;
+        if (metrics == null) return;
+        long seconds = Duration.between(since, Instant.now()).toSeconds();
+        metrics.incBotDeadSeconds(seconds);
     }
 
     private void configureClient(VingameWebSocketClient wsClient) {
@@ -271,8 +324,17 @@ public abstract class Bot {
         // emitted inside carry the bot's identity.
         wsClient.onWsStatusChange(mdcConsumer(wsStatus -> {
             switch (wsStatus) {
-                case CONNECTED -> transitionStatus(BotStatus.CONNECTED);
-                case AUTHENTICATING_WS -> transitionStatus(BotStatus.AUTHENTICATING_CONNECTION);
+                case CONNECTED -> {
+                    transitionStatus(BotStatus.CONNECTED);
+                    if (metrics != null) metrics.incBotWsEvent("connected");
+                }
+                case AUTHENTICATING_WS -> {
+                    transitionStatus(BotStatus.AUTHENTICATING_CONNECTION);
+                    if (metrics != null) metrics.incBotWsEvent("authenticating");
+                }
+                case DISCONNECTED -> {
+                    if (metrics != null) metrics.incBotWsEvent("disconnected");
+                }
                 default -> {}
             }
         }));
@@ -289,6 +351,9 @@ public abstract class Bot {
         }
         transitionStatus(BotStatus.RECONNECTING);
         log.warn("Bot {}: WS disconnected — starting retrial flow", userName);
+        // One increment per reconnect EVENT, tagged by the originating reason.
+        // Internal escalations (loop fall-through, performReauth) must not increment.
+        if (metrics != null) metrics.incBotReconnect("ws-disconnect");
         Thread.ofVirtual().name("reconnect-" + userName).start(mdcWrap(this::runWsReconnectLoop));
     }
 
@@ -300,13 +365,31 @@ public abstract class Bot {
         }
         transitionStatus(BotStatus.RECONNECTING);
         log.warn("Bot {}: full reconnect triggered — {}", userName, reason);
+        if (metrics != null) {
+            metrics.incBotReconnect(normalizeReconnectReason(reason));
+        }
         if (client != null && client.isOpen()) {
             client.close();
         }
         Thread.ofVirtual().name("reconnect-" + userName).start(mdcWrap(this::runAuthThenWsLoop));
     }
 
+    /**
+     * Normalize the free-form reconnect reason string to a small bounded enum-like value
+     * used as the {@code reason} tag on {@code bot_reconnects_total}. Cardinality budget
+     * (Architecture Decision 7): {@code watchdog | ws-disconnect | reauth-cycle}.
+     */
+    private static String normalizeReconnectReason(String raw) {
+        if (raw == null) return "ws-disconnect";
+        if (raw.startsWith("watchdog")) return "watchdog";
+        return "ws-disconnect";
+    }
+
     private void runWsReconnectLoop() {
+        // No metric increment here: the reconnect event was already counted by
+        // onWsDisconnected (reason=ws-disconnect) or triggerFullReconnect (reason=
+        // watchdog). This loop is the worker that retries; falling through from
+        // runAuthThenWsLoop must not double-count either.
         int attempt = 0;
         while (!stopped) {
             long delaySecs = BACKOFF_SECONDS[Math.min(attempt, BACKOFF_SECONDS.length - 1)];
@@ -334,6 +417,10 @@ public abstract class Bot {
     }
 
     private void runAuthThenWsLoop() {
+        // No metric increment here either: triggerFullReconnect counted this event
+        // with its originating reason (typically watchdog). The "reauth-cycle"
+        // tag is unused in current code; if a future caller needs it, increment
+        // at that callsite before spawning this loop.
         if (stopped) return;
         if (!performReauth()) return;
         if (stopped) return;
@@ -488,6 +575,7 @@ public abstract class Bot {
         this.expectedCurrentBalance.addAndGet(-amount);
         this.totalBetsPlaced.incrementAndGet();
         this.totalBetAmount.addAndGet(amount);
+        if (metrics != null) metrics.incBetPlaced(amount);
     }
 
     public final void start() {

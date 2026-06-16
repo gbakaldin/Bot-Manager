@@ -123,4 +123,14 @@ class NohuGameMessageTypesTest {
         assertThat(nohu.getD2()).isEqualTo(2);
         assertThat(nohu.getD3()).isEqualTo(3);
     }
+
+    @Test
+    @DisplayName("HasJackpot: returns tJpV when iJp=true, 0 otherwise")
+    void hasJackpot() {
+        NohuEndGameMessage noJp = new NohuEndGameMessage(7006, 0, 0, 0, null, 0, 9000, false, 0, 0, null, null);
+        NohuEndGameMessage withJp = new NohuEndGameMessage(7006, 0, 0, 0, null, 0, 9000, true, 0, 0, null, null);
+
+        assertThat(noJp.jackpotFor("any-bot")).isZero();
+        assertThat(withJp.jackpotFor("any-bot")).isEqualTo(9000L);
+    }
 }

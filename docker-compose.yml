@@ -64,8 +64,25 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - loki
+      - prometheus
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    ports:
+      - "9090:9090"
+    volumes:
+      # Bind-mounted config so sgame can edit without root, matching the
+      # ./logs and ./grafana/provisioning patterns. See
+      # docs/plans/OBSERVABILITY.md Architecture Decision 9.
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Named volume for the TSDB. Prometheus is sensitive to host filesystem
+      # semantics; the operator does not need to inspect tsdb files directly.
+      - prometheus-data:/prometheus
+    depends_on:
+      - bot-manager
 
 volumes:
   mongo-data:
   loki-data:
   grafana-data:
+  prometheus-data:

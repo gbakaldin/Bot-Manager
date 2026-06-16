@@ -327,6 +327,38 @@ class BotGroupControllerTest {
                     .andExpect(jsonPath("$.gameId").value("game-baucua"))
                     .andExpect(jsonPath("$.botCount").value(5));
         }
+
+        @Test
+        @DisplayName("Should return 502 Bad Gateway with forwarded error when upstream registration fails")
+        void shouldReturnBadGatewayWhenRegistrationFails() throws Exception {
+            BotGroupDTO inputDto = BotGroupDTO.builder()
+                    .name("Demo 116 BC")
+                    .namePrefix("dem0bc116bot")
+                    .password("a123123A")
+                    .gameId("game-1")
+                    .botCount(30)
+                    .environmentId("env-1")
+                    .build();
+
+            BotGroup entity = BotGroup.builder()
+                    .name("Demo 116 BC")
+                    .namePrefix("dem0bc116bot")
+                    .build();
+
+            when(mapper.toEntity(any(BotGroupDTO.class))).thenReturn(entity);
+            when(service.save(any(BotGroup.class), eq(false)))
+                    .thenThrow(new IllegalStateException(
+                            "Failed to register any users for bot group 'Demo 116 BC'. " +
+                                    "Errors: Tên đăng nhập không được nhiều hơn 12 ký tự"));
+
+            mockMvc.perform(post("/api/v1/bot-group/")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(inputDto)))
+                    .andExpect(status().isBadGateway())
+                    .andExpect(jsonPath("$.type").value("Game server error"))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Tên đăng nhập không được nhiều hơn 12 ký tự")));
+        }
     }
 
     @Nested

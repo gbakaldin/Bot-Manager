@@ -7,7 +7,7 @@ cd "$(dirname "$(readlink -f "$0")")"
 
 docker ps --filter "name=bot-" --format "{{.ID}}" | xargs -r docker kill
 
-mkdir -p logs
+mkdir -p logs prometheus grafana/provisioning/dashboards
 
 # Write .env with the invoking host user's UID/GID so docker-compose can
 # substitute them into the bot-manager service's `user:` directive. This makes
