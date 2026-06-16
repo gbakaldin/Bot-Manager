@@ -2,6 +2,7 @@ package com.vingame.bot.domain.session.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.domain.session.dto.SessionHistoryDTO;
 import com.vingame.bot.domain.session.mapper.SessionHistoryMapper;
 import com.vingame.bot.domain.session.model.SessionHistory;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -27,6 +29,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(SessionHistoryController.class)
+@Import(RestExceptionHandler.class)
 @DisplayName("SessionHistoryController")
 class SessionHistoryControllerTest {
 
@@ -308,6 +311,43 @@ class SessionHistoryControllerTest {
             mockMvc.perform(delete("/api/v1/session-history/{id}", id))
                     .andExpect(status().isOk());
             verify(service).delete(id);
+        }
+    }
+
+    @Nested
+    @DisplayName("Advice integration — structured error body on failures")
+    class AdviceIntegrationTests {
+
+        @Test
+        @DisplayName("Unhandled RuntimeException on findById -> 500 with sanitised {type, msg} body via RestExceptionHandler")
+        void shouldReturnInternalServerErrorWithBody() throws Exception {
+            // Confirms the advice fires through this controller's error path
+            // (catch ladders were removed in Phase B — without the advice, this
+            // would either propagate raw or return a bodyless 500). The 500
+            // body is sanitised: raw exception messages may carry Mongo
+            // hostnames / bean wiring failures and must stay server-log-only.
+            String id = "sess-1";
+            when(service.findById(id)).thenThrow(new RuntimeException("db down"));
+
+            mockMvc.perform(get("/api/v1/session-history/{id}", id))
+                    .andExpect(status().isInternalServerError())
+                    .andExpect(jsonPath("$.type").value("Internal error"))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Internal server error")))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("db down"))));
+        }
+
+        @Test
+        @DisplayName("IllegalArgumentException on findById -> 400 with {type, msg} body via RestExceptionHandler")
+        void shouldReturnBadRequestWithBody() throws Exception {
+            String id = "bad";
+            when(service.findById(id)).thenThrow(new IllegalArgumentException("Invalid id"));
+
+            mockMvc.perform(get("/api/v1/session-history/{id}", id))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value("Invalid id"));
         }
     }
 }

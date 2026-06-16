@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.service;
 
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.bot.service.BotFactory;
@@ -149,7 +150,7 @@ class BotGroupBehaviorServiceTest {
     class StartValidationTests {
 
         @Test
-        @DisplayName("Should throw and not retain runtime when environmentId is null")
+        @DisplayName("Should throw BadRequestException and not retain runtime when environmentId is null")
         void shouldThrowWhenEnvironmentIdNull() {
             BotGroup group = BotGroup.builder()
                     .id("g-1")
@@ -159,7 +160,7 @@ class BotGroupBehaviorServiceTest {
             when(botGroupService.findById("g-1")).thenReturn(group);
 
             assertThatThrownBy(() -> service.start("g-1"))
-                    .isInstanceOf(RuntimeException.class)
+                    .isInstanceOf(BadRequestException.class)
                     .hasMessageContaining("environmentId");
 
             assertThat(runningGroups()).doesNotContainKey("g-1");
@@ -168,7 +169,7 @@ class BotGroupBehaviorServiceTest {
         }
 
         @Test
-        @DisplayName("Should throw and not retain runtime when gameId is null")
+        @DisplayName("Should throw BadRequestException and not retain runtime when gameId is null")
         void shouldThrowWhenGameIdNull() {
             BotGroup group = BotGroup.builder()
                     .id("g-1")
@@ -178,7 +179,7 @@ class BotGroupBehaviorServiceTest {
             when(botGroupService.findById("g-1")).thenReturn(group);
 
             assertThatThrownBy(() -> service.start("g-1"))
-                    .isInstanceOf(RuntimeException.class)
+                    .isInstanceOf(BadRequestException.class)
                     .hasMessageContaining("gameId");
 
             assertThat(runningGroups()).doesNotContainKey("g-1");
@@ -264,7 +265,7 @@ class BotGroupBehaviorServiceTest {
     class ScheduleRestartTests {
 
         @Test
-        @DisplayName("Should throw IllegalArgumentException when scheduled time is in the past")
+        @DisplayName("Should throw BadRequestException when scheduled time is in the past")
         void shouldRejectPastTimes() {
             BotGroup group = BotGroup.builder().id("g-1").name("Group").build();
             when(botGroupService.findById("g-1")).thenReturn(group);
@@ -272,7 +273,7 @@ class BotGroupBehaviorServiceTest {
             LocalDateTime past = LocalDateTime.now().minusMinutes(5);
 
             assertThatThrownBy(() -> service.scheduleRestart("g-1", past))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(BadRequestException.class)
                     .hasMessage("Scheduled time must be in the future");
 
             // No save occurred

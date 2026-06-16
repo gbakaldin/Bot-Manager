@@ -3,8 +3,6 @@ package com.vingame.bot.domain.botgroup.controller;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatusDTO;
-import com.vingame.bot.common.dto.ErrorResponse;
-import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
@@ -15,7 +13,6 @@ import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -29,6 +26,15 @@ import org.springframework.web.bind.annotation.RestController;
 import java.time.LocalDateTime;
 import java.util.List;
 
+/**
+ * Exception handling is delegated to
+ * {@link com.vingame.bot.common.exception.RestExceptionHandler} — controllers
+ * only express the success path. Service-layer throws of typed exceptions
+ * (e.g. {@link com.vingame.bot.common.exception.UpstreamRegistrationException},
+ * {@link com.vingame.bot.common.exception.BadRequestException},
+ * {@link com.vingame.bot.common.exception.ResourceNotFoundException}) are
+ * translated to HTTP responses there.
+ */
 @RestController
 @RequestMapping("api/v1/bot-group")
 public class BotGroupController {
@@ -50,16 +56,8 @@ public class BotGroupController {
     @GetMapping("/{id}")
     public ResponseEntity<BotGroupDTO> findById(
             @PathVariable @Parameter(description = "ID of the bot group to retrieve") String id) {
-        try {
-            BotGroup botGroup = service.findById(id);
-            return ResponseEntity.ok(mapper.toDTO(botGroup));
-        } catch (ResourceNotFoundException e) {
-            return ResponseEntity.notFound().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        BotGroup botGroup = service.findById(id);
+        return ResponseEntity.ok(mapper.toDTO(botGroup));
     }
 
     @Operation(
@@ -67,14 +65,10 @@ public class BotGroupController {
             description = "Returns a list of all bot groups, does not support paging yet")
     @GetMapping("/")
     public ResponseEntity<List<BotGroupDTO>> findAll() {
-        try {
-            List<BotGroupDTO> dtos = service.findAll().stream()
-                    .map(mapper::toDTO)
-                    .toList();
-            return ResponseEntity.ok(dtos);
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        List<BotGroupDTO> dtos = service.findAll().stream()
+                .map(mapper::toDTO)
+                .toList();
+        return ResponseEntity.ok(dtos);
     }
 
     @Operation(
@@ -84,17 +78,10 @@ public class BotGroupController {
     public ResponseEntity<List<BotGroupDTO>> filter(
             @Parameter(description = "The filter to query the bot groups by")
             @RequestBody BotGroupFilter filter) {
-
-        try {
-            List<BotGroupDTO> dtos = service.filter(filter).stream()
-                    .map(mapper::toDTO)
-                    .toList();
-            return ResponseEntity.ok(dtos);
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        List<BotGroupDTO> dtos = service.filter(filter).stream()
+                .map(mapper::toDTO)
+                .toList();
+        return ResponseEntity.ok(dtos);
     }
 
     @Operation(
@@ -102,25 +89,13 @@ public class BotGroupController {
             description = "Returns the freshly created bot group complete with the actual id. " +
                     "Set existingGroup=true to skip user registration (for migrating existing bots).")
     @PostMapping("/")
-    public ResponseEntity<?> save(
+    public ResponseEntity<BotGroupDTO> save(
             @Parameter(description = "Bot group body to save in the database")
             @RequestBody BotGroupDTO botGroupDTO) {
-        try {
-            BotGroup botGroup = mapper.toEntity(botGroupDTO);
-            boolean skipRegistration = Boolean.TRUE.equals(botGroupDTO.getExistingGroup());
-            BotGroup saved = service.save(botGroup, skipRegistration);
-            return ResponseEntity.ok(mapper.toDTO(saved));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (IllegalStateException e) {
-            // Upstream game/auth server rejected the request (e.g., all user
-            // registrations failed). Forward the underlying error message so
-            // the operator can act on it instead of guessing from an empty 5xx.
-            return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
-                    .body(new ErrorResponse("Game server error", e.getMessage()));
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        BotGroup botGroup = mapper.toEntity(botGroupDTO);
+        boolean skipRegistration = Boolean.TRUE.equals(botGroupDTO.getExistingGroup());
+        BotGroup saved = service.save(botGroup, skipRegistration);
+        return ResponseEntity.ok(mapper.toDTO(saved));
     }
 
     @Operation(
@@ -131,17 +106,8 @@ public class BotGroupController {
             @PathVariable @Parameter(description = "ID of the bot group to update") String id,
             @Parameter(description = "Bot group DTO containing the fields that need updating")
             @RequestBody BotGroupDTO botGroupDTO) {
-
-        try {
-            BotGroup updated = service.update(id, botGroupDTO);
-            return ResponseEntity.ok(mapper.toDTO(updated));
-        } catch (ResourceNotFoundException e) {
-            return ResponseEntity.notFound().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        BotGroup updated = service.update(id, botGroupDTO);
+        return ResponseEntity.ok(mapper.toDTO(updated));
     }
 
     @Operation(
@@ -150,55 +116,30 @@ public class BotGroupController {
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(
             @PathVariable @Parameter(description = "ID to use for deletion") String id) {
-
-        try {
-            service.delete(id);
-            return ResponseEntity.ok().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        service.delete(id);
+        return ResponseEntity.ok().build();
     }
 
 
     @PostMapping("/{id}/start")
     @Operation(summary = "Start bot group", description = "Starts the bot group with the given ID")
     public ResponseEntity<Void> start(@PathVariable String id) {
-        try {
-            behaviorService.start(id);
-            return ResponseEntity.ok().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        behaviorService.start(id);
+        return ResponseEntity.ok().build();
     }
 
     @PostMapping("/{id}/stop")
     @Operation(summary = "Stop bot group", description = "Stops the bot group with the given ID")
     public ResponseEntity<Void> stop(@PathVariable String id) {
-        try {
-            behaviorService.stop(id);
-            return ResponseEntity.ok().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        behaviorService.stop(id);
+        return ResponseEntity.ok().build();
     }
 
     @PostMapping("/{id}/restart")
     @Operation(summary = "Restart bot group", description = "Restarts the bot group with the given ID")
     public ResponseEntity<Void> restart(@PathVariable String id) {
-        try {
-            behaviorService.restart(id);
-            return ResponseEntity.ok().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        behaviorService.restart(id);
+        return ResponseEntity.ok().build();
     }
 
     @PostMapping("/{id}/schedule-restart")
@@ -206,14 +147,8 @@ public class BotGroupController {
     public ResponseEntity<Void> scheduleRestart(
             @PathVariable String id,
             @RequestBody LocalDateTime time) {
-        try {
-            behaviorService.scheduleRestart(id, time);
-            return ResponseEntity.ok().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        behaviorService.scheduleRestart(id, time);
+        return ResponseEntity.ok().build();
     }
 
     @GetMapping("/{id}/health")
@@ -221,14 +156,8 @@ public class BotGroupController {
             summary = "Get bot group health details",
             description = "Returns detailed health metrics including per-bot connection status, balances, and bet counters")
     public ResponseEntity<BotGroupHealthDTO> getHealth(@PathVariable String id) {
-        try {
-            BotGroupHealthDTO health = behaviorService.getHealth(id);
-            return ResponseEntity.ok(health);
-        } catch (ResourceNotFoundException e) {
-            return ResponseEntity.notFound().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        BotGroupHealthDTO health = behaviorService.getHealth(id);
+        return ResponseEntity.ok(health);
     }
 
     @GetMapping("/{id}/status")
@@ -236,25 +165,19 @@ public class BotGroupController {
             summary = "Get bot group runtime status",
             description = "Returns both target status (from database) and actual runtime status")
     public ResponseEntity<BotGroupStatusDTO> getStatus(@PathVariable String id) {
-        try {
-            BotGroup group = service.findById(id);
-            BotGroupStatus actualStatus = behaviorService.getActualStatus(id);
-            BotGroupPlayingStatus playingStatus = behaviorService.getPlayingStatus(id);
+        BotGroup group = service.findById(id);
+        BotGroupStatus actualStatus = behaviorService.getActualStatus(id);
+        BotGroupPlayingStatus playingStatus = behaviorService.getPlayingStatus(id);
 
-            BotGroupStatusDTO statusDTO = BotGroupStatusDTO.builder()
-                    .groupId(group.getId())
-                    .groupName(group.getName())
-                    .targetStatus(group.getTargetStatus())
-                    .actualStatus(actualStatus)
-                    .playingStatus(playingStatus)
-                    .build();
+        BotGroupStatusDTO statusDTO = BotGroupStatusDTO.builder()
+                .groupId(group.getId())
+                .groupName(group.getName())
+                .targetStatus(group.getTargetStatus())
+                .actualStatus(actualStatus)
+                .playingStatus(playingStatus)
+                .build();
 
-            return ResponseEntity.ok(statusDTO);
-        } catch (ResourceNotFoundException e) {
-            return ResponseEntity.notFound().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        return ResponseEntity.ok(statusDTO);
     }
 
 

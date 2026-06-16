@@ -2,6 +2,7 @@ package com.vingame.bot.domain.environment.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import com.vingame.bot.domain.environment.dto.EnvironmentDTO;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -37,6 +39,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 
 @WebMvcTest(EnvironmentController.class)
+@Import(RestExceptionHandler.class)
 @DisplayName("EnvironmentController")
 class EnvironmentControllerTest {
 
@@ -114,15 +117,37 @@ class EnvironmentControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 400 Bad Request when ID is malformed")
+        @DisplayName("Should return 400 Bad Request with body when ID is malformed")
         void shouldReturnBadRequestWhenIdIsMalformed() throws Exception {
             // Arrange
             String envId = "bad-id";
             when(service.findById(envId)).thenThrow(new IllegalArgumentException("Invalid ID"));
 
-            // Act & Assert
+            // Act & Assert — body assertion proves the advice fired (rather
+            // than Spring's bodyless 400 default).
             mockMvc.perform(get("/api/v1/environment/{id}", envId))
-                    .andExpect(status().isBadRequest());
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value("Invalid ID"));
+        }
+
+        @Test
+        @DisplayName("Should return 500 Internal Server Error with sanitised body when service throws unexpected exception")
+        void shouldReturnInternalServerErrorWithBody() throws Exception {
+            // Confirms the terminal Exception handler in the advice produces
+            // a sanitised structured body — the raw "db down" message (or
+            // any Mongo / driver detail that would normally land here) must
+            // not reach the client. The full exception is logged server-side.
+            String envId = "env-1";
+            when(service.findById(envId)).thenThrow(new RuntimeException("db down"));
+
+            mockMvc.perform(get("/api/v1/environment/{id}", envId))
+                    .andExpect(status().isInternalServerError())
+                    .andExpect(jsonPath("$.type").value("Internal error"))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Internal server error")))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("db down"))));
         }
     }
 
@@ -400,15 +425,17 @@ class EnvironmentControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 400 Bad Request when delete throws IllegalArgumentException")
+        @DisplayName("Should return 400 Bad Request with body when delete throws IllegalArgumentException")
         void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
             // Arrange
             String envId = "non-existent";
-            doThrow(new IllegalArgumentException("Not found")).when(service).delete(envId);
+            doThrow(new IllegalArgumentException("Bad id")).when(service).delete(envId);
 
             // Act & Assert
             mockMvc.perform(delete("/api/v1/environment/{id}", envId))
-                    .andExpect(status().isBadRequest());
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value("Bad id"));
         }
     }
 }

@@ -3,7 +3,9 @@ package com.vingame.bot.domain.botgroup.service;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.UpstreamRegistrationException;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
@@ -100,7 +102,8 @@ public class BotGroupService {
      * @param botGroup The bot group to save or update
      * @param skipRegistration If true, skips user registration (for migrating existing bots)
      * @return The saved/updated bot group
-     * @throws IllegalStateException if user registration completely fails (new groups only)
+     * @throws UpstreamRegistrationException if user registration completely fails (new groups only);
+     *         mapped to HTTP 502 by {@link com.vingame.bot.common.exception.RestExceptionHandler}.
      * @throws ResourceNotFoundException if the environment doesn't exist
      */
     public BotGroup save(BotGroup botGroup, boolean skipRegistration) {
@@ -133,7 +136,7 @@ public class BotGroupService {
                         String.join("; ", registrationResult.getErrors())
                     );
                     log.error(errorMsg);
-                    throw new IllegalStateException(errorMsg);
+                    throw new UpstreamRegistrationException(errorMsg);
                 }
 
                 if (registrationResult.isPartialSuccess()) {
@@ -174,8 +177,9 @@ public class BotGroupService {
      *       ({@link ProductCode#getUsernameMaxLength()} returns null).</li>
      * </ul>
      *
-     * @throws IllegalArgumentException if the longest username exceeds the cap;
-     *         mapped to HTTP 400 by the controller layer.
+     * @throws BadRequestException if the longest username exceeds the cap;
+     *         mapped to HTTP 400 by
+     *         {@link com.vingame.bot.common.exception.RestExceptionHandler}.
      */
     private void validateUsernameLength(BotGroup botGroup) {
         Environment environment = environmentService.findById(botGroup.getEnvironmentId());
@@ -191,7 +195,7 @@ public class BotGroupService {
         int botCount = botGroup.getBotCount();
         int maxLength = (prefix == null ? 0 : prefix.length()) + String.valueOf(botCount).length();
         if (maxLength > cap) {
-            throw new IllegalArgumentException(String.format(
+            throw new BadRequestException(String.format(
                     "Username too long for product %s: prefix '%s' + botCount %d yields max length %d, " +
                     "but product cap is %d. Shorten the prefix or reduce the bot count.",
                     productCode.name(), prefix, botCount, maxLength, cap));

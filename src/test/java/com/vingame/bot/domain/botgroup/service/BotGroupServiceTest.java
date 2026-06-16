@@ -1,6 +1,8 @@
 package com.vingame.bot.domain.botgroup.service;
 
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.UpstreamRegistrationException;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
@@ -274,7 +276,7 @@ class BotGroupServiceTest {
             when(apiGatewayClient.registerUsers("bot", "pass", 5)).thenReturn(failResult);
 
             assertThatThrownBy(() -> service.save(group))
-                    .isInstanceOf(IllegalStateException.class)
+                    .isInstanceOf(UpstreamRegistrationException.class)
                     .hasMessageContaining("Failed to register any users");
 
             verify(repository, never()).save(any());
@@ -519,7 +521,7 @@ class BotGroupServiceTest {
         }
 
         @Test
-        @DisplayName("Should reject with IllegalArgumentException when prefix + botCount exceeds the cap")
+        @DisplayName("Should reject with BadRequestException when prefix + botCount exceeds the cap")
         void shouldRejectWhenExceedsCap() {
             // Tip cap is 12. prefix "authtestws" (10) + 999 (3 digits) = 13, one over.
             BotGroup group = BotGroup.builder()
@@ -533,7 +535,7 @@ class BotGroupServiceTest {
             when(environmentService.findById("env-tip")).thenReturn(envWithProductCode(ProductCode.P_116));
 
             assertThatThrownBy(() -> service.save(group))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(BadRequestException.class)
                     .hasMessageContaining("P_116")
                     .hasMessageContaining("authtestws")
                     .hasMessageContaining("999")

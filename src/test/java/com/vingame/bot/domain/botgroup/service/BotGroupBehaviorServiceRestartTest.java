@@ -226,6 +226,64 @@ class BotGroupBehaviorServiceRestartTest {
     }
 
     @Test
+    @DisplayName("createBotsInParallel classifies BadRequestException as reason=\"validation\" (API_ERROR_FORWARDING new arm)")
+    void start_classifiesBadRequestExceptionAsValidationReason() {
+        // API_ERROR_FORWARDING Phase B introduced an explicit
+        // BadRequestException → "validation" arm in classifyCreationFailure.
+        // The arm sits above the message-substring heuristic, so even if the
+        // exception's message contains "auth" it must still resolve to
+        // "validation".
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(1).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        // Message intentionally contains "auth" — the type-based arm must win
+        // over the message-substring fallback.
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new com.vingame.bot.common.exception.BadRequestException(
+                        "username too long for product P_116 (auth gateway cap)"));
+
+        service.start("g-1");
+
+        verify(botMetrics).incBotCreationFailure(eq("validation"));
+    }
+
+    @Test
+    @DisplayName("createBotsInParallel classifies UpstreamLoginException as reason=\"auth\" (API_ERROR_FORWARDING new arm)")
+    void start_classifiesUpstreamLoginExceptionAsAuthReason() {
+        // API_ERROR_FORWARDING Phase B added an explicit
+        // UpstreamLoginException → "auth" arm. Type-based classification
+        // means future library upgrades that change the exception message
+        // wording (the websocket-parser's "No data in response" carry) don't
+        // silently drift this counter into "unknown".
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(1).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        // Message intentionally lacks the auth/login/token keywords so the
+        // type-based arm is the only path that resolves "auth".
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new com.vingame.bot.common.exception.UpstreamLoginException(
+                        "No data in response"));
+
+        service.start("g-1");
+
+        verify(botMetrics).incBotCreationFailure(eq("auth"));
+    }
+
+    @Test
     @DisplayName("createBotsInParallel increments bot_creation_failures_total with reason=\"unknown\" for non-classified exceptions")
     void start_classifiesGenericRuntimeAsUnknownReason() {
         BotGroup group = BotGroup.builder()
@@ -374,6 +432,75 @@ class BotGroupBehaviorServiceRestartTest {
             } catch (Exception ignored) {
             }
         }
+    }
+
+    @Test
+    @DisplayName("start() failure log carries the cause type and message (API_ERROR_FORWARDING reviewer fix)")
+    void start_failureLogCarriesCauseTypeAndMessage() {
+        // API_ERROR_FORWARDING reviewer finding: Phase B's refactor swapped
+        // the outer catch(Exception) for try/finally + boolean started,
+        // losing the `e` reference in the failure log line. The fix
+        // captures the in-flight exception into a Throwable variable so
+        // operators grepping for "Failed to start bot group" see the cause
+        // inline — critical for the auto-start path (PostConstruct) where
+        // no RestExceptionHandler logs the exception elsewhere.
+        BotGroup group = BotGroup.builder()
+                .id("group-failurelog").name("Group-failurelog")
+                .environmentId("env-failurelog").gameId("game-1")
+                .botCount(1).namePrefix("bot").password("pass").build();
+
+        when(botGroupService.findById("group-failurelog")).thenReturn(group);
+        // Force the overall failure by making environmentService throw — that
+        // bubbles straight out of the try-block with a distinctive type and
+        // message so we can assert the failure-log carries them.
+        RuntimeException upstreamFailure = new RuntimeException(
+                "auth gateway returned 503 — circuit breaker open");
+        when(environmentService.findById("env-failurelog")).thenThrow(upstreamFailure);
+
+        CapturingAppender appender = new CapturingAppender(
+                "CapturingAppender-failure-log");
+        appender.start();
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        String loggerName = BotGroupBehaviorService.class.getName();
+        LoggerConfig loggerConfig = ctx.getConfiguration().getLoggerConfig(loggerName);
+        Level prev = loggerConfig.getLevel();
+        loggerConfig.addAppender(appender, Level.ALL, null);
+        loggerConfig.setLevel(Level.ALL);
+        ctx.updateLoggers();
+        try {
+            assertThatThrownBy(() -> service.start("group-failurelog"))
+                    .isSameAs(upstreamFailure);
+        } finally {
+            loggerConfig.removeAppender(appender.getName());
+            loggerConfig.setLevel(prev);
+            ctx.updateLoggers();
+            appender.stop();
+        }
+
+        List<LogEvent> errors = appender.events().stream()
+                .filter(e -> e.getLevel() == Level.ERROR)
+                .filter(e -> e.getMessage().getFormattedMessage()
+                        .contains("Failed to start bot group"))
+                .toList();
+
+        assertThat(errors)
+                .as("expected an ERROR log line for the start() failure")
+                .isNotEmpty();
+
+        LogEvent failureLog = errors.get(0);
+        String formatted = failureLog.getMessage().getFormattedMessage();
+        assertThat(formatted)
+                .as("failure log must carry the group name")
+                .contains("Group-failurelog");
+        assertThat(formatted)
+                .as("failure log must carry the cause type")
+                .contains("RuntimeException");
+        assertThat(formatted)
+                .as("failure log must carry the cause message")
+                .contains("auth gateway returned 503");
+        assertThat(failureLog.getThrown())
+                .as("failure log must attach the throwable so SLF4J can render the stacktrace")
+                .isSameAs(upstreamFailure);
     }
 
     /**

@@ -2,6 +2,7 @@ package com.vingame.bot.domain.game.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.dto.GameDTO;
@@ -16,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
@@ -37,6 +39,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @WebMvcTest(GameController.class)
+@Import(RestExceptionHandler.class)
 @DisplayName("GameController")
 class GameControllerTest {
 
@@ -194,15 +197,23 @@ class GameControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 500 Internal Server Error when service throws")
+        @DisplayName("Should return 500 Internal Server Error with sanitised body when service throws")
         void shouldReturnInternalServerErrorWhenServiceThrows() throws Exception {
-            // Arrange
             when(service.findByBrandAndProduct(BrandCode.G2, ProductCode.P_097))
                     .thenThrow(new RuntimeException("boom"));
 
-            // Act & Assert
+            // Must carry the structured {type, msg} body so the advice is
+            // proven wired into this controller (without @Import the body
+            // would be empty). The 500 fallback intentionally sanitises the
+            // msg — raw RuntimeException messages can carry Mongo hostnames,
+            // bean wiring failures, etc.
             mockMvc.perform(get("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097"))
-                    .andExpect(status().isInternalServerError());
+                    .andExpect(status().isInternalServerError())
+                    .andExpect(jsonPath("$.type").value("Internal error"))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
+                            "Internal server error")))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
+                            org.hamcrest.Matchers.containsString("boom"))));
         }
     }
 
@@ -339,7 +350,7 @@ class GameControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 400 Bad Request when save throws IllegalArgumentException")
+        @DisplayName("Should return 400 Bad Request with structured body when save throws IllegalArgumentException")
         void shouldReturnBadRequestWhenSaveThrowsIllegalArgument() throws Exception {
             // Arrange
             GameDTO inputDto = GameDTO.builder().name("BadGame").build();
@@ -348,11 +359,14 @@ class GameControllerTest {
             when(mapper.toEntity(any(GameDTO.class))).thenReturn(entity);
             when(service.save(any(Game.class))).thenThrow(new IllegalArgumentException("Invalid game"));
 
-            // Act & Assert
+            // Act & Assert — body shape verifies the advice handler actually
+            // fired (rather than Spring's bodyless 400 fallback).
             mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(inputDto)))
-                    .andExpect(status().isBadRequest());
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value("Invalid game"));
         }
 
         @Test

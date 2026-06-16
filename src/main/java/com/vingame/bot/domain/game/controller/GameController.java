@@ -1,6 +1,5 @@
 package com.vingame.bot.domain.game.controller;
 
-import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.dto.GameDTO;
@@ -24,6 +23,10 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 
+/**
+ * Exception handling is delegated to
+ * {@link com.vingame.bot.common.exception.RestExceptionHandler}.
+ */
 @RestController
 @RequestMapping("api/v1/game")
 public class GameController {
@@ -51,17 +54,8 @@ public class GameController {
     @GetMapping("/{id}")
     public ResponseEntity<GameDTO> findById(
             @PathVariable @Parameter(description = "ID of the game to retrieve", example = "game-bom-baucua") String id) {
-
-        try {
-            Game game = service.findById(id);
-            return ResponseEntity.ok(mapper.toDTO(game));
-        } catch (ResourceNotFoundException e) {
-            return ResponseEntity.notFound().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        Game game = service.findById(id);
+        return ResponseEntity.ok(mapper.toDTO(game));
     }
 
     @Operation(
@@ -71,15 +65,10 @@ public class GameController {
     public ResponseEntity<List<GameDTO>> findByBrandAndProduct(
             @PathVariable @Parameter(description = "Brand code", example = "G2") BrandCode brandCode,
             @PathVariable @Parameter(description = "Product code", example = "P_097") ProductCode productCode) {
-
-        try {
-            List<GameDTO> dtos = service.findByBrandAndProduct(brandCode, productCode).stream()
-                    .map(mapper::toDTO)
-                    .toList();
-            return ResponseEntity.ok(dtos);
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        List<GameDTO> dtos = service.findByBrandAndProduct(brandCode, productCode).stream()
+                .map(mapper::toDTO)
+                .toList();
+        return ResponseEntity.ok(dtos);
     }
 
     @Operation(
@@ -89,15 +78,10 @@ public class GameController {
     public ResponseEntity<List<GameDTO>> filter(
             @Parameter(description = "Filter criteria for games")
             @RequestBody GameFilter filter) {
-
-        try {
-            List<GameDTO> dtos = service.filter(filter).stream()
-                    .map(mapper::toDTO)
-                    .toList();
-            return ResponseEntity.ok(dtos);
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        List<GameDTO> dtos = service.filter(filter).stream()
+                .map(mapper::toDTO)
+                .toList();
+        return ResponseEntity.ok(dtos);
     }
 
     @Operation(
@@ -109,18 +93,11 @@ public class GameController {
             @PathVariable @Parameter(description = "Product code", example = "P_097") ProductCode productCode,
             @Parameter(description = "Game configuration to create")
             @RequestBody GameDTO gameDTO) {
-
-        try {
-            Game game = mapper.toEntity(gameDTO);
-            game.setBrandCode(brandCode);
-            game.setProductCode(productCode);
-            Game saved = service.save(game);
-            return ResponseEntity.ok(mapper.toDTO(saved));
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        Game game = mapper.toEntity(gameDTO);
+        game.setBrandCode(brandCode);
+        game.setProductCode(productCode);
+        Game saved = service.save(game);
+        return ResponseEntity.ok(mapper.toDTO(saved));
     }
 
     @Operation(
@@ -131,17 +108,8 @@ public class GameController {
             @PathVariable @Parameter(description = "ID of the game to update", example = "game-bom-baucua") String id,
             @Parameter(description = "Game DTO containing fields to update")
             @RequestBody GameDTO gameDTO) {
-
-        try {
-            Game updated = service.update(id, gameDTO);
-            return ResponseEntity.ok(mapper.toDTO(updated));
-        } catch (ResourceNotFoundException e) {
-            return ResponseEntity.notFound().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        Game updated = service.update(id, gameDTO);
+        return ResponseEntity.ok(mapper.toDTO(updated));
     }
 
     @Operation(
@@ -150,14 +118,7 @@ public class GameController {
     @DeleteMapping("/{id}")
     public ResponseEntity<Void> delete(
             @PathVariable @Parameter(description = "ID of the game to delete", example = "game-bom-baucua") String id) {
-
-        try {
-            service.delete(id);
-            return ResponseEntity.ok().build();
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().build();
-        } catch (Exception e) {
-            return ResponseEntity.internalServerError().build();
-        }
+        service.delete(id);
+        return ResponseEntity.ok().build();
     }
 }

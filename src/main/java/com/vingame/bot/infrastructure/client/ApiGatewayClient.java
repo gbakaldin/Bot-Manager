@@ -2,6 +2,7 @@ package com.vingame.bot.infrastructure.client;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vingame.bot.common.exception.UpstreamLoginException;
 import com.vingame.bot.infrastructure.auth.AuthProfile;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationRequest;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResponse;
@@ -149,7 +150,15 @@ public class ApiGatewayClient {
             // Counter increment must not change error semantics — BotFactory relies on
             // the exception propagating up so the bot creation pipeline records the failure.
             metrics.incLogin(false);
-            throw e;
+            // Wrap the library's bare RuntimeException ("No data in response" etc.)
+            // in a typed UpstreamLoginException so callers and the REST advice
+            // can distinguish login failures from generic runtime errors. The
+            // library's message (currently misleading) is preserved verbatim
+            // until the websocket-parser library learns to surface the upstream
+            // envelope. See API_ERROR_FORWARDING AD-7.
+            throw new UpstreamLoginException(
+                    "Login failed for user '" + credentials.getUsername() + "': " + e.getMessage(),
+                    e);
         }
     }
 
