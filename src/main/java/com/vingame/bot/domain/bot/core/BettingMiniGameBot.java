@@ -99,7 +99,7 @@ public class BettingMiniGameBot extends Bot {
         );
 
         log.info("BettingMiniGameBot initialized: game={}, offset={}, options={}, md5={}, watchdog={}s",
-                game.getName(), offset, game.getNumberOfOptions(), game.isMd5(),
+                game.getName(), offset, game.getEffectiveOptionAffinities().size(), game.isMd5(),
                 configuration.getWatchdogTimeoutSeconds());
     }
 
@@ -264,7 +264,12 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private int resolveNextEntryToBet() {
-        List<Integer> options = configuration.getGame().getEffectiveBettingOptions();
+        // Phase 1 keeps the call-site behavior identical to the pre-affinity world:
+        // uniform pick over the option-id set. Affinity-aware option selection is a
+        // future BettingStrategy's concern (see BETTING_STRATEGIES.md, Architecture
+        // Decision 5 — affinity is a neutral prior, not "high = bet more").
+        List<Integer> options = List.copyOf(
+                configuration.getGame().getEffectiveOptionAffinities().keySet());
         return options.get(random.nextInt(options.size()));
     }
 
