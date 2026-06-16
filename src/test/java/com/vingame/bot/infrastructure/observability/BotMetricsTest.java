@@ -107,22 +107,7 @@ class BotMetricsTest {
         assertThat(failure.count()).isEqualTo(1.0);
     }
 
-    @Test
-    void incBetPlaced_incrementsBothCountAndAmount() {
-        setBotMdc();
-        metrics.incBetPlaced(500_000L);
-        metrics.incBetPlaced(250_000L);
-
-        Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
-        Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
-
-        assertThat(bets).isNotNull();
-        assertThat(bets.count()).isEqualTo(2.0);
-        assertThat(amount).isNotNull();
-        assertThat(amount.count()).isEqualTo(750_000.0);
-    }
-
-    /* ----- ENDGAME_METRICS Phase A — batch overload for HasBetTotals dispatch ----- */
+    /* ----- ENDGAME_METRICS — batch overload for HasBetTotals dispatch ----- */
 
     @Test
     void incBetsPlaced_batchIncrementsCountAndAmountSums() {
@@ -150,28 +135,61 @@ class BotMetricsTest {
     }
 
     @Test
-    void incBetsPlaced_zeroOrNegativeCountIsNoOpAndCreatesNoCounter() {
+    void incBetsPlaced_bothZeroOrNegativeIsNoOpAndCreatesNoCounter() {
         setBotMdc();
         metrics.incBetsPlaced(0, 0L);
-        metrics.incBetsPlaced(-3, 100L);
+        metrics.incBetsPlaced(-3, -100L);
 
         Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
         Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
 
-        // Defensive contract: zero/negative count must never reach the registry,
-        // mirroring the dead-seconds silent-drop pattern.
+        // Defensive contract: a fully-zero (or fully-negative) call creates no
+        // counters — mirrors the dead-seconds silent-drop pattern. Asymmetric
+        // calls (one positive, one zero) are covered by the independent-guard
+        // tests below.
         assertThat(bets).isNull();
         assertThat(amount).isNull();
     }
 
     @Test
-    void incBetsPlaced_sharesTimeSeriesWithSingleBetIncBetPlaced() {
-        // Both incBetPlaced(long) and incBetsPlaced(int, long) target the same
-        // two meters with the same MDC tag shape — they must aggregate into the
-        // same time series (no series split when the bet-counter callsite
-        // migrates from creditBalance to onEndGame in Phase B).
+    void incBetsPlaced_zeroCountWithPositiveAmountStillRecordsAmount() {
+        // Reviewer fix: prior version's `if (count <= 0) return;` early-out
+        // silently dropped a non-zero amount. Future HasBetTotals implementers
+        // may legitimately emit (count=0, amount=N>0) — the amount counter must
+        // still increment.
         setBotMdc();
-        metrics.incBetPlaced(100L);
+        metrics.incBetsPlaced(0, 500L);
+
+        Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
+        Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
+
+        assertThat(bets).isNull();              // count guard correctly skipped
+        assertThat(amount).isNotNull();
+        assertThat(amount.count()).isEqualTo(500.0);
+    }
+
+    @Test
+    void incBetsPlaced_positiveCountWithZeroAmountStillRecordsCount() {
+        // Mirror of the above: count > 0 with amount == 0 must still increment
+        // the count counter independently. Guards are symmetric.
+        setBotMdc();
+        metrics.incBetsPlaced(3, 0L);
+
+        Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();
+        Counter amount = registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter();
+
+        assertThat(bets).isNotNull();
+        assertThat(bets.count()).isEqualTo(3.0);
+        assertThat(amount).isNull();            // amount guard correctly skipped
+    }
+
+    @Test
+    void incBetsPlaced_multipleCallsSumIntoTheSameTimeSeries() {
+        // Two consecutive batches must aggregate into the same per-MDC counter
+        // pair — no series split when the bot-side dispatch fires repeatedly
+        // across rounds.
+        setBotMdc();
+        metrics.incBetsPlaced(1, 100L);
         metrics.incBetsPlaced(2, 300L);
 
         Counter bets = registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter();

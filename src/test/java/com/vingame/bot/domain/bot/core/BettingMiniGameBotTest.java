@@ -514,85 +514,6 @@ class BettingMiniGameBotTest {
         }
     }
 
-    /* ----- Phase 4 + 5 — winnings, jackpot, game-total wiring in onEndGame ----- */
-
-    @Nested
-    @DisplayName("onEndGame metrics wiring (Phase 4 + 5)")
-    class OnEndGameMetricsTests {
-
-        @Test
-        @DisplayName("Default base class: incBotWinnings(0) is called, no jackpot, no game-totals")
-        void shouldCallWinningsZeroAndSkipJackpotAndGameTotalsByDefault() throws Exception {
-            BotMetrics metrics = mock(BotMetrics.class);
-            bot.setMetrics(metrics);
-
-            setLastFetchedBalance(50_000_000L);
-            setExpectedCurrentBalance(50_000_000L);
-            setGameState(BettingMiniGameState.BET);
-
-            EndGameMessage msg = mock(EndGameMessage.class);
-            ActionResponseMessage<EndGameMessage> resp =
-                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
-
-            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
-
-            // endGame message counter fires first, then winnings counter at 0.
-            InOrder order = inOrder(metrics);
-            order.verify(metrics).incBotMessage("endGame");
-            order.verify(metrics).incBotWinnings(0L);
-            // No jackpot — default getJackpot() is 0.
-            verify(metrics, never()).incBotJackpot(org.mockito.ArgumentMatchers.anyLong());
-
-            // lastRoundWinnings reflects the read of getWinnings() (0L).
-            assertThat(((Bot) bot).getLastRoundWinnings()).isEqualTo(0L);
-        }
-
-        @Test
-        @DisplayName("Subclass with non-zero getWinnings + getJackpot: both metrics fire, lastRoundWinnings updates")
-        void shouldEmitWinningsAndJackpotWhenSubclassOverrides() throws Exception {
-            BotMetrics metrics = mock(BotMetrics.class);
-            BettingMiniGameBot subclassed = newSubclassWithWinnings(750L, 10_000L, false, 0L, 0L);
-            subclassed.setMetrics(metrics);
-            seedBalance(subclassed, 50_000_000L);
-
-            EndGameMessage msg = mock(EndGameMessage.class);
-            ActionResponseMessage<EndGameMessage> resp =
-                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
-
-            try {
-                invokePrivateOn(subclassed, "onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
-
-                InOrder order = inOrder(metrics);
-                order.verify(metrics).incBotMessage("endGame");
-                order.verify(metrics).incBotWinnings(750L);
-                order.verify(metrics).incBotJackpot(10_000L);
-
-                assertThat(((Bot) subclassed).getLastRoundWinnings()).isEqualTo(750L);
-            } finally {
-                shutdownSchedulers(subclassed);
-            }
-        }
-
-        @Test
-        @DisplayName("Null metrics: onEndGame still runs without NPE (no-op wiring)")
-        void shouldNoOpWhenMetricsNull() throws Exception {
-            bot.setMetrics(null);
-
-            setLastFetchedBalance(50_000_000L);
-            setExpectedCurrentBalance(50_000_000L);
-            setGameState(BettingMiniGameState.BET);
-
-            EndGameMessage msg = mock(EndGameMessage.class);
-            ActionResponseMessage<EndGameMessage> resp =
-                    new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
-
-            // Must not throw.
-            invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
-
-            assertThat(readField("gameState")).isEqualTo(BettingMiniGameState.PAYOUT);
-        }
-    }
-
     /* ----- ENDGAME_METRICS Phase A — new marker-interface dispatch in onEndGame ----- */
 
     @Nested
@@ -600,7 +521,7 @@ class BettingMiniGameBotTest {
     class OnEndGameMarkerDispatchTests {
 
         @Test
-        @DisplayName("Vanilla EndGameMessage (no markers): only incBotMessage(\"endGame\") fires from the new dispatch")
+        @DisplayName("Vanilla EndGameMessage (no markers): only incBotMessage(\"endGame\") fires")
         void shouldEmitNothingForVanillaEndGameMessage() throws Exception {
             BotMetrics metrics = mock(BotMetrics.class);
             bot.setMetrics(metrics);
@@ -616,19 +537,15 @@ class BettingMiniGameBotTest {
 
             invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
 
+            // Only the message-counter fires (Phase C: legacy capability hooks are gone).
             verify(metrics).incBotMessage("endGame");
-            // None of the new dispatch branches fired.
             verify(metrics, never()).incBetsPlaced(anyInt(), anyLong());
-            // incBotWinnings(0L) still fires because the LEGACY capability-hook block
-            // remains in place during Phase A (deleted in Phase C). Marker dispatch
-            // contributed nothing: verify by asserting only the legacy default-0 call.
-            verify(metrics).incBotWinnings(0L);
-            verify(metrics, never()).incBotWinnings(org.mockito.ArgumentMatchers.longThat(v -> v > 0L));
+            verify(metrics, never()).incBotWinnings(anyLong());
             verify(metrics, never()).incBotJackpot(anyLong());
         }
 
         @Test
-        @DisplayName("HasBotWinnings: incBotWinnings(N) is called when N > 0")
+        @DisplayName("HasBotWinnings: incBotWinnings(N) is called when N > 0 and lastRoundWinnings is updated")
         void shouldExtractFromHasBotWinnings() throws Exception {
             BotMetrics metrics = mock(BotMetrics.class);
             bot.setMetrics(metrics);
@@ -643,16 +560,11 @@ class BettingMiniGameBotTest {
 
             invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
 
-            // The new HasBotWinnings dispatch fires incBotWinnings(750L). The legacy
-            // capability-hook block (still present in Phase A, deleted in Phase C)
-            // ALSO fires incBotWinnings(0L) from the default getWinnings() — that's
-            // an independent call to the same method with a different value, so
-            // Mockito treats them as distinct invocations.
+            // Phase C: only the marker-interface dispatch contributes — no legacy
+            // default-0 overwrite, so lastRoundWinnings reflects the extracted value.
             verify(metrics).incBotWinnings(750L);
-            // lastRoundWinnings is overwritten by the legacy block in Phase A
-            // (last-write-wins, defaults to 0). The Phase 4 contract — write every
-            // round even at 0 — is preserved end-to-end; the per-round-payout-visible
-            // assertion belongs in Phase C tests once the legacy block is gone.
+            verify(metrics, never()).incBotWinnings(0L);
+            assertThat(((Bot) bot).getLastRoundWinnings()).isEqualTo(750L);
         }
 
         @Test
@@ -736,7 +648,7 @@ class BettingMiniGameBotTest {
         }
 
         @Test
-        @DisplayName("Null metrics with all three surviving interfaces implemented: no NPE, gameState transitions to PAYOUT")
+        @DisplayName("Null metrics with all three surviving interfaces implemented: no NPE, gameState transitions to PAYOUT, lastRoundWinnings still updates")
         void shouldNoOpOnAllInterfacesWhenMetricsNull() throws Exception {
             bot.setMetrics(null);
             setLastFetchedBalance(50_000_000L);
@@ -754,6 +666,13 @@ class BettingMiniGameBotTest {
             invokePrivate("onEndGame", new Class<?>[]{ActionResponseMessage.class}, resp);
 
             assertThat(readField("gameState")).isEqualTo(BettingMiniGameState.PAYOUT);
+            // lastRoundWinnings is a local accumulator backing BotHealthDTO and is
+            // functionally independent of Prometheus wiring (same family as
+            // totalBetsPlaced / totalBetAmount). Per the Phase B/C narrative, local
+            // accumulators stay regardless of `metrics`; only the metric emission
+            // is gated. With metrics null and a HasBotWinnings payload of 500,
+            // lastRoundWinnings must still update.
+            assertThat(((Bot) bot).getLastRoundWinnings()).isEqualTo(500L);
         }
 
         // TODO(observability): once a per-game EndGameMessage subtype implements
@@ -857,46 +776,6 @@ class BettingMiniGameBotTest {
         b.initializeSubclass();
         b.setRandom(mock(Random.class));
         seedBalance(b, 50_000_000L);
-        return b;
-    }
-
-    /**
-     * Build a {@link BettingMiniGameBot} subclass whose Phase 4/5 capability hooks
-     * return the supplied constants. Used to assert the {@code onEndGame} wiring
-     * forwards subclass values verbatim to {@link BotMetrics}.
-     */
-    private BettingMiniGameBot newSubclassWithWinnings(long winnings, long jackpot,
-                                                       boolean canCheckTotals,
-                                                       long totalWinnings, long totalBet) {
-        BettingMiniGameBot b = new BettingMiniGameBot() {
-            @Override protected long getWinnings()              { return winnings; }
-            @Override protected long getJackpot()               { return jackpot; }
-            @Override protected boolean canCheckTotalWinnings() { return canCheckTotals; }
-            @Override protected long getTotalWinnings()         { return totalWinnings; }
-            @Override protected long getRoundTotalBetAmount()   { return totalBet; }
-        };
-        BotCredentials credentials = BotCredentials.builder()
-                .username("subclassbot").password("pw").fingerprint("fp").build();
-        Game game = Game.builder()
-                .id("g1").name("BauCua").pluginName("BauCua")
-                .offset(2000).numberOfOptions(6).build();
-        BotBehaviorConfig behavior = BotBehaviorConfig.builder()
-                .minBet(100).maxBet(1000).betIncrement(100)
-                .maxTotalBetPerRound(10_000).minBetsPerRound(1).maxBetsPerRound(3)
-                .chatEnabled(false).autoDepositEnabled(false).betSkipPercentage(0)
-                .build();
-        BotConfiguration cfg = BotConfiguration.builder()
-                .credentials(credentials)
-                .environmentId("env-1").botGroupId("group-1").botIndex(1)
-                .game(game).behaviorConfig(behavior)
-                .zoneName("Z").timeoutMillis(60_000L)
-                .watchdogTimeoutSeconds(120L)
-                .build();
-        b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
-        b.setConfiguration(cfg);
-        b.setRandom(mock(Random.class));
-        b.initializeSubclass();
-        b.setRandom(mock(Random.class));
         return b;
     }
 

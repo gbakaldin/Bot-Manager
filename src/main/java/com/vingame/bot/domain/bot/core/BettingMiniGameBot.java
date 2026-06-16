@@ -190,16 +190,21 @@ public class BettingMiniGameBot extends Bot {
         if (metrics != null) metrics.incBotMessage("endGame");
 
         EndGameMessage msg = data.getData();
+        // Marker-interface dispatch (ENDGAME_METRICS plan, Phase A/C).
+        // Per-message extraction. Independent `if` checks — a message may
+        // implement multiple interfaces. The pre-Phase-A capability hooks
+        // (getWinnings / getJackpot / canCheckTotalWinnings / getTotalWinnings
+        // / getRoundTotalBetAmount) were deleted in Phase C; the message
+        // payload now owns extraction.
+        // Extraction (local-accumulator updates) runs unconditionally — those
+        // fields back BotHealthDTO and are independent of Prometheus wiring.
+        // Only the metric emission is gated on `metrics != null`.
+        if (msg instanceof HasBotWinnings hw) {
+            long w = hw.winningsFor(getUserName());
+            lastRoundWinnings = w;
+            if (metrics != null && w > 0) metrics.incBotWinnings(w);
+        }
         if (metrics != null) {
-            // === New marker-interface dispatch (ENDGAME_METRICS plan, Phase A) ===
-            // Per-message extraction. Independent `if` checks — a message may
-            // implement multiple interfaces. Per-bot branches run before the
-            // round-aggregate branch (AD-5).
-            if (msg instanceof HasBotWinnings hw) {
-                long w = hw.winningsFor(getUserName());
-                if (w > 0) metrics.incBotWinnings(w);
-                lastRoundWinnings = w;
-            }
             if (msg instanceof HasJackpot hj) {
                 long j = hj.jackpotFor(getUserName());
                 if (j > 0) metrics.incBotJackpot(j);
@@ -210,26 +215,6 @@ public class BettingMiniGameBot extends Bot {
                 metrics.incBetsPlaced(bt.betCountFor(getUserName()),
                         bt.betAmountFor(getUserName()));
             }
-
-            // === Legacy capability-hook dispatch — REMOVED IN PHASE C ===
-            // Phase 4 — bot's own winnings + jackpot. Defaults below return 0 / no-op,
-            // so unless a per-game subclass overrides getWinnings() / getJackpot() this
-            // is a free pass. lastRoundWinnings (Bot.java:74) is repurposed here so the
-            // existing BotHealthDTO winnings field reflects the per-round payout.
-            long winnings = getWinnings();
-            metrics.incBotWinnings(winnings);
-            lastRoundWinnings = winnings;
-
-            long jackpot = getJackpot();
-            if (jackpot > 0) {
-                metrics.incBotJackpot(jackpot);
-            }
-
-            // Phase 5 game-aggregate dispatch removed by ENDGAME_METRICS Phase A.5
-            // (game-total counter methods deleted from BotMetrics). The legacy
-            // capability hooks canCheckTotalWinnings / getTotalWinnings /
-            // getRoundTotalBetAmount remain on the class until Phase C; they are
-            // unreachable from production now.
         }
 
         gameState = BettingMiniGameState.PAYOUT;
@@ -240,51 +225,6 @@ public class BettingMiniGameBot extends Bot {
         scheduleWatchdog();
         onNewSession();
     }
-
-    /**
-     * Per-game capability hook: this bot's gross winnings (payout) for the
-     * just-completed round. Default {@code 0L}; per-game subclasses override to
-     * read from the {@link EndGameMessage} payload they just received.
-     * <p>
-     * Must be cheap and non-blocking — runs on the netty-ws-message-processor pool.
-     */
-    protected long getWinnings() { return 0L; }
-
-    /**
-     * Per-game capability hook: jackpot value won this round; {@code 0L} if no
-     * jackpot. Default {@code 0L}; subclasses override to read protocol-specific
-     * jackpot fields (e.g. {@code tJpV} on {@code BomEndGameMessage}).
-     */
-    protected long getJackpot() { return 0L; }
-
-    /**
-     * Per-game capability hook: {@code true} iff the game protocol exposes
-     * round-level aggregates (Bom/B52/Nohu {@code bs} arrays). Default
-     * {@code false}; subclasses override when totals are readable from the
-     * {@code EndGame} payload.
-     */
-    protected boolean canCheckTotalWinnings() { return false; }
-
-    /**
-     * Per-game capability hook: sum of all players' winnings for the
-     * just-completed round. Only meaningful when {@link #canCheckTotalWinnings()}
-     * is {@code true}. Default {@code 0L}.
-     */
-    protected long getTotalWinnings() { return 0L; }
-
-    /**
-     * Per-game capability hook: sum of all players' bets for the just-completed
-     * round. Only meaningful when {@link #canCheckTotalWinnings()} is {@code true}.
-     * Default {@code 0L}.
-     * <p>
-     * Renamed from the plan's literal {@code getTotalBetAmount()} to avoid a
-     * collision with the Lombok-generated {@code Bot.getTotalBetAmount()} which
-     * returns the per-bot lifetime {@code AtomicLong} cumulative bet accumulator
-     * (see {@code Bot.java:72}). The two methods are semantically distinct
-     * (per-round game total vs. per-bot lifetime total); keeping the existing
-     * Bot-level accessor stable preserves the {@code BotHealthDTO} contract.
-     */
-    protected long getRoundTotalBetAmount() { return 0L; }
 
     @Override
     protected void beforeReconnect() {

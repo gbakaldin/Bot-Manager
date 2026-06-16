@@ -6,6 +6,7 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.websocketparser.VingameWebSocketClient;
 import com.vingame.websocketparser.auth.TokensProvider;
 import com.vingame.websocketparser.scenario.Scenario;
@@ -21,6 +22,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -28,6 +30,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @DisplayName("Bot (core)")
@@ -38,6 +41,7 @@ class BotTest {
     private ClientFactory clientFactory;
     private VingameWebSocketClient wsClient;
     private TokensProvider tokens;
+    private BotMetrics metrics;
 
     private TestBot bot;
 
@@ -48,6 +52,7 @@ class BotTest {
         clientFactory = mock(ClientFactory.class);
         wsClient = mock(VingameWebSocketClient.class);
         tokens = mock(TokensProvider.class);
+        metrics = mock(BotMetrics.class);
 
         when(apiGatewayClient.getApiGateway()).thenReturn("http://gateway.test");
 
@@ -79,6 +84,7 @@ class BotTest {
         bot = new TestBot();
         bot.setClients(apiGatewayClient, gameMsClient, clientFactory);
         bot.setConfiguration(cfg);
+        bot.setMetrics(metrics);
     }
 
     /* ----- creditBalance ----- */
@@ -97,6 +103,9 @@ class BotTest {
             assertThat(bot.getExpectedBalance()).isEqualTo(initialExpected - 500);
             assertThat(bot.getTotalBetsPlaced().get()).isEqualTo(1);
             assertThat(bot.getTotalBetAmount().get()).isEqualTo(500);
+            // ENDGAME_METRICS Phase B/C: bet-counter metrics moved to onEndGame's
+            // HasBetTotals branch — creditBalance must not touch BotMetrics.
+            verify(metrics, never()).incBetsPlaced(anyInt(), anyLong());
         }
 
         @Test
@@ -110,6 +119,16 @@ class BotTest {
             assertThat(bot.getExpectedBalance()).isEqualTo(initialExpected - 350);
             assertThat(bot.getTotalBetsPlaced().get()).isEqualTo(2);
             assertThat(bot.getTotalBetAmount().get()).isEqualTo(350);
+            verify(metrics, never()).incBetsPlaced(anyInt(), anyLong());
+        }
+
+        @Test
+        @DisplayName("creditBalance touches no BotMetrics counter (Phase B contract)")
+        void shouldNotEmitMetricsCounter() {
+            bot.creditBalance(500);
+            // Strict contract: zero interactions on the metrics mock. Local
+            // accumulator semantics asserted in the tests above.
+            verifyNoInteractions(metrics);
         }
     }
 
