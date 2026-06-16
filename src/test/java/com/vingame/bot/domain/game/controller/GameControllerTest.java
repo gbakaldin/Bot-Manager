@@ -23,6 +23,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -64,6 +65,7 @@ class GameControllerTest {
         void shouldReturnOkWhenGameExists() throws Exception {
             // Arrange
             String gameId = "game-bom-baucua";
+            Map<Integer, Integer> affinities = Map.of(0, 1, 1, 1, 2, 1, 3, 1, 4, 1, 5, 1);
             Game game = Game.builder()
                     .id(gameId)
                     .brandCode(BrandCode.G2)
@@ -72,7 +74,7 @@ class GameControllerTest {
                     .gameType(GameType.BETTING_MINI)
                     .pluginName("MiniGame3")
                     .gameId(3)
-                    .numberOfOptions(6)
+                    .optionAffinities(affinities)
                     .offset(2000)
                     .md5(false)
                     .build();
@@ -85,7 +87,7 @@ class GameControllerTest {
                     .gameType(GameType.BETTING_MINI)
                     .pluginName("MiniGame3")
                     .gameId(3)
-                    .numberOfOptions(6)
+                    .optionAffinities(affinities)
                     .offset(2000)
                     .md5(false)
                     .build();
@@ -93,7 +95,8 @@ class GameControllerTest {
             when(service.findById(gameId)).thenReturn(game);
             when(mapper.toDTO(game)).thenReturn(dto);
 
-            // Act & Assert
+            // Act & Assert — read DTO returns the unified optionAffinities map.
+            // Legacy numberOfOptions / bettingOptions must not appear on the wire.
             mockMvc.perform(get("/api/v1/game/{id}", gameId))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.id").value(gameId))
@@ -102,7 +105,11 @@ class GameControllerTest {
                     .andExpect(jsonPath("$.productCode.code").value("097"))
                     .andExpect(jsonPath("$.gameType").value("BETTING_MINI"))
                     .andExpect(jsonPath("$.pluginName").value("MiniGame3"))
-                    .andExpect(jsonPath("$.numberOfOptions").value(6))
+                    .andExpect(jsonPath("$.optionAffinities").exists())
+                    .andExpect(jsonPath("$.optionAffinities.0").value(1))
+                    .andExpect(jsonPath("$.optionAffinities.5").value(1))
+                    .andExpect(jsonPath("$.numberOfOptions").doesNotExist())
+                    .andExpect(jsonPath("$.bettingOptions").doesNotExist())
                     .andExpect(jsonPath("$.offset").value(2000))
                     .andExpect(jsonPath("$.md5").value(false));
         }
@@ -286,6 +293,9 @@ class GameControllerTest {
         @DisplayName("Should return 200 OK with created game and set brand/product from path")
         void shouldReturnOkWithCreatedGame() throws Exception {
             // Arrange — body intentionally omits brandCode/productCode; controller must inject from path.
+            // Use the create-time convenience shorthand: numberOfOptions=6 is expanded by
+            // the mapper into a flat-prior optionAffinities map. The mapper itself is
+            // mocked here, so we just verify the controller plumbs the call through.
             GameDTO inputDto = GameDTO.builder()
                     .name("BauCua")
                     .gameType(GameType.BETTING_MINI)
@@ -296,12 +306,13 @@ class GameControllerTest {
                     .md5(false)
                     .build();
 
+            Map<Integer, Integer> expandedAffinities = Map.of(0, 1, 1, 1, 2, 1, 3, 1, 4, 1, 5, 1);
             Game entityFromMapper = Game.builder()
                     .name("BauCua")
                     .gameType(GameType.BETTING_MINI)
                     .pluginName("MiniGame3")
                     .gameId(3)
-                    .numberOfOptions(6)
+                    .optionAffinities(expandedAffinities)
                     .offset(2000)
                     .md5(false)
                     .build();
@@ -314,7 +325,7 @@ class GameControllerTest {
                     .gameType(GameType.BETTING_MINI)
                     .pluginName("MiniGame3")
                     .gameId(3)
-                    .numberOfOptions(6)
+                    .optionAffinities(expandedAffinities)
                     .offset(2000)
                     .md5(false)
                     .build();
@@ -396,9 +407,13 @@ class GameControllerTest {
         void shouldReturnOkWithUpdatedGame() throws Exception {
             // Arrange
             String gameId = "game-bom-baucua";
+            // PATCH semantics for optionAffinities is full-replace (see plan,
+            // Architecture Decision 6). numberOfOptions is the create-time
+            // shorthand only — never sent on PATCH.
+            Map<Integer, Integer> newAffinities = Map.of(0, 2, 1, 1);
             GameDTO updateDto = GameDTO.builder()
                     .name("BauCua Renamed")
-                    .numberOfOptions(8)
+                    .optionAffinities(newAffinities)
                     .build();
 
             Game updatedEntity = Game.builder()
@@ -406,7 +421,7 @@ class GameControllerTest {
                     .brandCode(BrandCode.G2)
                     .productCode(ProductCode.P_097)
                     .name("BauCua Renamed")
-                    .numberOfOptions(8)
+                    .optionAffinities(newAffinities)
                     .build();
 
             GameDTO outputDto = GameDTO.builder()
@@ -414,7 +429,7 @@ class GameControllerTest {
                     .brandCode(BrandCode.G2)
                     .productCode(ProductCode.P_097)
                     .name("BauCua Renamed")
-                    .numberOfOptions(8)
+                    .optionAffinities(newAffinities)
                     .build();
 
             when(service.update(eq(gameId), any(GameDTO.class))).thenReturn(updatedEntity);
@@ -427,7 +442,8 @@ class GameControllerTest {
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.id").value(gameId))
                     .andExpect(jsonPath("$.name").value("BauCua Renamed"))
-                    .andExpect(jsonPath("$.numberOfOptions").value(8));
+                    .andExpect(jsonPath("$.optionAffinities.0").value(2))
+                    .andExpect(jsonPath("$.optionAffinities.1").value(1));
         }
 
         @Test

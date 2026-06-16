@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mapstruct.factory.Mappers;
 
-import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -24,8 +24,9 @@ class GameMapperTest {
     class ToDTOTests {
 
         @Test
-        @DisplayName("Should map all fields from entity to DTO")
+        @DisplayName("Maps all fields and emits optionAffinities from entity")
         void shouldMapAllFields() {
+            Map<Integer, Integer> affinities = Map.of(0, 1, 1, 1, 2, 1);
             Game entity = Game.builder()
                     .id("game-1")
                     .brandCode(BrandCode.G2)
@@ -35,8 +36,7 @@ class GameMapperTest {
                     .gameType(GameType.BETTING_MINI)
                     .pluginName("MiniGame3")
                     .gameId(11005)
-                    .numberOfOptions(6)
-                    .bettingOptions(List.of(1, 10, 100))
+                    .optionAffinities(affinities)
                     .offset(2000)
                     .md5(true)
                     .build();
@@ -51,16 +51,47 @@ class GameMapperTest {
             assertThat(dto.getGameType()).isEqualTo(GameType.BETTING_MINI);
             assertThat(dto.getPluginName()).isEqualTo("MiniGame3");
             assertThat(dto.getGameId()).isEqualTo(11005);
-            assertThat(dto.getNumberOfOptions()).isEqualTo(6);
-            assertThat(dto.getBettingOptions()).containsExactly(1, 10, 100);
+            assertThat(dto.getOptionAffinities()).isEqualTo(affinities);
             assertThat(dto.getOffset()).isEqualTo(2000);
             assertThat(dto.getMd5()).isTrue();
+            // Convenience shorthand must never leak into the read response.
+            assertThat(dto.getNumberOfOptions()).isNull();
         }
 
         @Test
-        @DisplayName("Should return null when entity is null")
+        @DisplayName("Synthesizes optionAffinities from legacy numberOfOptions on read for unmigrated docs")
+        void shouldSynthesizeAffinitiesFromLegacyOnRead() {
+            // Simulates a Mongo doc that pre-dates Phase 1 — only numberOfOptions.
+            Game entity = Game.builder()
+                    .id("legacy-1")
+                    .name("LegacyGame")
+                    .numberOfOptions(4)
+                    .build();
+
+            GameDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getOptionAffinities()).hasSize(4).containsKeys(0, 1, 2, 3);
+            assertThat(dto.getOptionAffinities().values()).containsOnly(1);
+        }
+
+        @Test
+        @DisplayName("Returns null when entity is null")
         void shouldReturnNullForNull() {
             assertThat(mapper.toDTO(null)).isNull();
+        }
+
+        @Test
+        @DisplayName("Surfaces a null optionAffinities (not a crash) when entity is misconfigured")
+        void shouldNotCrashOnMisconfiguredEntity() {
+            // A Game with neither field set is misconfigured. toDTO must still
+            // return a usable response so the operator can spot it via the
+            // missing/empty affinity map rather than seeing a 500.
+            Game entity = Game.builder().id("broken").name("Broken").build();
+
+            GameDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto).isNotNull();
+            assertThat(dto.getOptionAffinities()).isNull();
         }
     }
 
@@ -69,8 +100,9 @@ class GameMapperTest {
     class ToEntityTests {
 
         @Test
-        @DisplayName("Should map all fields from DTO to entity")
-        void shouldMapAllFields() {
+        @DisplayName("Uses optionAffinities from DTO as-is when present")
+        void shouldUseExplicitAffinities() {
+            Map<Integer, Integer> affinities = Map.of(0, 2, 1, 3);
             GameDTO dto = GameDTO.builder()
                     .id("game-1")
                     .brandCode(BrandCode.G2)
@@ -80,8 +112,7 @@ class GameMapperTest {
                     .gameType(GameType.BETTING_MINI)
                     .pluginName("MiniGame3")
                     .gameId(11005)
-                    .numberOfOptions(6)
-                    .bettingOptions(List.of(1, 10, 100))
+                    .optionAffinities(affinities)
                     .offset(2000)
                     .md5(true)
                     .build();
@@ -96,26 +127,58 @@ class GameMapperTest {
             assertThat(entity.getGameType()).isEqualTo(GameType.BETTING_MINI);
             assertThat(entity.getPluginName()).isEqualTo("MiniGame3");
             assertThat(entity.getGameId()).isEqualTo(11005);
-            assertThat(entity.getNumberOfOptions()).isEqualTo(6);
-            assertThat(entity.getBettingOptions()).containsExactly(1, 10, 100);
+            assertThat(entity.getOptionAffinities()).isEqualTo(affinities);
             assertThat(entity.getOffset()).isEqualTo(2000);
             assertThat(entity.isMd5()).isTrue();
         }
 
         @Test
-        @DisplayName("Should default numeric/boolean fields when DTO has nulls")
-        void shouldDefaultPrimitivesWhenNull() {
+        @DisplayName("Expands numberOfOptions shorthand into a flat-prior optionAffinities map")
+        void shouldExpandNumberOfOptionsShorthand() {
+            GameDTO dto = GameDTO.builder()
+                    .name("CreateMe")
+                    .numberOfOptions(4)
+                    .build();
+
+            Game entity = mapper.toEntity(dto);
+
+            assertThat(entity.getOptionAffinities())
+                    .hasSize(4)
+                    .containsEntry(0, 1)
+                    .containsEntry(1, 1)
+                    .containsEntry(2, 1)
+                    .containsEntry(3, 1);
+        }
+
+        @Test
+        @DisplayName("optionAffinities wins over numberOfOptions when both provided on create")
+        void shouldPreferAffinitiesOverShorthandOnCreate() {
+            Map<Integer, Integer> explicit = Map.of(0, 5);
+            GameDTO dto = GameDTO.builder()
+                    .name("CreateMe")
+                    .optionAffinities(explicit)
+                    .numberOfOptions(99)
+                    .build();
+
+            Game entity = mapper.toEntity(dto);
+
+            assertThat(entity.getOptionAffinities()).isEqualTo(explicit);
+        }
+
+        @Test
+        @DisplayName("Defaults md5 to false and leaves optionAffinities null when DTO carries neither shape")
+        void shouldDefaultWhenNoAffinityInfoProvided() {
             GameDTO dto = GameDTO.builder().name("Empty").build();
 
             Game entity = mapper.toEntity(dto);
 
             assertThat(entity.getName()).isEqualTo("Empty");
-            assertThat(entity.getNumberOfOptions()).isEqualTo(0);
+            assertThat(entity.getOptionAffinities()).isNull();
             assertThat(entity.isMd5()).isFalse();
         }
 
         @Test
-        @DisplayName("Should return null when DTO is null")
+        @DisplayName("Returns null when DTO is null")
         void shouldReturnNullForNull() {
             assertThat(mapper.toEntity(null)).isNull();
         }
@@ -126,8 +189,9 @@ class GameMapperTest {
     class UpdateEntityFromDTOTests {
 
         @Test
-        @DisplayName("Should overwrite only fields that DTO provides, keeping the rest unchanged")
+        @DisplayName("Keeps existing values for fields the DTO does not provide")
         void shouldKeepFieldsWhenDtoNull() {
+            Map<Integer, Integer> existing = Map.of(0, 1, 1, 1, 2, 1);
             Game entity = Game.builder()
                     .id("game-1")
                     .brandCode(BrandCode.G2)
@@ -137,8 +201,7 @@ class GameMapperTest {
                     .gameType(GameType.BETTING_MINI)
                     .pluginName("MiniGame3")
                     .gameId(11005)
-                    .numberOfOptions(6)
-                    .bettingOptions(List.of(1, 2, 3))
+                    .optionAffinities(existing)
                     .offset(2000)
                     .md5(true)
                     .build();
@@ -156,14 +219,56 @@ class GameMapperTest {
             assertThat(entity.getGameType()).isEqualTo(GameType.BETTING_MINI);
             assertThat(entity.getPluginName()).isEqualTo("MiniGame3");
             assertThat(entity.getGameId()).isEqualTo(11005);
-            assertThat(entity.getNumberOfOptions()).isEqualTo(6);
-            assertThat(entity.getBettingOptions()).containsExactly(1, 2, 3);
+            assertThat(entity.getOptionAffinities()).isEqualTo(existing);
             assertThat(entity.getOffset()).isEqualTo(2000);
             assertThat(entity.isMd5()).isTrue();
         }
 
         @Test
-        @DisplayName("Should be a no-op when DTO is null")
+        @DisplayName("PATCH on optionAffinities is full-replace (not field-merge)")
+        void shouldFullReplaceOptionAffinitiesOnPatch() {
+            Game entity = Game.builder()
+                    .id("game-1")
+                    .name("BauCua")
+                    .optionAffinities(Map.of(0, 1, 1, 1, 2, 1, 3, 1))
+                    .build();
+
+            GameDTO dto = GameDTO.builder()
+                    .optionAffinities(Map.of(0, 2, 1, 1))
+                    .build();
+
+            mapper.updateEntityFromDTO(dto, entity);
+
+            // Full-replace: keys 2 and 3 are gone; only the DTO's map remains.
+            assertThat(entity.getOptionAffinities())
+                    .hasSize(2)
+                    .containsEntry(0, 2)
+                    .containsEntry(1, 1)
+                    .doesNotContainKey(2)
+                    .doesNotContainKey(3);
+        }
+
+        @Test
+        @DisplayName("Ignores numberOfOptions shorthand on PATCH (create-only convenience)")
+        void shouldIgnoreNumberOfOptionsOnPatch() {
+            Map<Integer, Integer> existing = Map.of(0, 1, 1, 1);
+            Game entity = Game.builder()
+                    .id("game-1")
+                    .name("BauCua")
+                    .optionAffinities(existing)
+                    .build();
+
+            // Caller mistakenly used the create shorthand on PATCH — must not
+            // alter the existing affinity map.
+            GameDTO dto = GameDTO.builder().numberOfOptions(7).build();
+
+            mapper.updateEntityFromDTO(dto, entity);
+
+            assertThat(entity.getOptionAffinities()).isEqualTo(existing);
+        }
+
+        @Test
+        @DisplayName("Is a no-op when DTO is null")
         void shouldBeNoOpWhenDtoNull() {
             Game entity = Game.builder().id("id").name("Old").build();
 

@@ -30,6 +30,8 @@ import org.junit.jupiter.api.Timeout;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledExecutorService;
@@ -69,8 +71,7 @@ class BettingMiniGameBotTest {
                 .name("BauCua")
                 .pluginName("BauCua")
                 .offset(2000)
-                .numberOfOptions(6)
-                .bettingOptions(null)
+                .optionAffinities(flatPriorAffinities(6))
                 .build();
 
         BotBehaviorConfig behavior = BotBehaviorConfig.builder()
@@ -757,7 +758,7 @@ class BettingMiniGameBotTest {
                 .username(userName).password("pw").fingerprint("fp").build();
         Game game = Game.builder()
                 .id("g1").name("BauCua").pluginName("BauCua")
-                .offset(2000).numberOfOptions(6).build();
+                .offset(2000).optionAffinities(flatPriorAffinities(6)).build();
         BotBehaviorConfig behavior = BotBehaviorConfig.builder()
                 .minBet(100).maxBet(1000).betIncrement(100)
                 .maxTotalBetPerRound(10_000).minBetsPerRound(1).maxBetsPerRound(3)
@@ -817,7 +818,7 @@ class BettingMiniGameBotTest {
                 .name("BauCua")
                 .pluginName("BauCua")
                 .offset(2000)
-                .numberOfOptions(6)
+                .optionAffinities(flatPriorAffinities(6))
                 .build();
         BotBehaviorConfig behavior = BotBehaviorConfig.builder()
                 .minBet(100).maxBet(1000).betIncrement(100)
@@ -933,11 +934,30 @@ class BettingMiniGameBotTest {
     }
 
     private void setBettingOptions(List<Integer> options) throws Exception {
-        bot.getConfiguration().getGame().setBettingOptions(options);
+        // Phase 1 of BETTING_STRATEGIES replaced bettingOptions/numberOfOptions with
+        // a unified optionAffinities map. The pre-Phase-1 "configured list" of bettable
+        // option IDs becomes the key set of the affinity map (values flat = 1).
+        Map<Integer, Integer> affinities = new LinkedHashMap<>();
+        if (options != null) {
+            for (Integer option : options) {
+                affinities.put(option, 1);
+            }
+        }
+        bot.getConfiguration().getGame().setOptionAffinities(affinities.isEmpty() ? null : affinities);
     }
 
     private void setNumberOfOptions(int n) throws Exception {
-        bot.getConfiguration().getGame().setNumberOfOptions(n);
+        // Simulates the "fall back to [0..n)" pre-Phase-1 path by writing an
+        // explicit flat-prior optionAffinities map of that size.
+        bot.getConfiguration().getGame().setOptionAffinities(flatPriorAffinities(n));
+    }
+
+    private static Map<Integer, Integer> flatPriorAffinities(int n) {
+        Map<Integer, Integer> affinities = new LinkedHashMap<>(n);
+        for (int i = 0; i < n; i++) {
+            affinities.put(i, 1);
+        }
+        return affinities;
     }
 
     private void setGameState(GameState state) throws Exception {
