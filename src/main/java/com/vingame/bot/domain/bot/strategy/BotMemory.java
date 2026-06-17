@@ -9,6 +9,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -31,12 +32,35 @@ import java.util.Optional;
  *   <li>{@link #game} — read-only handle for option-affinity / bet-window lookups.</li>
  * </ul>
  *
- * <p><b>Thread-safety.</b> All mutators (and reads that expose internal state)
- * are guarded by an intrinsic lock on {@code this}. Writer is the netty
- * message-processor thread ({@code onStartGame} / {@code onEndGame}) and the
- * scenario thread ({@code bet()} → {@code recordBetSent}). Strategy reads on
- * the scenario thread go through {@link #snapshotLastResults} /
- * {@link #snapshotGlobalRecentWins} which return immutable copies.
+ * <p><b>Thread-safety.</b> Mutators ({@link #beginRound}, {@link #recordBetSent},
+ * {@link #completeRound}, {@link #recordGlobalWin}) hold an intrinsic lock on
+ * {@code this}. Writers are the netty message-processor thread
+ * ({@code onStartGame} / {@code onEndGame}) and the scenario thread
+ * ({@code bet()} → {@code recordBetSent}).
+ *
+ * <p>Strategy reads on the scenario thread are heterogeneous:
+ * <ul>
+ *   <li>Collections ({@link #lastResults}, {@link #globalRecentWins},
+ *       {@link RoundState#getBetsByOption()}) are read via the
+ *       {@code snapshot*} methods which hold the monitor and return immutable
+ *       copies.</li>
+ *   <li>Primitive scalar fields on {@link RoundState} ({@code sessionId},
+ *       {@code phase}, {@code remainingTimeMs}) are declared {@code volatile}
+ *       on {@code RoundState} itself so the scenario thread can read them
+ *       directly via {@link #getCurrentRound()} without acquiring the monitor.
+ *       This is the cheapest sound option for the per-tick decide() hot path,
+ *       which only inspects the {@code sessionId} primitive (see
+ *       {@code RandomBehaviorStrategy.decide}).</li>
+ *   <li>{@link #currentBalance} is itself {@code volatile} for the same
+ *       reason.</li>
+ * </ul>
+ *
+ * <p>{@link #getCurrentRound()} returns the live {@link RoundState} reference,
+ * not a defensive snapshot — strategies that need a coherent view of the bets
+ * map must call {@link #snapshotCurrentRoundBets()} instead. The method is
+ * declared {@code synchronized} historically for the reference read; the
+ * effective happens-before edge on the returned object's primitive fields
+ * comes from the {@code volatile} declarations on {@link RoundState}.
  */
 @Slf4j
 public final class BotMemory {
@@ -59,7 +83,11 @@ public final class BotMemory {
         if (capacity <= 0) {
             throw new IllegalArgumentException("capacity must be > 0, got " + capacity);
         }
-        this.game = game;
+        // Fail loud at construction if game is null — strategies dereferencing
+        // ctx.game().getEffectiveOptionAffinities() would otherwise NPE much
+        // later inside decide() on the scenario thread, with a misleading
+        // stack trace far from the misconfiguration site.
+        this.game = Objects.requireNonNull(game, "game");
         this.capacity = capacity;
         this.lastResults = new ArrayDeque<>(capacity);
         this.globalRecentWins = new ArrayDeque<>(capacity);
@@ -74,10 +102,16 @@ public final class BotMemory {
     }
 
     /**
-     * @return the in-flight {@link RoundState}. Strategies that need it should
-     *         go through {@link #snapshotCurrentRound} for a defensive copy.
+     * @return the live in-flight {@link RoundState}. Reference is final and
+     *         non-null. The returned object's primitive fields ({@code sessionId},
+     *         {@code phase}, {@code remainingTimeMs}) are {@code volatile}, so
+     *         single-field reads from any thread are safe without acquiring
+     *         this monitor. Strategies that need a coherent snapshot of the
+     *         bets map must call {@link #snapshotCurrentRoundBets()} instead —
+     *         the live {@link RoundState#getBetsByOption()} is a plain
+     *         {@link HashMap} mutated under this monitor.
      */
-    public synchronized RoundState getCurrentRound() {
+    public RoundState getCurrentRound() {
         return currentRound;
     }
 

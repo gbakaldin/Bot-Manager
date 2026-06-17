@@ -11,17 +11,33 @@ import java.util.Map;
  * {@code StartGame}, accumulated as the bot sends bets, finalized into a
  * {@link RoundResult} on {@code EndGame}. Lives on {@link BotMemory}.
  *
- * <p>Not thread-safe on its own — all access goes through {@link BotMemory}'s
- * synchronization (see Architecture Decision 3 / 15).
+ * <p><b>Thread-safety.</b> Mutators run under {@link BotMemory}'s intrinsic
+ * lock on the netty message-processor thread ({@code onStartGame} /
+ * {@code onEndGame}) and the scenario thread ({@code bet()} →
+ * {@code recordBetSent}). Strategies on the scenario thread read individual
+ * fields outside the BotMemory monitor via {@link BotMemory#getCurrentRound()},
+ * so the primitive scalar fields here are declared {@code volatile} to
+ * publish writes across threads without forcing every read site through the
+ * monitor. The {@link #betsByOption} map is not volatile — strategies that
+ * need a coherent snapshot of the bets go through
+ * {@link BotMemory#snapshotCurrentRoundBets()} which holds the lock and
+ * returns a defensive copy.
  *
  * <p>{@code sessionId == 0} is the "no active round" sentinel — matches the
  * existing {@code SessionIdStore} convention.
  */
 public final class RoundState {
 
-    private long sessionId;
-    private GameState phase;
-    private long remainingTimeMs;
+    // volatile: read by strategies (e.g. RandomBehaviorStrategy.decide) on the
+    // scenario thread outside the BotMemory monitor; written by the netty
+    // processor thread in beginRound (inside the monitor). A plain long read
+    // has no happens-before edge to the write, which on a 32-bit JVM allows a
+    // torn read and on any JVM allows visibility lag. Marking volatile gives a
+    // single-word atomic read and a happens-before edge for the strategy's
+    // sessionId-change check (see RandomBehaviorStrategy.decide:68).
+    private volatile long sessionId;
+    private volatile GameState phase;
+    private volatile long remainingTimeMs;
     private final Map<Integer, Long> betsByOption = new HashMap<>();
 
     public RoundState() {
