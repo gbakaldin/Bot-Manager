@@ -38,7 +38,9 @@ public class BotConfiguration {
     int botIndex;
 
     /**
-     * Game configuration containing offset, numberOfOptions, pluginName, md5, etc.
+     * Game configuration — offset, pluginName, md5, and the option-affinity
+     * map ({@link Game#getEffectiveOptionAffinities()}) the assigned strategy
+     * uses to pick a betting option.
      */
     Game game;
 

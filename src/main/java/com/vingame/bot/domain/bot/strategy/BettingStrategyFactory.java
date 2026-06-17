@@ -22,12 +22,12 @@ import java.util.Map;
  * Decision 12) — singleton-scoped strategies would share mutable state across
  * bots and silently corrupt decisions.
  *
- * <p>{@link #create(StrategyId, long)} returns a new strategy instance every
- * call. The {@code seed} parameter is reserved for future strategies that hold
- * their own RNG; today's {@link RandomBehaviorStrategy} ignores it (RNG is
- * threaded through {@link BetContext#rng()}). The plumbing exists so a future
- * strategy can be wired in without touching the call site in
- * {@code BettingMiniGameBot}.
+ * <p>{@link #create(StrategyId)} returns a new strategy instance every call.
+ * The RNG is owned by the bot and threaded through {@link BetContext#rng()} on
+ * every {@code decide} call (Architecture Decision 13) — strategies never hold
+ * their own RNG today. When a future strategy needs one the signature can be
+ * extended with a {@code seed} parameter; until then carrying dead plumbing
+ * just confuses callers about what does and doesn't seed strategy behaviour.
  *
  * <p>An unknown {@link StrategyId} at lookup throws
  * {@link IllegalArgumentException} — see Architecture Decision 12: a strategy
@@ -79,14 +79,10 @@ public class BettingStrategyFactory {
      *
      * @param id    {@link StrategyId} assigned to the bot at startup (from the
      *              {@code BotGroup.strategyMix} fill-to-target distribution).
-     * @param seed  reserved for future strategies that own their own RNG.
-     *              {@link RandomBehaviorStrategy} ignores this parameter — the
-     *              per-bot RNG flows in via {@link BetContext#rng()} so the
-     *              bot owns RNG lifecycle and seeding.
      * @return a new {@link BettingStrategy} instance (prototype-scoped).
      * @throws IllegalArgumentException if {@code id} has no registered bean.
      */
-    public BettingStrategy create(StrategyId id, long seed) {
+    public BettingStrategy create(StrategyId id) {
         Class<? extends BettingStrategy> clazz = registry.get(id);
         if (clazz == null) {
             throw new IllegalArgumentException("No BettingStrategy registered for " + id

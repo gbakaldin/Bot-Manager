@@ -53,8 +53,8 @@ class BettingStrategyFactoryTest {
         BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(a));
         factory.init();
 
-        BettingStrategy s1 = factory.create(StrategyId.RANDOM, 1L);
-        BettingStrategy s2 = factory.create(StrategyId.RANDOM, 2L);
+        BettingStrategy s1 = factory.create(StrategyId.RANDOM);
+        BettingStrategy s2 = factory.create(StrategyId.RANDOM);
 
         assertThat(s1).isNotSameAs(s2);
         assertThat(s1).isInstanceOf(RandomBehaviorStrategy.class);
@@ -69,7 +69,7 @@ class BettingStrategyFactoryTest {
         BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of());
         factory.init();
 
-        assertThatThrownBy(() -> factory.create(StrategyId.RANDOM, 0L))
+        assertThatThrownBy(() -> factory.create(StrategyId.RANDOM))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("RANDOM");
     }

@@ -86,11 +86,7 @@ class BettingMiniGameBotStrategyHookTest {
         // calls factory.create(...), so this guarantees the recording strategy is
         // what gets invoked when onEndGame fires.
         BettingStrategyFactory factory = mock(BettingStrategyFactory.class);
-        when(factory.create(StrategyId.RANDOM, 0L)).thenReturn(strategy);
-        // Match any seed (the bot derives a per-bot seed) — return the same
-        // recording strategy regardless.
-        when(factory.create(org.mockito.ArgumentMatchers.eq(StrategyId.RANDOM),
-                org.mockito.ArgumentMatchers.anyLong())).thenReturn(strategy);
+        when(factory.create(StrategyId.RANDOM)).thenReturn(strategy);
 
         bot = new BettingMiniGameBot();
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
