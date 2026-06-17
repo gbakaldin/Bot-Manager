@@ -1,5 +1,6 @@
 package com.vingame.bot.config.bot;
 
+import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.game.model.Game;
 import lombok.Builder;
 import lombok.Value;
@@ -37,7 +38,9 @@ public class BotConfiguration {
     int botIndex;
 
     /**
-     * Game configuration containing offset, numberOfOptions, pluginName, md5, etc.
+     * Game configuration — offset, pluginName, md5, and the option-affinity
+     * map ({@link Game#getEffectiveOptionAffinities()}) the assigned strategy
+     * uses to pick a betting option.
      */
     Game game;
 
@@ -55,4 +58,17 @@ public class BotConfiguration {
     long timeoutMillis;
 
     long watchdogTimeoutSeconds;
+
+    /**
+     * Strategy id assigned to this bot by the group's strategy mix at start.
+     * <p>
+     * Populated by {@code BotGroupBehaviorService.createSingleBot()} from the
+     * fill-to-target assignment over {@code BotGroup.strategyMix}. Read by the
+     * bot lifecycle to instantiate the per-bot {@code BettingStrategy} instance
+     * (Phase 5) and surfaced on {@code BotHealthDTO} for observability.
+     * <p>
+     * May be {@code null} on legacy code paths that bypass the assignment
+     * (no production caller); the {@code Bot} accessor tolerates that.
+     */
+    StrategyId strategyId;
 }

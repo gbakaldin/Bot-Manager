@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.botgroup.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -8,6 +9,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Data
 @Builder
@@ -42,6 +44,14 @@ public class BotGroupDTO {
 
     private Boolean chatEnabled;
     private Boolean autoDepositEnabled;
+
+    /**
+     * Weighted mix of betting strategies; null/empty falls back to {@code [(RANDOM, 1.0)]}
+     * at assignment time. PATCH is full-replace — supplying this field overwrites the
+     * persisted list wholesale, but does NOT re-assign already-running bots
+     * (Architecture Decision 9 in {@code docs/plans/BETTING_STRATEGIES.md}).
+     */
+    private List<WeightedStrategy> strategyMix;
 
     // Lifecycle management
     private BotGroupStatus targetStatus;

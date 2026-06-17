@@ -2,12 +2,20 @@ package com.vingame.bot.domain.bot.core;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.domain.bot.message.request.Request;
+import com.vingame.bot.domain.bot.strategy.BetContext;
+import com.vingame.bot.domain.bot.strategy.BetDecision;
+import com.vingame.bot.domain.bot.strategy.BettingStrategy;
+import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
+import com.vingame.bot.domain.bot.strategy.BotMemory;
+import com.vingame.bot.domain.bot.strategy.RandomBehaviorStrategy;
+import com.vingame.bot.domain.bot.strategy.RoundResult;
+import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
 import com.vingame.bot.domain.bot.util.GameState;
 import com.vingame.bot.domain.bot.util.OutputPrinter;
 import com.vingame.bot.domain.bot.util.SessionIdStore;
-import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.GameMessageTypes;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
@@ -27,11 +35,13 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static com.vingame.websocketparser.message.properties.MessageType.RECEIVED;
@@ -68,13 +78,40 @@ public class BettingMiniGameBot extends Bot {
     private volatile ScheduledFuture<?> watchdogTask;
     private long watchdogTimeoutMillis;
 
-    // Betting state
-    private int numberOfBetsInCurrentSession = 0;
-    private Random random = new Random();
+    // Betting state — per-bot RNG, owned by the bot and threaded into BetContext
+    // on every tick. The strategy never holds its own RNG (see Decision 13 and
+    // BettingStrategyFactory javadoc); the bot owns lifecycle and seeding.
+    private Random rng = new Random();
 
-    // Visible for testing — allows deterministic randomness in unit tests.
+    // Factual rolling history (Phase 2 of BETTING_STRATEGIES). Populated from
+    // incoming WS messages in onStartGame/onEndGame and from outbound bets in
+    // bet(). Read by the strategy via BetContext on every tick.
+    @Getter
+    private BotMemory memory;
+
+    // Strategy factory (injected by BotFactory) used at initializeSubclass to
+    // build the per-bot BettingStrategy instance for this.strategyId.
+    @Setter
+    private BettingStrategyFactory strategyFactory;
+
+    // Per-bot strategy instance (built in initializeSubclass via strategyFactory).
+    // One instance per bot per restart; state-carrying (Decision 1, 10).
+    @Getter
+    private BettingStrategy strategy;
+
+    // Pre-computed decision shared between the sendAsync condition and the
+    // supplier. The scenario engine throws if the supplier returns null
+    // (SendAsync.processInternal:135), so the condition computes decide(ctx)
+    // and parks the Optional here; the supplier reads it back to build the bet.
+    // See BETTING_STRATEGIES.md Implementation Note 1.
+    private final AtomicReference<Optional<BetDecision>> pendingDecision =
+            new AtomicReference<>(Optional.empty());
+
+    // Visible for testing — allows deterministic randomness in unit tests by
+    // injecting a mocked or seeded Random. Preserves the legacy test seam used
+    // by BettingMiniGameBotTest / BettingMiniGameBotTipDispatchTest.
     void setRandom(Random random) {
-        this.random = random;
+        this.rng = random;
     }
 
     public BettingMiniGameBot() {
@@ -93,14 +130,40 @@ public class BettingMiniGameBot extends Bot {
             offset
         );
 
+        // BotMemory is built after `game` is set so its captured Game reference is
+        // non-null. Capacity defaults to BotMemory.DEFAULT_CAPACITY (50, per
+        // BETTING_STRATEGIES Architecture Decision 3 — hardcoded for v1).
+        this.memory = new BotMemory(game);
+
+        // Phase 5: seed the per-bot RNG. Decision 13 — deterministic-ish per
+        // user (hash of userName) but distinct per process (XOR with nanoTime)
+        // so two restarts of the same bot don't replay an identical sequence.
+        // Test fixtures override this via setRandom().
+        this.rng = new Random(((long) getUserName().hashCode()) ^ System.nanoTime());
+
+        // Phase 5: build the per-bot strategy via the factory. strategyId is
+        // populated by BotGroupBehaviorService.createSingleBot via the
+        // fill-to-target assignment over BotGroup.strategyMix; legacy/test
+        // fixtures that bypass the assignment default to RANDOM (Decision 7).
+        StrategyId effectiveId = strategyId != null ? strategyId : StrategyId.RANDOM;
+        if (strategyFactory != null) {
+            this.strategy = strategyFactory.create(effectiveId);
+        } else {
+            // Test seam: fixtures that don't wire the factory (and don't intend
+            // to exercise the strategy code path) get a default instance so
+            // the bet() supplier can still run without NPE. Production callers
+            // always go through BotFactory which wires the factory.
+            this.strategy = new RandomBehaviorStrategy();
+        }
+
         this.watchdogTimeoutMillis = configuration.getWatchdogTimeoutSeconds() * 1000L;
         this.watchdogScheduler = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofVirtual().name("watchdog-" + getUserName()).factory()
         );
 
-        log.info("BettingMiniGameBot initialized: game={}, offset={}, options={}, md5={}, watchdog={}s",
-                game.getName(), offset, game.getNumberOfOptions(), game.isMd5(),
-                configuration.getWatchdogTimeoutSeconds());
+        log.info("BettingMiniGameBot initialized: game={}, offset={}, options={}, md5={}, watchdog={}s, strategy={}",
+                game.getName(), offset, game.getEffectiveOptionAffinities().size(), game.isMd5(),
+                configuration.getWatchdogTimeoutSeconds(), effectiveId);
     }
 
     private void onNewSession() {
@@ -172,7 +235,22 @@ public class BettingMiniGameBot extends Bot {
         StartGameMessage msg = data.getData();
         sidStore.set(msg.getSessionId());
         gameState = BettingMiniGameState.BET;
-        numberOfBetsInCurrentSession = 0;
+        // Phase 2 of BETTING_STRATEGIES: kick off the in-flight RoundState for
+        // bet→result correlation. Balance snapshot mirrors expectedCurrentBalance.
+        // Phase 5: the per-round bet counter now lives on the strategy
+        // (RandomBehaviorStrategy resets it on sessionId change via
+        // currentRound.sessionId, so no explicit reset call is needed here).
+        // memory is always non-null post-initializeSubclass (production and
+        // tests both call it); see Decision 15.
+        memory.beginRound(msg.getSessionId(), expectedCurrentBalance.get());
+        // pendingDecision is intentionally NOT cleared here. Clearing on the
+        // netty thread mid-tick raced with the scenario thread between
+        // betCondition() (parks decision) and bet() (consumes decision) —
+        // see review.md "Race between condition and supplier". The next tick's
+        // condition computes a fresh decision in any case; a leftover parked
+        // value will be replaced on the next condition call. RandomBehavior
+        // resets its per-round counter via the sessionId-change branch in
+        // decide().
         scheduleWatchdog();
     }
 
@@ -199,8 +277,10 @@ public class BettingMiniGameBot extends Bot {
         // Extraction (local-accumulator updates) runs unconditionally — those
         // fields back BotHealthDTO and are independent of Prometheus wiring.
         // Only the metric emission is gated on `metrics != null`.
+        long payout = 0L;
         if (msg instanceof HasBotWinnings hw) {
             long w = hw.winningsFor(getUserName());
+            payout = w;
             lastRoundWinnings = w;
             if (metrics != null && w > 0) metrics.incBotWinnings(w);
         }
@@ -216,6 +296,19 @@ public class BettingMiniGameBot extends Bot {
                         bt.betAmountFor(getUserName()));
             }
         }
+
+        // Phase 2 of BETTING_STRATEGIES: finalize the in-flight RoundState into
+        // a RoundResult and push onto BotMemory.lastResults. v1 cannot yet
+        // extract winningOption (no HasWinningOption marker exists — Implementation
+        // Note 4); pass Optional.empty(). globalRecentWins stays empty for v1.
+        // Phase 5: route the finalized RoundResult into strategy.onRoundEnd
+        // so stateful strategies (Martingale, trend-followers) can update
+        // their interpretive state. RandomBehaviorStrategy is a no-op.
+        // memory and strategy are both non-null post-initializeSubclass.
+        Optional<Integer> winningOption = Optional.empty();
+        RoundResult roundResult = memory.completeRound(msg.getSessionId(), winningOption, payout);
+        memory.recordGlobalWin(winningOption);
+        strategy.onRoundEnd(roundResult);
 
         gameState = BettingMiniGameState.PAYOUT;
         if (scheduler != null) {
@@ -239,7 +332,12 @@ public class BettingMiniGameBot extends Bot {
         sidStore.set(0L);
         gameState = null;
         remainingTime.set(0L);
-        numberOfBetsInCurrentSession = 0;
+        // Strategy state is intentionally not reset here — a reconnect mid-round
+        // does not produce a new RoundResult, and strategies that care about
+        // cross-round state (e.g. Martingale loss streak) should not lose it on
+        // a transient WS disconnect. RandomBehaviorStrategy's per-round counter
+        // re-syncs on the next StartGame via the sessionId-change branch.
+        pendingDecision.set(Optional.empty());
     }
 
     @Override
@@ -253,19 +351,82 @@ public class BettingMiniGameBot extends Bot {
         }
     }
 
-    private Supplier<ActionRequestMessage> bet() {
-        return () -> {
-            long nextBetAmount = resolveBetAmount();
-            creditBalance(nextBetAmount);
-
-            int entryToBet = resolveNextEntryToBet();
-            return request.bet(nextBetAmount, entryToBet, sidStore.get());
-        };
+    /**
+     * Build a fresh {@link BetContext} snapshot for the current tick. Called
+     * from the scenario condition (and indirectly from the supplier via the
+     * parked {@link #pendingDecision}) on the {@code pool-N-thread-1} scenario
+     * thread. Strategies read this synchronously and must not cache it across
+     * calls — the in-flight RoundState, balance, and memory snapshots are all
+     * stale by the next tick.
+     */
+    private BetContext buildBetContext() {
+        return new BetContext(
+                memory,
+                configuration.getBehaviorConfig(),
+                configuration.getGame(),
+                expectedCurrentBalance.get(),
+                memory.getCurrentRound(),
+                rng);
     }
 
-    private int resolveNextEntryToBet() {
-        List<Integer> options = configuration.getGame().getEffectiveBettingOptions();
-        return options.get(random.nextInt(options.size()));
+    /**
+     * Phase 5: the {@code sendAsync} supplier reads the decision parked by
+     * {@link #betCondition()}.
+     *
+     * <p>In the steady state the condition has already parked a decision via
+     * {@link #pendingDecision} and the supplier pops it, book-keeps the bet,
+     * and builds the WS message.
+     *
+     * <p>If the parked decision is absent at supplier time — which can happen
+     * only when a netty-thread event ({@link #beforeReconnect}) clears it
+     * between the condition and supplier calls — the supplier degrades
+     * gracefully: log DEBUG, re-derive a fresh decision via the strategy on
+     * the current {@link BetContext}, and use that. The scenario engine's
+     * non-null guard (SendAsync.processInternal:135) leaves no way to "skip"
+     * the supplier, so if the strategy also declines we have no choice but to
+     * throw — but the {@code onStartGame} race is gone (that clear was removed
+     * once the strategy's per-round counter started keying on
+     * {@code RoundState.sessionId}), and {@code beforeReconnect} only fires
+     * while the WS is down, so this path is effectively unreachable in
+     * production.
+     */
+    private Supplier<ActionRequestMessage> bet() {
+        return () -> {
+            Optional<BetDecision> popped = pendingDecision.getAndSet(Optional.empty());
+            if (popped.isEmpty()) {
+                // Race fallback. The condition computed and parked a decision
+                // but a concurrent netty event (beforeReconnect) cleared it
+                // before the supplier ran. Re-derive from the current context
+                // instead of throwing — the only call site that can clear
+                // mid-tick is beforeReconnect, and a stale-tick decision is
+                // strictly less safe than a fresh one.
+                log.debug("Bot {}: bet() supplier found no parked decision — re-deriving via strategy", getUserName());
+                popped = strategy.decide(buildBetContext());
+                if (popped.isEmpty()) {
+                    // Strategy also declined. The scenario engine forbids
+                    // returning null from the supplier (it throws
+                    // IllegalArgumentException), so we have nothing to send.
+                    // This is effectively unreachable: the condition already
+                    // exercised decide() this tick and returned true; with no
+                    // round boundary in between the strategy should produce
+                    // the same outcome. If we ever land here, surface loudly.
+                    throw new IllegalStateException(
+                            "bet() supplier: strategy declined re-derivation after race with " +
+                                    "beforeReconnect — sendAsync cannot skip; engine null-guard would throw");
+                }
+            }
+            BetDecision decision = popped.get();
+            long amount = decision.amount();
+            int optionId = decision.optionId();
+            creditBalance(amount);
+
+            long currentSid = sidStore.get();
+            // Phase 2 of BETTING_STRATEGIES: accumulate bet→result correlation.
+            memory.recordBetSent(currentSid, optionId, amount);
+            log.debug("Bot {}: sending bet option={}, amount={}, sid={}",
+                    getUserName(), optionId, amount, currentSid);
+            return request.bet(amount, optionId, currentSid);
+        };
     }
 
     private boolean doesEnoughTimeRemain() {
@@ -279,39 +440,34 @@ public class BettingMiniGameBot extends Bot {
         return sessionExists && betPhaseActive && doesEnoughTimeRemain();
     }
 
-    @Override
-    protected boolean shouldBet() {
-        BotBehaviorConfig behavior = configuration.getBehaviorConfig();
-
-        if (numberOfBetsInCurrentSession < behavior.getMaxBetsPerRound()) {
-            if (random.nextInt(100) < behavior.getBetSkipPercentage()) {
+    /**
+     * Phase 5: the {@code sendAsync} condition. Gates on the phase-level
+     * {@link #canBet()} predicate (session live, BET phase, time remaining),
+     * then asks the strategy for a {@link BetDecision} and parks the result
+     * in {@link #pendingDecision}. Returns {@code true} only when a decision
+     * is present, ensuring the downstream supplier always sees a non-empty
+     * parked value.
+     *
+     * <p>Per CLAUDE.md the per-tick decide() outcome is DEBUG-level.
+     */
+    private Supplier<Boolean> betCondition() {
+        return () -> {
+            if (!canBet()) {
                 return false;
             }
-
-            numberOfBetsInCurrentSession++;
+            if (strategy == null) {
+                return false;
+            }
+            Optional<BetDecision> decision = strategy.decide(buildBetContext());
+            if (decision.isEmpty()) {
+                log.debug("Bot {}: strategy skipped tick (no decision)", getUserName());
+                return false;
+            }
+            pendingDecision.set(decision);
+            log.debug("Bot {}: strategy parked decision option={}, amount={}",
+                    getUserName(), decision.get().optionId(), decision.get().amount());
             return true;
-        }
-
-        return false;
-    }
-
-    @Override
-    protected Supplier<Boolean> resolveBetCondition() {
-        return () -> canBet() && shouldBet();
-    }
-
-    @Override
-    protected long resolveBetAmount() {
-        BotBehaviorConfig behavior = configuration.getBehaviorConfig();
-
-        long minBet = behavior.getMinBet();
-        long maxBet = behavior.getMaxBet();
-        long betStep = behavior.getBetIncrement();
-
-        int maxSteps = Math.toIntExact((maxBet - minBet) / betStep);
-        long steps = random.nextInt(maxSteps + 1);
-
-        return minBet + (steps * betStep);
+        };
     }
 
     private long resolveIntervalBetweenBets() {
@@ -355,7 +511,7 @@ public class BettingMiniGameBot extends Bot {
                 .sendAsync(buildMessage()
                         .messageSupplier(mdcSupplier(bet()))
                         .mode(INFINITE)
-                        .condition(mdcSupplier(resolveBetCondition()))
+                        .condition(mdcSupplier(betCondition()))
                         .interval(resolveIntervalBetweenBets(), MILLISECONDS)
                         .build())
                 .onMessage(endGameClass, mdcConsumer(this::onEndGame))

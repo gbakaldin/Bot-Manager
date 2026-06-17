@@ -19,7 +19,6 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -162,9 +161,6 @@ class BotReconnectMdcTest {
         }
 
         @Override protected void initializeSubclass() {}
-        @Override protected boolean shouldBet() { return false; }
-        @Override protected long resolveBetAmount() { return 0L; }
-        @Override protected Supplier<Boolean> resolveBetCondition() { return () -> false; }
         @Override protected Scenario botBehaviorScenario() { return null; }
         @Override protected void onStart() {}
     }

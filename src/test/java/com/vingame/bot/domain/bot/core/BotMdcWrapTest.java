@@ -388,9 +388,6 @@ class BotMdcWrapTest {
      */
     static class TestBot extends Bot {
         @Override protected void initializeSubclass() {}
-        @Override protected boolean shouldBet() { return false; }
-        @Override protected long resolveBetAmount() { return 0L; }
-        @Override protected Supplier<Boolean> resolveBetCondition() { return () -> false; }
         @Override protected Scenario botBehaviorScenario() { return null; }
         @Override protected void onStart() {}
     }

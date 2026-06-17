@@ -1,5 +1,8 @@
 package com.vingame.bot.domain.botgroup.mapper;
 
+import com.vingame.bot.common.exception.BadRequestException;
+import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
@@ -9,8 +12,10 @@ import org.junit.jupiter.api.Test;
 import org.mapstruct.factory.Mappers;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("BotGroupMapper")
 class BotGroupMapperTest {
@@ -235,6 +240,88 @@ class BotGroupMapperTest {
             mapper.updateEntityFromDTO(null, entity);
 
             assertThat(entity.getName()).isEqualTo("Old");
+        }
+    }
+
+    @Nested
+    @DisplayName("strategyMix mapping (Phase 4)")
+    class StrategyMixTests {
+
+        @Test
+        @DisplayName("toDTO emits strategyMix as-is when persisted on the entity")
+        void toDtoEmitsStrategyMix() {
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            BotGroup entity = BotGroup.builder().id("g").name("g").strategyMix(mix).build();
+
+            BotGroupDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getStrategyMix()).isEqualTo(mix);
+        }
+
+        @Test
+        @DisplayName("toDTO returns null strategyMix when entity has none (read-side fallback lives in the service)")
+        void toDtoNullStrategyMixWhenAbsent() {
+            BotGroup entity = BotGroup.builder().id("g").name("g").build();
+
+            BotGroupDTO dto = mapper.toDTO(entity);
+
+            // Mapper does NOT synthesize the default — that's BotGroupBehavior-
+            // Service.effectiveStrategyMix's job. Keeping the mapper a pure
+            // shape transform makes the wire payload reflect the persisted
+            // doc faithfully.
+            assertThat(dto.getStrategyMix()).isNull();
+        }
+
+        @Test
+        @DisplayName("toEntity persists strategyMix as-is when provided in the DTO")
+        void toEntityPersistsStrategyMix() {
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            BotGroupDTO dto = BotGroupDTO.builder().name("g").strategyMix(mix).build();
+
+            BotGroup entity = mapper.toEntity(dto);
+
+            assertThat(entity.getStrategyMix()).isEqualTo(mix);
+        }
+
+        @Test
+        @DisplayName("PATCH full-replaces strategyMix when DTO supplies a non-empty list")
+        void patchFullReplacesStrategyMix() {
+            List<WeightedStrategy> oldMix = List.of(new WeightedStrategy(StrategyId.RANDOM, 0.5));
+            List<WeightedStrategy> newMix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+
+            BotGroup entity = BotGroup.builder().id("g").name("g").strategyMix(oldMix).build();
+            BotGroupDTO patch = BotGroupDTO.builder().strategyMix(newMix).build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            // Full-replace, not merge — the new list wholesale overwrites
+            // the persisted one. This is the contract documented in the
+            // plan's Architecture Decision 9.
+            assertThat(entity.getStrategyMix()).isEqualTo(newMix);
+        }
+
+        @Test
+        @DisplayName("PATCH retains existing strategyMix when DTO omits the field (null)")
+        void patchKeepsExistingWhenDtoNull() {
+            List<WeightedStrategy> existing = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            BotGroup entity = BotGroup.builder().id("g").name("g").strategyMix(existing).build();
+            BotGroupDTO patch = BotGroupDTO.builder().name("renamed").build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.getStrategyMix()).isEqualTo(existing);
+        }
+
+        @Test
+        @DisplayName("PATCH with an explicit empty strategyMix throws BadRequestException (Implementation Note 10)")
+        void patchEmptyStrategyMixRejected() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .strategyMix(List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0))).build();
+            BotGroupDTO patch = BotGroupDTO.builder().strategyMix(List.of()).build();
+
+            assertThatThrownBy(() -> mapper.updateEntityFromDTO(patch, entity))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("non-empty");
         }
     }
 }

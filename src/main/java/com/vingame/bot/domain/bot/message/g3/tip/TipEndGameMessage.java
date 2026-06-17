@@ -92,6 +92,11 @@ public class TipEndGameMessage extends EndGameMessage
         return total;
     }
 
+    @Override
+    public long getSessionId() {
+        return sid;
+    }
+
     private boolean iJ;
     private int gid;
     private List<PlayerSummary> ps;

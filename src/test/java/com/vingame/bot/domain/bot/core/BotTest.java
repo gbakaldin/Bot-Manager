@@ -17,7 +17,6 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
 import java.util.function.Consumer;
-import java.util.function.Supplier;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -360,9 +359,6 @@ class BotTest {
     /** Minimal Bot subclass with no-op abstract implementations. */
     static class TestBot extends Bot {
         @Override protected void initializeSubclass() {}
-        @Override protected boolean shouldBet() { return false; }
-        @Override protected long resolveBetAmount() { return 0L; }
-        @Override protected Supplier<Boolean> resolveBetCondition() { return () -> false; }
         @Override protected Scenario botBehaviorScenario() { return null; }
         @Override protected void onStart() {}
 
