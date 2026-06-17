@@ -155,24 +155,41 @@ class BettingMiniGameBotMemoryTest {
     @DisplayName("bet() Supplier accumulates per-option bets into the in-flight RoundState via BotMemory.recordBetSent")
     void betSupplierRecordsBets() throws Exception {
         invokeOnStartGame(bot, 555L);
-        // Force a deterministic random output so resolveBetAmount + resolveNextEntryToBet
-        // are predictable. minBet=100, maxBet=1000, step=100 -> maxSteps=9 ->
-        // random.nextInt(10) selects step; affinities map has 6 options -> random.nextInt(6)
-        // picks the option index. Configure both.
+        // Phase 5: the strategy decides the (option, amount); the condition
+        // parks the decision in BettingMiniGameBot.pendingDecision; the supplier
+        // pops it and records to memory. Force a deterministic random output so
+        // RandomBehaviorStrategy.decide is predictable:
+        //  - betSkipPercentage=0 -> rng.nextInt(100) gate is don't-skip
+        //  - minBet=100, maxBet=1000, step=100 -> maxSteps=9 -> rng.nextInt(10)
+        //  - 6 options -> rng.nextInt(6) picks the option index
         Random rng = mock(Random.class);
-        when(rng.nextInt(10)).thenReturn(2); // step 2 -> 100 + 2*100 = 300
-        when(rng.nextInt(6)).thenReturn(3);  // option index 3
+        when(rng.nextInt(100)).thenReturn(50); // skip-pct gate: never skip
+        when(rng.nextInt(10)).thenReturn(2);   // step 2 -> 100 + 2*100 = 300
+        when(rng.nextInt(6)).thenReturn(3);    // option index 3
         bot.setRandom(rng);
 
-        // Force gameState BET + sid so canBet would pass — but bet() is called directly
-        // here to bypass the scenario engine. canBet is exercised in BettingMiniGameBotTest.
+        // Force sid + BET state so canBet inside betCondition passes
+        setField(bot, "gameState", BettingMiniGameState.BET);
+        com.vingame.bot.domain.bot.util.SessionIdStore sidStore =
+                (com.vingame.bot.domain.bot.util.SessionIdStore) readField(bot, "sidStore");
+        sidStore.set(555L);
+        // remainingTime >= blockBetTime (default 3000) — set 10s.
+        ((java.util.concurrent.atomic.AtomicLong) readField(bot, "remainingTime")).set(10_000L);
 
-        // Trigger bet() supplier twice
+        // Trigger condition -> supplier twice (the engine calls condition then supplier per tick)
+        Method conditionMethod = BettingMiniGameBot.class.getDeclaredMethod("betCondition");
+        conditionMethod.setAccessible(true);
         Method betMethod = BettingMiniGameBot.class.getDeclaredMethod("bet");
         betMethod.setAccessible(true);
         @SuppressWarnings("unchecked")
+        java.util.function.Supplier<Boolean> cond =
+                (java.util.function.Supplier<Boolean>) conditionMethod.invoke(bot);
+        @SuppressWarnings("unchecked")
         java.util.function.Supplier<?> sup = (java.util.function.Supplier<?>) betMethod.invoke(bot);
+
+        assertThat(cond.get()).isTrue();
         sup.get();
+        assertThat(cond.get()).isTrue();
         sup.get();
 
         Map<Integer, Long> bets = bot.getMemory().snapshotCurrentRoundBets();

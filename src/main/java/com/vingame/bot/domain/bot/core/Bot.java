@@ -212,8 +212,6 @@ public abstract class Bot {
         client.close();
     }
 
-    protected abstract boolean shouldBet();
-
     protected void connectToSocket() {
         client.connect();
     }
@@ -588,10 +586,6 @@ public abstract class Bot {
     }
 
     // ---- Abstract & template methods ----
-
-    protected abstract long resolveBetAmount();
-
-    protected abstract Supplier<Boolean> resolveBetCondition();
 
     protected abstract Scenario botBehaviorScenario();
 

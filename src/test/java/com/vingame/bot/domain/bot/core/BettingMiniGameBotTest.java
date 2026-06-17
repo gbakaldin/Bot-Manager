@@ -119,106 +119,92 @@ class BettingMiniGameBotTest {
         if (countdown != null) countdown.shutdownNow();
     }
 
-    /* ----- shouldBet ----- */
+    /* ----- strategy-driven betCondition + bet supplier (Phase 5) ----- */
 
     @Nested
-    @DisplayName("shouldBet")
-    class ShouldBetTests {
+    @DisplayName("betCondition + bet supplier (strategy-driven, Phase 5)")
+    class StrategyDrivenBetTests {
 
         @Test
-        @DisplayName("With betSkipPercentage=0 and maxBetsPerRound=3, returns true 3 times then false")
-        void shouldRespectMaxBetsCap() {
-            // betSkipPercentage = 0 -> random.nextInt(100) < 0 is never true -> never skip
-            when(random.nextInt(100)).thenReturn(50); // any value >= 0 -> not skip
-
-            assertThat(bot.shouldBet()).isTrue();
-            assertThat(bot.shouldBet()).isTrue();
-            assertThat(bot.shouldBet()).isTrue();
-            assertThat(bot.shouldBet()).isFalse(); // cap hit
+        @DisplayName("betCondition: returns false when canBet is false (no session)")
+        void conditionFalseWhenCannotBet() throws Exception {
+            setSidStoreValue(0L); // no session => canBet=false
+            // No need to begin a round; strategy is not consulted.
+            @SuppressWarnings("unchecked")
+            java.util.function.Supplier<Boolean> condition =
+                    (java.util.function.Supplier<Boolean>) invokePrivate("betCondition");
+            assertThat(condition.get()).isFalse();
         }
 
         @Test
-        @DisplayName("With betSkipPercentage=100, always returns false (always skips)")
-        void shouldAlwaysSkipAt100Percent() throws Exception {
-            setBehavior(100, 100, 1000, 100, 3);
-            // Any value from 0..99 < 100 -> skip
-            when(random.nextInt(100)).thenReturn(0, 50, 99);
+        @DisplayName("betCondition: returns true and parks decision when strategy says bet")
+        void conditionParksDecisionFromStrategy() throws Exception {
+            // Open a round so canBet passes
+            setSidStoreValue(42L);
+            setGameState(BettingMiniGameState.BET);
+            setRemainingTime(10_000);
+            setBlockBetTime(2_000);
+            bot.getMemory().beginRound(42L, 50_000_000L);
 
-            assertThat(bot.shouldBet()).isFalse();
-            assertThat(bot.shouldBet()).isFalse();
-            assertThat(bot.shouldBet()).isFalse();
+            // betSkipPercentage=0, maxBetsPerRound=3, options=6, minBet=100, maxBet=1000, step=100.
+            // RandomBehaviorStrategy reads ctx.rng — we control the bot's rng.
+            when(random.nextInt(100)).thenReturn(50);  // skip-pct gate: don't skip
+            when(random.nextInt(10)).thenReturn(2);    // bet step => 100 + 2*100 = 300
+            when(random.nextInt(6)).thenReturn(3);     // option index 3
+
+            @SuppressWarnings("unchecked")
+            java.util.function.Supplier<Boolean> condition =
+                    (java.util.function.Supplier<Boolean>) invokePrivate("betCondition");
+            assertThat(condition.get()).isTrue();
+
+            // bet() supplier reads the parked decision back
+            @SuppressWarnings("unchecked")
+            java.util.function.Supplier<Object> supplier =
+                    (java.util.function.Supplier<Object>) invokePrivate("bet");
+            // Smoke: supplier invocation does not throw. The actual WS request
+            // construction is integration-tested by BettingMiniGameBotTipDispatchTest.
+            assertThat(supplier.get()).isNotNull();
         }
 
         @Test
-        @DisplayName("With betSkipPercentage=50, returns false when random=30, true when random=70")
-        void shouldHonor50PercentSkip() throws Exception {
-            setBehavior(50, 100, 1000, 100, 5);
+        @DisplayName("betCondition: returns false when strategy skips (betSkipPercentage=100)")
+        void conditionFalseWhenStrategySkips() throws Exception {
+            setBehavior(100, 100, 1000, 100, 3); // 100% skip
+            setSidStoreValue(42L);
+            setGameState(BettingMiniGameState.BET);
+            setRemainingTime(10_000);
+            setBlockBetTime(2_000);
+            bot.getMemory().beginRound(42L, 50_000_000L);
 
-            when(random.nextInt(100)).thenReturn(30); // 30 < 50 -> skip
-            assertThat(bot.shouldBet()).isFalse();
+            when(random.nextInt(100)).thenReturn(50); // < 100 => skip
 
-            when(random.nextInt(100)).thenReturn(70); // 70 < 50 false -> bet
-            assertThat(bot.shouldBet()).isTrue();
-        }
-    }
-
-    /* ----- resolveBetAmount ----- */
-
-    @Nested
-    @DisplayName("resolveBetAmount")
-    class ResolveBetAmountTests {
-
-        @Test
-        @DisplayName("minBet=100, maxBet=1000, step=100: random=0 -> 100; random=9 -> 1000; random=5 -> 600")
-        void shouldRespectStepBoundsAndScale() {
-            // maxSteps = (1000-100)/100 = 9 -> random.nextInt(10)
-            when(random.nextInt(10)).thenReturn(0);
-            assertThat(bot.resolveBetAmount()).isEqualTo(100L);
-
-            when(random.nextInt(10)).thenReturn(9);
-            assertThat(bot.resolveBetAmount()).isEqualTo(1000L);
-
-            when(random.nextInt(10)).thenReturn(5);
-            assertThat(bot.resolveBetAmount()).isEqualTo(600L);
+            @SuppressWarnings("unchecked")
+            java.util.function.Supplier<Boolean> condition =
+                    (java.util.function.Supplier<Boolean>) invokePrivate("betCondition");
+            assertThat(condition.get()).isFalse();
         }
 
         @Test
-        @DisplayName("minBet==maxBet collapses to single value (random.nextInt(1) -> 0)")
-        void shouldCollapseWhenMinEqualsMax() throws Exception {
-            setBehavior(0, 500, 500, 100, 3);
-            when(random.nextInt(1)).thenReturn(0);
+        @DisplayName("betCondition: returns false after maxBetsPerRound bets in the same round")
+        void conditionRespectsMaxBetsPerRoundCap() throws Exception {
+            setBehavior(0, 100, 1000, 100, 2); // skip=0, cap=2
+            setSidStoreValue(42L);
+            setGameState(BettingMiniGameState.BET);
+            setRemainingTime(10_000);
+            setBlockBetTime(2_000);
+            bot.getMemory().beginRound(42L, 50_000_000L);
 
-            assertThat(bot.resolveBetAmount()).isEqualTo(500L);
-        }
-    }
+            when(random.nextInt(100)).thenReturn(50);  // never skip
+            when(random.nextInt(10)).thenReturn(0);    // step 0 => 100
+            when(random.nextInt(6)).thenReturn(0);     // option 0
 
-    /* ----- resolveNextEntryToBet (private) ----- */
-
-    @Nested
-    @DisplayName("resolveNextEntryToBet")
-    class ResolveNextEntryToBetTests {
-
-        @Test
-        @DisplayName("Picks from configured bettingOptions when present")
-        void shouldUseConfiguredOptions() throws Exception {
-            setBettingOptions(List.of(1, 10, 100));
-            when(random.nextInt(3)).thenReturn(1);
-
-            int result = (int) invokePrivate("resolveNextEntryToBet");
-
-            assertThat(result).isEqualTo(10);
-        }
-
-        @Test
-        @DisplayName("Falls back to [0..numberOfOptions) when bettingOptions is null")
-        void shouldFallBackToRange() throws Exception {
-            setBettingOptions(null);
-            setNumberOfOptions(5);
-            when(random.nextInt(5)).thenReturn(3);
-
-            int result = (int) invokePrivate("resolveNextEntryToBet");
-
-            assertThat(result).isEqualTo(3);
+            @SuppressWarnings("unchecked")
+            java.util.function.Supplier<Boolean> condition =
+                    (java.util.function.Supplier<Boolean>) invokePrivate("betCondition");
+            assertThat(condition.get()).isTrue();
+            assertThat(condition.get()).isTrue();
+            // Third tick: cap of 2 reached on the strategy's internal counter
+            assertThat(condition.get()).isFalse();
         }
     }
 
@@ -306,11 +292,8 @@ class BettingMiniGameBotTest {
         }
 
         @Test
-        @DisplayName("onStartGame sets sessionId, state=BET, resets bet count")
+        @DisplayName("onStartGame sets sessionId and state=BET")
         void shouldHandleOnStartGame() throws Exception {
-            // Force a prior bet count so we can verify reset
-            setIntField("numberOfBetsInCurrentSession", 7);
-
             StartGameMessage msg = mock(StartGameMessage.class);
             when(msg.getSessionId()).thenReturn(42069L);
 
@@ -322,7 +305,9 @@ class BettingMiniGameBotTest {
             SessionIdStore store = (SessionIdStore) readField("sidStore");
             assertThat(store.get()).isEqualTo(42069L);
             assertThat(readField("gameState")).isEqualTo(BettingMiniGameState.BET);
-            assertThat(readField("numberOfBetsInCurrentSession")).isEqualTo(0);
+            // Phase 5: the per-round bet counter is owned by the strategy
+            // (RandomBehaviorStrategy.numberOfBetsInCurrentSession) — verified
+            // by RandomBehaviorStrategyTest's counterResetsOnNewRound.
         }
 
         @Test
@@ -398,12 +383,11 @@ class BettingMiniGameBotTest {
     class BeforeReconnectTests {
 
         @Test
-        @DisplayName("Resets sidStore, gameState, remainingTime, and bet count; cancels timers")
+        @DisplayName("Resets sidStore, gameState, remainingTime; cancels timers")
         void shouldResetStateAndTimers() throws Exception {
             setSidStoreValue(999L);
             setGameState(BettingMiniGameState.BET);
             setRemainingTime(5000L);
-            setIntField("numberOfBetsInCurrentSession", 3);
 
             // Provide a scheduler + watchdogTask so beforeReconnect cancels them
             ScheduledExecutorService scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
@@ -425,7 +409,9 @@ class BettingMiniGameBotTest {
                 assertThat(readField("gameState")).isNull();
                 AtomicLong remaining = (AtomicLong) readField("remainingTime");
                 assertThat(remaining.get()).isEqualTo(0L);
-                assertThat(readField("numberOfBetsInCurrentSession")).isEqualTo(0);
+                // Phase 5: per-round bet counter is now strategy-internal (no
+                // numberOfBetsInCurrentSession field on the bot); RandomBehaviorStrategy
+                // re-syncs its counter on the next StartGame via sessionId change.
                 // scheduler field should be nulled
                 assertThat(readField("scheduler")).isNull();
                 // watchdogTask should be nulled
@@ -945,25 +931,6 @@ class BettingMiniGameBotTest {
         bot.setConfiguration(newCfg);
     }
 
-    private void setBettingOptions(List<Integer> options) throws Exception {
-        // Phase 1 of BETTING_STRATEGIES replaced bettingOptions/numberOfOptions with
-        // a unified optionAffinities map. The pre-Phase-1 "configured list" of bettable
-        // option IDs becomes the key set of the affinity map (values flat = 1).
-        Map<Integer, Integer> affinities = new LinkedHashMap<>();
-        if (options != null) {
-            for (Integer option : options) {
-                affinities.put(option, 1);
-            }
-        }
-        bot.getConfiguration().getGame().setOptionAffinities(affinities.isEmpty() ? null : affinities);
-    }
-
-    private void setNumberOfOptions(int n) throws Exception {
-        // Simulates the "fall back to [0..n)" pre-Phase-1 path by writing an
-        // explicit flat-prior optionAffinities map of that size.
-        bot.getConfiguration().getGame().setOptionAffinities(flatPriorAffinities(n));
-    }
-
     private static Map<Integer, Integer> flatPriorAffinities(int n) {
         Map<Integer, Integer> affinities = new LinkedHashMap<>(n);
         for (int i = 0; i < n; i++) {
@@ -994,12 +961,6 @@ class BettingMiniGameBotTest {
     private void setSidStoreValue(long sid) throws Exception {
         SessionIdStore store = (SessionIdStore) readField("sidStore");
         store.set(sid);
-    }
-
-    private void setIntField(String name, int value) throws Exception {
-        Field f = BettingMiniGameBot.class.getDeclaredField(name);
-        f.setAccessible(true);
-        f.setInt(bot, value);
     }
 
     private void setBotStatus(BotStatus status) throws Exception {

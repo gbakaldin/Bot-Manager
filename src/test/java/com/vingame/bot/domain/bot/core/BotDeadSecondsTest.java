@@ -18,7 +18,6 @@ import org.junit.jupiter.api.Test;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.Instant;
-import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
@@ -229,9 +228,6 @@ class BotDeadSecondsTest {
 
     static class TestBot extends Bot {
         @Override protected void initializeSubclass() {}
-        @Override protected boolean shouldBet() { return false; }
-        @Override protected long resolveBetAmount() { return 0L; }
-        @Override protected Supplier<Boolean> resolveBetCondition() { return () -> false; }
         @Override protected Scenario botBehaviorScenario() { return null; }
         @Override protected void onStart() {}
     }

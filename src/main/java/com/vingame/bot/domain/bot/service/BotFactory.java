@@ -9,6 +9,7 @@ import com.vingame.bot.domain.bot.core.BettingMiniGameBot;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.message.GameMessageTypes;
 import com.vingame.bot.domain.bot.message.GameMessageTypesResolver;
+import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.environment.model.Environment;
 import io.netty.channel.EventLoopGroup;
@@ -61,14 +62,17 @@ public class BotFactory {
     private final EnvironmentClientRegistry clientRegistry;
     private final EventLoopGroup eventLoopGroup;
     private final BotMetrics botMetrics;
+    private final BettingStrategyFactory strategyFactory;
 
     @Autowired
     public BotFactory(EnvironmentClientRegistry clientRegistry,
                       EventLoopGroup eventLoopGroup,
-                      BotMetrics botMetrics) {
+                      BotMetrics botMetrics,
+                      BettingStrategyFactory strategyFactory) {
         this.clientRegistry = clientRegistry;
         this.eventLoopGroup = eventLoopGroup;
         this.botMetrics = botMetrics;
+        this.strategyFactory = strategyFactory;
     }
 
     /**
@@ -135,6 +139,9 @@ public class BotFactory {
             case BETTING_MINI -> {
                 BettingMiniGameBot bettingBot = new BettingMiniGameBot();
                 bettingBot.setMessageTypes(messageTypes);
+                // Phase 5: wire the strategy registry so initializeSubclass()
+                // can build the per-bot BettingStrategy for configuration.strategyId.
+                bettingBot.setStrategyFactory(strategyFactory);
                 yield bettingBot;
             }
             case SLOT, TAI_XIU, CARD_GAME, UP_DOWN ->

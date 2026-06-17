@@ -4,6 +4,7 @@ import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
+import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
@@ -47,8 +48,11 @@ class BotFactoryFailLoudTest {
     @Mock
     private BotMetrics botMetrics;
 
+    @Mock
+    private BettingStrategyFactory strategyFactory;
+
     private BotFactory factory() {
-        return new BotFactory(clientRegistry, eventLoopGroup, botMetrics);
+        return new BotFactory(clientRegistry, eventLoopGroup, botMetrics, strategyFactory);
     }
 
     private static EnvironmentClients envClientsWith(Environment env) {
