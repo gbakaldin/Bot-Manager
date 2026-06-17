@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.mapper;
 
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import org.mapstruct.Mapper;
@@ -38,6 +39,7 @@ public interface BotGroupMapper {
                 .timeUntil(entity.getTimeUntil())
                 .chatEnabled(entity.isChatEnabled())
                 .autoDepositEnabled(entity.isAutoDepositEnabled())
+                .strategyMix(entity.getStrategyMix())
                 .targetStatus(entity.getTargetStatus())
                 .scheduledRestartTime(entity.getScheduledRestartTime())
                 .lastStartedAt(entity.getLastStartedAt())
@@ -74,6 +76,7 @@ public interface BotGroupMapper {
                 .timeUntil(dto.getTimeUntil())
                 .chatEnabled(Optional.ofNullable(dto.getChatEnabled()).orElse(false))
                 .autoDepositEnabled(Optional.ofNullable(dto.getAutoDepositEnabled()).orElse(false))
+                .strategyMix(dto.getStrategyMix())
                 .targetStatus(dto.getTargetStatus())
                 .scheduledRestartTime(dto.getScheduledRestartTime())
                 .lastStartedAt(dto.getLastStartedAt())
@@ -108,6 +111,21 @@ public interface BotGroupMapper {
         entity.setTimeUntil(Optional.ofNullable(dto.getTimeUntil()).orElse(entity.getTimeUntil()));
         entity.setChatEnabled(Optional.ofNullable(dto.getChatEnabled()).orElse(entity.isChatEnabled()));
         entity.setAutoDepositEnabled(Optional.ofNullable(dto.getAutoDepositEnabled()).orElse(entity.isAutoDepositEnabled()));
+        // strategyMix PATCH semantics: full-replace if DTO supplies the field
+        // (non-null). A null DTO field keeps the existing value. An empty list
+        // is rejected as a 400 — leaving a group with no assignable strategies
+        // would crash the next start. Operators who want to clear the mix
+        // should not supply the field at all (PATCH then keeps the existing
+        // value), or set it to the default [(RANDOM, 1.0)].
+        // Plan Architecture Decision 9 + Implementation Note 10: mid-flight
+        // changes do NOT re-assign already-running bots — only newly-created /
+        // restarted bots draw from the new mix.
+        if (dto.getStrategyMix() != null) {
+            if (dto.getStrategyMix().isEmpty()) {
+                throw new BadRequestException("strategyMix must be non-empty");
+            }
+            entity.setStrategyMix(dto.getStrategyMix());
+        }
         entity.setTargetStatus(Optional.ofNullable(dto.getTargetStatus()).orElse(entity.getTargetStatus()));
         entity.setScheduledRestartTime(Optional.ofNullable(dto.getScheduledRestartTime()).orElse(entity.getScheduledRestartTime()));
         // Note: lastStartedAt, lastStoppedAt, lastFailureReason are system-managed, not updated via DTO

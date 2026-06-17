@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.bot.core;
 
 import com.vingame.bot.common.logging.BotMdc;
+import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
@@ -56,6 +57,22 @@ public abstract class Bot {
     @Getter
     protected TokensProvider tokens;
 
+    /**
+     * Strategy id assigned to this bot at start by the group's strategy mix.
+     * <p>
+     * Populated from {@link BotConfiguration#getStrategyId()} in
+     * {@link #setConfiguration(BotConfiguration)}. Surfaced via
+     * {@code BotHealthDTO.strategyId} so operators can see the per-bot
+     * assignment in {@code GET /api/v1/bot-group/{id}/health}.
+     * <p>
+     * May be {@code null} for legacy callers that build a {@code BotConfiguration}
+     * without going through the group-start assignment path (currently none in
+     * production code; defensive against test fixtures that use the builder
+     * directly).
+     */
+    @Getter
+    protected StrategyId strategyId;
+
     protected volatile long lastFetchedBalance = -1;
     protected final AtomicLong expectedCurrentBalance = new AtomicLong(-100_000_000L);
 
@@ -103,6 +120,11 @@ public abstract class Bot {
         this.configuration = configuration;
         this.credentials = configuration.getCredentials();
         this.userName = credentials.getUsername();
+        // The assignment is logged once at INFO in BotGroupBehaviorService.createSingleBot
+        // — surface it here as a field for the health DTO and (in Phase 5) the
+        // strategy-factory lookup. Null-tolerant because some test fixtures
+        // build a BotConfiguration with no strategyId.
+        this.strategyId = configuration.getStrategyId();
         log.debug("Bot {} configured", userName);
         return this;
     }

@@ -4,8 +4,11 @@ import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.bot.service.BotFactory;
+import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
+import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
@@ -621,6 +624,118 @@ class BotGroupBehaviorServiceTest {
                 verify(botGroupService, never()).save(any(BotGroup.class));
             } finally {
                 runtime.getExecutor().shutdownNow();
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("Phase 4 — strategy assignment + health DTO surfacing")
+    class StrategyAssignmentIntegrationTests {
+
+        @Test
+        @DisplayName("start() propagates the assigned StrategyId into BotConfiguration for every bot")
+        void startPropagatesStrategyIdToConfiguration() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1")
+                    .name("Group")
+                    .environmentId("env-1")
+                    .gameId("game-1")
+                    .botCount(3)
+                    .namePrefix("bot")
+                    .password("pass")
+                    .strategyMix(List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0)))
+                    .build();
+
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("BauCua").build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            // Capture the BotConfiguration passed to createBot — we want to
+            // assert that strategyId is non-null and matches the assignment.
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            // Throw to short-circuit further setup — the captor still records
+            // the configuration so we can verify the strategyId field.
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            // Every attempted bot creation carried a non-null strategyId.
+            // With a [(RANDOM, 1.0)] mix every bot lands on RANDOM, which is
+            // the verifiable invariant for v1 (single-enum case).
+            assertThat(configCaptor.getAllValues())
+                    .as("captured BotConfigurations")
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> assertThat(cfg.getStrategyId()).isEqualTo(StrategyId.RANDOM));
+
+            // Cleanup the side-effect runtime created on the failed start path.
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+
+        @Test
+        @DisplayName("start() falls back to [(RANDOM, 1.0)] when the group has no strategyMix (unmigrated docs)")
+        void startFallsBackOnMissingStrategyMix() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1")
+                    .name("Group")
+                    .environmentId("env-1")
+                    .gameId("game-1")
+                    .botCount(2)
+                    .namePrefix("bot")
+                    .password("pass")
+                    // strategyMix intentionally not set — simulates an
+                    // unmigrated Mongo doc that pre-dates Phase 4.
+                    .build();
+
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("BauCua").build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> assertThat(cfg.getStrategyId())
+                            .as("read-side fallback should default missing mix to RANDOM")
+                            .isEqualTo(StrategyId.RANDOM));
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+
+        @Test
+        @DisplayName("getHealth() surfaces the per-bot strategyId on BotHealthDTO")
+        void healthSurfacesStrategyId() {
+            BotGroup group = BotGroup.builder().id("g-1").name("Group").build();
+            when(botGroupService.findById("g-1")).thenReturn(group);
+
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 1, "env-1");
+            runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+            try {
+                Bot b = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
+                lenient().when(b.getStrategyId()).thenReturn(StrategyId.RANDOM);
+                putBots(runtime, List.of(b));
+                runningGroups().put("g-1", runtime);
+
+                BotGroupHealthDTO dto = service.getHealth("g-1");
+
+                assertThat(dto.getBots()).hasSize(1);
+                BotHealthDTO botDto = dto.getBots().get(0);
+                assertThat(botDto.getStrategyId()).isEqualTo(StrategyId.RANDOM);
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
             }
         }
     }

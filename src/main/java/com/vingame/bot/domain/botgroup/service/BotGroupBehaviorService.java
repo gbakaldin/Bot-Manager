@@ -3,6 +3,9 @@ package com.vingame.bot.domain.botgroup.service;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.service.BotFactory;
+import com.vingame.bot.domain.bot.strategy.StrategyAssignment;
+import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
@@ -32,6 +35,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -216,6 +220,19 @@ public class BotGroupBehaviorService {
             // Load game configuration (throws ResourceNotFoundException if not found)
             Game game = gameService.findById(group.getGameId());
 
+            // Compute per-bot strategy assignment up-front. The identifier shape
+            // (namePrefix + botIndex) matches what createSingleBot builds for
+            // the username, so the assignment.get(username) lookup hits.
+            // Done here (outside the parallel section) because the
+            // fill-to-target algorithm needs the full bot-id list to apportion
+            // weights — not a per-bot decision.
+            List<String> botIdentifiers = new ArrayList<>(group.getBotCount());
+            for (int i = 1; i <= group.getBotCount(); i++) {
+                botIdentifiers.add(group.getNamePrefix() + i);
+            }
+            Map<String, StrategyId> strategyAssignment = StrategyAssignment.assign(
+                    effectiveStrategyMix(group), botIdentifiers);
+
             // Create runtime state
             BotGroupRuntime runtime = new BotGroupRuntime(id, group.getBotCount(), group.getEnvironmentId());
             runningGroups.put(id, runtime);
@@ -224,7 +241,7 @@ public class BotGroupBehaviorService {
                     group.getBotCount(), group.getName(), botCreationParallelism);
 
             // Create bots in parallel with controlled concurrency
-            List<Bot> bots = createBotsInParallel(group, environment, game);
+            List<Bot> bots = createBotsInParallel(group, environment, game, strategyAssignment);
 
             // Start all bots
             for (Bot bot : bots) {
@@ -300,7 +317,8 @@ public class BotGroupBehaviorService {
      * @param game        The game configuration
      * @return List of created and initialized bots
      */
-    private List<Bot> createBotsInParallel(BotGroup group, Environment environment, Game game) {
+    private List<Bot> createBotsInParallel(BotGroup group, Environment environment, Game game,
+                                           Map<String, StrategyId> strategyAssignment) {
         int botCount = group.getBotCount();
         Semaphore semaphore = new Semaphore(botCreationParallelism);
 
@@ -314,7 +332,7 @@ public class BotGroupBehaviorService {
                 try {
                     semaphore.acquire();
                     try {
-                        return createSingleBot(group, environment, game, botIndex);
+                        return createSingleBot(group, environment, game, botIndex, strategyAssignment);
                     } finally {
                         semaphore.release();
                     }
@@ -411,13 +429,21 @@ public class BotGroupBehaviorService {
     /**
      * Create a single bot with all necessary configuration.
      *
-     * @param group       The bot group configuration
-     * @param environment The environment configuration
-     * @param game        The game configuration
-     * @param botIndex    The index of this bot (1-based)
+     * @param group              The bot group configuration
+     * @param environment        The environment configuration
+     * @param game               The game configuration
+     * @param botIndex           The index of this bot (1-based)
+     * @param strategyAssignment Map from username → assigned {@link StrategyId},
+     *                           computed once per group start by
+     *                           {@link StrategyAssignment#assign}. Lookup by
+     *                           username; missing keys fall back to
+     *                           {@link StrategyId#RANDOM} (defensive — the
+     *                           assignment is built from the same identifier
+     *                           shape, so a miss is a bug).
      * @return The created and initialized bot
      */
-    private Bot createSingleBot(BotGroup group, Environment environment, Game game, int botIndex) {
+    private Bot createSingleBot(BotGroup group, Environment environment, Game game, int botIndex,
+                                Map<String, StrategyId> strategyAssignment) {
         String username = group.getNamePrefix() + botIndex;
         String password = group.getPassword();
 
@@ -441,6 +467,21 @@ public class BotGroupBehaviorService {
                 .autoDepositEnabled(group.isAutoDepositEnabled())
                 .build();
 
+        // Resolve assigned strategy. Defensive fallback: if the username is
+        // missing from the assignment map (should never happen — both are built
+        // from the same namePrefix + i shape), default to RANDOM so the bot
+        // still starts. The assignment map carries the per-bot lifecycle
+        // identity downstream (Phase 5 will read configuration.strategyId
+        // in BettingMiniGameBot.initializeSubclass to build the strategy).
+        StrategyId strategyId = strategyAssignment.getOrDefault(username, StrategyId.RANDOM);
+        // INFO per Architecture Decision 14 and CLAUDE.md logging guidance:
+        // group-level lifecycle, bounded — N bots = N lines at start, mirrors
+        // the "Bot starting in virtual thread" line emitted from BotGroupRuntime
+        // at the same scale. MDC (botGroupId, botIndex, gameType) is already
+        // set by createBotsInParallel's BotMdc.setGroupContext call, so this
+        // line is grep-able by group from Loki.
+        log.info("Bot {}: assigned strategy {}", username, strategyId);
+
         BotConfiguration configuration = BotConfiguration.builder()
                 .credentials(credentials)
                 .environmentId(group.getEnvironmentId())
@@ -450,6 +491,7 @@ public class BotGroupBehaviorService {
                 .behaviorConfig(behaviorConfig)
                 .zoneName(environment.resolveZoneName(game))
                 .watchdogTimeoutSeconds(watchdogTimeoutSeconds)
+                .strategyId(strategyId)
                 .build();
 
         // Create bot using factory (authenticates and creates WebSocket client)
@@ -457,6 +499,22 @@ public class BotGroupBehaviorService {
 
         log.debug("Created bot {} ({}/{})", username, botIndex, group.getBotCount());
         return bot;
+    }
+
+    /**
+     * Resolve the effective strategy mix for a bot group, applying the
+     * read-side fallback for unmigrated Mongo docs. Defaults to
+     * {@code [(RANDOM, 1.0)]} when the group's persisted mix is null or empty,
+     * so groups that pre-date Phase 4 still start cleanly without operator
+     * intervention (Architecture Decision 7 in
+     * {@code docs/plans/BETTING_STRATEGIES.md}).
+     */
+    private static List<WeightedStrategy> effectiveStrategyMix(BotGroup group) {
+        List<WeightedStrategy> mix = group.getStrategyMix();
+        if (mix == null || mix.isEmpty()) {
+            return List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+        }
+        return mix;
     }
 
     /**
@@ -599,6 +657,7 @@ public class BotGroupBehaviorService {
                         .totalBetsPlaced(bot.getTotalBetsPlaced().get())
                         .totalBetAmount(bot.getTotalBetAmount().get())
                         .lastRoundWinnings(bot.getLastRoundWinnings())
+                        .strategyId(bot.getStrategyId())
                         .build())
                 .toList();
 
