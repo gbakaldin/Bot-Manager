@@ -112,8 +112,40 @@ db.games.countDocuments({
 })
 // Expect: 0. If non-zero, investigate before continuing.
 
-// 1.3 Migration: synthesize {0:1, 1:1, ..., n-1:1} from numberOfOptions,
-//     then unset the legacy fields.
+// 1.3a Migration — phase A: synthesize optionAffinities from the legacy
+//      bettingOptions list when it's present and non-empty. This preserves
+//      explicit option-id sets (e.g. odd-only dice [1, 3, 5]) that would
+//      otherwise be silently re-mapped to [0, 1, 2] by the numberOfOptions
+//      range fallback. Run this BEFORE the numberOfOptions fallback below so
+//      the explicit list wins when both legacy fields are present.
+db.games.updateMany(
+  {
+    optionAffinities: { $exists: false },
+    bettingOptions: { $exists: true, $not: { $size: 0 } }
+  },
+  [
+    {
+      $set: {
+        optionAffinities: {
+          $arrayToObject: {
+            $map: {
+              input: "$bettingOptions",
+              as: "opt",
+              in: { k: { $toString: "$$opt" }, v: 1 }
+            }
+          }
+        }
+      }
+    },
+    { $unset: ["numberOfOptions", "bettingOptions"] }
+  ]
+)
+// Expect: matchedCount == (count of docs with legacy bettingOptions and no
+//         optionAffinities), modifiedCount equal.
+
+// 1.3b Migration — phase B: synthesize {0:1, 1:1, ..., n-1:1} from
+//      numberOfOptions for any remaining docs (no bettingOptions list, only
+//      a count), then unset the legacy fields.
 db.games.updateMany(
   { optionAffinities: { $exists: false }, numberOfOptions: { $gt: 0 } },
   [
@@ -133,7 +165,7 @@ db.games.updateMany(
     { $unset: ["numberOfOptions", "bettingOptions"] }
   ]
 )
-// Expect: matchedCount == N_GAMES_BEFORE, modifiedCount == N_GAMES_BEFORE.
+// Expect: matchedCount + modifiedCount of 1.3a + 1.3b == N_GAMES_BEFORE.
 ```
 
 ### Step 1 — Verification
@@ -319,6 +351,31 @@ and wants a single sequence to run:
 // --- games ---
 print("games to migrate: " + db.games.countDocuments({ optionAffinities: { $exists: false } }));
 
+// Phase A: preserve explicit bettingOptions list (odd-only dice etc.).
+db.games.updateMany(
+  {
+    optionAffinities: { $exists: false },
+    bettingOptions: { $exists: true, $not: { $size: 0 } }
+  },
+  [
+    {
+      $set: {
+        optionAffinities: {
+          $arrayToObject: {
+            $map: {
+              input: "$bettingOptions",
+              as: "opt",
+              in: { k: { $toString: "$$opt" }, v: 1 }
+            }
+          }
+        }
+      }
+    },
+    { $unset: ["numberOfOptions", "bettingOptions"] }
+  ]
+);
+
+// Phase B: fall back to numberOfOptions range for the rest.
 db.games.updateMany(
   { optionAffinities: { $exists: false }, numberOfOptions: { $gt: 0 } },
   [

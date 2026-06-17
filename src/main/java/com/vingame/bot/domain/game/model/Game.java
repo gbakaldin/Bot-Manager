@@ -13,6 +13,7 @@ import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 
@@ -68,9 +69,36 @@ public class Game {
     private Integer numberOfOptions;
 
     /**
+     * Legacy field — explicit list of allowed option ids (e.g. {@code [1, 3, 5]}
+     * for odd-only dice faces). Pre-BETTING_STRATEGIES Phase 1 docs that
+     * customised the playable option set used this field instead of the implicit
+     * {@code [0..numberOfOptions-1]} range.
+     *
+     * <p>Read-side fallback only — like {@link #numberOfOptions} this is never
+     * round-tripped to the wire. {@link #getEffectiveOptionAffinities()} prefers
+     * this list over {@code numberOfOptions} when present so a game with
+     * {@code bettingOptions = [1, 3, 5]} produces {@code {1:1, 3:1, 5:1}}
+     * affinities — preserving the option-id semantics the operator chose.
+     *
+     * <p>If both {@code bettingOptions} and {@code numberOfOptions} are set the
+     * explicit list wins (mirrors the legacy {@code getEffectiveBettingOptions()}
+     * preference).
+     */
+    @JsonIgnore
+    @Getter(AccessLevel.PACKAGE)
+    @Setter(AccessLevel.PACKAGE)
+    private List<Integer> bettingOptions;
+
+    /**
      * Returns the effective option-affinity map.
      * <ul>
      *   <li>If {@code optionAffinities} is non-null and non-empty, returns it as-is.</li>
+     *   <li>Else if legacy {@code bettingOptions} is non-null and non-empty,
+     *       synthesizes a flat-prior map keyed by those explicit option ids —
+     *       e.g. {@code [1, 3, 5]} → {@code {1:1, 3:1, 5:1}}. This preserves
+     *       custom option-id sets (odd-only dice, sparse rewards) that would
+     *       otherwise be silently replaced by the {@code numberOfOptions}
+     *       range fallback.</li>
      *   <li>Else if legacy {@code numberOfOptions > 0}, synthesizes a flat-prior map
      *       {@code {0:1, 1:1, ..., n-1:1}} from the legacy field.</li>
      *   <li>Else throws {@link IllegalStateException} — a Game with neither field
@@ -82,6 +110,15 @@ public class Game {
     public Map<Integer, Integer> getEffectiveOptionAffinities() {
         if (optionAffinities != null && !optionAffinities.isEmpty()) {
             return optionAffinities;
+        }
+        if (bettingOptions != null && !bettingOptions.isEmpty()) {
+            Map<Integer, Integer> synthesized = new LinkedHashMap<>(bettingOptions.size());
+            for (Integer opt : bettingOptions) {
+                if (opt != null) synthesized.put(opt, 1);
+            }
+            if (!synthesized.isEmpty()) {
+                return synthesized;
+            }
         }
         if (numberOfOptions != null && numberOfOptions > 0) {
             Map<Integer, Integer> synthesized = new LinkedHashMap<>(numberOfOptions);
