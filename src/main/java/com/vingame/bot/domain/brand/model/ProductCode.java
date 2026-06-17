@@ -38,6 +38,17 @@ public enum ProductCode {
     }
 
     /**
+     * Canonical human-readable label for this product, mirroring the
+     * {@code displayName} pattern used on {@link com.vingame.bot.domain.game.model.GameType}
+     * and {@link com.vingame.bot.domain.bot.strategy.StrategyId}. Returns the
+     * same value as {@link #getName()} — kept as a separate getter so the wire
+     * shape stays uniform across enums.
+     */
+    public String getDisplayName() {
+        return name;
+    }
+
+    /**
      * Static per-brand app_id used in auth gateway register/login payloads.
      * Returns {@code null} for products where the value has not been confirmed
      * yet — callers should fall back to {@code Environment.getAppId()}.

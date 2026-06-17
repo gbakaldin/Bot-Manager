@@ -486,12 +486,13 @@ class GameControllerTest {
     class GetGameTypesTests {
 
         @Test
-        @DisplayName("Should return all GameType enum values")
-        void shouldReturnAllGameTypeEnumValues() throws Exception {
+        @DisplayName("Should return all GameType enum values paired with display names")
+        void shouldReturnAllGameTypeEnumValuesWithDisplayNames() throws Exception {
             mockMvc.perform(get("/api/v1/game/types"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.length()").value(GameType.values().length))
-                    .andExpect(jsonPath("$[*]").value(org.hamcrest.Matchers.hasItem("BETTING_MINI")));
+                    .andExpect(jsonPath("$[*].code").value(org.hamcrest.Matchers.hasItem("BETTING_MINI")))
+                    .andExpect(jsonPath("$[*].displayName").value(org.hamcrest.Matchers.hasItem("Betting mini")));
         }
     }
 
