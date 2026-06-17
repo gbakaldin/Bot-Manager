@@ -21,5 +21,21 @@ public enum StrategyId {
      * identically-seeded {@link java.util.Random}. See
      * {@link RandomBehaviorStrategy} for the canonical implementation.
      */
-    RANDOM
+    RANDOM("Random", "Pure RNG decisions on every tick. Ignores affinity weights and history.");
+
+    private final String displayName;
+    private final String description;
+
+    StrategyId(String displayName, String description) {
+        this.displayName = displayName;
+        this.description = description;
+    }
+
+    public String getDisplayName() {
+        return displayName;
+    }
+
+    public String getDescription() {
+        return description;
+    }
 }

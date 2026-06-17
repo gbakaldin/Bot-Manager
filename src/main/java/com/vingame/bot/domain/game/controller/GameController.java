@@ -3,10 +3,13 @@ package com.vingame.bot.domain.game.controller;
 import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.dto.GameDTO;
+import com.vingame.bot.domain.game.dto.GameTypeDTO;
 import com.vingame.bot.domain.game.mapper.GameMapper;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameFilter;
 import com.vingame.bot.domain.game.model.GameType;
+
+import java.util.Arrays;
 import com.vingame.bot.domain.game.service.GameService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -42,10 +45,10 @@ public class GameController {
 
     @Operation(
             summary = "List supported game types",
-            description = "Returns all values of the GameType enum. Frontend uses this to populate the game-type selector before creating a new Game.")
+            description = "Returns each GameType enum value paired with a human-readable label. Frontend uses this to populate the game-type selector before creating a new Game.")
     @GetMapping("/types")
-    public ResponseEntity<List<GameType>> getGameTypes() {
-        return ResponseEntity.ok(List.of(GameType.values()));
+    public ResponseEntity<List<GameTypeDTO>> getGameTypes() {
+        return ResponseEntity.ok(Arrays.stream(GameType.values()).map(GameTypeDTO::of).toList());
     }
 
     @Operation(
