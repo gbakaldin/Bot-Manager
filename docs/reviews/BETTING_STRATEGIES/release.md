@@ -52,6 +52,11 @@ Run from any host that can reach the bot-manager API. Replace
 `<host>` with the staging or production host (e.g. `Bot-1`) and `<port>`
 with `8080`.
 
+> **`jq` not on Bot-1.** Replace any `| jq '<filter>'` with
+> `| python3 -m json.tool` for raw pretty-print, or pipe through a small
+> `python3 -c "import json,sys; d=json.load(sys.stdin); print(...)"` for
+> field extraction. The exact substitutions are noted inline below.
+
 ```bash
 # 1. App health
 curl -fsS http://<host>:<port>/actuator/health
@@ -65,7 +70,9 @@ curl -fsS http://<host>:<port>/api/v1/bot-group/ \
 #         [(RANDOM, 1.0)] on the read path for assignment).
 
 # 3. Existing games still readable (read-side fallback for optionAffinities)
-curl -fsS http://<host>:<port>/api/v1/game/ \
+#    NOTE: GameController has no GET "/" — use the filter endpoint with {}.
+curl -fsS -X POST http://<host>:<port>/api/v1/game/filter/ \
+  -H 'Content-Type: application/json' -d '{}' \
   | jq '.[0] | {id, name, optionAffinities}'
 # expect: HTTP 200; optionAffinities is non-null and non-empty
 #         (synthesized from numberOfOptions if the Mongo doc has not been
@@ -245,15 +252,18 @@ curl -fsS http://<host>:<port>/api/v1/bot-group/$GROUP_ID/health \
 # Expect: "RANDOM"
 
 # 3.2 Read back a game — verify only the new shape on the wire.
-curl -fsS http://<host>:<port>/api/v1/game/ \
+#     NOTE: use the filter endpoint, not GET "/" (it doesn't exist).
+curl -fsS -X POST http://<host>:<port>/api/v1/game/filter/ \
+  -H 'Content-Type: application/json' -d '{}' \
   | jq '.[0] | keys'
 # Expect: keys include "optionAffinities" and do NOT include
 #         "numberOfOptions" or "bettingOptions".
 
 # 3.3 PATCH-update a bot group strategyMix end-to-end.
-curl -fsS -X PATCH http://<host>:<port>/api/v1/bot-group \
+#     NOTE: id is in the path; PATCH "/api/v1/bot-group" without id is 404.
+curl -fsS -X PATCH http://<host>:<port>/api/v1/bot-group/$GROUP_ID \
   -H 'Content-Type: application/json' \
-  -d "{\"id\":\"$GROUP_ID\",\"strategyMix\":[{\"strategyId\":\"RANDOM\",\"weight\":1.0}]}"
+  -d '{"strategyMix":[{"strategyId":"RANDOM","weight":1.0}]}'
 # Expect: HTTP 200
 
 curl -fsS http://<host>:<port>/api/v1/bot-group/$GROUP_ID | jq '.strategyMix'
