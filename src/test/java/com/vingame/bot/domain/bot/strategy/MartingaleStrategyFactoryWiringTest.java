@@ -192,4 +192,66 @@ class MartingaleStrategyFactoryWiringTest {
                 StrategyId.FIBONACCI_CAUTIOUS,
                 StrategyId.FIBONACCI_AGGRESSIVE);
     }
+
+    /**
+     * Phase 4 sanity check: every {@link StrategyId} value declared in the enum
+     * must have a registered backing bean, and {@code create(id)} must return
+     * an instance of the expected concrete class. This catches the failure mode
+     * where someone adds a new enum entry without wiring a corresponding
+     * {@code @StrategyImpl}-annotated bean — the listing endpoint
+     * ({@code GET /api/v1/strategy/}) would surface the id while
+     * {@code BotGroup}'s {@code /start} would throw
+     * {@link IllegalArgumentException} at runtime.
+     *
+     * <p>Walks {@link StrategyId#values()} explicitly rather than asserting a
+     * hard-coded set, so the test fails fast on any future enum addition that
+     * forgets the bean side of the contract.
+     */
+    @Test
+    @DisplayName("Phase 4: every StrategyId resolves to its expected concrete class — no missing wiring")
+    void everyStrategyIdResolvesEndToEnd() {
+        BettingStrategyFactory factory = wiredFactory();
+
+        // The full id → expected concrete class map. Keep in lockstep with
+        // StrategyId.values() — the assertion below fails if any enum value is
+        // missing here OR if the resolved bean is the wrong class.
+        java.util.Map<StrategyId, Class<? extends BettingStrategy>> expected =
+                new java.util.EnumMap<>(StrategyId.class);
+        expected.put(StrategyId.RANDOM, RandomBehaviorStrategy.class);
+        expected.put(StrategyId.MARTINGALE_CLASSIC_CAUTIOUS, ClassicMartingaleCautious.class);
+        expected.put(StrategyId.MARTINGALE_CLASSIC_AGGRESSIVE, ClassicMartingaleAggressive.class);
+        expected.put(StrategyId.PAROLI_CAUTIOUS, ParoliCautious.class);
+        expected.put(StrategyId.PAROLI_AGGRESSIVE, ParoliAggressive.class);
+        expected.put(StrategyId.DALEMBERT_CAUTIOUS, DAlembertCautious.class);
+        expected.put(StrategyId.DALEMBERT_AGGRESSIVE, DAlembertAggressive.class);
+        expected.put(StrategyId.FIBONACCI_CAUTIOUS, FibonacciCautious.class);
+        expected.put(StrategyId.FIBONACCI_AGGRESSIVE, FibonacciAggressive.class);
+
+        // Coverage check — every declared StrategyId is in the expectations
+        // table. Without this guard a new enum entry would slip past the
+        // per-id assertion below (we'd never iterate over the new id).
+        assertThat(expected.keySet())
+                .as("expectations table must cover every StrategyId.values()")
+                .containsExactlyInAnyOrder(StrategyId.values());
+
+        // Registration coverage — every declared StrategyId is also actually
+        // registered by the factory. The hard-coded test in registeredIdsForPhase3
+        // pins the same shape, but iterating StrategyId.values() here lets
+        // this test self-update on future enum additions (the test above must
+        // be hand-edited).
+        assertThat(factory.registeredIds())
+                .as("factory must register every declared StrategyId")
+                .containsExactlyInAnyOrderElementsOf(java.util.Arrays.asList(StrategyId.values()));
+
+        // Resolution coverage — create() returns the right concrete class for
+        // every id. Prototype-scope is already pinned by
+        // martingaleStrategiesArePrototypeScoped; here we only confirm the
+        // class wiring is correct end-to-end.
+        for (java.util.Map.Entry<StrategyId, Class<? extends BettingStrategy>> e : expected.entrySet()) {
+            BettingStrategy resolved = factory.create(e.getKey());
+            assertThat(resolved)
+                    .as("create(%s) must return an instance of %s", e.getKey(), e.getValue().getSimpleName())
+                    .isInstanceOf(e.getValue());
+        }
+    }
 }
