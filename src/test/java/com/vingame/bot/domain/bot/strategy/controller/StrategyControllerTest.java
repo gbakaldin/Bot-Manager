@@ -32,4 +32,36 @@ class StrategyControllerTest {
                 .andExpect(jsonPath("$[*].displayName").value(hasItem("Random")))
                 .andExpect(jsonPath("$[*].description").value(hasItem(StrategyId.RANDOM.getDescription())));
     }
+
+    /**
+     * MARTINGALE_STRATEGIES Architecture Decision A1 + Verification step A.2/A.3:
+     * every Martingale enum entry surfaces in the listing with the verbatim
+     * displayName and description strings the plan locked in. The frontend
+     * dropdown reads these directly, so a typo in {@code StrategyId} would
+     * silently change a user-visible string — pinning each one here means a
+     * future copy edit shows up as a test failure and forces explicit
+     * acknowledgement.
+     */
+    @Test
+    @DisplayName("GET /api/v1/strategy/ exposes the 8 Martingale entries with their locked-in displayName / description")
+    void shouldExposeMartingaleStrategiesWithLockedStrings() throws Exception {
+        var perform = mockMvc.perform(get("/api/v1/strategy/"))
+                .andExpect(status().isOk());
+
+        StrategyId[] martingaleIds = {
+                StrategyId.MARTINGALE_CLASSIC_CAUTIOUS,
+                StrategyId.MARTINGALE_CLASSIC_AGGRESSIVE,
+                StrategyId.PAROLI_CAUTIOUS,
+                StrategyId.PAROLI_AGGRESSIVE,
+                StrategyId.DALEMBERT_CAUTIOUS,
+                StrategyId.DALEMBERT_AGGRESSIVE,
+                StrategyId.FIBONACCI_CAUTIOUS,
+                StrategyId.FIBONACCI_AGGRESSIVE,
+        };
+        for (StrategyId id : martingaleIds) {
+            perform.andExpect(jsonPath("$[*].id").value(hasItem(id.name())))
+                    .andExpect(jsonPath("$[*].displayName").value(hasItem(id.getDisplayName())))
+                    .andExpect(jsonPath("$[*].description").value(hasItem(id.getDescription())));
+        }
+    }
 }
