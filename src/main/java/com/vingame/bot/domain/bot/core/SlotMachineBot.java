@@ -9,6 +9,11 @@ import com.vingame.bot.domain.bot.message.SlotMessageTypes;
 import com.vingame.bot.domain.bot.message.request.SlotRequest;
 import com.vingame.bot.domain.bot.message.slot.SlotSpinResultMessage;
 import com.vingame.bot.domain.bot.message.slot.SlotSubscribeResponse;
+import com.vingame.bot.domain.bot.strategy.slot.FixedBetStrategy;
+import com.vingame.bot.domain.bot.strategy.slot.SlotBetContext;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategy;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.bot.util.OutputPrinter;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.websocketparser.ObjectMapperProvider;
@@ -45,9 +50,13 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  * not from Game config. {@code canSpin()} gates the first spin on having
  * received that response.
  * <p>
- * <b>Phase 4.</b> Bet selection uses an inline fixed-amount picker (smallest
- * allowed value). The pluggable slot-strategy family ({@code SlotStrategy} /
- * {@code SlotStrategyFactory}) lands in Phase 6 and replaces {@link #chooseBet()}.
+ * <b>Phase 6.</b> Bet selection is delegated to the pluggable slot-strategy
+ * family: the bot reads {@code BotConfiguration.slotStrategyId} (defaulting to
+ * {@link SlotStrategyId#FIXED}) and instantiates a {@link SlotStrategy} via the
+ * injected {@link SlotStrategyFactory} in {@link #initializeSubclass()}. The
+ * strategy only picks the bet <em>amount</em> from the server-sourced allowed
+ * set (AD-9); cadence, one-spin-in-flight and balance gating remain the bot's
+ * job (AD-6/AD-13).
  */
 @Slf4j
 public class SlotMachineBot extends Bot {
@@ -81,6 +90,18 @@ public class SlotMachineBot extends Bot {
     // override via setRandom().
     private Random rng = new Random();
 
+    // Slot strategy factory (injected by BotFactory in Phase 5). May be null on
+    // standalone-test code paths — initializeSubclass() then falls back to an
+    // inline FixedBetStrategy (mirrors the betting bot's RandomBehaviorStrategy
+    // fallback).
+    @Setter
+    private SlotStrategyFactory slotStrategyFactory;
+
+    // Per-bot bet-amount picker, built in initializeSubclass() from
+    // configuration.getSlotStrategyId() (default FIXED). Picks the staked amount
+    // from the server-sourced allowed set (AD-9).
+    private SlotStrategy strategy;
+
     /**
      * Visible for testing — inject a seeded/mocked {@link Random} for
      * deterministic bet selection (mirrors {@code BettingMiniGameBot.setRandom}).
@@ -111,10 +132,22 @@ public class SlotMachineBot extends Bot {
         // Test fixtures override via setRandom().
         this.rng = new Random(((long) getUserName().hashCode()) ^ System.nanoTime());
 
+        // Build the per-bot slot strategy (AD-9). Default to FIXED when the
+        // config leaves slotStrategyId null (AD-10: slot strategy is out of the
+        // group strategy-mix UI for v1). When the factory is absent (standalone
+        // tests), fall back to an inline FixedBetStrategy so the bot is testable
+        // without a Spring context (mirrors the betting bot's fallback).
+        SlotStrategyId strategyId = configuration.getSlotStrategyId() != null
+                ? configuration.getSlotStrategyId()
+                : SlotStrategyId.FIXED;
+        this.strategy = slotStrategyFactory != null
+                ? slotStrategyFactory.create(strategyId)
+                : new FixedBetStrategy();
+
         // numLines / allowedBetValues are NOT known yet — they arrive with the
         // 1300 response and are captured in onSubscribe (AD-12).
-        log.info("SlotMachineBot initialized: game={}, gid={}, strategy=FIXED(inline)",
-                game.getName(), gid);
+        log.info("SlotMachineBot initialized: game={}, gid={}, strategy={}",
+                game.getName(), gid, strategyId);
     }
 
     private void onNewSession() {
@@ -198,12 +231,15 @@ public class SlotMachineBot extends Bot {
     }
 
     /**
-     * Inline fixed-amount bet picker (Phase 4 stub). Returns the smallest
-     * (first) allowed value from the server-sourced set. Replaced by the
-     * pluggable {@code SlotStrategy} family in Phase 6.
+     * Ask the assigned {@link SlotStrategy} for the next bet amount, building a
+     * fresh {@link SlotBetContext} over the current server-sourced config and
+     * balance. The strategy only picks the amount from the allowed set (AD-9);
+     * cadence/in-flight/balance gating stays in {@link #spinCondition()}.
      */
     private long chooseBet() {
-        return allowedBetValues.get(0);
+        SlotBetContext ctx = new SlotBetContext(
+                allowedBetValues, numLines, expectedCurrentBalance.get(), rng);
+        return strategy.chooseBet(ctx);
     }
 
     /**
