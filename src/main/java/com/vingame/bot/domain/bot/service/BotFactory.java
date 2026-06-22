@@ -7,9 +7,10 @@ import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.bot.core.BettingMiniGameBot;
 import com.vingame.bot.domain.bot.core.Bot;
-import com.vingame.bot.domain.bot.message.GameMessageTypes;
+import com.vingame.bot.domain.bot.core.SlotMachineBot;
 import com.vingame.bot.domain.bot.message.GameMessageTypesResolver;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.environment.model.Environment;
 import io.netty.channel.EventLoopGroup;
@@ -63,16 +64,19 @@ public class BotFactory {
     private final EventLoopGroup eventLoopGroup;
     private final BotMetrics botMetrics;
     private final BettingStrategyFactory strategyFactory;
+    private final SlotStrategyFactory slotStrategyFactory;
 
     @Autowired
     public BotFactory(EnvironmentClientRegistry clientRegistry,
                       EventLoopGroup eventLoopGroup,
                       BotMetrics botMetrics,
-                      BettingStrategyFactory strategyFactory) {
+                      BettingStrategyFactory strategyFactory,
+                      SlotStrategyFactory slotStrategyFactory) {
         this.clientRegistry = clientRegistry;
         this.eventLoopGroup = eventLoopGroup;
         this.botMetrics = botMetrics;
         this.strategyFactory = strategyFactory;
+        this.slotStrategyFactory = slotStrategyFactory;
     }
 
     /**
@@ -131,22 +135,30 @@ public class BotFactory {
         freshClientFactory.setIgnoreJwtToken(!env.isUseJwtAuth());
         freshClientFactory.setEventLoopGroup(eventLoopGroup);
 
-        // Resolve betting-mini message types based on environment's product code.
-        // SLOT games resolve a product-neutral provider via resolveSlot() — wired
-        // into the SLOT branch in a later phase.
-        GameMessageTypes messageTypes = GameMessageTypesResolver.resolveBettingMini(env.getProductCode());
-
-        // Instantiate bot based on game type (using domain.game.model.GameType)
+        // Instantiate bot based on game type (using domain.game.model.GameType).
+        // Message-types resolution is now per-branch (AD-4): betting-mini resolves
+        // a product-keyed GameMessageTypes; SLOT resolves a product-neutral
+        // SlotMessageTypes. Resolving betting-mini up front would throw for a SLOT
+        // game on a product that lacks a betting-mini provider.
         Bot bot = switch (game.getGameType()) {
             case BETTING_MINI -> {
                 BettingMiniGameBot bettingBot = new BettingMiniGameBot();
-                bettingBot.setMessageTypes(messageTypes);
-                // Phase 5: wire the strategy registry so initializeSubclass()
-                // can build the per-bot BettingStrategy for configuration.strategyId.
+                bettingBot.setMessageTypes(
+                        GameMessageTypesResolver.resolveBettingMini(env.getProductCode()));
+                // Wire the strategy registry so initializeSubclass() can build the
+                // per-bot BettingStrategy for configuration.strategyId.
                 bettingBot.setStrategyFactory(strategyFactory);
                 yield bettingBot;
             }
-            case SLOT, TAI_XIU, CARD_GAME, UP_DOWN ->
+            case SLOT -> {
+                SlotMachineBot slotBot = new SlotMachineBot();
+                slotBot.setMessageTypes(GameMessageTypesResolver.resolveSlot());
+                // Wire the slot strategy registry so initializeSubclass() can build
+                // the per-bot SlotStrategy for configuration.slotStrategyId (AD-9).
+                slotBot.setSlotStrategyFactory(slotStrategyFactory);
+                yield slotBot;
+            }
+            case TAI_XIU, CARD_GAME, UP_DOWN ->
                 throw new IllegalArgumentException("Game type not yet implemented: " + game.getGameType());
         };
 
