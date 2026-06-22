@@ -22,9 +22,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * exercise the body element directly so the test pins the message-class mapping
  * without dragging in the library scenario engine.
  * <p>
- * Phase 2 introduces {@code SlotMessageTypesImpl.getTypeRegistrations()}; until
- * then this test registers the two {@link NamedType}s inline, exactly as the plan
- * permits.
+ * As of Phase 2 the two {@link NamedType} registrations are sourced from
+ * {@code SlotMessageTypesImpl.getTypeRegistrations()} — the same provider the
+ * slot bot uses — rather than declared inline.
  */
 @DisplayName("Slot message deserialization (Phase 1)")
 class SlotMessageDeserializationTest {
@@ -32,9 +32,9 @@ class SlotMessageDeserializationTest {
     private ObjectMapper newMapper() {
         ObjectMapper mapper = new ObjectMapper();
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-        mapper.registerSubtypes(
-                new NamedType(SlotSubscribeResponse.class, "1300"),
-                new NamedType(SlotSpinResultMessage.class, "1302"));
+        // Phase 2: register via the provider's getTypeRegistrations() rather than
+        // inline NamedTypes — exercises SlotMessageTypesImpl as the bot will use it.
+        mapper.registerSubtypes(new SlotMessageTypesImpl().getTypeRegistrations());
         return mapper;
     }
 

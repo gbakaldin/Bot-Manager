@@ -131,8 +131,10 @@ public class BotFactory {
         freshClientFactory.setIgnoreJwtToken(!env.isUseJwtAuth());
         freshClientFactory.setEventLoopGroup(eventLoopGroup);
 
-        // Resolve message types based on environment's product code
-        GameMessageTypes messageTypes = GameMessageTypesResolver.resolve(env.getProductCode());
+        // Resolve betting-mini message types based on environment's product code.
+        // SLOT games resolve a product-neutral provider via resolveSlot() — wired
+        // into the SLOT branch in a later phase.
+        GameMessageTypes messageTypes = GameMessageTypesResolver.resolveBettingMini(env.getProductCode());
 
         // Instantiate bot based on game type (using domain.game.model.GameType)
         Bot bot = switch (game.getGameType()) {

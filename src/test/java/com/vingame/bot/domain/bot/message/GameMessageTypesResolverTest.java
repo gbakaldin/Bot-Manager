@@ -24,7 +24,7 @@ class GameMessageTypesResolverTest {
     @Test
     @DisplayName("Should resolve P_097 to BomGameMessageTypes")
     void shouldResolveP097ToBom() {
-        GameMessageTypes result = GameMessageTypesResolver.resolve(ProductCode.P_097);
+        GameMessageTypes result = GameMessageTypesResolver.resolveBettingMini(ProductCode.P_097);
 
         assertThat(result).isInstanceOf(BomGameMessageTypes.class);
     }
@@ -32,7 +32,7 @@ class GameMessageTypesResolverTest {
     @Test
     @DisplayName("Should resolve P_098 to BomGameMessageTypes")
     void shouldResolveP098ToBom() {
-        GameMessageTypes result = GameMessageTypesResolver.resolve(ProductCode.P_098);
+        GameMessageTypes result = GameMessageTypesResolver.resolveBettingMini(ProductCode.P_098);
 
         assertThat(result).isInstanceOf(BomGameMessageTypes.class);
     }
@@ -40,7 +40,7 @@ class GameMessageTypesResolverTest {
     @Test
     @DisplayName("Should resolve P_118 to NohuGameMessageTypes")
     void shouldResolveP118ToNohu() {
-        GameMessageTypes result = GameMessageTypesResolver.resolve(ProductCode.P_118);
+        GameMessageTypes result = GameMessageTypesResolver.resolveBettingMini(ProductCode.P_118);
 
         assertThat(result).isInstanceOf(NohuGameMessageTypes.class);
     }
@@ -48,7 +48,7 @@ class GameMessageTypesResolverTest {
     @Test
     @DisplayName("Should resolve P_116 to TipGameMessageTypes")
     void shouldResolveP116ToTip() {
-        GameMessageTypes result = GameMessageTypesResolver.resolve(ProductCode.P_116);
+        GameMessageTypes result = GameMessageTypesResolver.resolveBettingMini(ProductCode.P_116);
 
         assertThat(result).isInstanceOf(TipGameMessageTypes.class);
     }
@@ -56,7 +56,7 @@ class GameMessageTypesResolverTest {
     @Test
     @DisplayName("Should throw IllegalArgumentException when productCode is null")
     void shouldThrowWhenNull() {
-        assertThatThrownBy(() -> GameMessageTypesResolver.resolve(null))
+        assertThatThrownBy(() -> GameMessageTypesResolver.resolveBettingMini(null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("ProductCode cannot be null");
     }
@@ -65,7 +65,7 @@ class GameMessageTypesResolverTest {
     @EnumSource(value = ProductCode.class, names = {"P_066", "P_103", "P_105", "P_114", "P_119", "P_222"})
     @DisplayName("Should throw IllegalArgumentException for unimplemented product codes")
     void shouldThrowForUnimplementedProductCodes(ProductCode productCode) {
-        assertThatThrownBy(() -> GameMessageTypesResolver.resolve(productCode))
+        assertThatThrownBy(() -> GameMessageTypesResolver.resolveBettingMini(productCode))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(productCode.getCode())
                 .hasMessageContaining("not yet implemented");
