@@ -126,7 +126,12 @@ public class SlotMachineBot extends Bot {
         }
         this.gid = gameId;
 
-        this.request = new SlotRequest(game.getPluginName(), configuration.getZoneName());
+        // Slot frames route to the fixed cross-product slot extension
+        // (SlotMessageTypes.SLOT_PLUGIN_NAME), NOT game.getPluginName() — that is
+        // the brand's betting-mini extension and the server never answers a slot
+        // subscribe routed there. Only the zone is supplied here. (SLOT_MACHINE_BOT
+        // staging fix.)
+        this.request = new SlotRequest(configuration.getZoneName());
 
         // Deterministic-ish per user, distinct per process (mirrors betting bot).
         // Test fixtures override via setRandom().

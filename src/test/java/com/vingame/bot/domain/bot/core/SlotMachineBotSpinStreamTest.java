@@ -147,6 +147,12 @@ class SlotMachineBotSpinStreamTest {
         assertThat(out).isInstanceOf(SlotSpin.class);
         SlotSpin.Data data = spinData(out);
 
+        // Staging fix: the bot's spin frame must route to the fixed slot
+        // extension, NOT the game's "Tip" pluginName configured in newBot().
+        assertThat(pluginName(out))
+                .as("spin frame routes to the fixed slot extension, not Game.pluginName")
+                .isEqualTo("slotMachinePlugin");
+
         // AD-8/AD-13: FIXED strategy picks the smallest server-sourced value...
         assertThat(data.getB()).as("staked b from server-sourced set").isEqualTo(500L);
         assertThat(data.getGid()).isEqualTo(204);
@@ -319,6 +325,14 @@ class SlotMachineBotSpinStreamTest {
         bodyField.setAccessible(true);
         Body body = (Body) bodyField.get(out);
         return (SlotSpin.Data) body;
+    }
+
+    // ActionRequestMessage stores pluginName as a private field with no getter
+    // (mirror RequestTest) — read it to assert the slot frame's SmartFox routing.
+    private static String pluginName(ActionRequestMessage out) throws Exception {
+        Field f = ActionRequestMessage.class.getDeclaredField("pluginName");
+        f.setAccessible(true);
+        return (String) f.get(out);
     }
 
     @SuppressWarnings("unchecked")

@@ -23,6 +23,13 @@ public interface SlotMessageTypes {
     int SUBSCRIBE_CMD = 1300;
     int SPIN_CMD = 1302;
 
+    // Fixed SmartFox extension name for ALL slot frames (subscribe + spin),
+    // cross-product and cross-environment — exactly like the zone is always
+    // "MiniGame" and the CMDs are fixed 1300/1302. Slots are routed by a
+    // dedicated extension, so this must NOT come from Game.pluginName (which is
+    // the brand's betting-mini extension, e.g. "Tip").
+    String SLOT_PLUGIN_NAME = "slotMachinePlugin";
+
     /**
      * @return Class for deserializing subscribe response messages (cmd 1300)
      */
