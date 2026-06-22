@@ -1,0 +1,48 @@
+[
+  5,
+  {
+    "iJ": false,
+    "b": 500,
+    "gid": 204,
+    "hMG": false,
+    "sbs": [6, 0, 8, 8, 7, 2, 3, 1, 4, 5, 8, 8, 7, 5, 8],
+    "fss": 0,
+    "lsp": {
+      "gs": false,
+      "aid": 1,
+      "m": 6000,
+      "gT": 0,
+      "iF": false,
+      "ex2": true
+    },
+    "J": 0,
+    "mX": 6000,
+    "sid": 13,
+    "as": false,
+    "hFS": false,
+    "bw": false,
+    "cmd": 1302,
+    "wls": [
+      {
+        "iJ": false,
+        "img": false,
+        "crd": 1000,
+        "lid": 17,
+        "sbIds": [8, 8, 8, -1, -1],
+        "fs": false,
+        "sbN": "H",
+        "sbId": 8
+      },
+      {
+        "iJ": false,
+        "img": false,
+        "crd": 5000,
+        "lid": 19,
+        "sbIds": [8, 0, 8, 8, 8],
+        "fs": false,
+        "sbN": "H",
+        "sbId": 8
+      }
+    ]
+  }
+]
