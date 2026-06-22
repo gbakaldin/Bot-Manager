@@ -94,7 +94,18 @@ public class SlotSpinResultMessage extends SlotMessage
         return total;
     }
 
-    /** Amount staked this spin = {@code b} (AD-7). {@code userName} ignored. */
+    /**
+     * Per-line staked amount {@code b} (AD-7). {@code userName} ignored.
+     * <p>
+     * NOTE: this is the <b>per-line</b> bet, not the total stake. The total
+     * amount staked per spin is {@code b * numLines}, but {@code numLines} is
+     * not carried on the result frame — it is server-sourced from the 1300
+     * subscribe response and lives on the bot. {@code SlotMachineBot.onSpinResult}
+     * multiplies this value by its known {@code numLines} so the
+     * {@code bot_bet_amount_total} metric records the total stake (consistent
+     * with the balance gate and the debit). Do not treat this return value as
+     * the total stake.
+     */
     @Override
     public long betAmountFor(String userName) {
         return b;

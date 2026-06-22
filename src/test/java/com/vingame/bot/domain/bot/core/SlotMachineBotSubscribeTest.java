@@ -99,14 +99,23 @@ class SlotMachineBotSubscribeTest {
     }
 
     @Test
-    @DisplayName("Subscribe with no winlines/bet values: WARN + skip; gate stays closed")
-    void onSubscribe_missingConfig_doesNotCaptureOrAuthenticate() throws Exception {
+    @DisplayName("Subscribe with no winlines/bet values: WARN + skip capture; connection still marked authenticated, spin gate stays closed")
+    void onSubscribe_missingConfig_authenticatesButDoesNotCapture() throws Exception {
         SlotSubscribeResponse empty = new SlotSubscribeResponse(1300, 204, null, null);
         invokeOnSubscribe(bot, empty);
 
+        // Server config is NOT captured — the bot must not spin blind (AD-12).
         assertThat(readField(bot, "numLines")).isEqualTo(0);
         assertThat(readField(bot, "allowedBetValues")).isNull();
-        assertThat(bot.getStatus()).isNotEqualTo(BotStatus.CONNECTION_AUTHENTICATED);
+        // But the connection IS authenticated (a live socket acked a 1300): the
+        // bot must not wedge in AUTHENTICATING_CONNECTION on a degenerate response
+        // (matches BettingMiniGameBot.onSubscribe — mark authenticated first).
+        assertThat(bot.getStatus()).isEqualTo(BotStatus.CONNECTION_AUTHENTICATED);
+
+        // The spin gate stays closed because numLines/allowedBetValues are unset.
+        @SuppressWarnings("unchecked")
+        Supplier<Boolean> condition = (Supplier<Boolean>) invoke(bot, "spinCondition");
+        assertThat(condition.get()).as("spin gate stays closed on degenerate 1300").isFalse();
     }
 
     /* ----- helpers ----- */

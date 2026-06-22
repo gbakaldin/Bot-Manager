@@ -61,17 +61,18 @@ import static org.mockito.Mockito.times;
  *   <li>AD-8/AD-13 — the spin's selected winlines are {@code [0..numLines-1]}
  *       drawn from the <em>server-sourced</em> winline count, and the staked
  *       {@code b} is drawn from the server-provided {@code Js[].b} set;</li>
- *   <li>AD-7/AD-14 — balance accounting across the stream: debit {@code b} per
- *       spin on send, credit {@code sum(wls[].crd)} on result (gross, not net).</li>
+ *   <li>AD-7/AD-13 — balance accounting across the stream: debit the TOTAL stake
+ *       {@code b * numLines} per spin on send, credit {@code sum(wls[].crd)} on
+ *       result (gross, not net).</li>
  * </ul>
  *
- * <p><b>Implementation note (vs. plan idealisation).</b> The plan's Phase-7
- * prose says "balance debited by {@code b}". AD-13 separately says the per-spin
- * <em>cost gate</em> is {@code chosenBet * numLines}. The landed implementation
- * matches both: {@code creditBalance(amount)} debits only the staked {@code b}
- * (AD-7/AD-14), while {@code spinCondition()} gates on {@code b * numLines}
- * (AD-13). This test asserts the <em>debit is b</em> — what the code does — not
- * {@code b * numLines}.
+ * <p><b>Accounting note.</b> The per-line bet {@code b} (a value from the server
+ * {@code Js} set) is staked across each of {@code numLines} winlines, so the
+ * total amount staked per spin is {@code b * numLines}. The debit
+ * ({@code creditBalance}), the balance gate ({@code spinCondition}), and the
+ * {@code bot_bet_amount_total} metric all record this total stake consistently;
+ * the spin request still carries the per-line {@code b}. This test asserts the
+ * debit and metric at {@code b * numLines}.
  */
 @DisplayName("SlotMachineBot deterministic spin stream (Phase 7)")
 class SlotMachineBotSpinStreamTest {
@@ -154,11 +155,11 @@ class SlotMachineBotSpinStreamTest {
                 .as("selected winline indices [0..24]")
                 .containsExactlyElementsOf(IntStream.range(0, NUM_LINES).boxed().toList());
 
-        // AD-7: debit on send is the staked b only (not b * numLines).
-        assertThat(bot.getExpectedBalance()).isEqualTo(balanceBeforeSpin - 500L);
-        // Local sent-counters bumped by creditBalance.
+        // AD-7/AD-13: debit on send is the TOTAL stake = b(500) * numLines(25) = 12_500.
+        assertThat(bot.getExpectedBalance()).isEqualTo(balanceBeforeSpin - 12_500L);
+        // Local sent-counters bumped by creditBalance with the total stake.
         assertThat(bot.getTotalBetsPlaced().get()).isEqualTo(1L);
-        assertThat(bot.getTotalBetAmount().get()).isEqualTo(500L);
+        assertThat(bot.getTotalBetAmount().get()).isEqualTo(12_500L);
 
         // AD-6: a spin is now in flight → the gate is closed even with ample balance.
         assertThat(spinInFlight(bot).get()).as("in-flight gate set by spin()").isTrue();
@@ -171,7 +172,7 @@ class SlotMachineBotSpinStreamTest {
 
         verify(metrics).incBotMessage("spin");
         verify(metrics).incBotWinnings(6000L);
-        verify(metrics).incBetsPlaced(1, 500L);
+        verify(metrics).incBetsPlaced(1, 12_500L);
 
         assertThat(bot.getLastRoundWinnings()).isEqualTo(6000L);
         assertThat(bot.getExpectedBalance()).isEqualTo(balanceBeforeResult + 6000L);
@@ -203,8 +204,10 @@ class SlotMachineBotSpinStreamTest {
             assertThat(condition.get()).as("tick %d gate open", i).isTrue();
             ActionRequestMessage out = spinSupplier.get();
             SlotSpin.Data data = spinData(out);
-            long staked = data.getB();
-            assertThat(staked).isEqualTo(500L); // FIXED
+            long perLine = data.getB();
+            assertThat(perLine).isEqualTo(500L); // FIXED
+            // Total stake = per-line b * numLines(25) = 12_500.
+            long staked = perLine * NUM_LINES;
             assertThat(spinInFlight(bot).get()).as("in flight after spin %d", i).isTrue();
             assertThat(condition.get()).as("gate closed while spin %d in flight", i).isFalse();
 
@@ -226,7 +229,7 @@ class SlotMachineBotSpinStreamTest {
         // Local sent-counters and server-confirmed bet metric both equal N.
         assertThat(bot.getTotalBetsPlaced().get()).isEqualTo((long) spins);
         assertThat(bot.getTotalBetAmount().get()).isEqualTo(totalStaked);
-        verify(metrics, times(spins)).incBetsPlaced(1, 500L);
+        verify(metrics, times(spins)).incBetsPlaced(1, 12_500L);
         verify(metrics, times(spins)).incBotWinnings(6000L);
     }
 

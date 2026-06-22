@@ -169,6 +169,15 @@ public class SlotMachineBot extends Bot {
     private void onSubscribe(ActionResponseMessage<? extends SlotSubscribeResponse> data) {
         if (metrics != null) metrics.incBotMessage("subscribe");
 
+        // Mark the connection authenticated FIRST, unconditionally — mirroring
+        // BettingMiniGameBot.onSubscribe. The bot has received and acknowledged a
+        // subscribe response on a live socket, so the connection IS authenticated.
+        // Gating this behind validation would wedge the bot in AUTHENTICATING_CONNECTION
+        // forever on a degenerate 1300 (live socket, no disconnect, no watchdog).
+        // The spin gate (canSpin / spinCondition) still keeps a misconfigured bot
+        // from spinning blind because numLines/allowedBetValues stay unset.
+        markConnectionAuthenticated();
+
         SlotSubscribeResponse resp = data.getData();
         int lines = resp.numLines();
         List<Long> betValues = resp.allowedBetValues();
@@ -185,7 +194,6 @@ public class SlotMachineBot extends Bot {
         log.debug("Bot {}: subscribed — numLines={}, allowedBetValues={}",
                 getUserName(), numLines, allowedBetValues);
 
-        markConnectionAuthenticated();
         onNewSession();
     }
 
@@ -221,7 +229,12 @@ public class SlotMachineBot extends Bot {
             }
         }
         if (metrics != null && msg instanceof HasBetTotals bt) {
-            metrics.incBetsPlaced(bt.betCountFor(getUserName()), bt.betAmountFor(getUserName()));
+            // Bet-amount metric must reflect TOTAL stake = per-line b * numLines,
+            // matching the gate and the debit (AD-13). betAmountFor() returns only
+            // the per-line b (numLines is not on the result message), so multiply
+            // here by the bot's server-sourced numLines. betCountFor() stays 1.
+            long totalStake = bt.betAmountFor(getUserName()) * numLines;
+            metrics.incBetsPlaced(bt.betCountFor(getUserName()), totalStake);
         }
 
         log.debug("Bot {}: spin result b={}, winnings={}, sid={}, balance={}",
@@ -295,15 +308,21 @@ public class SlotMachineBot extends Bot {
             }
 
             spinInFlight.set(true);
-            // Debit the staked amount on send (AD-7). Winnings credited on result.
-            creditBalance(amount);
+            // Debit the TOTAL stake on send (AD-7/AD-13): the per-line bet `amount`
+            // is staked across each of `numLines` winlines, so the wallet drops by
+            // amount * numLines — the same figure the balance gate reserved. The
+            // request still carries the per-line `amount` (the server multiplies by
+            // the line set). Winnings (gross) are credited on result.
+            long totalStake = amount * numLines;
+            creditBalance(totalStake);
 
             List<Integer> ls = new ArrayList<>(numLines);
             for (int i = 0; i < numLines; i++) {
                 ls.add(i);
             }
 
-            log.debug("Bot {}: sending spin gid={}, bet={}, lines={}", getUserName(), gid, amount, numLines);
+            log.debug("Bot {}: sending spin gid={}, bet={} ({} lines, totalStake={})",
+                    getUserName(), gid, amount, numLines, totalStake);
             return request.spin(gid, amount, ls);
         };
     }

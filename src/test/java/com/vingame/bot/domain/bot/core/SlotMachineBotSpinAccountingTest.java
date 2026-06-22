@@ -96,8 +96,8 @@ class SlotMachineBotSpinAccountingTest {
         order.verify(metrics).incBotMessage("spin");
         // Gross winnings = sum(wls[].crd) = 1000 + 5000 = 6000 (AD-7).
         order.verify(metrics).incBotWinnings(6000L);
-        // Single spin = one bet at staked b=500 (AD-7).
-        order.verify(metrics).incBetsPlaced(1, 500L);
+        // Single spin = one bet; total stake = per-line b(500) * numLines(25) = 12_500.
+        order.verify(metrics).incBetsPlaced(1, 12_500L);
 
         assertThat(bot.getLastRoundWinnings()).isEqualTo(6000L);
         // onSpinResult only credits winnings (the debit happens in spin()); +6000.
@@ -117,7 +117,8 @@ class SlotMachineBotSpinAccountingTest {
 
         verify(metrics).incBotMessage("spin");
         verify(metrics, never()).incBotWinnings(anyLong());
-        verify(metrics).incBetsPlaced(1, 500L);
+        // total stake = per-line b(500) * numLines(25) = 12_500.
+        verify(metrics).incBetsPlaced(1, 12_500L);
 
         assertThat(bot.getLastRoundWinnings()).isZero();
         assertThat(bot.getExpectedBalance()).isEqualTo(before);
