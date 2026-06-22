@@ -1,6 +1,7 @@
 package com.vingame.bot.config.bot;
 
 import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.game.model.Game;
 import lombok.Builder;
 import lombok.Value;
@@ -71,4 +72,19 @@ public class BotConfiguration {
      * (no production caller); the {@code Bot} accessor tolerates that.
      */
     StrategyId strategyId;
+
+    /**
+     * Slot strategy id assigned to this bot (SLOT game type only).
+     * <p>
+     * Read by {@code SlotMachineBot.initializeSubclass()} to instantiate the
+     * per-bot {@code SlotStrategy} via {@code SlotStrategyFactory}. A separate
+     * field from {@link #strategyId} because the slot strategy family is
+     * parallel and disjoint from the betting one (AD-9 of
+     * {@code docs/plans/SLOT_MACHINE_BOT.md}).
+     * <p>
+     * Nullable — defaults to {@code SlotStrategyId.FIXED} when unset. Slot
+     * strategy is out of the group strategy-mix UI for v1 (AD-10), so this is
+     * only ever set directly, not via the fill-to-target assignment.
+     */
+    SlotStrategyId slotStrategyId;
 }
