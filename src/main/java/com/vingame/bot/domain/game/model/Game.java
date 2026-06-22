@@ -35,6 +35,16 @@ public class Game {
     private GameType gameType;
 
     private String pluginName;
+
+    /**
+     * Numeric game identifier. For {@link GameType#BETTING_MINI} games this is the
+     * subscribe channel id (e.g. {@code 11005} for BauCua). For
+     * {@link GameType#SLOT} games this carries the slot {@code gid} — the env-scoped
+     * slot game id placed on every subscribe ({@code cmd:1300}) and spin
+     * ({@code cmd:1302}) message. Winline count and allowed bet values for slots are
+     * <b>not</b> config fields — they are sourced from the {@code cmd:1300} subscribe
+     * response at runtime (see SLOT_MACHINE_BOT plan, AD-8/AD-11).
+     */
     private Integer gameId;
     private Integer offset;
     private boolean md5;

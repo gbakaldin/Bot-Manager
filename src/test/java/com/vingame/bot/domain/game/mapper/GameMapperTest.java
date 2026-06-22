@@ -277,4 +277,47 @@ class GameMapperTest {
             assertThat(entity.getName()).isEqualTo("Old");
         }
     }
+
+    @Nested
+    @DisplayName("SLOT game type")
+    class SlotGameTypeTests {
+
+        /**
+         * SLOT_MACHINE_BOT Phase 3: confirms a SLOT game shaped as
+         * {@code {gameType:SLOT, gameId:<gid>, productCode, pluginName}} round-trips
+         * through the existing DTO/mapper with no new fields. The {@code gameId}
+         * carries the slot {@code gid} (AD-2); winline count and bet values are
+         * server-sourced from the 1300 response (AD-8/AD-11), not config — so there
+         * is intentionally nothing slot-specific to map.
+         */
+        @Test
+        @DisplayName("Round-trips gameType=SLOT and gameId (gid) through DTO → entity → DTO")
+        void shouldRoundTripSlotGame() {
+            GameDTO in = GameDTO.builder()
+                    .gameType(GameType.SLOT)
+                    .gameId(204)
+                    .productCode(ProductCode.P_116)
+                    .pluginName("Tip")
+                    .name("SlotTipTest")
+                    .build();
+
+            Game entity = mapper.toEntity(in);
+
+            assertThat(entity.getGameType()).isEqualTo(GameType.SLOT);
+            assertThat(entity.getGameId()).isEqualTo(204);
+            assertThat(entity.getProductCode()).isEqualTo(ProductCode.P_116);
+            assertThat(entity.getPluginName()).isEqualTo("Tip");
+            // No slot-specific config: optionAffinities stays null (server-sourced
+            // winline count + bet values are not modeled here).
+            assertThat(entity.getOptionAffinities()).isNull();
+
+            GameDTO out = mapper.toDTO(entity);
+
+            assertThat(out.getGameType()).isEqualTo(GameType.SLOT);
+            assertThat(out.getGameId()).isEqualTo(204);
+            assertThat(out.getProductCode()).isEqualTo(ProductCode.P_116);
+            assertThat(out.getPluginName()).isEqualTo("Tip");
+            assertThat(out.getName()).isEqualTo("SlotTipTest");
+        }
+    }
 }
