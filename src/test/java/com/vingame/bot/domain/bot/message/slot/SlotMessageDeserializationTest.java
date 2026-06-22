@@ -99,4 +99,36 @@ class SlotMessageDeserializationTest {
         assertThat(empty.numLines()).isZero();
         assertThat(empty.allowedBetValues()).isEmpty();
     }
+
+    @Test
+    @DisplayName("Partial spin-result JSON: only cmd present -> scalar defaults, missing wls -> zero winnings")
+    void partialSpinResultDeserializes() throws Exception {
+        // A minimal 1302 body with only the cmd discriminator. All other scalars
+        // default (FAIL_ON_UNKNOWN_PROPERTIES is off; missing primitives default).
+        String json = "[5, {\"cmd\": 1302}]";
+        JsonNode root = newMapper().readTree(json);
+        SlotMessage parsed = newMapper().treeToValue(root.get(1), SlotMessage.class);
+
+        assertThat(parsed).isInstanceOf(SlotSpinResultMessage.class);
+        SlotSpinResultMessage spin = (SlotSpinResultMessage) parsed;
+        assertThat(spin.getCmd()).isEqualTo(1302);
+        assertThat(spin.getB()).isZero();
+        assertThat(spin.getGid()).isZero();
+        // Missing wls -> null -> zero winnings (no NPE).
+        assertThat(spin.getWls()).isNull();
+        assertThat(spin.winningsFor("x")).isZero();
+        assertThat(spin.betCountFor("x")).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("Unknown extra fields on the subscribe body are tolerated (eSC/taxes/lss/etc.)")
+    void unknownFieldsTolerated() throws Exception {
+        // The captured 1300 fixture carries eSC, taxes, as, ae, fss, lss — none
+        // modeled on SlotSubscribeResponse. They must deserialize without failing.
+        SlotMessage parsed = readBody(newMapper(), "/messages/slot/subscribeResponse.json");
+        assertThat(parsed).isInstanceOf(SlotSubscribeResponse.class);
+        // (round-trip already asserted in subscribeResponseDeserializes; this pins
+        // that the un-modeled fields do not break the parse.)
+        assertThat(((SlotSubscribeResponse) parsed).numLines()).isEqualTo(25);
+    }
 }

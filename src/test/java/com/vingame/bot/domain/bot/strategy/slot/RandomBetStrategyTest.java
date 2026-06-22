@@ -48,4 +48,28 @@ class RandomBetStrategyTest {
             assertThat(ALLOWED).contains(strategy.chooseBet(ctx));
         }
     }
+
+    @Test
+    @DisplayName("Single-element allowed set always returns that element (nextInt(1) == 0)")
+    void singleElementSet() {
+        RandomBetStrategy strategy = new RandomBetStrategy();
+        Random seeded = new Random(99L);
+        for (int i = 0; i < 10; i++) {
+            SlotBetContext ctx = new SlotBetContext(List.of(2500L), 25, 50_000_000L, seeded);
+            assertThat(strategy.chooseBet(ctx)).isEqualTo(2500L);
+        }
+    }
+
+    @Test
+    @DisplayName("Picks span the whole allowed set over many draws (no element starved)")
+    void coversAllElements() {
+        RandomBetStrategy strategy = new RandomBetStrategy();
+        Random seeded = new Random(123L);
+        java.util.Set<Long> seen = new java.util.HashSet<>();
+        for (int i = 0; i < 500; i++) {
+            SlotBetContext ctx = new SlotBetContext(ALLOWED, 25, 50_000_000L, seeded);
+            seen.add(strategy.chooseBet(ctx));
+        }
+        assertThat(seen).containsExactlyInAnyOrderElementsOf(ALLOWED);
+    }
 }
