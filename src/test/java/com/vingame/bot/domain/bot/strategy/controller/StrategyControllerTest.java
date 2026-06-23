@@ -2,6 +2,7 @@ package com.vingame.bot.domain.bot.strategy.controller;
 
 import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -63,5 +64,35 @@ class StrategyControllerTest {
                     .andExpect(jsonPath("$[*].displayName").value(hasItem(id.getDisplayName())))
                     .andExpect(jsonPath("$[*].description").value(hasItem(id.getDescription())));
         }
+    }
+
+    @Test
+    @DisplayName("GET /api/v1/strategy/?gameType=BETTING_MINI returns the betting strategies (same as no-param)")
+    void shouldReturnBettingStrategiesWhenGameTypeBettingMini() throws Exception {
+        mockMvc.perform(get("/api/v1/strategy/").param("gameType", "BETTING_MINI"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(StrategyId.values().length))
+                .andExpect(jsonPath("$[*].id").value(hasItem("RANDOM")))
+                .andExpect(jsonPath("$[*].id").value(hasItem(StrategyId.MARTINGALE_CLASSIC_CAUTIOUS.name())));
+    }
+
+    @Test
+    @DisplayName("GET /api/v1/strategy/?gameType=SLOT returns the slot strategies (FIXED, RANDOM) with id/displayName/description")
+    void shouldReturnSlotStrategiesWhenGameTypeSlot() throws Exception {
+        mockMvc.perform(get("/api/v1/strategy/").param("gameType", "SLOT"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(SlotStrategyId.values().length))
+                .andExpect(jsonPath("$[*].id").value(hasItem(SlotStrategyId.FIXED.name())))
+                .andExpect(jsonPath("$[*].id").value(hasItem(SlotStrategyId.RANDOM.name())))
+                .andExpect(jsonPath("$[*].displayName").value(hasItem(SlotStrategyId.FIXED.getDisplayName())))
+                .andExpect(jsonPath("$[*].description").value(hasItem(SlotStrategyId.RANDOM.getDescription())));
+    }
+
+    @Test
+    @DisplayName("GET /api/v1/strategy/?gameType=TAI_XIU returns an empty list (no strategies implemented yet)")
+    void shouldReturnEmptyListForUnimplementedGameType() throws Exception {
+        mockMvc.perform(get("/api/v1/strategy/").param("gameType", "TAI_XIU"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
     }
 }
