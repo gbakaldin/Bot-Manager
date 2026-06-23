@@ -2,7 +2,6 @@ package com.vingame.bot.domain.bot.strategy.controller;
 
 import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
-import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -77,15 +76,11 @@ class StrategyControllerTest {
     }
 
     @Test
-    @DisplayName("GET /api/v1/strategy/?gameType=SLOT returns the slot strategies (FIXED, RANDOM) with id/displayName/description")
-    void shouldReturnSlotStrategiesWhenGameTypeSlot() throws Exception {
+    @DisplayName("GET /api/v1/strategy/?gameType=SLOT returns an empty list (slot strategy is not selectable, always FIXED)")
+    void shouldReturnEmptyListForSlotGameType() throws Exception {
         mockMvc.perform(get("/api/v1/strategy/").param("gameType", "SLOT"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.length()").value(SlotStrategyId.values().length))
-                .andExpect(jsonPath("$[*].id").value(hasItem(SlotStrategyId.FIXED.name())))
-                .andExpect(jsonPath("$[*].id").value(hasItem(SlotStrategyId.RANDOM.name())))
-                .andExpect(jsonPath("$[*].displayName").value(hasItem(SlotStrategyId.FIXED.getDisplayName())))
-                .andExpect(jsonPath("$[*].description").value(hasItem(SlotStrategyId.RANDOM.getDescription())));
+                .andExpect(jsonPath("$.length()").value(0));
     }
 
     @Test
