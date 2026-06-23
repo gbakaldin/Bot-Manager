@@ -6,6 +6,7 @@ import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyAssignment;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
@@ -17,6 +18,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
@@ -482,6 +484,18 @@ public class BotGroupBehaviorService {
         // line is grep-able by group from Loki.
         log.info("Bot {}: assigned strategy {}", username, strategyId);
 
+        // SLOT bots draw their bet amount from a separate, group-level slot
+        // strategy (SLOT_MACHINE_BOT AD-9 — a distinct enum family from the
+        // betting strategyMix). Default to FIXED when the group leaves it unset.
+        // The betting strategyId above is meaningless for slots but harmless, so
+        // it is left in place unchanged; SlotMachineBot.initializeSubclass reads
+        // configuration.slotStrategyId and ignores strategyId.
+        SlotStrategyId slotStrategyId = null;
+        if (game.getGameType() == GameType.SLOT) {
+            slotStrategyId = Optional.ofNullable(group.getSlotStrategyId()).orElse(SlotStrategyId.FIXED);
+            log.info("Bot {}: assigned slot strategy {}", username, slotStrategyId);
+        }
+
         BotConfiguration configuration = BotConfiguration.builder()
                 .credentials(credentials)
                 .environmentId(group.getEnvironmentId())
@@ -492,6 +506,7 @@ public class BotGroupBehaviorService {
                 .zoneName(environment.resolveZoneName(game))
                 .watchdogTimeoutSeconds(watchdogTimeoutSeconds)
                 .strategyId(strategyId)
+                .slotStrategyId(slotStrategyId)
                 .build();
 
         // Create bot using factory (authenticates and creates WebSocket client)

@@ -6,6 +6,7 @@ import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
@@ -15,6 +16,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
@@ -737,6 +739,122 @@ class BotGroupBehaviorServiceTest {
                 runtime.getExecutor().shutdownNow();
                 runningGroups().remove("g-1");
             }
+        }
+    }
+
+    @Nested
+    @DisplayName("SLOT_MACHINE_BOT — slotStrategyId propagation")
+    class SlotStrategyIdPropagationTests {
+
+        @Test
+        @DisplayName("start() of a SLOT group propagates the group's slotStrategyId (RANDOM) into every BotConfiguration")
+        void startPropagatesSelectedSlotStrategy() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1")
+                    .name("Slot Group")
+                    .environmentId("env-1")
+                    .gameId("game-1")
+                    .botCount(3)
+                    .namePrefix("bot")
+                    .password("pass")
+                    .slotStrategyId(SlotStrategyId.RANDOM)
+                    .build();
+
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("Slot").gameType(GameType.SLOT).build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .as("captured BotConfigurations for SLOT group")
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> assertThat(cfg.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM));
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+
+        @Test
+        @DisplayName("start() of a SLOT group with null slotStrategyId defaults each BotConfiguration to FIXED")
+        void startDefaultsToFixedWhenUnset() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1")
+                    .name("Slot Group")
+                    .environmentId("env-1")
+                    .gameId("game-1")
+                    .botCount(2)
+                    .namePrefix("bot")
+                    .password("pass")
+                    // slotStrategyId intentionally not set
+                    .build();
+
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("Slot").gameType(GameType.SLOT).build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> assertThat(cfg.getSlotStrategyId())
+                            .as("null group slotStrategyId should default to FIXED at build time")
+                            .isEqualTo(SlotStrategyId.FIXED));
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+
+        @Test
+        @DisplayName("start() of a non-SLOT (betting) group leaves slotStrategyId null on BotConfiguration even if the group set one")
+        void startLeavesSlotStrategyNullForBettingGroup() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1")
+                    .name("Betting Group")
+                    .environmentId("env-1")
+                    .gameId("game-1")
+                    .botCount(2)
+                    .namePrefix("bot")
+                    .password("pass")
+                    // even if a slotStrategyId leaks onto a betting group, it must not flow through
+                    .slotStrategyId(SlotStrategyId.RANDOM)
+                    .build();
+
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("BauCua").gameType(GameType.BETTING_MINI).build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> assertThat(cfg.getSlotStrategyId())
+                            .as("betting groups must not carry a slotStrategyId")
+                            .isNull());
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
         }
     }
 
