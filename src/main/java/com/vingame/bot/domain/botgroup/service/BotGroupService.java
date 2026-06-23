@@ -11,6 +11,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
+import com.vingame.bot.domain.botgroup.validation.BotGroupConfigValidationService;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
@@ -34,16 +35,19 @@ public class BotGroupService {
     private final EnvironmentClientRegistry clientRegistry;
     private final EnvironmentService environmentService;
     private final MongoTemplate mongoTemplate;
+    private final BotGroupConfigValidationService configValidation;
 
     public BotGroupService(BotGroupRepository repository, BotGroupMapper mapper,
                            EnvironmentClientRegistry clientRegistry,
                            EnvironmentService environmentService,
-                           MongoTemplate mongoTemplate) {
+                           MongoTemplate mongoTemplate,
+                           BotGroupConfigValidationService configValidation) {
         this.repository = repository;
         this.mapper = mapper;
         this.clientRegistry = clientRegistry;
         this.environmentService = environmentService;
         this.mongoTemplate = mongoTemplate;
+        this.configValidation = configValidation;
     }
 
     public BotGroup findById(String id) {
@@ -112,6 +116,12 @@ public class BotGroupService {
         if (isNewGroup) {
             log.info("Creating new bot group '{}' with {} bots in environment {}",
                      botGroup.getName(), botGroup.getBotCount(), botGroup.getEnvironmentId());
+
+            // Game-type-specific config validation runs before registration so a
+            // bad config fails fast with one clean 400 instead of fanning out N
+            // wasted auth calls (AD-9). The seam is game-type-agnostic here — the
+            // orchestrator resolves the GameType and selects the validator.
+            configValidation.validate(botGroup);
 
             if (skipRegistration) {
                 log.info("Skipping user registration for bot group '{}' (existing group migration)",
@@ -205,6 +215,9 @@ public class BotGroupService {
     public BotGroup update(String id, BotGroupDTO updateDTO) {
         BotGroup existing = findById(id);
         mapper.updateEntityFromDTO(updateDTO, existing);
+        // Validate the post-merge entity (AD-6) so cross-field PATCH rules — e.g.
+        // lowering maxBet below the persisted minBet — are caught before save.
+        configValidation.validate(existing);
         return repository.save(existing);
     }
 

@@ -11,6 +11,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
+import com.vingame.bot.domain.botgroup.validation.BotGroupConfigValidationService;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
@@ -66,6 +67,9 @@ class BotGroupServiceTest {
 
     @Mock
     private ApiGatewayClient apiGatewayClient;
+
+    @Mock
+    private BotGroupConfigValidationService configValidation;
 
     @Captor
     private ArgumentCaptor<Query> queryCaptor;
