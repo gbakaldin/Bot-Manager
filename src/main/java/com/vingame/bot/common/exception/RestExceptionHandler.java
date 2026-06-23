@@ -8,6 +8,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.validation.FieldError;
+import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
@@ -151,6 +153,38 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
                 describe(request), ex.getMessage());
         return handleExceptionInternal(ex,
                 new ErrorResponse("Bad request", "Malformed request body"),
+                headers, status, request);
+    }
+
+    /**
+     * Override Spring's default {@link MethodArgumentNotValidException} handling
+     * (thrown by {@code @Valid}/{@code @Validated} request-body failures) so the
+     * body matches our {@code {type, msg}} envelope and the message aggregates
+     * every field violation — mirroring the service-layer game-type validators,
+     * which join all violations with {@code "; "} into one
+     * {@link BadRequestException}.
+     * <p>
+     * Field-error default messages are operator-safe by construction here: they
+     * are the explicit {@code message =} text on the DTO constraints
+     * (e.g. {@code "gameId must not be blank"}), not raw exception internals.
+     * Errors are sorted by field name for a deterministic, test-stable order.
+     */
+    @Override
+    protected ResponseEntity<Object> handleMethodArgumentNotValid(MethodArgumentNotValidException ex,
+                                                                  HttpHeaders headers,
+                                                                  HttpStatusCode status,
+                                                                  WebRequest request) {
+        String msg = ex.getBindingResult().getFieldErrors().stream()
+                .sorted(java.util.Comparator.comparing(FieldError::getField))
+                .map(FieldError::getDefaultMessage)
+                .collect(java.util.stream.Collectors.joining("; "));
+        if (msg.isBlank()) {
+            msg = "Validation failed";
+        }
+        log.warn("Handled {} from {}: {}", ex.getClass().getSimpleName(),
+                describe(request), msg);
+        return handleExceptionInternal(ex,
+                new ErrorResponse("Bad request", msg),
                 headers, status, request);
     }
 

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -21,12 +23,26 @@ public class BotGroupDTO {
 
     private String id;
     private String name;
+
+    // Universal required-field validation (POST/create path only — OnCreate group).
+    // Behavior fields (minBet/maxBet/betIncrement/min|maxBetsPerRound/maxTotalBetPerRound)
+    // are intentionally NOT annotated here: their rules (including the fact that
+    // minBet=0 / minBetsPerRound=0 are valid) live entirely in the game-type
+    // GameConfigValidator strategies, not this universal layer.
+    // See docs/plans/BOT_GROUP_CONFIG_VALIDATION.md AD-10.
+    @NotBlank(groups = OnCreate.class, message = "environmentId must not be blank")
     private String environmentId;
 
+    @NotBlank(groups = OnCreate.class, message = "namePrefix must not be blank")
     private String namePrefix;
+
+    @NotBlank(groups = OnCreate.class, message = "password must not be blank")
     private String password;
 
+    @NotBlank(groups = OnCreate.class, message = "gameId must not be blank")
     private String gameId;
+
+    @Positive(groups = OnCreate.class, message = "botCount must be >= 1")
     private Integer botCount;
 
     private Long minBet;

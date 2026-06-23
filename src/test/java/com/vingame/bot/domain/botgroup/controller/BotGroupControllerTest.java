@@ -369,12 +369,15 @@ class BotGroupControllerTest {
         @Test
         @DisplayName("Should return 400 Bad Request with body when service throws BadRequestException")
         void shouldReturnBadRequestWithBodyWhenBadRequestException() throws Exception {
+            // gameId present so the universal @Validated(OnCreate) layer passes and
+            // the request reaches the service mock, which is what this test asserts.
             BotGroupDTO inputDto = BotGroupDTO.builder()
                     .name("Bad")
                     .namePrefix("longprefix")
                     .password("p")
                     .botCount(99)
                     .environmentId("env-tip")
+                    .gameId("game-tip")
                     .build();
 
             BotGroup entity = BotGroup.builder().name("Bad").build();

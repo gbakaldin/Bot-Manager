@@ -3,6 +3,7 @@ package com.vingame.bot.domain.botgroup.controller;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatusDTO;
+import com.vingame.bot.domain.botgroup.dto.OnCreate;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
@@ -22,6 +23,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.validation.annotation.Validated;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -91,7 +93,7 @@ public class BotGroupController {
     @PostMapping("/")
     public ResponseEntity<BotGroupDTO> save(
             @Parameter(description = "Bot group body to save in the database")
-            @RequestBody BotGroupDTO botGroupDTO) {
+            @Validated(OnCreate.class) @RequestBody BotGroupDTO botGroupDTO) {
         BotGroup botGroup = mapper.toEntity(botGroupDTO);
         boolean skipRegistration = Boolean.TRUE.equals(botGroupDTO.getExistingGroup());
         BotGroup saved = service.save(botGroup, skipRegistration);
