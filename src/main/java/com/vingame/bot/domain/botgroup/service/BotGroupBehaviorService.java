@@ -484,16 +484,18 @@ public class BotGroupBehaviorService {
         // line is grep-able by group from Loki.
         log.info("Bot {}: assigned strategy {}", username, strategyId);
 
-        // SLOT bots draw their bet amount from a separate, group-level slot
-        // strategy (SLOT_MACHINE_BOT AD-9 — a distinct enum family from the
-        // betting strategyMix). Default to FIXED when the group leaves it unset.
-        // The betting strategyId above is meaningless for slots but harmless, so
-        // it is left in place unchanged; SlotMachineBot.initializeSubclass reads
-        // configuration.slotStrategyId and ignores strategyId.
+        // SLOT bots always run the basic FIXED slot strategy. Strategy variety has
+        // no purpose for slots (slot play is invisible to other players), so any
+        // client-supplied group.slotStrategyId is intentionally ignored and
+        // overridden to FIXED here — the create/update still succeeds, this is a
+        // silent override, not a rejection. The betting strategyId above is
+        // meaningless for slots but harmless, so it is left in place unchanged;
+        // SlotMachineBot.initializeSubclass reads configuration.slotStrategyId and
+        // ignores strategyId.
         SlotStrategyId slotStrategyId = null;
         if (game.getGameType() == GameType.SLOT) {
-            slotStrategyId = Optional.ofNullable(group.getSlotStrategyId()).orElse(SlotStrategyId.FIXED);
-            log.info("Bot {}: assigned slot strategy {}", username, slotStrategyId);
+            slotStrategyId = SlotStrategyId.FIXED;
+            log.info("Bot {}: assigned slot strategy {} (slot strategy is not selectable)", username, slotStrategyId);
         }
 
         BotConfiguration configuration = BotConfiguration.builder()

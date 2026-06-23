@@ -747,8 +747,8 @@ class BotGroupBehaviorServiceTest {
     class SlotStrategyIdPropagationTests {
 
         @Test
-        @DisplayName("start() of a SLOT group propagates the group's slotStrategyId (RANDOM) into every BotConfiguration")
-        void startPropagatesSelectedSlotStrategy() {
+        @DisplayName("start() of a SLOT group overrides any client-supplied slotStrategyId (RANDOM) to FIXED on every BotConfiguration")
+        void startOverridesSelectedSlotStrategyToFixed() {
             BotGroup group = BotGroup.builder()
                     .id("g-1")
                     .name("Slot Group")
@@ -757,6 +757,7 @@ class BotGroupBehaviorServiceTest {
                     .botCount(3)
                     .namePrefix("bot")
                     .password("pass")
+                    // client picked RANDOM, but slots are never selectable — must be overridden to FIXED
                     .slotStrategyId(SlotStrategyId.RANDOM)
                     .build();
 
@@ -776,15 +777,17 @@ class BotGroupBehaviorServiceTest {
             assertThat(configCaptor.getAllValues())
                     .as("captured BotConfigurations for SLOT group")
                     .isNotEmpty()
-                    .allSatisfy(cfg -> assertThat(cfg.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM));
+                    .allSatisfy(cfg -> assertThat(cfg.getSlotStrategyId())
+                            .as("group slotStrategyId RANDOM must be silently overridden to FIXED")
+                            .isEqualTo(SlotStrategyId.FIXED));
 
             BotGroupRuntime rt = runningGroups().get("g-1");
             if (rt != null) rt.stopAllBots();
         }
 
         @Test
-        @DisplayName("start() of a SLOT group with null slotStrategyId defaults each BotConfiguration to FIXED")
-        void startDefaultsToFixedWhenUnset() {
+        @DisplayName("start() of a SLOT group with null slotStrategyId assigns each BotConfiguration FIXED")
+        void startAssignsFixedWhenUnset() {
             BotGroup group = BotGroup.builder()
                     .id("g-1")
                     .name("Slot Group")
@@ -812,7 +815,7 @@ class BotGroupBehaviorServiceTest {
             assertThat(configCaptor.getAllValues())
                     .isNotEmpty()
                     .allSatisfy(cfg -> assertThat(cfg.getSlotStrategyId())
-                            .as("null group slotStrategyId should default to FIXED at build time")
+                            .as("SLOT bots always run FIXED regardless of group slotStrategyId")
                             .isEqualTo(SlotStrategyId.FIXED));
 
             BotGroupRuntime rt = runningGroups().get("g-1");
