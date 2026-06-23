@@ -273,6 +273,119 @@ class BettingMiniConfigValidatorTest {
         }
     }
 
+    @Nested
+    @DisplayName("grid / cross-field boundary cases (QA)")
+    class BoundaryCases {
+
+        @Test
+        @DisplayName("range exceeds betIncrement by exactly 1 rejected (off-by-one grid)")
+        void offByOneGridRejected() {
+            // (111 - 100) % 10 == 1 != 0 — the tightest off-grid case.
+            BotGroup group = validConfig().minBet(100).maxBet(111).betIncrement(10).build();
+            assertThatThrownBy(() -> validator.validate(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("(maxBet (111) - minBet (100)) must be exactly divisible by betIncrement (10)");
+        }
+
+        @Test
+        @DisplayName("betIncrement larger than the (positive) range rejected as off-grid")
+        void incrementLargerThanRange() {
+            // range = 5, increment = 10 → 5 % 10 == 5 != 0. A single step cannot
+            // even reach maxBet, so the grid rule correctly bites.
+            BotGroup group = validConfig().minBet(100).maxBet(105).betIncrement(10).build();
+            assertThatThrownBy(() -> validator.validate(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("must be exactly divisible by betIncrement (10)");
+        }
+
+        @Test
+        @DisplayName("range exactly equal to betIncrement passes (one step)")
+        void rangeEqualsIncrementPasses() {
+            // (110 - 100) % 10 == 0 — exactly one increment of headroom.
+            BotGroup group = validConfig().minBet(100).maxBet(110).betIncrement(10).build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("betIncrement == 1 makes every integer range valid (grid degenerate)")
+        void incrementOneAlwaysOnGrid() {
+            BotGroup group = validConfig().minBet(100).maxBet(137).betIncrement(1).build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("maxTotalBetPerRound exactly == maxBet passes the cap (>= boundary)")
+        void capEqualsMaxBetPasses() {
+            // cap == maxBet (500) and >= minBet*minBetsPerRound (100*1=100): both clauses hold at the edge.
+            BotGroup group = validConfig().maxTotalBetPerRound(500).build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("maxTotalBetPerRound one below maxBet rejected (just under the cap edge)")
+        void capOneBelowMaxBetRejected() {
+            BotGroup group = validConfig().maxTotalBetPerRound(499).build();
+            assertThatThrownBy(() -> validator.validate(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("maxTotalBetPerRound (499) must be >= maxBet (500)");
+        }
+
+        @Test
+        @DisplayName("maxTotalBetPerRound exactly == minBet * minBetsPerRound passes (both non-zero, >= edge)")
+        void capEqualsMinTotalPasses() {
+            // minBet=100, minBetsPerRound=5 → minTotal=500; cap=500 == minTotal and == maxBet.
+            BotGroup group = validConfig()
+                    .minBet(100)
+                    .maxBet(500)
+                    .betIncrement(10)
+                    .minBetsPerRound(5)
+                    .maxBetsPerRound(5)
+                    .maxTotalBetPerRound(500)
+                    .build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("maxTotalBetPerRound one below minBet * minBetsPerRound rejected (both non-zero)")
+        void capOneBelowMinTotalRejected() {
+            // minBet=100, minBetsPerRound=5 → minTotal=500; cap=499 >= maxBet? no — keep maxBet low to
+            // isolate the minTotal clause: maxBet=400, cap=499 >= 400 holds, but 499 < 500 minTotal.
+            BotGroup group = validConfig()
+                    .minBet(100)
+                    .maxBet(400)
+                    .betIncrement(10)
+                    .minBetsPerRound(5)
+                    .maxBetsPerRound(5)
+                    .maxTotalBetPerRound(499)
+                    .build();
+            assertThatThrownBy(() -> validator.validate(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("maxTotalBetPerRound (499) must be >= minBet * minBetsPerRound (100 * 5 = 500)")
+                    // maxBet clause must NOT fire here (cap 499 >= maxBet 400), isolating the cross-field clause.
+                    .matches(t -> !t.getMessage().contains("must be >= maxBet"),
+                            "the maxBet cap clause should not fire when cap >= maxBet");
+        }
+
+        @Test
+        @DisplayName("minBet * minBetsPerRound at exactly Long.MAX boundary does not overflow into a false pass")
+        void minTotalNoSilentOverflow() {
+            // minBet * minBetsPerRound would overflow long and wrap negative under naive math; assert
+            // the validator still reports the cross-field violation rather than silently passing.
+            long bigMin = 4_000_000_000L; // > Integer.MAX
+            BotGroup group = BotGroup.builder()
+                    .minBet(bigMin)
+                    .maxBet(bigMin)
+                    .betIncrement(1)
+                    .minBetsPerRound(3)        // 4e9 * 3 = 1.2e10, fits in long, exceeds the cap below
+                    .maxBetsPerRound(3)
+                    .maxTotalBetPerRound(bigMin)
+                    .build();
+            assertThatThrownBy(() -> validator.validate(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("12000000000");
+        }
+    }
+
     @Test
     @DisplayName("multiple simultaneous violations are all reported in one exception")
     void multipleViolationsAggregated() {

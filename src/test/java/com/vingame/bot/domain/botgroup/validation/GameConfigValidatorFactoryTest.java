@@ -75,6 +75,27 @@ class GameConfigValidatorFactoryTest {
     }
 
     @Test
+    @DisplayName("a validator returning null supportedType throws IllegalStateException at boot")
+    void nullSupportedTypeThrows() {
+        GameConfigValidatorFactory factory = new GameConfigValidatorFactory(List.of(
+                stub(null)));
+
+        assertThatThrownBy(factory::init)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("returned null from supportedType()");
+    }
+
+    @Test
+    @DisplayName("registeredTypes() is read-only (defensive copy)")
+    void registeredTypesUnmodifiable() {
+        GameConfigValidatorFactory factory = new GameConfigValidatorFactory(allTypes());
+        factory.init();
+
+        assertThatThrownBy(() -> factory.registeredTypes().clear())
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
     @DisplayName("forType on an unregistered type throws IllegalArgumentException")
     void forTypeUnknownThrows() {
         // Build a factory with only one type, bypassing init()'s completeness

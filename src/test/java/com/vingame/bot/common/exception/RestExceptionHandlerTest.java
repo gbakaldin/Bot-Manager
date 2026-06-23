@@ -257,6 +257,33 @@ class RestExceptionHandlerTest {
                 .andExpect(jsonPath("$.msg").value("custom upstream failure"));
     }
 
+    @Test
+    @DisplayName("MethodArgumentNotValid -> 400 with field errors joined, deterministically sorted by field name")
+    void methodArgumentNotValidSortedAndAggregated() throws Exception {
+        // All three @NotBlank fields blank. Declared order is zebra, alpha, mango;
+        // the handler sorts by field name, so the msg must read alpha; mango; zebra.
+        mockMvc.perform(post("/__test/validated")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"zebra\":\"\",\"alpha\":\"\",\"mango\":\"\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.type").value("Bad request"))
+                .andExpect(jsonPath("$.msg").value(
+                        "alpha must not be blank; mango must not be blank; zebra must not be blank"));
+    }
+
+    @Test
+    @DisplayName("MethodArgumentNotValid with a single field error -> 400 with just that message (no stray separators)")
+    void methodArgumentNotValidSingleField() throws Exception {
+        // Only mango blank; the other two satisfied — the msg must be exactly the
+        // one field message with no trailing/leading "; ".
+        mockMvc.perform(post("/__test/validated")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"zebra\":\"z\",\"alpha\":\"a\",\"mango\":\"\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.type").value("Bad request"))
+                .andExpect(jsonPath("$.msg").value("mango must not be blank"));
+    }
+
     /**
      * Tiny test controller that throws each handled exception type on demand.
      * Defined static-inner so it stays scoped to this test class.
@@ -319,6 +346,13 @@ class RestExceptionHandlerTest {
             return body.toString();
         }
 
+        @PostMapping(value = "/__test/validated", consumes = MediaType.APPLICATION_JSON_VALUE)
+        public String validated(
+                @org.springframework.web.bind.annotation.RequestBody
+                @jakarta.validation.Valid ValidatedBody body) {
+            return "ok";
+        }
+
         @GetMapping("/__test/upstream-custom-type")
         public String upstreamCustomType() {
             // Anonymous subclass of the abstract base lets us verify
@@ -357,5 +391,20 @@ class RestExceptionHandlerTest {
             // the advice's reformatting.
             return q;
         }
+    }
+
+    /**
+     * Body with three {@code @NotBlank} fields whose declaration order
+     * (zebra, alpha, mango) deliberately differs from alphabetical order, so a
+     * passing ordering assertion proves the handler sorts by field name rather
+     * than echoing declaration / reflection order.
+     */
+    static class ValidatedBody {
+        @jakarta.validation.constraints.NotBlank(message = "zebra must not be blank")
+        public String zebra;
+        @jakarta.validation.constraints.NotBlank(message = "alpha must not be blank")
+        public String alpha;
+        @jakarta.validation.constraints.NotBlank(message = "mango must not be blank")
+        public String mango;
     }
 }
