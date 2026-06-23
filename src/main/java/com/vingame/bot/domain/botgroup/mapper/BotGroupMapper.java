@@ -40,6 +40,7 @@ public interface BotGroupMapper {
                 .chatEnabled(entity.isChatEnabled())
                 .autoDepositEnabled(entity.isAutoDepositEnabled())
                 .strategyMix(entity.getStrategyMix())
+                .slotStrategyId(entity.getSlotStrategyId())
                 .targetStatus(entity.getTargetStatus())
                 .scheduledRestartTime(entity.getScheduledRestartTime())
                 .lastStartedAt(entity.getLastStartedAt())
@@ -77,6 +78,7 @@ public interface BotGroupMapper {
                 .chatEnabled(Optional.ofNullable(dto.getChatEnabled()).orElse(false))
                 .autoDepositEnabled(Optional.ofNullable(dto.getAutoDepositEnabled()).orElse(false))
                 .strategyMix(dto.getStrategyMix())
+                .slotStrategyId(dto.getSlotStrategyId())
                 .targetStatus(dto.getTargetStatus())
                 .scheduledRestartTime(dto.getScheduledRestartTime())
                 .lastStartedAt(dto.getLastStartedAt())
@@ -126,6 +128,12 @@ public interface BotGroupMapper {
             }
             entity.setStrategyMix(dto.getStrategyMix());
         }
+        // slotStrategyId PATCH semantics: full-replace if DTO supplies the field
+        // (non-null); a null DTO field keeps the existing value. No empty-value
+        // case to guard — it is a single nullable enum, and null is a valid
+        // "fall back to FIXED" state. Mid-flight changes do NOT re-assign
+        // already-running bots, mirroring strategyMix.
+        entity.setSlotStrategyId(Optional.ofNullable(dto.getSlotStrategyId()).orElse(entity.getSlotStrategyId()));
         entity.setTargetStatus(Optional.ofNullable(dto.getTargetStatus()).orElse(entity.getTargetStatus()));
         entity.setScheduledRestartTime(Optional.ofNullable(dto.getScheduledRestartTime()).orElse(entity.getScheduledRestartTime()));
         // Note: lastStartedAt, lastStoppedAt, lastFailureReason are system-managed, not updated via DTO

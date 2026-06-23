@@ -2,6 +2,7 @@ package com.vingame.bot.domain.botgroup.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -52,6 +53,14 @@ public class BotGroupDTO {
      * (Architecture Decision 9 in {@code docs/plans/BETTING_STRATEGIES.md}).
      */
     private List<WeightedStrategy> strategyMix;
+
+    /**
+     * Slot strategy applied to all bots in a SLOT group. Nullable — null falls back to
+     * {@code SlotStrategyId.FIXED} at bot-build time. Betting groups ignore this field.
+     * PATCH is full-replace — supplying this field overwrites the persisted value, but
+     * does NOT re-assign already-running bots (mirrors {@code strategyMix} semantics).
+     */
+    private SlotStrategyId slotStrategyId;
 
     // Lifecycle management
     private BotGroupStatus targetStatus;

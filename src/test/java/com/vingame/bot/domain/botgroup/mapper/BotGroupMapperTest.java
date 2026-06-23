@@ -3,6 +3,7 @@ package com.vingame.bot.domain.botgroup.mapper;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
@@ -322,6 +323,65 @@ class BotGroupMapperTest {
             assertThatThrownBy(() -> mapper.updateEntityFromDTO(patch, entity))
                     .isInstanceOf(BadRequestException.class)
                     .hasMessageContaining("non-empty");
+        }
+    }
+
+    @Nested
+    @DisplayName("slotStrategyId mapping (SLOT_MACHINE_BOT)")
+    class SlotStrategyIdTests {
+
+        @Test
+        @DisplayName("toDTO emits slotStrategyId as-is when persisted on the entity")
+        void toDtoEmitsSlotStrategyId() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .slotStrategyId(SlotStrategyId.RANDOM).build();
+
+            BotGroupDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM);
+        }
+
+        @Test
+        @DisplayName("toDTO returns null slotStrategyId when entity has none (FIXED fallback lives in the service)")
+        void toDtoNullSlotStrategyIdWhenAbsent() {
+            BotGroup entity = BotGroup.builder().id("g").name("g").build();
+
+            assertThat(mapper.toDTO(entity).getSlotStrategyId()).isNull();
+        }
+
+        @Test
+        @DisplayName("toEntity persists slotStrategyId as-is when provided in the DTO")
+        void toEntityPersistsSlotStrategyId() {
+            BotGroupDTO dto = BotGroupDTO.builder().name("g")
+                    .slotStrategyId(SlotStrategyId.RANDOM).build();
+
+            BotGroup entity = mapper.toEntity(dto);
+
+            assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM);
+        }
+
+        @Test
+        @DisplayName("PATCH full-replaces slotStrategyId when DTO supplies a value")
+        void patchFullReplacesSlotStrategyId() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .slotStrategyId(SlotStrategyId.FIXED).build();
+            BotGroupDTO patch = BotGroupDTO.builder().slotStrategyId(SlotStrategyId.RANDOM).build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM);
+        }
+
+        @Test
+        @DisplayName("PATCH retains existing slotStrategyId when DTO omits the field (null)")
+        void patchKeepsExistingWhenDtoNull() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .slotStrategyId(SlotStrategyId.RANDOM).build();
+            BotGroupDTO patch = BotGroupDTO.builder().name("renamed").build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM);
         }
     }
 }

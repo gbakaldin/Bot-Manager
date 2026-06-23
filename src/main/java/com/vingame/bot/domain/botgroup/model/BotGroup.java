@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.botgroup.model;
 
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Getter;
@@ -68,6 +69,19 @@ public class BotGroup {
      * newly-created or restarted bots draw from the new mix (Architecture Decision 9).
      */
     private List<WeightedStrategy> strategyMix;
+
+    /**
+     * Slot strategy applied to every bot in a SLOT group. Nullable — a null value
+     * falls back to {@link SlotStrategyId#FIXED} at bot-build time in
+     * {@code BotGroupBehaviorService.createSingleBot}. Betting groups ignore this
+     * field (their per-bot strategy comes from {@link #strategyMix}).
+     * <p>
+     * <b>PATCH semantics:</b> full-replace — a non-null DTO value overwrites the
+     * persisted value; a null DTO value keeps the existing one. Mid-flight changes
+     * do NOT re-assign already-running bots — only newly-created / restarted bots
+     * pick up the new value, mirroring {@link #strategyMix}.
+     */
+    private SlotStrategyId slotStrategyId;
 
     // Lifecycle management - target state (what admin wants)
     private BotGroupStatus targetStatus;
