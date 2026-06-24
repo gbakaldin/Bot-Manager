@@ -507,6 +507,28 @@ public class BettingMiniGameBot extends Bot {
     }
 
     /**
+     * Seam over {@code strategy.decide(ctx)} (TAI_XIU_BOT plan AD-13). Both betting
+     * call sites — {@link #betCondition()} (parks the decision) and {@link #bet()}
+     * (pops/re-derives) — route through this method so a subclass can post-process
+     * the strategy's chosen entry without touching the strategy itself.
+     *
+     * <p><b>Default is identity</b>: it returns the strategy's decision verbatim, so
+     * {@link BettingMiniGameBot} behavior is byte-for-byte unchanged and BettingMini
+     * keeps allowing multiple distinct entries within a single round.
+     *
+     * <p>{@link TaiXiuGameBot} overrides this to enforce the single-entry-per-round
+     * lock (a Tai Xiu bot bets only one of Tài/Xỉu per round; later ticks may only
+     * increase the stake on the entry already bet this round). The strategy's
+     * <i>amount</i> is preserved either way — only the <i>entry</i> is constrained.
+     *
+     * @param ctx the per-tick context, also handed to the strategy
+     * @return the (possibly remapped) decision, or empty to skip the tick
+     */
+    protected Optional<BetDecision> decideBet(BetContext ctx) {
+        return strategy.decide(ctx);
+    }
+
+    /**
      * Phase 5: the {@code sendAsync} supplier reads the decision parked by
      * {@link #betCondition()}.
      *
@@ -538,7 +560,7 @@ public class BettingMiniGameBot extends Bot {
                 // mid-tick is beforeReconnect, and a stale-tick decision is
                 // strictly less safe than a fresh one.
                 log.debug("Bot {}: bet() supplier found no parked decision — re-deriving via strategy", getUserName());
-                popped = strategy.decide(buildBetContext());
+                popped = decideBet(buildBetContext());
                 if (popped.isEmpty()) {
                     // Strategy also declined. The scenario engine forbids
                     // returning null from the supplier (it throws
@@ -595,7 +617,7 @@ public class BettingMiniGameBot extends Bot {
             if (strategy == null) {
                 return false;
             }
-            Optional<BetDecision> decision = strategy.decide(buildBetContext());
+            Optional<BetDecision> decision = decideBet(buildBetContext());
             if (decision.isEmpty()) {
                 log.debug("Bot {}: strategy skipped tick (no decision)", getUserName());
                 return false;
