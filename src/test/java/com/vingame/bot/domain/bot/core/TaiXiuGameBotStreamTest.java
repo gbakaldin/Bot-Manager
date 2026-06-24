@@ -135,12 +135,17 @@ class TaiXiuGameBotStreamTest {
         b.setRandom(new Random(0L));
         b.initializeSubclass();
         // The inherited initializeSubclass() dead-stores game.getOffset() into the
-        // unused `offset` field (BettingMiniGameBot.java:131) — a generic setup read,
+        // unused `offset` field (BettingMiniGameBot.java) — a generic setup read,
         // NOT a CMD-derivation use. Clear that one invocation so the AD-9 negative
         // assertion below pins what actually matters: the offset is never consulted
         // during the operational subscribe→start→bet→end stream. The poison value
         // (999_999) is the second guard — if it leaked into any CMD, the fixed-CMD
         // assertions (1005/1002/1004/1000) would already fail.
+        //
+        // NOTE: this test seeds a NON-null poison offset, so it does not exercise
+        // the real production case where a Tai Xiu game's offset is null. That
+        // null-offset init path (the staging NPE) is covered directly, without any
+        // clearInvocations workaround, by TaiXiuGameBotNullOffsetInitTest.
         org.mockito.Mockito.clearInvocations(gameSpy);
 
         seedLong(b, "lastFetchedBalance", START_BALANCE);
