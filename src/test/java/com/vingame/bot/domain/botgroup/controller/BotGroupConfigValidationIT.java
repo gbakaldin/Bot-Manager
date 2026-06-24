@@ -113,6 +113,7 @@ class BotGroupConfigValidationIT {
 
     private static final String BM_GAME = "game-bm";
     private static final String SLOT_GAME = "game-slot";
+    private static final String TX_GAME = "game-tx";
 
     private void stubBettingMiniGame() {
         when(gameService.findById(BM_GAME))
@@ -122,6 +123,11 @@ class BotGroupConfigValidationIT {
     private void stubSlotGame() {
         when(gameService.findById(SLOT_GAME))
                 .thenReturn(Game.builder().id(SLOT_GAME).gameType(GameType.SLOT).build());
+    }
+
+    private void stubTaiXiuGame() {
+        when(gameService.findById(TX_GAME))
+                .thenReturn(Game.builder().id(TX_GAME).gameType(GameType.TAI_XIU).build());
     }
 
     /** repository.save echoes its argument so the controller can map it back to a DTO. */
@@ -368,6 +374,96 @@ class BotGroupConfigValidationIT {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(json(dto)))
                     .andExpect(status().isOk());
+
+            verify(repository).save(any(BotGroup.class));
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // TAI_XIU — same STRICT-GRID rules as BETTING_MINI (TAI_XIU_BOT AD-8).
+    // ---------------------------------------------------------------------
+
+    @Nested
+    @DisplayName("TAI_XIU (strict-grid, same as BETTING_MINI)")
+    class TaiXiuLayer {
+
+        /**
+         * Same betting-field shape as {@link #validBettingMiniDto()} but pointed at a
+         * TAI_XIU game. Used to prove the grid is now enforced for Tai Xiu too.
+         */
+        private BotGroupDTO.BotGroupDTOBuilder validTaiXiuDto() {
+            return BotGroupDTO.builder()
+                    .name("txtest")
+                    .environmentId("env-1")
+                    .gameId(TX_GAME)
+                    .namePrefix("tx")
+                    .password("secret")
+                    .botCount(1)
+                    .existingGroup(true)
+                    .minBet(100L)
+                    .maxBet(500L)
+                    .betIncrement(10L)
+                    .minBetsPerRound(1)
+                    .maxBetsPerRound(5)
+                    .maxTotalBetPerRound(1000L);
+        }
+
+        @Test
+        @DisplayName("TAI_XIU minBet > maxBet → 400 (grid now enforced, AD-8)")
+        void taiXiuMinBetGreaterThanMaxBet() throws Exception {
+            stubTaiXiuGame();
+
+            BotGroupDTO dto = validTaiXiuDto()
+                    .minBet(500L)
+                    .maxBet(100L)
+                    .build();
+
+            mockMvc.perform(post("/api/v1/bot-group/")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(json(dto)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value(Matchers.allOf(
+                            Matchers.containsString("Invalid bot-group config"),
+                            Matchers.containsString("minBet (500) must be <= maxBet (100)"))));
+
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("TAI_XIU off-grid config that SLOT would have ignored → 400 (no longer permissive, AD-8)")
+        void taiXiuOffGridRejected() throws Exception {
+            stubTaiXiuGame();
+
+            // (505-100)%10 != 0 — off-grid. Previously the no-op validator let this through.
+            BotGroupDTO dto = validTaiXiuDto()
+                    .minBet(100L)
+                    .maxBet(505L)
+                    .betIncrement(10L)
+                    .build();
+
+            mockMvc.perform(post("/api/v1/bot-group/")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(json(dto)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value(
+                            Matchers.containsString("must be exactly divisible by betIncrement")));
+
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("valid TAI_XIU config → 200 (passes the shared grid rules)")
+        void validTaiXiuConfigSucceeds() throws Exception {
+            stubTaiXiuGame();
+            stubRepositorySaveEcho();
+
+            mockMvc.perform(post("/api/v1/bot-group/")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(json(validTaiXiuDto().build())))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.gameId").value(TX_GAME));
 
             verify(repository).save(any(BotGroup.class));
         }

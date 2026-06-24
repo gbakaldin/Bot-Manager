@@ -11,9 +11,13 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 /**
  * Phase 3 tests for the permissive no-op validators: {@link SlotConfigValidator}
  * (AD-4 — betting fields are server-sourced and ignored) and the unimplemented
- * game-type validators {@link TaiXiuConfigValidator} / {@link CardGameConfigValidator}
- * / {@link UpDownConfigValidator} (AD-5 — do not block group creation for types
- * that cannot start a bot anyway).
+ * game-type validators {@link CardGameConfigValidator} / {@link UpDownConfigValidator}
+ * (AD-5 — do not block group creation for types that cannot start a bot anyway).
+ *
+ * <p>{@code TaiXiuConfigValidator} was promoted out of the permissive set
+ * (TAI_XIU_BOT plan AD-8 — Tai Xiu can now start a bot and enforces the same
+ * STRICT-GRID rules as BETTING_MINI); its coverage lives in
+ * {@link TaiXiuConfigValidatorTest}.
  *
  * <p>Each is proven permissive by feeding it a configuration that
  * {@link BettingMiniConfigValidator} <em>would</em> reject (every betting field
@@ -24,7 +28,6 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 class PermissiveConfigValidatorsTest {
 
     private final SlotConfigValidator slot = new SlotConfigValidator();
-    private final TaiXiuConfigValidator taiXiu = new TaiXiuConfigValidator();
     private final CardGameConfigValidator cardGame = new CardGameConfigValidator();
     private final UpDownConfigValidator upDown = new UpDownConfigValidator();
 
@@ -63,13 +66,6 @@ class PermissiveConfigValidatorsTest {
     }
 
     @Test
-    @DisplayName("TAI_XIU accepts a config BETTING_MINI would reject (AD-5)")
-    void taiXiuAcceptsGarbage() {
-        assertThatCode(() -> taiXiu.validate(garbageBettingConfig()))
-                .doesNotThrowAnyException();
-    }
-
-    @Test
     @DisplayName("CARD_GAME accepts a config BETTING_MINI would reject (AD-5)")
     void cardGameAcceptsGarbage() {
         assertThatCode(() -> cardGame.validate(garbageBettingConfig()))
@@ -88,7 +84,6 @@ class PermissiveConfigValidatorsTest {
     void acceptDefaultConfig() {
         BotGroup empty = BotGroup.builder().build();
         assertThatCode(() -> slot.validate(empty)).doesNotThrowAnyException();
-        assertThatCode(() -> taiXiu.validate(empty)).doesNotThrowAnyException();
         assertThatCode(() -> cardGame.validate(empty)).doesNotThrowAnyException();
         assertThatCode(() -> upDown.validate(empty)).doesNotThrowAnyException();
     }
@@ -97,7 +92,6 @@ class PermissiveConfigValidatorsTest {
     @DisplayName("each validator reports its own supportedType")
     void supportedTypes() {
         assertThat(slot.supportedType()).isEqualTo(GameType.SLOT);
-        assertThat(taiXiu.supportedType()).isEqualTo(GameType.TAI_XIU);
         assertThat(cardGame.supportedType()).isEqualTo(GameType.CARD_GAME);
         assertThat(upDown.supportedType()).isEqualTo(GameType.UP_DOWN);
     }
