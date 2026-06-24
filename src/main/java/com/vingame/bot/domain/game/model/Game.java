@@ -117,6 +117,56 @@ public class Game {
      * Read-side fallback only; never written back to Mongo. The Phase 6 migration
      * persists the synthesized map and {@code $unset}s the legacy fields.
      */
+    /**
+     * The two fixed Tài/Xỉu entries a Tai Xiu game always offers, as a flat-prior
+     * affinity map {@code {1:1, 2:1}}. Tai Xiu is intrinsically a 2-option game
+     * (Tài vs Xỉu), so an operator never configures options for it. The eids
+     * {@code 1} and {@code 2} are the values the inherited
+     * {@code resolveNextEntryToBet}/strategy emit as the bet {@code eid} (the
+     * captured Tai Xiu bet used {@code eid:1}), so a defaulted Tai Xiu game bets
+     * over {@code {1, 2}}.
+     *
+     * <p>Insertion-ordered ({@link LinkedHashMap}) to match the deterministic
+     * option iteration {@link #getEffectiveOptionAffinities()} guarantees for the
+     * synthesized legacy paths.
+     */
+    public static Map<Integer, Integer> defaultTaiXiuOptionAffinities() {
+        Map<Integer, Integer> defaults = new LinkedHashMap<>(2);
+        defaults.put(1, 1);
+        defaults.put(2, 1);
+        return defaults;
+    }
+
+    /**
+     * Tai-Xiu-scoped default: if this game has neither {@code optionAffinities}
+     * nor a legacy option field set, populate {@code optionAffinities} with the
+     * two fixed Tài/Xỉu entries ({@link #defaultTaiXiuOptionAffinities()}) so
+     * {@link #getEffectiveOptionAffinities()} resolves to 2 equal options instead
+     * of throwing. Tai Xiu is intrinsically a 2-option game, so this spares the
+     * operator from ever setting {@code numberOfOptions} on it.
+     *
+     * <p><b>Idempotent and no-op when already configured.</b> If any option
+     * field is set (including an explicit {@code numberOfOptions:2}) this leaves
+     * the game untouched, so an operator override always wins. Only applied on
+     * the Tai Xiu bot path (see {@code TaiXiuGameBot.initializeSubclass}); it
+     * does <b>not</b> weaken {@link #getEffectiveOptionAffinities()} validation
+     * for any other game type — BettingMini with no option config still throws.
+     *
+     * <p>{@code synchronized} on {@code this} because the same {@link Game}
+     * instance is shared across the parallel bot-creation threads of a group;
+     * the guarded check-then-set keeps the shared mutation race-free, and the
+     * "only when absent" guard makes concurrent calls converge on the same map.
+     */
+    public synchronized void applyTaiXiuOptionDefaults() {
+        boolean hasOptionConfig =
+                (optionAffinities != null && !optionAffinities.isEmpty())
+                        || (bettingOptions != null && !bettingOptions.isEmpty())
+                        || (numberOfOptions != null && numberOfOptions > 0);
+        if (!hasOptionConfig) {
+            optionAffinities = defaultTaiXiuOptionAffinities();
+        }
+    }
+
     public Map<Integer, Integer> getEffectiveOptionAffinities() {
         if (optionAffinities != null && !optionAffinities.isEmpty()) {
             return optionAffinities;
