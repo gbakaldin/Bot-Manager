@@ -15,6 +15,7 @@ import com.vingame.bot.domain.bot.strategy.BetContext;
 import com.vingame.bot.domain.bot.strategy.BetDecision;
 import com.vingame.bot.domain.bot.strategy.BettingStrategy;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
+import com.vingame.bot.domain.bot.strategy.BotMemory;
 import com.vingame.bot.domain.bot.strategy.RoundResult;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
@@ -37,6 +38,7 @@ import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -233,6 +235,142 @@ class TaiXiuGameBotSingleEntryLockTest {
         assertThat(eidOf(placeBet())).as("now locked to Xỉu in round 2").isEqualTo(2L);
     }
 
+    @Test
+    @DisplayName("re-derive fallback: bet() supplier with NO parked decision still honors the lock")
+    void reDeriveFallbackHonorsLock() throws Exception {
+        bot = newBot();
+        openRound(BASE_SID);
+
+        // First bet via the normal park→pop path: lock onto Tài.
+        strategy.optionId = TaiXiuGameBot.TAI_EID;
+        strategy.amount = 400_000L;
+        assertThat(eidOf(placeBet())).isEqualTo(1L);
+
+        // Now simulate the park/re-derive race: condition parks a decision, but a
+        // concurrent beforeReconnect clears pendingDecision before the supplier
+        // runs. The supplier must re-derive via decideBet() and still produce Tài,
+        // even though the strategy is now flipped to Xỉu. This is the path the
+        // existing placeBet() helper never exercises (it always pops a parked value).
+        strategy.optionId = TaiXiuGameBot.XIU_EID;
+        strategy.amount = 800_000L;
+        assertThat(invokeBetCondition()).as("condition parks a (remapped) decision").isTrue();
+        clearPendingDecision(); // emulate beforeReconnect wiping the parked value
+
+        Bet.BetData reDerived = (Bet.BetData) readBody(invokeBetSupplier());
+        assertThat(reDerived.getEid())
+                .as("re-derive path agrees with parked path: still locked to Tài")
+                .isEqualTo(1L);
+        assertThat(reDerived.getB())
+                .as("re-derived amount is the strategy's current amount")
+                .isEqualTo(800_000L);
+    }
+
+    @Test
+    @DisplayName("park vs re-derive cannot disagree: both call sites read the same round memory")
+    void parkAndReDeriveAgreeWithinRound() throws Exception {
+        bot = newBot();
+        openRound(BASE_SID);
+
+        // Lock onto Xỉu first.
+        strategy.optionId = TaiXiuGameBot.XIU_EID;
+        strategy.amount = 200_000L;
+        assertThat(eidOf(placeBet())).isEqualTo(2L);
+
+        // Strategy flips to Tài. Compute the PARKED entry (via condition) and the
+        // RE-DERIVED entry (via supplier with pending cleared) for the SAME tick;
+        // they must be identical.
+        strategy.optionId = TaiXiuGameBot.TAI_EID;
+        strategy.amount = 600_000L;
+
+        assertThat(invokeBetCondition()).isTrue();
+        long parkedEid = parkedEntry();        // peek what condition parked
+        clearPendingDecision();
+        long reDerivedEid = ((Bet.BetData) readBody(invokeBetSupplier())).getEid();
+
+        assertThat(parkedEid).as("parked decision entry").isEqualTo(2L);
+        assertThat(reDerivedEid).as("re-derived entry equals parked entry").isEqualTo(parkedEid);
+    }
+
+    @Test
+    @DisplayName("lock holds across MANY bets in one round with martingale flipping every tick")
+    void lockHoldsAcrossManyBets() throws Exception {
+        bot = newBot();
+        openRound(BASE_SID);
+
+        // First bet: Tài.
+        strategy.optionId = TaiXiuGameBot.TAI_EID;
+        strategy.amount = 100_000L;
+        Bet.BetData first = placeBet();
+        assertThat(first.getEid()).isEqualTo(1L);
+        assertThat(first.getB()).isEqualTo(100_000L);
+
+        // Five more ticks: strategy flips to Xỉu every time and doubles the stake
+        // (martingale-on-the-wrong-side). Every emitted bet must stay Tài (eid 1)
+        // while the strategy's increasing amount is preserved verbatim.
+        long amount = 100_000L;
+        for (int tick = 1; tick <= 5; tick++) {
+            amount *= 2;
+            // Strategy alternates the side it WANTS so we never accidentally line
+            // up with the lock: odd ticks want Xỉu, even ticks want Tài-again.
+            strategy.optionId = (tick % 2 == 1) ? TaiXiuGameBot.XIU_EID : TaiXiuGameBot.TAI_EID;
+            strategy.amount = amount;
+            Bet.BetData b = placeBet();
+            assertThat(b.getEid()).as("tick " + tick + " stays locked to Tài").isEqualTo(1L);
+            assertThat(b.getB()).as("tick " + tick + " preserves strategy amount").isEqualTo(amount);
+        }
+    }
+
+    @Test
+    @DisplayName("stale lock cannot leak across rounds even though pendingDecision is not cleared on StartGame")
+    void staleLockDoesNotLeakAcrossStartGame() throws Exception {
+        bot = newBot();
+        openRound(BASE_SID);
+
+        // Round 1: lock onto Tài, then park (but do NOT consume) a remapped
+        // decision — leaving a stale value in pendingDecision exactly like a tick
+        // that straddles the round boundary.
+        strategy.optionId = TaiXiuGameBot.TAI_EID;
+        strategy.amount = 500_000L;
+        assertThat(eidOf(placeBet())).isEqualTo(1L);
+        strategy.optionId = TaiXiuGameBot.XIU_EID;
+        assertThat(invokeBetCondition()).as("round-1 condition parks a stale Tài decision").isTrue();
+
+        // New StartGame with a fresh sessionId. onStartGame does NOT clear
+        // pendingDecision by design — beginRound clears the round bet map, which is
+        // what the lock derives from. The first bet of round 2 must therefore be
+        // free: strategy wants Xỉu and Xỉu must be emitted.
+        invokeHandler("onStartGame", startGameWithSid(BASE_SID + 1));
+        setRemainingTime(50_000L);
+        setField("gameState", BettingMiniGameState.BET);
+
+        strategy.optionId = TaiXiuGameBot.XIU_EID;
+        strategy.amount = 700_000L;
+        Bet.BetData round2First = placeBet();
+        assertThat(round2First.getEid())
+                .as("round-2 first bet is unconstrained — no stale Tài lock from round 1")
+                .isEqualTo(2L);
+        assertThat(round2First.getB()).isEqualTo(700_000L);
+    }
+
+    @Test
+    @DisplayName("defensive: a multi-key round-bet map locks to the first entry by iteration order")
+    void defensiveMultiKeyMapLocksToFirstEntry() throws Exception {
+        bot = newBot();
+        openRound(BASE_SID);
+
+        // Force the (should-never-happen) state where the round bet map has BOTH
+        // entries recorded. The lock derivation must still return a value in {1,2}
+        // (the first by iteration order) and never null/0.
+        recordBetSent(BASE_SID, TaiXiuGameBot.TAI_EID, 100_000L);
+        recordBetSent(BASE_SID, TaiXiuGameBot.XIU_EID, 100_000L);
+
+        strategy.optionId = TaiXiuGameBot.XIU_EID;
+        strategy.amount = 300_000L;
+        Bet.BetData b = placeBet();
+        assertThat(b.getEid()).as("locked entry is one of the recorded 1-based ids").isIn(1L, 2L);
+        assertThat(b.getEid()).as("never collapses to 0").isNotZero();
+    }
+
     /* ---- round / bet helpers ---- */
 
     /** subscribe → start → open BET window for the given sid. */
@@ -300,6 +438,32 @@ class TaiXiuGameBotSingleEntryLockTest {
         Field f = ActionRequestMessage.class.getDeclaredField("body");
         f.setAccessible(true);
         return (Body) f.get(msg);
+    }
+
+    /** Emulate a beforeReconnect wiping the parked decision before bet() runs. */
+    @SuppressWarnings("unchecked")
+    private void clearPendingDecision() throws Exception {
+        Field f = BettingMiniGameBot.class.getDeclaredField("pendingDecision");
+        f.setAccessible(true);
+        ((AtomicReference<Optional<BetDecision>>) f.get(bot)).set(Optional.empty());
+    }
+
+    /** Peek the entry currently parked by betCondition() without consuming it. */
+    @SuppressWarnings("unchecked")
+    private long parkedEntry() throws Exception {
+        Field f = BettingMiniGameBot.class.getDeclaredField("pendingDecision");
+        f.setAccessible(true);
+        Optional<BetDecision> parked = ((AtomicReference<Optional<BetDecision>>) f.get(bot)).get();
+        assertThat(parked).as("a decision is parked").isPresent();
+        return parked.get().optionId();
+    }
+
+    /** Force a bet into the in-flight round memory (defensive-path setup). */
+    private void recordBetSent(long sid, int optionId, long amount) throws Exception {
+        Field f = BettingMiniGameBot.class.getDeclaredField("memory");
+        f.setAccessible(true);
+        BotMemory memory = (BotMemory) f.get(bot);
+        memory.recordBetSent(sid, optionId, amount);
     }
 
     private void setRemainingTime(long ms) throws Exception {
