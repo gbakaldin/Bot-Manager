@@ -128,7 +128,14 @@ public class BettingMiniGameBot extends Bot {
     @Override
     protected void initializeSubclass() {
         Game game = configuration.getGame();
-        this.offset = game.getOffset();
+        // Null-safe unbox: BettingMini games always carry a non-null offset, so
+        // this is value-identical for them. A fixed-CMD game type (Tai Xiu, AD-9)
+        // leaves offset null by design and overrides every CMD seam, so the 0
+        // fallback is a never-read dead store rather than a behavioral change.
+        // Eagerly unboxing game.getOffset() here NPEs for the null-offset case
+        // (staging: a Tai Xiu group created 0 bots — every createBot NPE'd here).
+        Integer gameOffset = game.getOffset();
+        this.offset = gameOffset != null ? gameOffset : 0;
         this.sidStore = new SessionIdStore(0L);
 
         this.request = buildRequest(game);
