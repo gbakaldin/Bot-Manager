@@ -8,16 +8,18 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 @AllArgsConstructor
-public class Request {
+public class Request implements GameRequest {
 
     private final String pluginName;
     private final String zoneName;
     private final int cmdPrefix;
 
+    @Override
     public SubscribeToLobbyMessage subscribe() {
         return new SubscribeToLobbyMessage(zoneName, pluginName, new Body(cmdPrefix + 3000));
     }
 
+    @Override
     public Bet bet(long amount, int entryId, long sid) {
         return new Bet(cmdPrefix + 3002, zoneName, pluginName, amount, entryId, sid);
     }
