@@ -2,6 +2,7 @@ package com.vingame.bot.domain.bot.core;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.domain.bot.message.request.Request;
 import com.vingame.bot.domain.bot.strategy.BetContext;
@@ -21,6 +22,7 @@ import com.vingame.bot.domain.bot.message.GameMessageTypes;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.HasJackpot;
+import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
@@ -64,7 +66,11 @@ public class BettingMiniGameBot extends Bot {
     // Game state
     @Getter
     private SessionIdStore sidStore;
-    private int offset;
+    // The BettingMini game offset (CMD = CODE + offset). Read only by the default
+    // CMD-derivation seams (subscribeCmd/updateBetCmd/startGameCmd/endGameCmd/
+    // messageTypeRegistrations/buildRequest). A fixed-CMD subclass (e.g. Tai Xiu)
+    // overrides those seams and never reads this field.
+    protected int offset;
 
     private long blockBetTime = 3_000L;
     private volatile GameState gameState;
@@ -124,11 +130,7 @@ public class BettingMiniGameBot extends Bot {
         this.offset = game.getOffset();
         this.sidStore = new SessionIdStore(0L);
 
-        this.request = new Request(
-            game.getPluginName(),
-            configuration.getZoneName(),
-            offset
-        );
+        this.request = buildRequest(game);
 
         // BotMemory is built after `game` is set so its captured Game reference is
         // non-null. Capacity defaults to BotMemory.DEFAULT_CAPACITY (50, per
@@ -164,6 +166,88 @@ public class BettingMiniGameBot extends Bot {
         log.info("BettingMiniGameBot initialized: game={}, offset={}, options={}, md5={}, watchdog={}s, strategy={}",
                 game.getName(), offset, game.getEffectiveOptionAffinities().size(), game.isMd5(),
                 configuration.getWatchdogTimeoutSeconds(), effectiveId);
+    }
+
+    // ----------------------------------------------------------------------
+    // CMD-derivation seams (AD-2 of TAI_XIU_BOT.md).
+    //
+    // BettingMini derives every CMD as CODE + offset and registers polymorphic
+    // subtypes against those summed CMDs. The default implementations below
+    // reproduce that scheme byte-for-byte. A fixed-CMD game type (e.g. Tai Xiu)
+    // overrides these to return literal CMD constants and a no-offset
+    // registration set, without touching any inherited handler logic.
+    // ----------------------------------------------------------------------
+
+    /** @return the inbound subscribe CMD (default: SUBSCRIBE_CODE + offset). */
+    protected int subscribeCmd() {
+        return GameMessageTypes.SUBSCRIBE_CODE + offset;
+    }
+
+    /** @return the updateBet CMD (default: UPDATE_BET_CODE + offset). */
+    protected int updateBetCmd() {
+        return GameMessageTypes.UPDATE_BET_CODE + offset;
+    }
+
+    /** @return the inbound startGame CMD (default: START_GAME_CODE + offset). */
+    protected int startGameCmd() {
+        return GameMessageTypes.START_GAME_CODE + offset;
+    }
+
+    /** @return the inbound endGame CMD (default: END_GAME_CODE + offset). */
+    protected int endGameCmd() {
+        return GameMessageTypes.END_GAME_CODE + offset;
+    }
+
+    /**
+     * Polymorphic subtype registrations for the scenario's ObjectMapper.
+     * Default wraps {@code messageTypes.getTypeRegistrations(offset, md5)} —
+     * CMD = CODE + offset. A fixed-CMD subclass overrides this to register
+     * against literal CMD strings with no offset.
+     */
+    protected NamedType[] messageTypeRegistrations() {
+        return messageTypes.getTypeRegistrations(offset, configuration.getGame().isMd5());
+    }
+
+    /**
+     * Build the outbound request helper. Default builds the BettingMini
+     * {@link Request} keyed on {@code offset} (it adds {@code offset + 3000/3002/...}
+     * per outbound). A fixed-CMD subclass overrides this to emit bare literal CMDs.
+     */
+    protected Request buildRequest(Game game) {
+        return new Request(
+            game.getPluginName(),
+            configuration.getZoneName(),
+            offset
+        );
+    }
+
+    // Concrete-class accessor seams. Default delegates to the injected
+    // GameMessageTypes provider; a fixed-CMD subclass overrides these to
+    // delegate to its own per-product provider with the same accessor shape.
+
+    /** @return concrete subscribe message class (default: messageTypes.subscribeType()). */
+    protected Class<? extends SubscribeMessage> subscribeType() {
+        return messageTypes.subscribeType();
+    }
+
+    /** @return concrete startGame message class (default: messageTypes.startGameType()). */
+    protected Class<? extends StartGameMessage> startGameType() {
+        return messageTypes.startGameType();
+    }
+
+    /** @return concrete MD5 startGame message class (default: messageTypes.startGameMd5Type()). */
+    protected Class<? extends StartGameMd5Message> startGameMd5Type() {
+        return messageTypes.startGameMd5Type();
+    }
+
+    /** @return concrete updateBet message class (default: messageTypes.updateBetType()). */
+    protected Class<? extends UpdateBetMessage> updateBetType() {
+        return messageTypes.updateBetType();
+    }
+
+    /** @return concrete endGame message class (default: messageTypes.endGameType()). */
+    protected Class<? extends EndGameMessage> endGameType() {
+        return messageTypes.endGameType();
     }
 
     private void onNewSession() {
@@ -489,12 +573,12 @@ public class BettingMiniGameBot extends Bot {
 
         ObjectMapper mapper = new ObjectMapper();
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
-        mapper.registerSubtypes(messageTypes.getTypeRegistrations(offset, game.isMd5()));
+        mapper.registerSubtypes(messageTypeRegistrations());
 
-        Class<? extends SubscribeMessage> subscribeClass = messageTypes.subscribeType();
-        Class<? extends StartGameMessage> startGameClass = game.isMd5() ? messageTypes.startGameMd5Type() : messageTypes.startGameType();
-        Class<? extends UpdateBetMessage> updateBetClass = messageTypes.updateBetType();
-        Class<? extends EndGameMessage> endGameClass = messageTypes.endGameType();
+        Class<? extends SubscribeMessage> subscribeClass = subscribeType();
+        Class<? extends StartGameMessage> startGameClass = game.isMd5() ? startGameMd5Type() : startGameType();
+        Class<? extends UpdateBetMessage> updateBetClass = updateBetType();
+        Class<? extends EndGameMessage> endGameClass = endGameType();
 
         // onMessage handlers run on the per-client netty-ws-message-processor-ws-<userName>
         // pool; sendAsync's supplier + condition run on a scenario-owned pool-N-thread-1.
@@ -504,7 +588,7 @@ public class BettingMiniGameBot extends Bot {
         return pipeline(buildContext("[Betting Mini][" + configuration.getGame().getName() + "]", mapper))
                 .waitFor(1_000L)
                 .send(request::subscribe)
-                .waitForMessage(cmd(GameMessageTypes.SUBSCRIBE_CODE + offset).and(typeOf(RECEIVED)))
+                .waitForMessage(cmd(subscribeCmd()).and(typeOf(RECEIVED)))
                 .onMessage(subscribeClass, mdcConsumer(this::onSubscribe))
                 .onMessage(startGameClass, mdcConsumer(this::onStartGame))
                 .onMessage(updateBetClass, mdcConsumer(this::onUpdate))
@@ -528,10 +612,10 @@ public class BettingMiniGameBot extends Bot {
         }
 
         List<Integer> cmdList = List.of(
-            GameMessageTypes.SUBSCRIBE_CODE + offset,
-            GameMessageTypes.UPDATE_BET_CODE + offset,
-            GameMessageTypes.START_GAME_CODE + offset,
-            GameMessageTypes.END_GAME_CODE + offset
+            subscribeCmd(),
+            updateBetCmd(),
+            startGameCmd(),
+            endGameCmd()
         );
         // Pass the bot's MDC snapshot so the "User <name>: ..." log lines emitted
         // from the netty-ws-message-processor-ws-<userName> pool carry botGroupId,
