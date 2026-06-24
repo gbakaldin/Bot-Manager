@@ -84,9 +84,19 @@ class StrategyControllerTest {
     }
 
     @Test
-    @DisplayName("GET /api/v1/strategy/?gameType=TAI_XIU returns an empty list (no strategies implemented yet)")
-    void shouldReturnEmptyListForUnimplementedGameType() throws Exception {
+    @DisplayName("GET /api/v1/strategy/?gameType=TAI_XIU returns the betting strategies (reuses the betting family, AD-6)")
+    void shouldReturnBettingStrategiesWhenGameTypeTaiXiu() throws Exception {
         mockMvc.perform(get("/api/v1/strategy/").param("gameType", "TAI_XIU"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(StrategyId.values().length))
+                .andExpect(jsonPath("$[*].id").value(hasItem("RANDOM")))
+                .andExpect(jsonPath("$[*].id").value(hasItem(StrategyId.MARTINGALE_CLASSIC_CAUTIOUS.name())));
+    }
+
+    @Test
+    @DisplayName("GET /api/v1/strategy/?gameType=CARD_GAME returns an empty list (no strategies implemented yet)")
+    void shouldReturnEmptyListForUnimplementedGameType() throws Exception {
+        mockMvc.perform(get("/api/v1/strategy/").param("gameType", "CARD_GAME"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(0));
     }
