@@ -190,30 +190,31 @@ class TaiXiuGameBotDispatchTest {
     }
 
     @Test
-    @DisplayName("partial refund (gB=500k, gR=200k, GX=700k): balance +400k, stake 300k, winnings 200k (AD-11)")
+    @DisplayName("partial refund (gB=500k, gR=200k, G=120k, GX=320k): balance -180k, stake 300k, winnings = G 120k (AD-11)")
     void partialRefundNetsCorrectly() throws Exception {
         runRound("endGame_partialRefund.json");
 
-        // Net = -b + gR + winnings = -500000 + 200000 + 200000 = -100000.
-        assertThat(currentBalance()).isEqualTo(START_BALANCE - 100_000L);
+        // Net = -b + gR + G = -500000 + 200000 + 120000 = -180000.
+        assertThat(currentBalance()).isEqualTo(START_BALANCE - 180_000L);
         // effective wagered = gB - gR = 300000.
         verify(metrics).incBetsPlaced(1, 300_000L);
-        // winnings = GX - gB = 200000.
-        verify(metrics).incBotWinnings(200_000L);
-        assertThat(bot.getLastRoundWinnings()).isEqualTo(200_000L);
+        // winnings = G = 120000 directly (NOT GX-gB = 320000-500000 = -180000).
+        verify(metrics).incBotWinnings(120_000L);
+        assertThat(bot.getLastRoundWinnings()).isEqualTo(120_000L);
     }
 
     @Test
-    @DisplayName("zero refund (gB=500k, gR=0, GX=0 loss): balance -500k, stake 500k, winnings 0 (AD-11)")
+    @DisplayName("zero refund (gB=500k, gR=0, G=80k, GX=80k): balance -420k, stake 500k, winnings = G 80k (AD-11)")
     void zeroRefundFullLoss() throws Exception {
         runRound("endGame_noRefund.json");
 
-        // Net = -b + 0 + 0 = -500000.
-        assertThat(currentBalance()).isEqualTo(START_BALANCE - 500_000L);
-        // No refund -> full bet at risk.
+        // Net = -b + gR + G = -500000 + 0 + 80000 = -420000.
+        assertThat(currentBalance()).isEqualTo(START_BALANCE - 420_000L);
+        // No refund -> full bet at risk; effective wagered = gB = 500000.
         verify(metrics).incBetsPlaced(1, 500_000L);
-        verify(metrics, org.mockito.Mockito.never()).incBotWinnings(org.mockito.ArgumentMatchers.anyLong());
-        assertThat(bot.getLastRoundWinnings()).isZero();
+        // winnings = G = 80000 directly (NOT GX-gB = 80000-500000 = -420000).
+        verify(metrics).incBotWinnings(80_000L);
+        assertThat(bot.getLastRoundWinnings()).isEqualTo(80_000L);
     }
 
     /* ---- round driver: subscribe -> start -> bet -> end ---- */

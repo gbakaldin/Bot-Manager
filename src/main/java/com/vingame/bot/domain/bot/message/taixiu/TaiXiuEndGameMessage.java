@@ -21,18 +21,23 @@ import lombok.Setter;
  * <ul>
  *   <li>{@code gB} — gold game <b>bet</b> total (sample 500000)</li>
  *   <li>{@code gR} — gold <b>refund</b> (sample 500000)</li>
- *   <li>{@code GX} — gold <b>exchange</b>/gross settlement returned (sample 500000)</li>
+ *   <li>{@code G} — gold <b>win money</b> (winnings — direct field, sample 0)</li>
+ *   <li>{@code GX} — gold <b>exchange</b>/gross settlement returned = {@code gR + G}
+ *       (sample 500000); modeled but no longer used for winnings (OI-7)</li>
  *   <li>{@code cB}/{@code cBB}/{@code cR}/{@code CX} — coin-currency counterparts
  *       (all 0 in the capture)</li>
  *   <li>{@code iJp}/{@code jpV} — jackpot flag + value (both falsy/0 in the capture)</li>
  * </ul>
  * <p>
- * <b>Refund-aware formulas (AD-11; inferred from one fully-refunded capture, OI-7):</b>
+ * <b>Refund-aware formulas (AD-11; OI-7 RESOLVED 2026-06-24 — use the {@code G} field
+ * directly, do NOT compute {@code GX − gB}):</b>
  * <ul>
  *   <li><b>effective wagered</b> = {@code gB − gR} — what actually rode on the outcome.
  *       A fully-refunded round contributes {@code 0} (capture: {@code 500000 − 500000 = 0}).</li>
- *   <li><b>winnings</b> = {@code GX − gB}, floored at {@code 0} — payout above the bet.
- *       Capture: {@code 500000 − 500000 = 0}.</li>
+ *   <li><b>winnings</b> = {@code G} — the gold win-money field directly.
+ *       Capture: {@code 0}. ({@code GX − gB} was the earlier guess; it only
+ *       coincidentally equals {@code G} in the fully-refunded sample because
+ *       {@code GX = gR + G} and there {@code gR == gB}.)</li>
  * </ul>
  * Tai Xiu is a balanced 2-entry game: the server refunds the Tai/Xiu stake imbalance
  * to the latest bettors at round end, so a bet can be partially or fully refunded
@@ -64,7 +69,8 @@ public class TaiXiuEndGameMessage extends EndGameMessage
     // Gold-currency accounting.
     private long gB;   // gold bet total
     private long gR;   // gold refund
-    private long GX;   // gold exchange / gross settlement returned
+    private long G;    // gold win money (winnings — direct field; OI-7)
+    private long GX;   // gold exchange / gross settlement returned (= gR + G; modeled, unused for winnings)
 
     // Coin-currency counterparts (0 in the capture; modeled for completeness).
     private long cB;
@@ -84,6 +90,7 @@ public class TaiXiuEndGameMessage extends EndGameMessage
             @JsonProperty("d3") int d3,
             @JsonProperty("gB") long gB,
             @JsonProperty("gR") long gR,
+            @JsonProperty("G") long G,
             @JsonProperty("GX") long GX,
             @JsonProperty("cB") long cB,
             @JsonProperty("cBB") long cBB,
@@ -97,6 +104,7 @@ public class TaiXiuEndGameMessage extends EndGameMessage
         this.d3 = d3;
         this.gB = gB;
         this.gR = gR;
+        this.G = G;
         this.GX = GX;
         this.cB = cB;
         this.cBB = cBB;
@@ -118,14 +126,15 @@ public class TaiXiuEndGameMessage extends EndGameMessage
     }
 
     /**
-     * This bot's gross winnings for the just-completed round = {@code GX − gB}
-     * (gross settlement minus the bet), floored at {@code 0} (AD-11). A
-     * fully-refunded round ({@code GX == gB}) yields {@code 0}. {@code userName}
-     * ignored — the payload is recipient-personalized.
+     * This bot's winnings for the just-completed round = the {@code G} field directly
+     * (gold win money), floored at {@code 0} (AD-11; OI-7 RESOLVED 2026-06-24). Do NOT
+     * compute {@code GX − gB} — that only coincidentally matched {@code G} in the
+     * fully-refunded capture (since {@code GX = gR + G} and {@code gR == gB} there).
+     * {@code userName} ignored — the payload is recipient-personalized.
      */
     @Override
     public long winningsFor(String userName) {
-        return Math.max(0L, GX - gB);
+        return Math.max(0L, G);
     }
 
     /**

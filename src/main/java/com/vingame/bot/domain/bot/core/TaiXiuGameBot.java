@@ -145,12 +145,14 @@ public class TaiXiuGameBot extends BettingMiniGameBot {
     /**
      * Refund-aware net balance credit at round end (AD-11). The full bet {@code b} was
      * debited at bet time ({@code creditBalance}); a Tai Xiu round's true balance effect
-     * is {@code −b + gR + winnings}, so credit back the refund {@code gR} plus winnings.
-     * The refund is read from the {@link com.vingame.bot.domain.bot.message.taixiu.TaiXiuEndGameMessage}
-     * ({@code gR = gB − effectiveWagered}); {@code winnings} is the value the inherited
-     * {@code onEndGame} already extracted via {@code HasBotWinnings}. The bet-amount
-     * <i>metric</i> stays {@code gB − gR} (handled separately by {@code HasBetTotals}) —
-     * balance credit and metric semantics are intentionally distinct.
+     * is {@code −b + gR + G}, so credit back the refund {@code gR} plus winnings (the
+     * {@code G} win-money field). The refund is read from the
+     * {@link com.vingame.bot.domain.bot.message.taixiu.TaiXiuEndGameMessage}
+     * ({@code gR}); {@code winnings} is the value the inherited {@code onEndGame} already
+     * extracted via {@code HasBotWinnings} — which now returns {@code G} directly
+     * (OI-7), so {@code refund + winnings == gR + G}. The bet-amount <i>metric</i> stays
+     * {@code gB − gR} (handled separately by {@code HasBetTotals}) — balance credit and
+     * metric semantics are intentionally distinct.
      */
     @Override
     protected long balanceCreditFor(EndGameMessage msg, long winnings) {

@@ -107,9 +107,10 @@ class TaiXiuMessageDeserializationTest {
         assertThat(end.getD1()).isEqualTo(1);
         assertThat(end.getD2()).isEqualTo(6);
         assertThat(end.getD3()).isEqualTo(6);
-        // Captured accounting: gB=gR=GX=500000.
+        // Captured accounting: gB=gR=GX=500000, G=0 (GX = gR + G).
         assertThat(end.getGB()).isEqualTo(500000L);
         assertThat(end.getGR()).isEqualTo(500000L);
+        assertThat(end.getG()).isZero();
         assertThat(end.getGX()).isEqualTo(500000L);
 
         EndGameMessage asEnd = (EndGameMessage) parsed;
@@ -120,48 +121,60 @@ class TaiXiuMessageDeserializationTest {
         // AD-11: a 100%-refunded round must net to zero stake and zero win — NOT a 500k loss.
         assertThat(((HasBetTotals) end).betAmountFor("any-bot")).isZero();   // gB - gR = 0
         assertThat(((HasBetTotals) end).betCountFor("any-bot")).isZero();    // no effective stake
-        assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isZero();  // GX - gB = 0
+        assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isZero();  // winnings = G = 0
         assertThat(((HasJackpot) end).jackpotFor("any-bot")).isZero();       // iJp=false
     }
 
     @Test
-    @DisplayName("endGame partial refund -> winnings = GX-gB, effective wagered = gB-gR (AD-11)")
+    @DisplayName("endGame partial refund -> winnings = G (NOT GX-gB), effective wagered = gB-gR (AD-11)")
     void endGamePartialRefund() throws Exception {
         TaiXiuEndGameMessage end = (TaiXiuEndGameMessage) parse("endGame_partialRefund.json");
 
         assertThat(end.getGB()).isEqualTo(500000L);
         assertThat(end.getGR()).isEqualTo(200000L);
-        assertThat(end.getGX()).isEqualTo(700000L);
+        assertThat(end.getG()).isEqualTo(120000L);
+        assertThat(end.getGX()).isEqualTo(320000L);   // GX = gR + G = 200000 + 120000
 
         // effective wagered = gB - gR = 300000.
         assertThat(((HasBetTotals) end).betAmountFor("any-bot")).isEqualTo(300000L);
         assertThat(((HasBetTotals) end).betCountFor("any-bot")).isEqualTo(1);
-        // winnings = GX - gB = 200000.
-        assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isEqualTo(200000L);
+        // winnings = G = 120000 directly. A regression to GX-gB would give
+        // 320000-500000 = -180000 (floored to 0) — provably different from G, so this
+        // assertion truly pins the G-based formula.
+        assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isEqualTo(120000L);
+        assertThat(((HasBotWinnings) end).winningsFor("any-bot"))
+                .as("winnings must be G, not GX-gB")
+                .isNotEqualTo(Math.max(0L, end.getGX() - end.getGB()));
     }
 
     @Test
-    @DisplayName("endGame zero refund -> effective wagered = gB; loss yields 0 winnings (AD-11)")
+    @DisplayName("endGame zero refund -> winnings = G (NOT GX-gB), effective wagered = gB (AD-11)")
     void endGameNoRefund() throws Exception {
         TaiXiuEndGameMessage end = (TaiXiuEndGameMessage) parse("endGame_noRefund.json");
 
         assertThat(end.getGB()).isEqualTo(500000L);
         assertThat(end.getGR()).isZero();
-        assertThat(end.getGX()).isZero();
+        assertThat(end.getG()).isEqualTo(80000L);
+        assertThat(end.getGX()).isEqualTo(80000L);    // GX = gR + G = 0 + 80000
 
         // No refund -> full bet was at risk.
         assertThat(((HasBetTotals) end).betAmountFor("any-bot")).isEqualTo(500000L);
         assertThat(((HasBetTotals) end).betCountFor("any-bot")).isEqualTo(1);
-        // GX=0 < gB -> winnings floored at 0 (a loss), no negative metric.
-        assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isZero();
+        // winnings = G = 80000. A regression to GX-gB would give 80000-500000 = -420000
+        // (floored to 0) — provably different from G.
+        assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isEqualTo(80000L);
+        assertThat(((HasBotWinnings) end).winningsFor("any-bot"))
+                .as("winnings must be G, not GX-gB")
+                .isNotEqualTo(Math.max(0L, end.getGX() - end.getGB()));
     }
 
     @Test
-    @DisplayName("winnings floors at 0 when GX < gB (loss); never negative")
+    @DisplayName("winnings floors at 0 when G < 0 (defensive); reads G not GX-gB")
     void winningsNeverNegative() {
+        // G is the source of winnings (OI-7). GX is set high to prove GX-gB is NOT used.
         TaiXiuEndGameMessage loss = new TaiXiuEndGameMessage(
                 1004, 1, 2, 3,
-                /*gB*/ 500000L, /*gR*/ 0L, /*GX*/ 100000L,
+                /*gB*/ 500000L, /*gR*/ 0L, /*G*/ 0L, /*GX*/ 100000L,
                 0L, 0L, 0L, 0L, false, 0L);
         assertThat(((HasBotWinnings) loss).winningsFor("x")).isZero();
         // Effective stake still the full bet (no refund).
@@ -173,13 +186,13 @@ class TaiXiuMessageDeserializationTest {
     void jackpotGated() {
         TaiXiuEndGameMessage withJp = new TaiXiuEndGameMessage(
                 1004, 1, 2, 3,
-                500000L, 0L, 500000L,
+                500000L, 0L, 0L, 500000L,
                 0L, 0L, 0L, 0L, /*iJp*/ true, /*jpV*/ 123456L);
         assertThat(((HasJackpot) withJp).jackpotFor("x")).isEqualTo(123456L);
 
         TaiXiuEndGameMessage noJp = new TaiXiuEndGameMessage(
                 1004, 1, 2, 3,
-                500000L, 0L, 500000L,
+                500000L, 0L, 0L, 500000L,
                 0L, 0L, 0L, 0L, /*iJp*/ false, /*jpV*/ 123456L);
         assertThat(((HasJackpot) noJp).jackpotFor("x")).isZero();
     }
