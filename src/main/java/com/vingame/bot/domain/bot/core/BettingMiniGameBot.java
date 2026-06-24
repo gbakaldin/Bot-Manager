@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
+import com.vingame.bot.domain.bot.message.request.GameRequest;
 import com.vingame.bot.domain.bot.message.request.Request;
 import com.vingame.bot.domain.bot.strategy.BetContext;
 import com.vingame.bot.domain.bot.strategy.BetDecision;
@@ -61,7 +62,7 @@ public class BettingMiniGameBot extends Bot {
     @Setter
     private GameMessageTypes messageTypes;
 
-    private Request request;
+    private GameRequest request;
 
     // Game state
     @Getter
@@ -211,9 +212,11 @@ public class BettingMiniGameBot extends Bot {
     /**
      * Build the outbound request helper. Default builds the BettingMini
      * {@link Request} keyed on {@code offset} (it adds {@code offset + 3000/3002/...}
-     * per outbound). A fixed-CMD subclass overrides this to emit bare literal CMDs.
+     * per outbound). A fixed-CMD subclass overrides this to emit bare literal CMDs
+     * (e.g. {@code TaiXiuRequest}, AD-12). Returns the {@link GameRequest} contract
+     * so either request shape plugs into the inherited scenario unchanged.
      */
-    protected Request buildRequest(Game game) {
+    protected GameRequest buildRequest(Game game) {
         return new Request(
             game.getPluginName(),
             configuration.getZoneName(),
@@ -248,6 +251,42 @@ public class BettingMiniGameBot extends Bot {
     /** @return concrete endGame message class (default: messageTypes.endGameType()). */
     protected Class<? extends EndGameMessage> endGameType() {
         return messageTypes.endGameType();
+    }
+
+    // ----------------------------------------------------------------------
+    // EndGame correlation / balance-credit seams (TAI_XIU_BOT.md AD-11, #3).
+    //
+    // BettingMini reads the session id off the EndGame body and credits nothing
+    // extra back to the local balance at round end (winnings are not echoed onto
+    // expectedCurrentBalance in BettingMini — the balance is reconciled via
+    // checkBalance()). The defaults below reproduce that behavior exactly. A
+    // subclass whose EndGame frame carries no sid (e.g. Tai Xiu) overrides
+    // endGameSessionId() to correlate against the currently-tracked session, and
+    // a subclass that must net a refund/win back into the local balance (Tai Xiu,
+    // AD-11) overrides balanceCreditFor().
+    // ----------------------------------------------------------------------
+
+    /**
+     * Session id used to correlate the just-finished round in {@link #onEndGame}.
+     * Default reads {@code msg.getSessionId()} (the betting-mini EndGame carries
+     * its own {@code sid}). A subclass whose EndGame frame has no {@code sid}
+     * (Tai Xiu) overrides this to return the currently-tracked session
+     * ({@code sidStore.get()}).
+     */
+    protected long endGameSessionId(EndGameMessage msg) {
+        return msg.getSessionId();
+    }
+
+    /**
+     * Amount to credit back to the local {@code expectedCurrentBalance} at round
+     * end. Default {@code 0} — BettingMini reconciles its balance via
+     * {@code checkBalance()} and does not echo winnings onto the local figure, so
+     * behavior is unchanged. Tai Xiu overrides this to net the refund {@code gR}
+     * plus winnings back into the running balance (AD-11), since the full bet
+     * {@code b} was debited at bet time.
+     */
+    protected long balanceCreditFor(EndGameMessage msg, long winnings) {
+        return 0L;
     }
 
     private void onNewSession() {
@@ -368,6 +407,13 @@ public class BettingMiniGameBot extends Bot {
             lastRoundWinnings = w;
             if (metrics != null && w > 0) metrics.incBotWinnings(w);
         }
+        // Refund-aware balance credit (AD-11). Default is 0 (BettingMini
+        // unchanged); Tai Xiu nets the refund gR + winnings back into the local
+        // balance because the full bet b was debited at bet time.
+        long balanceCredit = balanceCreditFor(msg, payout);
+        if (balanceCredit != 0L) {
+            expectedCurrentBalance.addAndGet(balanceCredit);
+        }
         if (metrics != null) {
             if (msg instanceof HasJackpot hj) {
                 long j = hj.jackpotFor(getUserName());
@@ -390,7 +436,7 @@ public class BettingMiniGameBot extends Bot {
         // their interpretive state. RandomBehaviorStrategy is a no-op.
         // memory and strategy are both non-null post-initializeSubclass.
         Optional<Integer> winningOption = Optional.empty();
-        RoundResult roundResult = memory.completeRound(msg.getSessionId(), winningOption, payout);
+        RoundResult roundResult = memory.completeRound(endGameSessionId(msg), winningOption, payout);
         memory.recordGlobalWin(winningOption);
         strategy.onRoundEnd(roundResult);
 
@@ -585,13 +631,22 @@ public class BettingMiniGameBot extends Bot {
         // None of these threads carry MDC by default — wrap each callback so its
         // log lines (and the OutputPrinter-emitted lines that share the pool) carry
         // the bot's identity.
-        return pipeline(buildContext("[Betting Mini][" + configuration.getGame().getName() + "]", mapper))
+        var stage = pipeline(buildContext("[Betting Mini][" + configuration.getGame().getName() + "]", mapper))
                 .waitFor(1_000L)
                 .send(request::subscribe)
                 .waitForMessage(cmd(subscribeCmd()).and(typeOf(RECEIVED)))
                 .onMessage(subscribeClass, mdcConsumer(this::onSubscribe))
-                .onMessage(startGameClass, mdcConsumer(this::onStartGame))
-                .onMessage(updateBetClass, mdcConsumer(this::onUpdate))
+                .onMessage(startGameClass, mdcConsumer(this::onStartGame));
+
+        // updateBet is optional. BettingMini always supplies a concrete class so this
+        // stage is always added (behavior unchanged). A fixed-CMD subclass (Tai Xiu)
+        // omits updateBet in v1 — no frame captured, OI-5 — by returning null from
+        // updateBetType(); skip the handler entirely rather than register a null class.
+        if (updateBetClass != null) {
+            stage = stage.onMessage(updateBetClass, mdcConsumer(this::onUpdate));
+        }
+
+        return stage
                 .sendAsync(buildMessage()
                         .messageSupplier(mdcSupplier(bet()))
                         .mode(INFINITE)
