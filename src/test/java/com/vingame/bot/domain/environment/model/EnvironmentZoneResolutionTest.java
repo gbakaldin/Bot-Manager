@@ -20,7 +20,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   customZone=false → mini? "MiniGame"   : "Simms"
  * </pre>
  * where {@code mini == (game.getGameType() == GameType.BETTING_MINI
- * || game.getGameType() == GameType.SLOT)} — slot games share the mini zone.
+ * || game.getGameType() == GameType.SLOT || game.getGameType() == GameType.TAI_XIU)}
+ * — slot and Tai Xiu games share the mini zone.
  */
 @DisplayName("Environment.resolveZoneName")
 class EnvironmentZoneResolutionTest {
@@ -103,10 +104,36 @@ class EnvironmentZoneResolutionTest {
         assertThat(env.resolveZoneName(game)).isEqualTo("MyMiniZone");
     }
 
+    @Test
+    @DisplayName("customZone=false + TAI_XIU returns the default mini zone name (Tai Xiu shares the mini zone)")
+    void resolveZoneName_usesDefaultWhenCustomZoneFalse_taiXiu() {
+        Environment env = Environment.builder()
+                .customZone(false)
+                .miniZoneName(null)
+                .cardZoneName(null)
+                .build();
+        Game game = Game.builder().gameType(GameType.TAI_XIU).build();
+
+        assertThat(env.resolveZoneName(game)).isEqualTo("MiniGame");
+    }
+
+    @Test
+    @DisplayName("customZone=true + TAI_XIU returns the env's custom miniZoneName (Tai Xiu shares the mini zone)")
+    void resolveZoneName_usesCustomWhenCustomZoneTrue_taiXiu() {
+        Environment env = Environment.builder()
+                .customZone(true)
+                .miniZoneName("MyMiniZone")
+                .cardZoneName("UnusedCard")
+                .build();
+        Game game = Game.builder().gameType(GameType.TAI_XIU).build();
+
+        assertThat(env.resolveZoneName(game)).isEqualTo("MyMiniZone");
+    }
+
     @ParameterizedTest(name = "{0} → \"Simms\" default")
-    @EnumSource(value = GameType.class, names = {"TAI_XIU", "UP_DOWN"})
-    @DisplayName("TAI_XIU / UP_DOWN are treated as card games (default Simms)")
-    void resolveZoneName_treatsTaiXiuAndUpDownAsCard(GameType type) {
+    @EnumSource(value = GameType.class, names = {"UP_DOWN"})
+    @DisplayName("UP_DOWN is treated as a card game (default Simms)")
+    void resolveZoneName_treatsUpDownAsCard(GameType type) {
         Environment env = Environment.builder()
                 .customZone(false)
                 .miniZoneName(null)
