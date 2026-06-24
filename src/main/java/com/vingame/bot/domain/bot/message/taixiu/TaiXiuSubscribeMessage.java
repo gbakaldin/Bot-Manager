@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.bot.message.taixiu;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import lombok.Getter;
@@ -10,41 +11,88 @@ import lombok.Setter;
  * Tai Xiu subscribe response for the captured {@code MiniGame}/{@code taixiuPlugin}
  * product (cmd {@code 1005}, AD-3).
  * <p>
- * <b>Captured payload (source of truth: {@code TaiXiuMessages/Subscribe.js}).</b>
- * The inbound subscribe body carries only {@code {"cmd":1005}} — no betting-window
- * timing fields were present in the capture. BettingMini sources its countdown from
- * {@code getTimeForBetting()}/{@code getTimeForDecision()} on this message; Tai Xiu's
- * countdown source is therefore <b>unconfirmed</b> (residual OI-5 — the round clock
- * may come from the shared server clock or a StartGame field rather than the
- * subscribe response). Both accessors return {@code 0} until a richer subscribe frame
- * is captured. {@code 0} is the same value the inherited
- * {@code BettingMiniGameBot.startRemainingTimeCountDown} treats as "no explicit
- * window" — it does not crash, and the bot still reacts to StartGame/EndGame.
+ * <b>Captured payload (source of truth: {@code TaiXiuMessages/SubscribeResponse.js}).</b>
+ * The earlier {@code Subscribe.js} was only the bare outbound request
+ * ({@code {"cmd":1005}}); the real <b>inbound</b> subscribe response carries the game
+ * state + round timing the bot needs to start its countdown immediately on subscribe,
+ * before the first StartGame frame. Load-bearing fields:
+ * <ul>
+ *   <li>{@code tFB} (sample {@code 50000}) — <b>time for betting</b>, the betting-window
+ *       length in ms; drives {@link #getTimeForBetting()} (the inherited
+ *       {@code startRemainingTimeCountDown} source).</li>
+ *   <li>{@code tFBB} (sample {@code 3000}) — <b>time-for-block-bet</b>, the late-bet
+ *       cutoff before round end; drives {@link #getTimeForDecision()}.</li>
+ *   <li>{@code sid} (sample {@code 2670594}) — current session id; exposed via
+ *       {@link #getSid()}. Note: {@link SubscribeMessage} has no {@code getSessionId()}
+ *       contract (only StartGame/EndGame do), so this is a plain getter, not an
+ *       override — see divergence note in the Phase-4 report.</li>
+ *   <li>{@code gS} (sample {@code 3}) — game state; modeled, not consumed in v1.</li>
+ *   <li>{@code rmT} (sample {@code 13535}) — remaining time in the current phase (ms);
+ *       modeled, not consumed in v1.</li>
+ *   <li>{@code odE} (sample {@code 3.99}) — odds; {@code iES} (sample {@code true}) —
+ *       is-entry-stage flag. Modeled, not consumed in v1.</li>
+ * </ul>
+ * The long {@code htr} (round history), {@code gi} (the two Tài/Xỉu entries),
+ * {@code cH} (chat), {@code ag} (agency balance), {@code tP}/{@code tFP}/etc. are
+ * tolerated but not modeled ({@link JsonIgnoreProperties}{@code (ignoreUnknown=true)});
+ * the scenario mapper also sets {@code FAIL_ON_UNKNOWN_PROPERTIES=false}.
  */
 @Getter
 @Setter
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class TaiXiuSubscribeMessage extends SubscribeMessage {
 
+    /** {@code tFB}: betting-window length (ms). */
+    private long tFB;
+    /** {@code tFBB}: late-bet cutoff before round end (ms). */
+    private long tFBB;
+    /** {@code sid}: current session id. */
+    private long sid;
+    /** {@code gS}: game state. */
+    private int gS;
+    /** {@code rmT}: remaining time in the current phase (ms). */
+    private long rmT;
+    /** {@code odE}: odds / payout multiplier. */
+    private double odE;
+    /** {@code iES}: is-entry-stage flag. */
+    private boolean iES;
+
     @JsonCreator
-    public TaiXiuSubscribeMessage(@JsonProperty("cmd") int cmd) {
+    public TaiXiuSubscribeMessage(
+            @JsonProperty("cmd") int cmd,
+            @JsonProperty("tFB") long tFB,
+            @JsonProperty("tFBB") long tFBB,
+            @JsonProperty("sid") long sid,
+            @JsonProperty("gS") int gS,
+            @JsonProperty("rmT") long rmT,
+            @JsonProperty("odE") double odE,
+            @JsonProperty("iES") boolean iES) {
         super(cmd);
+        this.tFB = tFB;
+        this.tFBB = tFBB;
+        this.sid = sid;
+        this.gS = gS;
+        this.rmT = rmT;
+        this.odE = odE;
+        this.iES = iES;
     }
 
     /**
-     * @return {@code 0} — no {@code timeForBetting} field was present in the captured
-     *         Tai Xiu subscribe frame (OI-5). Revisit when a richer frame is captured.
+     * @return {@code tFB} — the betting-window length (ms) from the inbound subscribe
+     *         response, feeding the inherited countdown.
      */
     @Override
     public long getTimeForBetting() {
-        return 0L;
+        return tFB;
     }
 
     /**
-     * @return {@code 0} — no decision-window field was present in the captured Tai Xiu
-     *         subscribe frame (OI-5).
+     * @return {@code tFBB} — the late-bet cutoff (ms) before round end. Mirrors the
+     *         betting-mini {@code getTimeForDecision()} (the {@code blockBetTime}
+     *         window in which the bot stops placing bets).
      */
     @Override
     public long getTimeForDecision() {
-        return 0L;
+        return tFBB;
     }
 }

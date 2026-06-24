@@ -57,7 +57,7 @@ class TaiXiuMessageDeserializationTest {
     }
 
     @Test
-    @DisplayName("subscribe (cmd=1005) -> TaiXiuSubscribeMessage; timing accessors default to 0 (OI-5)")
+    @DisplayName("subscribe (cmd=1005) -> TaiXiuSubscribeMessage; tFB/tFBB/sid from real inbound response")
     void subscribe() throws Exception {
         BettingMiniMessage parsed = parse("subscribe.json");
 
@@ -65,9 +65,17 @@ class TaiXiuMessageDeserializationTest {
         assertThat(parsed.getCmd()).isEqualTo(1005);
 
         SubscribeMessage asSubscribe = (SubscribeMessage) parsed;
-        // No timing fields were captured on the Tai Xiu subscribe frame (OI-5).
-        assertThat(asSubscribe.getTimeForBetting()).isZero();
-        assertThat(asSubscribe.getTimeForDecision()).isZero();
+        // Real inbound subscribe response (SubscribeResponse.js): tFB=50000 is the
+        // betting window, tFBB=3000 the late-bet cutoff.
+        assertThat(asSubscribe.getTimeForBetting()).isEqualTo(50000L);
+        assertThat(asSubscribe.getTimeForDecision()).isEqualTo(3000L);
+
+        TaiXiuSubscribeMessage tx = (TaiXiuSubscribeMessage) parsed;
+        assertThat(tx.getSid()).isEqualTo(2670594L);
+        assertThat(tx.getGS()).isEqualTo(3);
+        assertThat(tx.getRmT()).isEqualTo(13535L);
+        assertThat(tx.getOdE()).isEqualTo(3.99);
+        assertThat(tx.isIES()).isTrue();
     }
 
     @Test
@@ -105,7 +113,9 @@ class TaiXiuMessageDeserializationTest {
         assertThat(end.getGX()).isEqualTo(500000L);
 
         EndGameMessage asEnd = (EndGameMessage) parsed;
-        assertThat(asEnd.getSessionId()).isEqualTo(2670572L);
+        // #3: the captured Tai Xiu EndGame carries NO sid — getSessionId() returns 0;
+        // the bot correlates via the tracked session (sidStore), not this field.
+        assertThat(asEnd.getSessionId()).isZero();
 
         // AD-11: a 100%-refunded round must net to zero stake and zero win — NOT a 500k loss.
         assertThat(((HasBetTotals) end).betAmountFor("any-bot")).isZero();   // gB - gR = 0
@@ -150,7 +160,7 @@ class TaiXiuMessageDeserializationTest {
     @DisplayName("winnings floors at 0 when GX < gB (loss); never negative")
     void winningsNeverNegative() {
         TaiXiuEndGameMessage loss = new TaiXiuEndGameMessage(
-                1004, 1L, 1, 2, 3,
+                1004, 1, 2, 3,
                 /*gB*/ 500000L, /*gR*/ 0L, /*GX*/ 100000L,
                 0L, 0L, 0L, 0L, false, 0L);
         assertThat(((HasBotWinnings) loss).winningsFor("x")).isZero();
@@ -162,13 +172,13 @@ class TaiXiuMessageDeserializationTest {
     @DisplayName("jackpot returned only when iJp=true")
     void jackpotGated() {
         TaiXiuEndGameMessage withJp = new TaiXiuEndGameMessage(
-                1004, 1L, 1, 2, 3,
+                1004, 1, 2, 3,
                 500000L, 0L, 500000L,
                 0L, 0L, 0L, 0L, /*iJp*/ true, /*jpV*/ 123456L);
         assertThat(((HasJackpot) withJp).jackpotFor("x")).isEqualTo(123456L);
 
         TaiXiuEndGameMessage noJp = new TaiXiuEndGameMessage(
-                1004, 1L, 1, 2, 3,
+                1004, 1, 2, 3,
                 500000L, 0L, 500000L,
                 0L, 0L, 0L, 0L, /*iJp*/ false, /*jpV*/ 123456L);
         assertThat(((HasJackpot) noJp).jackpotFor("x")).isZero();

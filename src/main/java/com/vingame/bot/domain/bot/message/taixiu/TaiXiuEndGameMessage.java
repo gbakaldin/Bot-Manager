@@ -43,13 +43,18 @@ import lombok.Setter;
  * The marker accessors ignore {@code userName}: this product's EndGame is delivered
  * personalized to the recipient bot (the same convention as {@code TipEndGameMessage}),
  * so {@code gB}/{@code gR}/{@code GX} are already this bot's values.
+ * <p>
+ * <b>No {@code sid} (#3).</b> The captured {@code End.js} carries <b>no session id</b>.
+ * Tai Xiu correlates an EndGame to the round it tracked from StartGame/subscribe
+ * ({@code sidStore}) inside {@code TaiXiuGameBot.endGameSessionId()}, NOT from this
+ * payload. {@link #getSessionId()} therefore returns {@code 0} and is never used as the
+ * correlation key for Tai Xiu (the inherited {@code onEndGame} reads the session id
+ * through the {@code endGameSessionId} seam, which the bot overrides).
  */
 @Getter
 @Setter
 public class TaiXiuEndGameMessage extends EndGameMessage
         implements HasBotWinnings, HasJackpot, HasBetTotals {
-
-    private long sid;
 
     // Dice (1..6 each); sum determines Tai (>=11) vs Xiu (<=10).
     private int d1;
@@ -74,7 +79,6 @@ public class TaiXiuEndGameMessage extends EndGameMessage
     @JsonCreator
     public TaiXiuEndGameMessage(
             @JsonProperty("cmd") int cmd,
-            @JsonProperty("sid") long sid,
             @JsonProperty("d1") int d1,
             @JsonProperty("d2") int d2,
             @JsonProperty("d3") int d3,
@@ -88,7 +92,6 @@ public class TaiXiuEndGameMessage extends EndGameMessage
             @JsonProperty("iJp") boolean iJp,
             @JsonProperty("jpV") long jpV) {
         super(cmd);
-        this.sid = sid;
         this.d1 = d1;
         this.d2 = d2;
         this.d3 = d3;
@@ -103,9 +106,15 @@ public class TaiXiuEndGameMessage extends EndGameMessage
         this.jpV = jpV;
     }
 
+    /**
+     * @return {@code 0} — the captured Tai Xiu EndGame frame carries no {@code sid}
+     *         (#3). Correlation to the tracked round is done by the bot via
+     *         {@code TaiXiuGameBot.endGameSessionId()} reading {@code sidStore}, not
+     *         from this message, so this value is never used as the correlation key.
+     */
     @Override
     public long getSessionId() {
-        return sid;
+        return 0L;
     }
 
     /**
