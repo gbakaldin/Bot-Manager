@@ -57,6 +57,30 @@ public class TaiXiuGameBot extends BettingMiniGameBot {
         super();
     }
 
+    /**
+     * Default Tai Xiu to a 2-option game before the inherited init runs.
+     * <p>
+     * Tai Xiu always offers exactly the two Tài/Xỉu entries, so an operator never
+     * configures options for it. A Tai Xiu game created with neither
+     * {@code optionAffinities} nor legacy {@code numberOfOptions} would otherwise
+     * make the inherited {@code initializeSubclass} (and every later
+     * {@code ctx.game().getEffectiveOptionAffinities()} strategy read) throw
+     * {@code IllegalStateException} — the staging failure this fixes. Applying
+     * {@link Game#applyTaiXiuOptionDefaults()} here populates
+     * {@code optionAffinities = {1:1, 2:1}} (eids 1 and 2 for Tài/Xỉu) so the game
+     * resolves to 2 equal options.
+     * <p>
+     * This is the <b>only</b> place the default is applied — it is Tai-Xiu-scoped
+     * and never affects {@link BettingMiniGameBot} (which still requires explicit
+     * option config). The default is a no-op when any option field is already set,
+     * so an explicit {@code numberOfOptions:2} (or any operator override) wins.
+     */
+    @Override
+    protected void initializeSubclass() {
+        configuration.getGame().applyTaiXiuOptionDefaults();
+        super.initializeSubclass();
+    }
+
     // ---- Fixed CMD seams (AD-3). No CODE + offset arithmetic. ----
 
     @Override
