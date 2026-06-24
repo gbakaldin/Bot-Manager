@@ -1,6 +1,8 @@
 package com.vingame.bot.domain.bot.core;
 
 import com.fasterxml.jackson.databind.jsontype.NamedType;
+import com.vingame.bot.domain.bot.strategy.BetContext;
+import com.vingame.bot.domain.bot.strategy.BetDecision;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
@@ -12,6 +14,9 @@ import com.vingame.bot.domain.bot.message.request.TaiXiuRequest;
 import com.vingame.bot.domain.game.model.Game;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * Tai Xiu bot (TAI_XIU_BOT plan AD-1). Tai Xiu is round-based with
@@ -43,6 +48,21 @@ import lombok.extern.slf4j.Slf4j;
  */
 @Slf4j
 public class TaiXiuGameBot extends BettingMiniGameBot {
+
+    /**
+     * Entry id for <b>Tài</b> (over/high). Tai Xiu entry ids are <b>1-based</b>
+     * (AD-13): Tài = {@code eid 1}, Xỉu = {@code eid 2}. This matches the captured
+     * bet frame ({@code "eid":1}) and the default option set
+     * {@code {1:1, 2:1}} ({@link Game#defaultTaiXiuOptionAffinities()}). No 0-based
+     * assumption may leak into entry selection — a Tai Xiu bet must never emit
+     * {@code eid 0}.
+     */
+    public static final int TAI_EID = 1;
+
+    /**
+     * Entry id for <b>Xỉu</b> (under/low) — see {@link #TAI_EID}. 1-based: {@code 2}.
+     */
+    public static final int XIU_EID = 2;
 
     /**
      * Fixed-CMD, per-product message provider for Tai Xiu. Wired by
@@ -79,6 +99,64 @@ public class TaiXiuGameBot extends BettingMiniGameBot {
     protected void initializeSubclass() {
         configuration.getGame().applyTaiXiuOptionDefaults();
         super.initializeSubclass();
+    }
+
+    // ---- Single-entry-per-round lock (AD-13). ----
+
+    /**
+     * Enforce the Tai Xiu single-entry-per-round rule (AD-13): a bot may bet only
+     * <b>one</b> side per round. The first bet of a round is unconstrained — the
+     * strategy's chosen entry passes through. Once an entry (Tài or Xỉu) has been bet
+     * this round, every later bet in the <i>same</i> round is remapped onto that
+     * already-bet entry, so a strategy that flips to the other side can still
+     * <i>increase</i> the locked side's stake but can never bet the opposite entry.
+     *
+     * <p>The lock is <b>derived from round memory</b>, not a separate field: the
+     * already-bet entry is read from the in-flight {@code RoundState}'s
+     * per-option bet map ({@link com.vingame.bot.domain.bot.strategy.BotMemory#snapshotCurrentRoundBets()}),
+     * which {@code beginRound} clears on every {@code StartGame}/new sessionId. This
+     * makes the lock reset automatically per round and survive the
+     * park ({@code betCondition}) / re-derive ({@code bet()}) race — both call sites
+     * read the same memory, so they stay consistent without extra synchronization.
+     *
+     * <p>Only the <i>entry</i> is constrained; the strategy's <i>amount</i> is always
+     * preserved, so martingale-style increases on the locked side keep working.
+     */
+    @Override
+    protected Optional<BetDecision> decideBet(BetContext ctx) {
+        Optional<BetDecision> decision = super.decideBet(ctx);
+        if (decision.isEmpty()) {
+            return decision;
+        }
+        Integer lockedEntry = lockedEntryThisRound(ctx);
+        if (lockedEntry == null) {
+            // First bet of the round — strategy's entry choice passes through.
+            return decision;
+        }
+        BetDecision chosen = decision.get();
+        if (chosen.optionId() == lockedEntry) {
+            return decision;
+        }
+        // Lock held: remap to the already-bet entry, keep the strategy's amount.
+        log.debug("Bot {}: single-entry lock — remapping bet entry {} -> {} (amount={})",
+                getUserName(), chosen.optionId(), lockedEntry, chosen.amount());
+        return Optional.of(new BetDecision(lockedEntry, chosen.amount()));
+    }
+
+    /**
+     * The entry this bot has already bet in the current round, or {@code null} if no
+     * bet has been recorded yet this round (so the next bet is unconstrained).
+     * Derived from the in-flight round's per-option bet map. By the single-entry
+     * rule there is at most one key once a bet has been placed; if more than one is
+     * ever present (defensive — should not happen under this lock), the first by
+     * iteration order is treated as the locked entry.
+     */
+    private Integer lockedEntryThisRound(BetContext ctx) {
+        Map<Integer, Long> betsThisRound = ctx.memory().snapshotCurrentRoundBets();
+        if (betsThisRound.isEmpty()) {
+            return null;
+        }
+        return betsThisRound.keySet().iterator().next();
     }
 
     // ---- Fixed CMD seams (AD-3). No CODE + offset arithmetic. ----
