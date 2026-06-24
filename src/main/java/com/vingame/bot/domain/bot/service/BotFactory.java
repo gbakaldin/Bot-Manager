@@ -8,6 +8,7 @@ import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.bot.core.BettingMiniGameBot;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.SlotMachineBot;
+import com.vingame.bot.domain.bot.core.TaiXiuGameBot;
 import com.vingame.bot.domain.bot.message.GameMessageTypesResolver;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
@@ -158,7 +159,18 @@ public class BotFactory {
                 slotBot.setSlotStrategyFactory(slotStrategyFactory);
                 yield slotBot;
             }
-            case TAI_XIU, CARD_GAME, UP_DOWN ->
+            case TAI_XIU -> {
+                // Tai Xiu reuses BettingMiniGameBot's round behavior wholesale; only the
+                // message layer differs. Resolve the product-keyed, fixed-CMD provider
+                // (AD-5) and wire the betting strategy factory — Tai Xiu reuses the
+                // betting strategy family unchanged (AD-6), same as BETTING_MINI.
+                TaiXiuGameBot taiXiuBot = new TaiXiuGameBot();
+                taiXiuBot.setTaiXiuMessageTypes(
+                        GameMessageTypesResolver.resolveTaiXiu(env.getProductCode()));
+                taiXiuBot.setStrategyFactory(strategyFactory);
+                yield taiXiuBot;
+            }
+            case CARD_GAME, UP_DOWN ->
                 throw new IllegalArgumentException("Game type not yet implemented: " + game.getGameType());
         };
 
