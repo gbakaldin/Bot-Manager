@@ -635,8 +635,16 @@ public class BettingMiniGameBot extends Bot {
                 .waitFor(1_000L)
                 .send(request::subscribe)
                 .waitForMessage(cmd(subscribeCmd()).and(typeOf(RECEIVED)))
-                .onMessage(subscribeClass, mdcConsumer(this::onSubscribe))
-                .onMessage(startGameClass, mdcConsumer(this::onStartGame));
+                .onMessage(subscribeClass, mdcConsumer(this::onSubscribe));
+
+        // startGame handler. BettingMini always supplies a concrete class (md5 or
+        // non-md5) so this stage is always added (behavior unchanged). A fixed-CMD
+        // subclass (Tai Xiu) configured with md5=true but no md5 variant returns
+        // null from startGameMd5Type(); skip the handler entirely rather than
+        // register a null class — mirrors the updateBet null-guard below.
+        if (startGameClass != null) {
+            stage = stage.onMessage(startGameClass, mdcConsumer(this::onStartGame));
+        }
 
         // updateBet is optional. BettingMini always supplies a concrete class so this
         // stage is always added (behavior unchanged). A fixed-CMD subclass (Tai Xiu)
