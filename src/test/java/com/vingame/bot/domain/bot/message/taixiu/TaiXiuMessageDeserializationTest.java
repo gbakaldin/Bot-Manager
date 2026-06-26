@@ -79,6 +79,34 @@ class TaiXiuMessageDeserializationTest {
     }
 
     @Test
+    @DisplayName("getTimeForDecision() falls back to default 3000ms only when tFBB is absent/zero")
+    void timeForDecisionDefault() throws Exception {
+        // Absent tFBB (the 114 shape) -> default 3000ms cutoff.
+        String noTfbb = "{\"cmd\":1005,\"tFB\":51000,\"sid\":5966,\"gS\":3,\"rmT\":12460}";
+        TaiXiuSubscribeMessage absent =
+                (TaiXiuSubscribeMessage) newMapper().readValue(noTfbb, BettingMiniMessage.class);
+        assertThat(absent.getTimeForDecision())
+                .as("no tFBB -> default 3000ms")
+                .isEqualTo(3000L);
+
+        // tFBB:0 is treated the same as absent -> default 3000ms.
+        String zeroTfbb = "{\"cmd\":1005,\"tFB\":51000,\"tFBB\":0,\"sid\":5966}";
+        TaiXiuSubscribeMessage zero =
+                (TaiXiuSubscribeMessage) newMapper().readValue(zeroTfbb, BettingMiniMessage.class);
+        assertThat(zero.getTimeForDecision())
+                .as("tFBB=0 -> default 3000ms")
+                .isEqualTo(3000L);
+
+        // A real non-3000 tFBB passes through untouched — the default only fills absent/zero.
+        String tfbb5000 = "{\"cmd\":1005,\"tFB\":51000,\"tFBB\":5000,\"sid\":5966}";
+        TaiXiuSubscribeMessage explicit =
+                (TaiXiuSubscribeMessage) newMapper().readValue(tfbb5000, BettingMiniMessage.class);
+        assertThat(explicit.getTimeForDecision())
+                .as("tFBB=5000 -> 5000 (default does not override a real value)")
+                .isEqualTo(5000L);
+    }
+
+    @Test
     @DisplayName("startGame (cmd=1002) -> TaiXiuStartGameMessage with sessionId, odE, iES")
     void startGame() throws Exception {
         BettingMiniMessage parsed = parse("startGame.json");

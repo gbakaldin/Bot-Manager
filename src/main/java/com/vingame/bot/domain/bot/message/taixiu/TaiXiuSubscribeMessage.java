@@ -42,6 +42,15 @@ import lombok.Setter;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class TaiXiuSubscribeMessage extends SubscribeMessage {
 
+    /**
+     * Fallback late-bet cutoff (ms) applied when the inbound subscribe response carries
+     * no {@code tFBB} (or {@code tFBB <= 0}). The 114 jackpot subscribe response omits
+     * {@code tFBB} entirely, which would otherwise leave {@code blockBetTime == 0} and
+     * let bots bet right up to round end; 116 carries a real {@code tFBB=3000}, so this
+     * default leaves its behaviour unchanged.
+     */
+    static final long DEFAULT_TIME_FOR_DECISION_MS = 3000L;
+
     /** {@code tFB}: betting-window length (ms). */
     private long tFB;
     /** {@code tFBB}: late-bet cutoff before round end (ms). */
@@ -89,10 +98,13 @@ public class TaiXiuSubscribeMessage extends SubscribeMessage {
     /**
      * @return {@code tFBB} — the late-bet cutoff (ms) before round end. Mirrors the
      *         betting-mini {@code getTimeForDecision()} (the {@code blockBetTime}
-     *         window in which the bot stops placing bets).
+     *         window in which the bot stops placing bets). When the subscribe response
+     *         carries no {@code tFBB} (or {@code tFBB <= 0}, as on 114), falls back to
+     *         {@link #DEFAULT_TIME_FOR_DECISION_MS} so bots do not bet right up to round
+     *         end. 116 carries a real {@code tFBB=3000} and is unaffected.
      */
     @Override
     public long getTimeForDecision() {
-        return tFBB;
+        return tFBB > 0 ? tFBB : DEFAULT_TIME_FOR_DECISION_MS;
     }
 }

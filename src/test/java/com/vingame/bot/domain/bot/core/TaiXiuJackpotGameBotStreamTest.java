@@ -236,34 +236,41 @@ class TaiXiuJackpotGameBotStreamTest {
 
     /**
      * Concern #5 (TAI_XIU_114_JACKPOT plan, OI/product-decision item): the captured
-     * 114 subscribe response carries NO {@code tFBB}, so {@code getTimeForDecision()}
-     * defaults to 0, which {@code onSubscribe} assigns to {@code blockBetTime}. The
-     * late-bet cutoff is therefore 0 — the bet gate ({@code remainingTime >=
-     * blockBetTime}) never closes on the time dimension, even at {@code remainingTime
-     * == 0}. This is modeled faithfully (NOT a defect); the test pins it so the state
-     * is documented and intentional. Contrast the 116 path which carries a real tFBB.
+     * 114 subscribe response carries NO {@code tFBB}. Rather than leave
+     * {@code getTimeForDecision()==0} (which left {@code blockBetTime==0} and let bots
+     * bet right up to round end), {@code TaiXiuSubscribeMessage} now falls back to a
+     * default 3000ms cutoff when {@code tFBB} is absent/zero. So {@code onSubscribe}
+     * assigns {@code blockBetTime=3000} for 114, and the time gate ({@code remainingTime
+     * >= blockBetTime}) closes once under 3000ms remain. 116 carries a real tFBB=3000
+     * and is unaffected (see {@link #p116RegressionUnchanged()}).
      */
     @Test
-    @DisplayName("114 subscribe has no tFBB -> blockBetTime=0, bet gate stays open even at remainingTime=0")
-    void p114NoTfbbMeansZeroLateBetCutoff() throws Exception {
+    @DisplayName("114 subscribe has no tFBB -> default blockBetTime=3000, bet gate closes under 3000ms")
+    void p114NoTfbbMeansDefaultLateBetCutoff() throws Exception {
         bot = newBot(ProductCode.P_114, "taixiuJackpotPlugin");
         metrics = mock(BotMetrics.class);
         bot.setMetrics(metrics);
 
-        // onSubscribe reads getTimeForDecision() (0 for 114) into blockBetTime.
+        // onSubscribe reads getTimeForDecision() (default 3000 for 114) into blockBetTime.
         invokeOnSubscribe((SubscribeMessage) parseFixture("subscribe.json"));
         assertThat(readLongField("blockBetTime"))
-                .as("114 subscribe has no tFBB -> getTimeForDecision()==0 -> blockBetTime==0")
-                .isZero();
+                .as("114 subscribe has no tFBB -> getTimeForDecision()==3000 default -> blockBetTime==3000")
+                .isEqualTo(3000L);
 
         invokeOnStartGame(startGameWithSid(BASE_SID));
         setField("gameState", BettingMiniGameState.BET);
 
-        // Even with the countdown fully drained, the time gate stays open (>= 0).
+        // Above the cutoff: gate is open.
+        setRemainingTime(3000L);
+        assertThat(invokeBetCondition())
+                .as("blockBetTime=3000 -> gate open at remainingTime=3000")
+                .isTrue();
+
+        // Below the cutoff: the time gate now closes (it no longer stays open at 0).
         setRemainingTime(0L);
         assertThat(invokeBetCondition())
-                .as("blockBetTime=0 -> gate open even at remainingTime=0")
-                .isTrue();
+                .as("blockBetTime=3000 -> gate closed at remainingTime=0")
+                .isFalse();
     }
 
     @Test

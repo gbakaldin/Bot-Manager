@@ -135,9 +135,11 @@ class JackpotTaiXiuMessageTypesTest {
         assertThat(parsed.getCmd()).isEqualTo(1105);
 
         SubscribeMessage asSubscribe = (SubscribeMessage) parsed;
-        // 114 capture: tFB=51000 betting window. No tFBB in 114 -> getTimeForDecision()=0.
+        // 114 capture: tFB=51000 betting window. No tFBB in 114 -> getTimeForDecision()
+        // falls back to the default 3000ms late-bet cutoff (DEFAULT_TIME_FOR_DECISION_MS)
+        // so 114 bots stop betting 3s before round end rather than betting to the wire.
         assertThat(asSubscribe.getTimeForBetting()).isEqualTo(51000L);
-        assertThat(asSubscribe.getTimeForDecision()).isZero();
+        assertThat(asSubscribe.getTimeForDecision()).isEqualTo(3000L);
 
         TaiXiuSubscribeMessage tx = (TaiXiuSubscribeMessage) parsed;
         assertThat(tx.getSid()).isEqualTo(5966L);
