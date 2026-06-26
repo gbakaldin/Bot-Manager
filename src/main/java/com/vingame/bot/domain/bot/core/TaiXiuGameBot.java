@@ -237,7 +237,9 @@ public class TaiXiuGameBot extends BettingMiniGameBot {
                 game.getPluginName(),
                 configuration.getZoneName(),
                 taiXiuMessageTypes.subscribeCmd(),
-                taiXiuMessageTypes.betCmd());
+                taiXiuMessageTypes.betCmd(),
+                // P_114 emits the extra a:false on its bet (AD-2); P_116 does not.
+                taiXiuMessageTypes.emitsAutoBetFlag());
     }
 
     // ---- EndGame correlation + refund-aware balance (#3, AD-11). ----

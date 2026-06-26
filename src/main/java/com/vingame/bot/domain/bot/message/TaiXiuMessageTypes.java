@@ -77,6 +77,21 @@ public interface TaiXiuMessageTypes {
     }
 
     /**
+     * Whether the outbound bet body carries the extra auto-bet flag {@code a}
+     * (TAI_XIU_114_JACKPOT plan AD-2/AD-3). Defaults to {@code false} — the captured
+     * P_116 bet emits no {@code a} and the shared betting-mini {@code Bet.BetData} body
+     * is left byte-for-byte unchanged. The P_114 jackpot provider overrides this to
+     * {@code true}, whereupon {@code TaiXiuRequest} builds a Tai-Xiu-specific bet body
+     * that adds {@code "a":false} (the captured value; the bot never auto-bets). The
+     * flag is the explicit gate the plan prefers over inspecting {@link #cmdOffset()}.
+     *
+     * @return {@code true} if the bet body must include {@code a:false}; default {@code false}
+     */
+    default boolean emitsAutoBetFlag() {
+        return false;
+    }
+
+    /**
      * @return Class for deserializing subscribe response messages ({@link #subscribeCmd()})
      */
     Class<? extends SubscribeMessage> subscribeType();

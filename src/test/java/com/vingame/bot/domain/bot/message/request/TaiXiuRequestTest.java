@@ -20,8 +20,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("TaiXiuRequest")
 class TaiXiuRequestTest {
 
-    /** P_116 provider CMDs (cmdOffset 0): subscribe 1005, bet 1000. */
-    private final TaiXiuRequest request = new TaiXiuRequest("taixiuPlugin", "MiniGame", 1005, 1000);
+    /** P_116 provider CMDs (cmdOffset 0): subscribe 1005, bet 1000; no auto-bet flag. */
+    private final TaiXiuRequest request = new TaiXiuRequest("taixiuPlugin", "MiniGame", 1005, 1000, false);
 
     @Nested
     @DisplayName("subscribe")
@@ -50,29 +50,43 @@ class TaiXiuRequestTest {
         @Test
         @DisplayName("emits bare cmd 1000 (NOT cmdPrefix+3002)")
         void cmd() throws Exception {
-            Bet bet = request.bet(500_000L, 1, 2670572L);
+            ActionRequestMessage bet = request.bet(500_000L, 1, 2670572L);
             assertThat(getBody(bet).getCmd()).isEqualTo(1000);
         }
 
         @Test
         @DisplayName("carries amount, eid, sid, and aid=1 (reuses Bet.BetData shape)")
         void fields() throws Exception {
-            Bet bet = request.bet(500_000L, 2, 2670572L);
+            ActionRequestMessage bet = request.bet(500_000L, 2, 2670572L);
+            assertThat(bet).isInstanceOf(Bet.class);
             Bet.BetData data = (Bet.BetData) getBody(bet);
             assertThat(data.getB()).isEqualTo(500_000L);
             assertThat(data.getEid()).isEqualTo(2L);  // Xỉu
             assertThat(data.getSid()).isEqualTo(2670572L);
             assertThat(data.getAid()).isEqualTo(1);
         }
+
+        @Test
+        @DisplayName("116 bet (emitAutoBetFlag=false) is the shared Bet body with NO 'a' field")
+        void noAutoBetFlagForP116() throws Exception {
+            ActionRequestMessage bet = request.bet(500_000L, 1, 2670572L);
+            // 116 must use the shared Bet body (byte-for-byte unchanged) — not TaiXiuBet.
+            assertThat(bet).isInstanceOf(Bet.class);
+            assertThat(getBody(bet)).isInstanceOf(Bet.BetData.class);
+            // Serialized 116 bet must carry no "a" key.
+            String json = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .writeValueAsString(getBody(bet));
+            assertThat(json).doesNotContain("\"a\"");
+        }
     }
 
     @Nested
-    @DisplayName("offset-aware CMDs (AD-4)")
+    @DisplayName("offset-aware CMDs + a-flag (AD-2/AD-4)")
     class OffsetTests {
 
-        /** A provider at cmdOffset 100 supplies subscribe 1105 / bet 1100. */
+        /** A P_114 jackpot provider: subscribe 1105 / bet 1100, emitAutoBetFlag=true. */
         private final TaiXiuRequest shifted =
-                new TaiXiuRequest("taixiuJackpotPlugin", "MiniGame", 1105, 1100);
+                new TaiXiuRequest("taixiuJackpotPlugin", "MiniGame", 1105, 1100, true);
 
         @Test
         @DisplayName("subscribe emits the injected +100 cmd 1105")
@@ -81,15 +95,34 @@ class TaiXiuRequestTest {
         }
 
         @Test
-        @DisplayName("bet emits the injected +100 cmd 1100 while keeping the Bet.BetData shape")
+        @DisplayName("114 bet emits +100 cmd 1100, the TaiXiuBet body, and a:false")
         void betUsesInjectedCmd() throws Exception {
-            Bet bet = shifted.bet(500_000L, 1, 2670572L);
-            Bet.BetData data = (Bet.BetData) getBody(bet);
+            ActionRequestMessage bet = shifted.bet(500_000L, 1, 2670572L);
+            // 114 path uses the dedicated TaiXiuBet body carrying a.
+            assertThat(bet).isInstanceOf(TaiXiuBet.class);
+            assertThat(getBody(bet)).isInstanceOf(TaiXiuBet.BetData.class);
+            TaiXiuBet.BetData data = (TaiXiuBet.BetData) getBody(bet);
             assertThat(data.getCmd()).isEqualTo(1100);
             assertThat(data.getB()).isEqualTo(500_000L);
             assertThat(data.getEid()).isEqualTo(1L);
             assertThat(data.getSid()).isEqualTo(2670572L);
             assertThat(data.getAid()).isEqualTo(1);
+            assertThat(data.isA()).isFalse();
+        }
+
+        @Test
+        @DisplayName("114 bet serializes to {cmd:1100, aid:1, b, eid, sid, a:false}")
+        void betSerializesWithAFalse() throws Exception {
+            ActionRequestMessage bet = shifted.bet(500_000L, 1, 2670572L);
+            com.fasterxml.jackson.databind.JsonNode node =
+                    new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(getBody(bet));
+            assertThat(node.get("cmd").asInt()).isEqualTo(1100);
+            assertThat(node.get("aid").asInt()).isEqualTo(1);
+            assertThat(node.get("b").asLong()).isEqualTo(500_000L);
+            assertThat(node.get("eid").asLong()).isEqualTo(1L);
+            assertThat(node.get("sid").asLong()).isEqualTo(2670572L);
+            assertThat(node.has("a")).isTrue();
+            assertThat(node.get("a").asBoolean()).isFalse();
         }
     }
 

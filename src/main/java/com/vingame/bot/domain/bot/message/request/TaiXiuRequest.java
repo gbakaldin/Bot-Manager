@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.bot.message.request;
 
 import com.vingame.bot.domain.bot.message.TaiXiuMessageTypes;
+import com.vingame.websocketparser.message.request.ActionRequestMessage;
 import com.vingame.websocketparser.message.request.Body;
 import lombok.AllArgsConstructor;
 
@@ -41,6 +42,13 @@ public class TaiXiuRequest implements GameRequest {
     private final int subscribeCmd;
     /** Effective bet CMD from the provider ({@link TaiXiuMessageTypes#betCmd()}). */
     private final int betCmd;
+    /**
+     * Whether to emit the Tai-Xiu-specific bet body with the extra {@code a:false}
+     * field (TAI_XIU_114_JACKPOT plan AD-2/AD-3). {@code true} for the P_114 jackpot
+     * provider ({@link TaiXiuMessageTypes#emitsAutoBetFlag()}), {@code false} for P_116
+     * — keeping the 116 bet exactly {@code {cmd:1000, aid, b, eid, sid}} (no {@code a}).
+     */
+    private final boolean emitAutoBetFlag;
 
     /**
      * Build a subscribe request emitting the provider's effective subscribe CMD
@@ -54,15 +62,23 @@ public class TaiXiuRequest implements GameRequest {
 
     /**
      * Build a bet request emitting the provider's effective bet CMD (1000 for P_116,
-     * 1100 for P_114). Reuses {@link Bet.BetData}'s field shape
-     * ({@code cmd, aid:1, b, eid, sid}).
+     * 1100 for P_114).
+     * <p>
+     * When {@link #emitAutoBetFlag} is set (P_114, AD-2) the body is a
+     * {@link TaiXiuBet} carrying the extra {@code a:false}; otherwise it is the shared
+     * {@link Bet} ({@code cmd, aid:1, b, eid, sid}) so the 116 bet — and every
+     * betting-mini bet — stays byte-for-byte unchanged.
      *
      * @param amount  the stake ({@code b})
      * @param entryId the chosen Tài/Xỉu entry ({@code eid}; exactly 2 options)
      * @param sid     the currently-tracked session id
      */
     @Override
-    public Bet bet(long amount, int entryId, long sid) {
+    public ActionRequestMessage bet(long amount, int entryId, long sid) {
+        if (emitAutoBetFlag) {
+            // a=false is the captured value; the bot never auto-bets.
+            return new TaiXiuBet(betCmd, zoneName, pluginName, amount, entryId, sid, false);
+        }
         return new Bet(betCmd, zoneName, pluginName, amount, entryId, sid);
     }
 }
