@@ -58,6 +58,29 @@ class BotGroupRuntimeTest {
 
             runtime.getExecutor().shutdownNow();
         }
+
+        @Test
+        @DisplayName("3-arg constructor leaves environmentName null (backward-compatible)")
+        void threeArgConstructor_environmentNameNull() {
+            BotGroupRuntime runtime = new BotGroupRuntime("group-1", 5, "env-1");
+            try {
+                assertThat(runtime.getEnvironmentName()).isNull();
+            } finally {
+                runtime.getExecutor().shutdownNow();
+            }
+        }
+
+        @Test
+        @DisplayName("4-arg constructor threads the environment display name through (AD-2)")
+        void fourArgConstructor_threadsEnvironmentName() {
+            BotGroupRuntime runtime = new BotGroupRuntime("group-1", 5, "env-1", "Staging");
+            try {
+                assertThat(runtime.getEnvironmentId()).isEqualTo("env-1");
+                assertThat(runtime.getEnvironmentName()).isEqualTo("Staging");
+            } finally {
+                runtime.getExecutor().shutdownNow();
+            }
+        }
     }
 
     @Nested
