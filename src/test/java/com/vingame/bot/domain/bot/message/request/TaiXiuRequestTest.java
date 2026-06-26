@@ -11,14 +11,17 @@ import java.lang.reflect.Field;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Verifies {@link TaiXiuRequest} emits the BARE fixed Tai Xiu CMDs (subscribe
- * {@code 1005}, bet {@code 1000}) with no {@code cmdPrefix} arithmetic (AD-12), and
- * reuses {@link Bet.BetData}'s field shape ({@code cmd, aid:1, b, eid, sid}).
+ * Verifies {@link TaiXiuRequest} emits the BARE injected Tai Xiu CMDs (subscribe
+ * {@code 1005}, bet {@code 1000} for P_116) with no {@code cmdPrefix} arithmetic
+ * (AD-12), and reuses {@link Bet.BetData}'s field shape
+ * ({@code cmd, aid:1, b, eid, sid}). The CMDs are now passed in at construction
+ * (TAI_XIU_114_JACKPOT plan AD-4) so the same builder serves any offset.
  */
 @DisplayName("TaiXiuRequest")
 class TaiXiuRequestTest {
 
-    private final TaiXiuRequest request = new TaiXiuRequest("taixiuPlugin", "MiniGame");
+    /** P_116 provider CMDs (cmdOffset 0): subscribe 1005, bet 1000. */
+    private final TaiXiuRequest request = new TaiXiuRequest("taixiuPlugin", "MiniGame", 1005, 1000);
 
     @Nested
     @DisplayName("subscribe")
@@ -58,6 +61,33 @@ class TaiXiuRequestTest {
             Bet.BetData data = (Bet.BetData) getBody(bet);
             assertThat(data.getB()).isEqualTo(500_000L);
             assertThat(data.getEid()).isEqualTo(2L);  // Xỉu
+            assertThat(data.getSid()).isEqualTo(2670572L);
+            assertThat(data.getAid()).isEqualTo(1);
+        }
+    }
+
+    @Nested
+    @DisplayName("offset-aware CMDs (AD-4)")
+    class OffsetTests {
+
+        /** A provider at cmdOffset 100 supplies subscribe 1105 / bet 1100. */
+        private final TaiXiuRequest shifted =
+                new TaiXiuRequest("taixiuJackpotPlugin", "MiniGame", 1105, 1100);
+
+        @Test
+        @DisplayName("subscribe emits the injected +100 cmd 1105")
+        void subscribeUsesInjectedCmd() throws Exception {
+            assertThat(getBody(shifted.subscribe()).getCmd()).isEqualTo(1105);
+        }
+
+        @Test
+        @DisplayName("bet emits the injected +100 cmd 1100 while keeping the Bet.BetData shape")
+        void betUsesInjectedCmd() throws Exception {
+            Bet bet = shifted.bet(500_000L, 1, 2670572L);
+            Bet.BetData data = (Bet.BetData) getBody(bet);
+            assertThat(data.getCmd()).isEqualTo(1100);
+            assertThat(data.getB()).isEqualTo(500_000L);
+            assertThat(data.getEid()).isEqualTo(1L);
             assertThat(data.getSid()).isEqualTo(2670572L);
             assertThat(data.getAid()).isEqualTo(1);
         }

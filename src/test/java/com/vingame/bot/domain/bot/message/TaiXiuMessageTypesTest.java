@@ -32,12 +32,64 @@ class TaiXiuMessageTypesTest {
     private static final ProductCode CAPTURED_PRODUCT = ProductCode.P_116;
 
     @Test
-    @DisplayName("Fixed cmd constants are 1005/1002/1004 (inbound) + 1000 (bet, outbound)")
-    void fixedCmdConstants() {
-        assertThat(TaiXiuMessageTypes.SUBSCRIBE_CMD).isEqualTo(1005);
-        assertThat(TaiXiuMessageTypes.START_GAME_CMD).isEqualTo(1002);
-        assertThat(TaiXiuMessageTypes.END_GAME_CMD).isEqualTo(1004);
-        assertThat(TaiXiuMessageTypes.BET_CMD).isEqualTo(1000);
+    @DisplayName("Base cmd literals are 1005/1002/1004 (inbound) + 1000 (bet, outbound)")
+    void baseCmdLiterals() {
+        assertThat(TaiXiuMessageTypes.SUBSCRIBE_CMD_BASE).isEqualTo(1005);
+        assertThat(TaiXiuMessageTypes.START_GAME_CMD_BASE).isEqualTo(1002);
+        assertThat(TaiXiuMessageTypes.END_GAME_CMD_BASE).isEqualTo(1004);
+        assertThat(TaiXiuMessageTypes.BET_CMD_BASE).isEqualTo(1000);
+    }
+
+    @Test
+    @DisplayName("P_116 provider is offset 0 → effective cmds 1005/1002/1004/1000 (byte-for-byte unchanged)")
+    void capturedProviderIsOffsetZero() {
+        TaiXiuMessageTypes types = new MiniGameTaiXiuMessageTypes();
+        assertThat(types.cmdOffset()).isZero();
+        assertThat(types.subscribeCmd()).isEqualTo(1005);
+        assertThat(types.startGameCmd()).isEqualTo(1002);
+        assertThat(types.endGameCmd()).isEqualTo(1004);
+        assertThat(types.betCmd()).isEqualTo(1000);
+    }
+
+    @Test
+    @DisplayName("Offset mechanism: a cmdOffset()==100 provider yields 1105/1102/1104/1100 across cmds + registrations")
+    void cmdOffsetShiftsAllFourCmds() {
+        // Anonymous stub provider with offset 100 — reuses the captured-product
+        // inbound classes (Phase 1 does not yet add the 114 provider). This proves
+        // the offset seam shifts subscribe/start/end/bet AND the registration names.
+        TaiXiuMessageTypes shifted = new MiniGameTaiXiuMessageTypes() {
+            @Override
+            public int cmdOffset() {
+                return 100;
+            }
+        };
+
+        assertThat(shifted.cmdOffset()).isEqualTo(100);
+        assertThat(shifted.subscribeCmd()).isEqualTo(1105);
+        assertThat(shifted.startGameCmd()).isEqualTo(1102);
+        assertThat(shifted.endGameCmd()).isEqualTo(1104);
+        assertThat(shifted.betCmd()).isEqualTo(1100);
+
+        Map<String, Class<?>> byName = Arrays.stream(shifted.getTypeRegistrations())
+                .collect(Collectors.toMap(NamedType::getName, NamedType::getType));
+        assertThat(byName).containsOnlyKeys("1105", "1102", "1104");
+        assertThat(byName.get("1105")).isEqualTo(TaiXiuSubscribeMessage.class);
+        assertThat(byName.get("1102")).isEqualTo(TaiXiuStartGameMessage.class);
+        assertThat(byName.get("1104")).isEqualTo(TaiXiuEndGameMessage.class);
+        // The bet (1100) is outbound-only and must NOT be registered.
+        assertThat(byName).doesNotContainKey("1100");
+    }
+
+    @Test
+    @DisplayName("Default cmdOffset() on a bare provider is 0 → cmds stay 1005/1002/1004/1000")
+    void defaultOffsetIsZero() {
+        // A provider that does NOT override cmdOffset() inherits the interface default.
+        TaiXiuMessageTypes defaultProvider = new MiniGameTaiXiuMessageTypes();
+        assertThat(defaultProvider.cmdOffset()).isZero();
+        assertThat(defaultProvider.subscribeCmd()).isEqualTo(1005);
+        assertThat(defaultProvider.startGameCmd()).isEqualTo(1002);
+        assertThat(defaultProvider.endGameCmd()).isEqualTo(1004);
+        assertThat(defaultProvider.betCmd()).isEqualTo(1000);
     }
 
     @Test
