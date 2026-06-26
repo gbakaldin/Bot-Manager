@@ -6,7 +6,7 @@
     "observability"
   ],
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "editable": true,
   "graphTooltip": 1,
   "fiscalYearStartMonth": 0,
@@ -328,6 +328,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "Bet rate (per game type)",
+      "description": "rate(bot_bets_placed_total) grouped by the gameType enum (~5 values). After the label-fix phase, gameType carries the GameType enum (e.g. BETTING_MINI, SLOT), not the game name.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -382,6 +383,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "Bet amount rate (per game type)",
+      "description": "rate(bot_bet_amount_total) grouped by the gameType enum. gameType now carries the GameType enum, not the game name (label-fix phase).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -799,7 +801,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "Bot RTP per game (5m)",
-      "description": "Realized RTP by gameType. Renders 0% for games whose subclass has not yet implemented getWinnings().",
+      "description": "Realized RTP per individual game (gameName). Renders 0% for games whose subclass has not yet implemented getWinnings().",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -846,8 +848,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum by (gameType) (rate(bot_winnings_total[5m])) / sum by (gameType) (rate(bot_bet_amount_total[5m]))) or vector(0)",
-          "legendFormat": "{{gameType}}"
+          "expr": "(sum by (gameName) (rate(bot_winnings_total[5m])) / sum by (gameName) (rate(bot_bet_amount_total[5m]))) or vector(0)",
+          "legendFormat": "{{gameName}}"
         }
       ]
     },
@@ -855,7 +857,7 @@
       "id": 15,
       "type": "timeseries",
       "title": "Bot winnings rate per game (5m)",
-      "description": "rate(bot_winnings_total) by gameType.",
+      "description": "rate(bot_winnings_total) per individual game (gameName).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -901,8 +903,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (gameType) (rate(bot_winnings_total[5m]))",
-          "legendFormat": "{{gameType}}"
+          "expr": "sum by (gameName) (rate(bot_winnings_total[5m]))",
+          "legendFormat": "{{gameName}}"
         }
       ]
     },
@@ -910,7 +912,7 @@
       "id": 16,
       "type": "timeseries",
       "title": "Bot money drain per game (5m)",
-      "description": "Net cost to fund bots: rate(bet_amount) - rate(winnings) by gameType. Positive = bots net-losing (RTP < 100%).",
+      "description": "Net cost to fund bots: rate(bet_amount) - rate(winnings) per individual game (gameName). Positive = bots net-losing (RTP < 100%).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -956,8 +958,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (gameType) (rate(bot_bet_amount_total[5m]) - rate(bot_winnings_total[5m]))",
-          "legendFormat": "{{gameType}}"
+          "expr": "sum by (gameName) (rate(bot_bet_amount_total[5m]) - rate(bot_winnings_total[5m]))",
+          "legendFormat": "{{gameName}}"
         }
       ]
     },
@@ -965,7 +967,7 @@
       "id": 17,
       "type": "timeseries",
       "title": "Bot jackpot wins rate (5m)",
-      "description": "rate(bot_jackpots_total) by gameType. Rare events; expect mostly 0.",
+      "description": "rate(bot_jackpots_total) per individual game (gameName). Rare events; expect mostly 0.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1011,8 +1013,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (gameType) (rate(bot_jackpots_total[5m]))",
-          "legendFormat": "{{gameType}}"
+          "expr": "sum by (gameName) (rate(bot_jackpots_total[5m]))",
+          "legendFormat": "{{gameName}}"
         }
       ]
     },
@@ -1020,7 +1022,7 @@
       "id": 18,
       "type": "timeseries",
       "title": "Bot jackpot amount total per game (5m)",
-      "description": "rate(bot_jackpot_amount_total) by gameType.",
+      "description": "rate(bot_jackpot_amount_total) per individual game (gameName).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1070,8 +1072,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (gameType) (rate(bot_jackpot_amount_total[5m]))",
-          "legendFormat": "{{gameType}}"
+          "expr": "sum by (gameName) (rate(bot_jackpot_amount_total[5m]))",
+          "legendFormat": "{{gameName}}"
         }
       ]
     }
