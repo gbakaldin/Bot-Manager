@@ -26,12 +26,14 @@ import java.util.Optional;
  * the pendingDecision park/pop, strategy wiring, watchdog, reconnect, cleanup).
  * <p>
  * The only thing genuinely different is the <b>message layer</b>: Tai Xiu's CMDs are
- * <b>fixed literal constants</b> (single game instance, no per-env OFFSET — AD-3), and
- * the bet carries Tài/Xỉu {@code eid}/{@code aid} via a dedicated {@link TaiXiuRequest}
- * (AD-12). This bot therefore overrides only:
+ * <b>provider-resolved</b> (no per-env OFFSET; the effective CMD is the provider's base
+ * + {@code cmdOffset()} — TAI_XIU_114_JACKPOT plan AD-1/AD-7), and the bet carries
+ * Tài/Xỉu {@code eid}/{@code aid} via a dedicated {@link TaiXiuRequest} (AD-12). This
+ * bot therefore overrides only:
  * <ul>
  *   <li>the CMD seams ({@link #subscribeCmd()}/{@link #startGameCmd()}/
- *       {@link #endGameCmd()}/{@link #updateBetCmd()}) → fixed Tai Xiu constants;</li>
+ *       {@link #endGameCmd()}/{@link #updateBetCmd()}) → delegate to the wired
+ *       {@link #taiXiuMessageTypes} provider's offset-aware CMDs;</li>
  *   <li>{@link #messageTypeRegistrations()} → the no-offset Tai Xiu provider;</li>
  *   <li>the concrete-class accessors ({@code subscribeType}/{@code startGameType}/
  *       {@code startGameMd5Type}/{@code updateBetType}/{@code endGameType}) →
@@ -159,21 +161,23 @@ public class TaiXiuGameBot extends BettingMiniGameBot {
         return betsThisRound.keySet().iterator().next();
     }
 
-    // ---- Fixed CMD seams (AD-3). No CODE + offset arithmetic. ----
+    // ---- Provider-resolved CMD seams (AD-7). No per-environment OFFSET arithmetic;
+    // the effective CMD is the provider's base + cmdOffset() (1005/1002/1004 for
+    // P_116, 1105/1102/1104 for P_114). ----
 
     @Override
     protected int subscribeCmd() {
-        return TaiXiuMessageTypes.SUBSCRIBE_CMD; // 1005
+        return taiXiuMessageTypes.subscribeCmd(); // 1005 (P_116) / 1105 (P_114)
     }
 
     @Override
     protected int startGameCmd() {
-        return TaiXiuMessageTypes.START_GAME_CMD; // 1002
+        return taiXiuMessageTypes.startGameCmd(); // 1002 (P_116) / 1102 (P_114)
     }
 
     @Override
     protected int endGameCmd() {
-        return TaiXiuMessageTypes.END_GAME_CMD; // 1004
+        return taiXiuMessageTypes.endGameCmd(); // 1004 (P_116) / 1104 (P_114)
     }
 
     /**
@@ -229,7 +233,11 @@ public class TaiXiuGameBot extends BettingMiniGameBot {
 
     @Override
     protected GameRequest buildRequest(Game game) {
-        return new TaiXiuRequest(game.getPluginName(), configuration.getZoneName());
+        return new TaiXiuRequest(
+                game.getPluginName(),
+                configuration.getZoneName(),
+                taiXiuMessageTypes.subscribeCmd(),
+                taiXiuMessageTypes.betCmd());
     }
 
     // ---- EndGame correlation + refund-aware balance (#3, AD-11). ----

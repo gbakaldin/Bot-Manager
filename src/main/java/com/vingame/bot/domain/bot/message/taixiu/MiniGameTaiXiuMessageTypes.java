@@ -11,7 +11,8 @@ import com.vingame.bot.domain.bot.message.UpdateBetMessage;
  * {@link TaiXiuMessageTypes} implementation for the captured
  * {@code MiniGame}/{@code taixiuPlugin} product (TAI_XIU_BOT plan AD-4). Supplies
  * that product's concrete Tai Xiu message classes for polymorphic deserialization;
- * the fixed CMDs (1005/1002/1004) come from the interface (AD-3).
+ * the CMDs (1005/1002/1004) come from the interface at the default
+ * {@code cmdOffset()==0} (AD-1).
  * <p>
  * Resolved via {@code GameMessageTypesResolver.resolveTaiXiu(ProductCode)}. Mirrors
  * the per-product betting-mini providers (e.g. {@code TipGameMessageTypes}).
@@ -32,9 +33,10 @@ public class MiniGameTaiXiuMessageTypes implements TaiXiuMessageTypes {
      * {@inheritDoc}
      * <p>
      * No md5 StartGame variant was captured for this product (AD-10), so there is no
-     * {@code TaiXiuStartGameMd5Message} to return — {@code null}. The fixed
-     * {@code START_GAME_CMD=1002} is shared by both variants and {@link #getTypeRegistrations()}
-     * never registers an md5 entry, so this is never dereferenced in v1.
+     * {@code TaiXiuStartGameMd5Message} to return — {@code null}. The effective
+     * {@code startGameCmd()} (1002 at offset 0) is shared by both variants and
+     * {@link #getTypeRegistrations()} never registers an md5 entry, so this is never
+     * dereferenced in v1.
      */
     @Override
     public Class<? extends StartGameMd5Message> startGameMd5Type() {

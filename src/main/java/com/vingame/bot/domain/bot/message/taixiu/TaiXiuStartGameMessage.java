@@ -22,8 +22,9 @@ import lombok.Setter;
  * No explicit {@code timeForBetting} field was captured on StartGame (OI-5).
  * <p>
  * <b>md5 (AD-10):</b> no md5 StartGame variant was captured for this product, so
- * there is no separate {@code TaiXiuStartGameMd5Message}; the fixed
- * {@code START_GAME_CMD=1002} is shared by both variants (md5 only changes the body).
+ * there is no separate {@code TaiXiuStartGameMd5Message}; the effective
+ * {@code startGameCmd()} (1002 for P_116) is shared by both variants (md5 only
+ * changes the body).
  */
 @Getter
 @Setter

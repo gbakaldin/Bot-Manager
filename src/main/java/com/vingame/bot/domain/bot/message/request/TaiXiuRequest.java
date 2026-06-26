@@ -10,10 +10,16 @@ import lombok.AllArgsConstructor;
  * Unlike the betting-mini {@link Request} — which derives every outbound CMD as
  * {@code cmdPrefix + CODE} with a fixed {@code +2} gap between subscribe
  * ({@code +3000}) and bet ({@code +3002}) — Tai Xiu's CMDs are <b>bare fixed
- * literals</b>: subscribe {@link TaiXiuMessageTypes#SUBSCRIBE_CMD} = 1005, bet
- * {@link TaiXiuMessageTypes#BET_CMD} = 1000. That {@code −5} gap cannot be produced
- * by any single {@code cmdPrefix}, so a dedicated builder is required (mirrors
- * {@link SlotRequest}, which carries explicit fixed CMDs for the same reason).
+ * literals</b>: subscribe {@code 1005}, bet {@code 1000} for P_116. That {@code −5}
+ * gap cannot be produced by any single {@code cmdPrefix}, so a dedicated builder is
+ * required (mirrors {@link SlotRequest}, which carries explicit fixed CMDs for the
+ * same reason).
+ * <p>
+ * The two CMDs are <b>injected at construction</b> rather than read from static
+ * constants (TAI_XIU_114_JACKPOT plan AD-4): {@code TaiXiuGameBot.buildRequest()}
+ * passes {@code provider.subscribeCmd()} / {@code provider.betCmd()}, so the same
+ * builder serves both the P_116 provider (1005/1000) and the P_114 jackpot provider
+ * (1105/1100, {@code cmdOffset()==100}).
  * <p>
  * The <b>bet body shape is reused from betting-mini</b> ({@link Bet.BetData} =
  * {@code {cmd, aid:1, b, eid, sid}}) — it already matches the captured Tai Xiu bet
@@ -31,20 +37,25 @@ public class TaiXiuRequest implements GameRequest {
 
     private final String pluginName;
     private final String zoneName;
+    /** Effective subscribe CMD from the provider ({@link TaiXiuMessageTypes#subscribeCmd()}). */
+    private final int subscribeCmd;
+    /** Effective bet CMD from the provider ({@link TaiXiuMessageTypes#betCmd()}). */
+    private final int betCmd;
 
     /**
-     * Build a subscribe request emitting the bare fixed
-     * {@link TaiXiuMessageTypes#SUBSCRIBE_CMD} (1005) — no offset, no prefix.
+     * Build a subscribe request emitting the provider's effective subscribe CMD
+     * (1005 for P_116, 1105 for P_114) — no offset, no prefix.
      */
     @Override
     public SubscribeToLobbyMessage subscribe() {
         return new SubscribeToLobbyMessage(
-                zoneName, pluginName, new Body(TaiXiuMessageTypes.SUBSCRIBE_CMD));
+                zoneName, pluginName, new Body(subscribeCmd));
     }
 
     /**
-     * Build a bet request emitting the bare fixed {@link TaiXiuMessageTypes#BET_CMD}
-     * (1000). Reuses {@link Bet.BetData}'s field shape ({@code cmd, aid:1, b, eid, sid}).
+     * Build a bet request emitting the provider's effective bet CMD (1000 for P_116,
+     * 1100 for P_114). Reuses {@link Bet.BetData}'s field shape
+     * ({@code cmd, aid:1, b, eid, sid}).
      *
      * @param amount  the stake ({@code b})
      * @param entryId the chosen Tài/Xỉu entry ({@code eid}; exactly 2 options)
@@ -52,6 +63,6 @@ public class TaiXiuRequest implements GameRequest {
      */
     @Override
     public Bet bet(long amount, int entryId, long sid) {
-        return new Bet(TaiXiuMessageTypes.BET_CMD, zoneName, pluginName, amount, entryId, sid);
+        return new Bet(betCmd, zoneName, pluginName, amount, entryId, sid);
     }
 }
