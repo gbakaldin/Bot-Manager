@@ -234,6 +234,38 @@ class TaiXiuJackpotGameBotStreamTest {
         assertThat(fullRefundWinnings).isZero();
     }
 
+    /**
+     * Concern #5 (TAI_XIU_114_JACKPOT plan, OI/product-decision item): the captured
+     * 114 subscribe response carries NO {@code tFBB}, so {@code getTimeForDecision()}
+     * defaults to 0, which {@code onSubscribe} assigns to {@code blockBetTime}. The
+     * late-bet cutoff is therefore 0 — the bet gate ({@code remainingTime >=
+     * blockBetTime}) never closes on the time dimension, even at {@code remainingTime
+     * == 0}. This is modeled faithfully (NOT a defect); the test pins it so the state
+     * is documented and intentional. Contrast the 116 path which carries a real tFBB.
+     */
+    @Test
+    @DisplayName("114 subscribe has no tFBB -> blockBetTime=0, bet gate stays open even at remainingTime=0")
+    void p114NoTfbbMeansZeroLateBetCutoff() throws Exception {
+        bot = newBot(ProductCode.P_114, "taixiuJackpotPlugin");
+        metrics = mock(BotMetrics.class);
+        bot.setMetrics(metrics);
+
+        // onSubscribe reads getTimeForDecision() (0 for 114) into blockBetTime.
+        invokeOnSubscribe((SubscribeMessage) parseFixture("subscribe.json"));
+        assertThat(readLongField("blockBetTime"))
+                .as("114 subscribe has no tFBB -> getTimeForDecision()==0 -> blockBetTime==0")
+                .isZero();
+
+        invokeOnStartGame(startGameWithSid(BASE_SID));
+        setField("gameState", BettingMiniGameState.BET);
+
+        // Even with the countdown fully drained, the time gate stays open (>= 0).
+        setRemainingTime(0L);
+        assertThat(invokeBetCondition())
+                .as("blockBetTime=0 -> gate open even at remainingTime=0")
+                .isTrue();
+    }
+
     @Test
     @DisplayName("regression: P_116 bot still uses 1005/1002/1004/1000 and emits a Bet with NO 'a' field")
     void p116RegressionUnchanged() throws Exception {
@@ -374,6 +406,12 @@ class TaiXiuJackpotGameBotStreamTest {
         Field f = findField(name);
         f.setAccessible(true);
         return f.get(bot);
+    }
+
+    private long readLongField(String name) throws Exception {
+        Field f = findField(name);
+        f.setAccessible(true);
+        return f.getLong(bot);
     }
 
     private void setField(String name, Object value) {
