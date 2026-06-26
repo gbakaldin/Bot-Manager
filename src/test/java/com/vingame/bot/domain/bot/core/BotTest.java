@@ -276,6 +276,31 @@ class BotTest {
         }
 
         @Test
+        @DisplayName("initialize() sets corrected game MDC labels: gameType=enum, gameName=name, gameId=id (AD-1 fix)")
+        void initializeSetsCorrectedGameMdcLabels() {
+            // Highest-risk change: the gameType label fix at the real call site
+            // (Bot.initialize). The fixture's Game is BETTING_MINI / "BauCua" / "g1".
+            // mdcSnapshot is captured immediately after BotMdc.set(...) and survives
+            // the finally-clear, so it pins exactly what the metric series will carry.
+            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+            when(tokens.getAgencyToken()).thenReturn("agency1234567890");
+            when(tokens.getAuthToken()).thenReturn("auth1234567890abc");
+            when(clientFactory.newClient(eq(tokens), eq("botuser1"))).thenReturn(wsClient);
+
+            bot.initialize();
+
+            assertThat(bot.mdcSnapshot).isNotNull();
+            // gameType carries the GameType enum, NOT the display name (the bug fix).
+            assertThat(bot.mdcSnapshot).containsEntry("gameType", "BETTING_MINI");
+            // gameName carries the readable display name.
+            assertThat(bot.mdcSnapshot).containsEntry("gameName", "BauCua");
+            // gameId carries the Mongo _id (stable per-Game key), NOT the numeric gid.
+            assertThat(bot.mdcSnapshot).containsEntry("gameId", "g1");
+            // Regression: the name must NOT leak into gameType.
+            assertThat(bot.mdcSnapshot.get("gameType")).isNotEqualTo("BauCua");
+        }
+
+        @Test
         @DisplayName("markConnectionAuthenticated transitions to CONNECTION_AUTHENTICATED from STARTED")
         void shouldTransitionToConnectionAuthenticated() {
             // Move bot to STARTED first via start()

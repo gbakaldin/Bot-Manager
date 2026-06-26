@@ -1,18 +1,28 @@
 package com.vingame.bot.infrastructure.runtime;
 
+import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.domain.game.model.GameType;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 
 import java.lang.reflect.Field;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -77,6 +87,56 @@ class BotGroupRuntimeTest {
             try {
                 assertThat(runtime.getEnvironmentId()).isEqualTo("env-1");
                 assertThat(runtime.getEnvironmentName()).isEqualTo("Staging");
+            } finally {
+                runtime.getExecutor().shutdownNow();
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("startBot MDC labels")
+    class StartBotMdcTests {
+
+        @Test
+        @DisplayName("startBot sets corrected game MDC labels on the bot's virtual thread (AD-1 fix, 2nd call site)")
+        void startBotSetsCorrectedGameMdcLabels() throws Exception {
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 1, "env-1", "Staging");
+            try {
+                Game game = Game.builder()
+                        .id("game-uuid-1")
+                        .name("BauCua")
+                        .gameType(GameType.BETTING_MINI)
+                        .build();
+                BotConfiguration config = BotConfiguration.builder()
+                        .game(game)
+                        .environmentId("env-1")
+                        .botGroupId("g-1")
+                        .botIndex(1)
+                        .build();
+
+                Bot bot = mock(Bot.class);
+                lenient().when(bot.getConfiguration()).thenReturn(config);
+                lenient().when(bot.getUserName()).thenReturn("botuser1");
+
+                AtomicReference<Map<String, String>> captured = new AtomicReference<>();
+                CountDownLatch done = new CountDownLatch(1);
+                doAnswer(inv -> {
+                    // start() runs on the virtual thread after BotMdc.set(...); capture
+                    // the MDC the metric series will inherit on that thread.
+                    captured.set(MDC.getCopyOfContextMap());
+                    done.countDown();
+                    return null;
+                }).when(bot).start();
+
+                runtime.startBot(bot);
+
+                assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+                Map<String, String> mdc = captured.get();
+                assertThat(mdc).isNotNull();
+                assertThat(mdc).containsEntry("gameType", "BETTING_MINI"); // enum, not name
+                assertThat(mdc).containsEntry("gameName", "BauCua");
+                assertThat(mdc).containsEntry("gameId", "game-uuid-1");
+                assertThat(mdc.get("gameType")).isNotEqualTo("BauCua");
             } finally {
                 runtime.getExecutor().shutdownNow();
             }
