@@ -4,6 +4,7 @@ import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.nohu.NohuGameMessageTypes;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
+import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
 import com.vingame.bot.domain.brand.model.ProductCode;
 
@@ -90,7 +91,10 @@ public class GameMessageTypesResolver {
 
         return switch (productCode) {
             case P_116 -> new MiniGameTaiXiuMessageTypes();
-            case P_066, P_097, P_098, P_103, P_105, P_114, P_118, P_119, P_222 ->
+            // P_114 / RIK jackpot variant (taixiuJackpotPlugin): +100 CMDs, a:false on
+            // bet, reused inbound classes (TAI_XIU_114_JACKPOT plan AD-5/AD-6).
+            case P_114 -> new JackpotTaiXiuMessageTypes();
+            case P_066, P_097, P_098, P_103, P_105, P_118, P_119, P_222 ->
                 throw new IllegalArgumentException(
                     "TaiXiuMessageTypes not yet implemented for product code: " + productCode.getCode() +
                     ". Please create a TaiXiuMessageTypes implementation for this product.");

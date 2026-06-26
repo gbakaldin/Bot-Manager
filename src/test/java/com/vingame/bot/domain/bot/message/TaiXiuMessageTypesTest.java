@@ -139,7 +139,7 @@ class TaiXiuMessageTypesTest {
 
     @ParameterizedTest(name = "resolveTaiXiu({0}) -> IllegalArgumentException")
     @EnumSource(value = ProductCode.class,
-            names = {"P_066", "P_097", "P_098", "P_103", "P_105", "P_114", "P_118", "P_119", "P_222"})
+            names = {"P_066", "P_097", "P_098", "P_103", "P_105", "P_118", "P_119", "P_222"})
     @DisplayName("resolveTaiXiu throws 'not yet implemented' for unimplemented product codes")
     void resolveTaiXiuThrowsForUnimplemented(ProductCode productCode) {
         assertThatThrownBy(() -> GameMessageTypesResolver.resolveTaiXiu(productCode))
