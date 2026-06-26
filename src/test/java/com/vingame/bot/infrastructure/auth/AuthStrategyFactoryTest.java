@@ -2,6 +2,7 @@ package com.vingame.bot.infrastructure.auth;
 
 import com.vingame.bot.domain.bot.auth.B52LoginRequest;
 import com.vingame.bot.domain.bot.auth.BomLoginRequest;
+import com.vingame.bot.domain.bot.auth.RikLoginRequest;
 import com.vingame.bot.domain.bot.auth.TipLoginRequest;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.model.Environment;
@@ -94,7 +95,7 @@ class AuthStrategyFactoryTest {
     }
 
     @ParameterizedTest(name = "{0} → DefaultLoginRequest")
-    @EnumSource(value = ProductCode.class, names = {"P_066", "P_103", "P_105", "P_114", "P_118", "P_119", "P_222"})
+    @EnumSource(value = ProductCode.class, names = {"P_066", "P_103", "P_105", "P_118", "P_119", "P_222"})
     @DisplayName("standard products produce a DefaultLoginRequest")
     void getAuthProfile_loginRequestFactoryReturnsDefaultLoginRequest_forStandardProducts(ProductCode pc) {
         AuthProfile profile = factory.getAuthProfile(envFor(pc));
@@ -124,6 +125,23 @@ class AuthStrategyFactoryTest {
         assertThat(tip.getIp()).isEqualTo(BOT_IP);
         // app_id on Tip is brand-static, not driven by ctx.appId() — pin that.
         assertThat(tip.getAppId()).isEqualTo("bc115116");
+    }
+
+    @Test
+    @DisplayName("P_114 (Rik) produces a RikLoginRequest with botIp")
+    void getAuthProfile_loginRequestFactoryReturnsRikLoginRequest_forP114() {
+        AuthProfile profile = factory.getAuthProfile(envFor(ProductCode.P_114));
+
+        LoginRequest loginRequest = profile.loginRequestFactory().apply(fakeAuthContext());
+
+        assertThat(loginRequest).isInstanceOf(RikLoginRequest.class);
+        RikLoginRequest rik = (RikLoginRequest) loginRequest;
+        assertThat(rik.getUsername()).isEqualTo("alice");
+        assertThat(rik.getPassword()).isEqualTo("hunter2");
+        assertThat(rik.getFingerprint()).isEqualTo("fp-abc");
+        assertThat(rik.getIp()).isEqualTo(BOT_IP);
+        // app_id on Rik is brand-static, not driven by ctx.appId() — pin that.
+        assertThat(rik.getAppId()).isEqualTo("rik.vip");
     }
 
     @Test

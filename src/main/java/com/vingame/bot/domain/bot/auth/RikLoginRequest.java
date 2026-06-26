@@ -1,0 +1,36 @@
+package com.vingame.bot.domain.bot.auth;
+
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.vingame.websocketparser.auth.LoginRequest;
+import lombok.Getter;
+import lombok.RequiredArgsConstructor;
+
+@Getter
+@RequiredArgsConstructor
+public class RikLoginRequest implements LoginRequest {
+
+    private final String username;
+    private final String password;
+
+    @JsonProperty("app_id")
+    private final String appId = "rik.vip";
+
+    private final String os = "OS X";
+    private final String device = "Computer";
+    private final String browser = "chrome";
+
+    @JsonProperty("fg")
+    private final String fingerprint;
+
+    @JsonProperty("aff_id")
+    private final String affId = "RIKVIP";
+
+    @JsonProperty("apVer")
+    private final String apVer = "1.1.977";
+
+    private final String version = "1.1.977";
+
+    private final String ip;
+}
+
+//r_token:"0cAFcWeA5N4Q2xoX9q--hbE4ltqb_lOmpUC9Nsf8nMsh73YPhvHgZdKd0Dbeey_UXDLscC2xTvBFHapDBxZ2Y97f99b_j1hQpfF18zzqcfeGUZZmspIGDUHCX9VuafdVA6e2-2zgfoGgpfpVeT9YXOADndq_R3sULX6FynzOH4g0mTBG_IkyIAx7c8Puc8uexOG-PSLFCGG5PUptKYMsTSyam0gHhtNJyiCEPO5n46dLju-z1AvgXNMBiUaJSI9j0gS9orLNydxwxaULiGcUqdyatEpz8dtixmjLEOLVGPpSdWthUeqqmE_aKEglUfBNcek0aWVh-ETSJq4DdWlkVZdFqNqApbiIfUFejdyfbzmG1py3DLhahFdeO1kBZaSduJ0DsdBXyr87n3QiDng2xA-owQwM0JUudoWNtApGTRMC4EyLJtPFIVogbhzqHN4kHt9vaHSrP-gq0tYc9cRlriwEgwDOluFUjg4adBAIfhnEYkpemvWmqWq7RGkE6J6wWYnLm8j0gUtbRaPqWKhctVvgzdvuBPyWF82a8oMsPPOgic_WMWhjt3bUR3hImp_suH9gVPQEIsQP7yWkmhdU5ymoPBenkI-zOBcb5CjrMZVhQUJsbv43W_E9Jl0iM8n9DXQo7ShzC1dbaQ8rghomN7icEEytj3AhIaQJiumQgJCQcy_fyK-II1ywsh6Qk9rbMw8dROw-3CwyTCv66u2OM4Mea8vhIwb80MqYgT6H8ALmkQE5SRPjVpmPRdo7KANaIffLXuN6xKT9wSjRK2yGEE_SRczA7_vsYDJm1GQom_xB6laArcEbkcq7sNhcaDFTIctdw9DVIvfBJQqVIf_2sdpPWt0g11_6vegj3aLDle-KkF2M8rbIi3kOKEdGWm-L2uCjCHItmSTKh817QhtVoulSNmb9A2B4MFomTcbLMN19-Oix_8M-pra1EUJPIAighfsOOA5uodI4q0Ih9lWigwvCE56vjDdWg8FIFRNORH0LbrL7_XwsN0TQqB9tnnmsisvB1wkzdJBKxqm30I7p4yhe7wSei9Z3oq_tbz4zwyLt25ofF-dZhIlTwgWhf0LHOCPDMsQ71eYL-GmsRso22wPKA_mDh-VXVqkGOaUXYm3vOl_z7a3cxmxSyAmdFKkiV8Zg6Z1otNlN1RiaRE_d_jg6MoKPLthA1jQAJmxmygkIKpcP70sv_buNxlR346WPaZL8kh4G-J9L6PMtEVpC5vRDsR4qGH8uyhGCaZYsk_yAp0pkL5g11H3pFfVOx2HUuZm2Jq1xIYKeww7RuAqiKND75dRuUrdMhPnctOUKA0mNqH7iK6wSlhSqxuCiiRszaCS64W96Xt1KX74FYWyv1VEP2EdymodI2TtcfnlungfI4HSUgHmAiP1e3Krdg4_Fhdc9IyztLjwv-MSWLhIBzcNaWb3mLPtM3CeFYiz_s_pf7NPZ1uXsaY9grDCu3jlPj3aRsrDbafaB4BdbA2jngJqDoCiYLDes2ZhEuGg6lg1B_k_dtXg737SoO2N3-jwIvHm31EQE_RJGuSknQ27lkrF_CYAVJoTX1WxDg98QP109pUiT4LuoQRbeiXv-6qSuFv0iaYNhLwQE-0OFhUNHktZx31V8meHyeS6YGpMMmZjTik5DoNoabLv5LH0RV9LeryB57GHqbPahZ20kTEzoB1A496k_CM-kRHN-oWYwIiZsE-2G66WIkNEKY9NoPb1MPcHnwj7UOu7cBNOXPMPigA7oKT_B9otPOOSUZb_og7Lef2k5Ge-3Yz4ZyDERzRsi0Ih-MRXzlbXZToAEQMZZ9Efasd3r-MN0Hvc3CADqZ_fwmz5Twmh9dSPZVb3qnQAb--R5o0QM2vftAQC08FCwRKqDikRR5rGC58g8yzEP3p1dOZWeiltfZ1mYWZhVP4TcS4wF74cjKjLhNubTXn59SqAZY_dhwYF4AA4Os2_zz19BYRlnIQAEqNPjGaHNLZFAMuTHX9GeI6EoGw8eWzNtw4DtSdfxETu_np8T9ir1bZcBUM8KNMmaAblBsgeuui09G3kXCX_zEb1MMp"
