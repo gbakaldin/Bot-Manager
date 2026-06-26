@@ -58,7 +58,7 @@ class InfoGaugeRefresherTest {
         MDC.clear();
     }
 
-    // ---- Phase 2: game_info / environment_info join gauges ----
+    // ---- Phase 2: game_join / environment_join join gauges ----
 
     @Test
     void gameInfoGauge_carriesGameIdNameAndType_withValueOne() {
@@ -68,13 +68,13 @@ class InfoGaugeRefresherTest {
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
-        Gauge bauCua = registry.find("game_info").tag("gameId", "game-uuid-1").gauge();
+        Gauge bauCua = registry.find("game_join").tag("gameId", "game-uuid-1").gauge();
         assertThat(bauCua).isNotNull();
         assertThat(bauCua.value()).isEqualTo(1.0);
         assertThat(bauCua.getId().getTag("gameName")).isEqualTo("BauCua");
         assertThat(bauCua.getId().getTag("gameType")).isEqualTo("BETTING_MINI");
 
-        Gauge slot = registry.find("game_info").tag("gameName", "SlotA").gauge();
+        Gauge slot = registry.find("game_join").tag("gameName", "SlotA").gauge();
         assertThat(slot).isNotNull();
         assertThat(slot.getId().getTag("gameId")).isEqualTo("game-uuid-2");
         assertThat(slot.getId().getTag("gameType")).isEqualTo("SLOT");
@@ -87,7 +87,7 @@ class InfoGaugeRefresherTest {
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
-        Gauge env = registry.find("environment_info").tag("environmentId", "env-uuid-1").gauge();
+        Gauge env = registry.find("environment_join").tag("environmentId", "env-uuid-1").gauge();
         assertThat(env).isNotNull();
         assertThat(env.value()).isEqualTo(1.0);
         assertThat(env.getId().getTag("environmentName")).isEqualTo("Staging");
@@ -98,12 +98,12 @@ class InfoGaugeRefresherTest {
         when(behaviorService.listRunningGameInfo()).thenReturn(List.of(
                 new GameInfo("game-uuid-1", "BauCua", "BETTING_MINI")));
         InfoGaugeRefresher.refresh(behaviorService, gauges);
-        assertThat(registry.find("game_info").tag("gameId", "game-uuid-1").gauge()).isNotNull();
+        assertThat(registry.find("game_join").tag("gameId", "game-uuid-1").gauge()).isNotNull();
 
         // The game stops: the next refresh must drop its row.
         when(behaviorService.listRunningGameInfo()).thenReturn(List.of());
         InfoGaugeRefresher.refresh(behaviorService, gauges);
-        assertThat(registry.find("game_info").tag("gameId", "game-uuid-1").gauge()).isNull();
+        assertThat(registry.find("game_join").tag("gameId", "game-uuid-1").gauge()).isNull();
     }
 
     @Test
@@ -119,10 +119,10 @@ class InfoGaugeRefresherTest {
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
-        Gauge game = registry.find("game_info").tag("gameId", "game-uuid-1").gauge();
+        Gauge game = registry.find("game_join").tag("gameId", "game-uuid-1").gauge();
         assertThat(game).isNotNull();
         assertThat(game.getId().getTag(BotMdc.BOT_GROUP_ID)).isNull();
-        Gauge env = registry.find("environment_info").tag("environmentId", "env-uuid-1").gauge();
+        Gauge env = registry.find("environment_join").tag("environmentId", "env-uuid-1").gauge();
         assertThat(env).isNotNull();
         assertThat(env.getId().getTag(BotMdc.BOT_GROUP_ID)).isNull();
     }
@@ -209,11 +209,11 @@ class InfoGaugeRefresherTest {
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
-        Gauge game = registry.find("game_info").tag("gameId", "game-uuid-1").gauge();
+        Gauge game = registry.find("game_join").tag("gameId", "game-uuid-1").gauge();
         assertThat(game).isNotNull();
         assertThat(game.getId().getTag("gameName")).isEqualTo("");
         assertThat(game.getId().getTag("gameType")).isEqualTo("");
-        Gauge env = registry.find("environment_info").tag("environmentId", "env-uuid-1").gauge();
+        Gauge env = registry.find("environment_join").tag("environmentId", "env-uuid-1").gauge();
         assertThat(env).isNotNull();
         assertThat(env.getId().getTag("environmentName")).isEqualTo("");
     }
@@ -224,8 +224,8 @@ class InfoGaugeRefresherTest {
         // leave the gauges with zero series.
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
-        assertThat(registry.find("game_info").gauges()).isEmpty();
-        assertThat(registry.find("environment_info").gauges()).isEmpty();
+        assertThat(registry.find("game_join").gauges()).isEmpty();
+        assertThat(registry.find("environment_join").gauges()).isEmpty();
         assertThat(registry.find("bots_by_game_status").gauges()).isEmpty();
         assertThat(registry.find("bots_by_env_status").gauges()).isEmpty();
     }

@@ -32,10 +32,10 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(game_info, gameName)",
+        "definition": "label_values(game_join, gameName)",
         "query": {
           "qryType": 1,
-          "query": "label_values(game_info, gameName)",
+          "query": "label_values(game_join, gameName)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -56,10 +56,10 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(game_info{gameName=\"$game\"}, gameId)",
+        "definition": "label_values(game_join{gameName=\"$game\"}, gameId)",
         "query": {
           "qryType": 1,
-          "query": "label_values(game_info{gameName=\"$game\"}, gameId)",
+          "query": "label_values(game_join{gameName=\"$game\"}, gameId)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,

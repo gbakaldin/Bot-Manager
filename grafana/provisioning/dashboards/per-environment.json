@@ -32,10 +32,10 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(environment_info, environmentName)",
+        "definition": "label_values(environment_join, environmentName)",
         "query": {
           "qryType": 1,
-          "query": "label_values(environment_info, environmentName)",
+          "query": "label_values(environment_join, environmentName)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
@@ -56,10 +56,10 @@
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(environment_info{environmentName=\"$environment\"}, environmentId)",
+        "definition": "label_values(environment_join{environmentName=\"$environment\"}, environmentId)",
         "query": {
           "qryType": 1,
-          "query": "label_values(environment_info{environmentName=\"$environment\"}, environmentId)",
+          "query": "label_values(environment_join{environmentName=\"$environment\"}, environmentId)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
