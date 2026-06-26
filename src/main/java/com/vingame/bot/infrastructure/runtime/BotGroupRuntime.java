@@ -131,6 +131,8 @@ public class BotGroupRuntime {
                     config.getBotGroupId(),
                     config.getBotIndex(),
                     config.getEnvironmentId(),
+                    config.getGame().getGameType().name(),
+                    config.getGame().getId(),
                     config.getGame().getName(),
                     bot.getUserName()
             );

@@ -63,10 +63,12 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
             return id;
         }
 
-        List<Tag> extra = new ArrayList<>(3);
+        List<Tag> extra = new ArrayList<>(5);
         addTagIfPresent(extra, BotMdc.BOT_GROUP_ID);
         addTagIfPresent(extra, BotMdc.ENVIRONMENT_ID);
         addTagIfPresent(extra, BotMdc.GAME_TYPE);
+        addTagIfPresent(extra, BotMdc.GAME_ID);
+        addTagIfPresent(extra, BotMdc.GAME_NAME);
 
         if (extra.isEmpty()) {
             return id;

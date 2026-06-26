@@ -139,6 +139,8 @@ public abstract class Bot {
                 configuration.getBotGroupId(),
                 configuration.getBotIndex(),
                 configuration.getEnvironmentId(),
+                configuration.getGame().getGameType().name(),
+                configuration.getGame().getId(),
                 configuration.getGame().getName(),
                 userName
         );

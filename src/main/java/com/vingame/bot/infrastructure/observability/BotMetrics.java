@@ -15,7 +15,8 @@ import java.util.List;
  * Central holder for all bot-emitted Micrometer counters.
  * <p>
  * On every {@code inc*} call, this class reads bot identity ({@code botGroupId},
- * {@code environmentId}, {@code gameType}) from MDC and attaches them as tags on
+ * {@code environmentId}, {@code gameType}, {@code gameId}, {@code gameName}) from
+ * MDC and attaches them as tags on
  * the Counter builder. The registry interns counters by {@code name + tags}, so
  * each unique combination of MDC values produces a distinct time series with
  * effectively zero per-call overhead after first creation.
@@ -36,8 +37,16 @@ import java.util.List;
  *   <li>{@code bot_*} — per-bot semantics (carries MDC-driven group/env/game tags).</li>
  *   <li>All counters end in {@code _total}.</li>
  * </ul>
- * Cardinality cap (Architecture Decision 5): only {@code botGroupId},
- * {@code environmentId}, {@code gameType} are exposed. No per-bot tags.
+ * Cardinality cap (Architecture Decision 5, as amended by
+ * GRAFANA_PER_GAME_ENV_DASHBOARDS AD-9): the exposed identity tags are
+ * {@code botGroupId}, {@code environmentId}, {@code gameType}, {@code gameId}, and
+ * {@code gameName}. The latter two were added to enable the per-Game dashboard.
+ * They are bounded and add near-zero real cardinality: {@code gameId}/{@code gameName}
+ * are functionally dependent on {@code botGroupId} (a group maps to exactly one game),
+ * so they are constant within a group's series. {@code gameType} now correctly carries
+ * the {@code GameType} enum (~5 values), {@code gameName} the readable display name,
+ * and {@code gameId} the stable Mongo {@code _id} UUID. The prohibition on unbounded
+ * per-bot tags ({@code botId}, {@code botUserName}) still stands.
  */
 @Component
 public class BotMetrics {
@@ -79,10 +88,12 @@ public class BotMetrics {
      * legal but noisy.
      */
     private Tags mdcTags() {
-        List<Tag> tags = new ArrayList<>(3);
+        List<Tag> tags = new ArrayList<>(5);
         addIfPresent(tags, BotMdc.BOT_GROUP_ID);
         addIfPresent(tags, BotMdc.ENVIRONMENT_ID);
         addIfPresent(tags, BotMdc.GAME_TYPE);
+        addIfPresent(tags, BotMdc.GAME_ID);
+        addIfPresent(tags, BotMdc.GAME_NAME);
         return tags.isEmpty() ? Tags.empty() : Tags.of(tags);
     }
 
