@@ -21,7 +21,12 @@ class BotMetricsTest {
 
     private static final String GROUP_ID = "group-abc";
     private static final String ENV_ID = "env-xyz";
-    private static final String GAME_TYPE = "BauCua";
+    // GRAFANA_PER_GAME_ENV_DASHBOARDS AD-1: gameType now carries the GameType enum,
+    // not the game's display name. Regression-guards the latent naming bug where
+    // gameType was populated from game.getName() (e.g. "BauCua").
+    private static final String GAME_TYPE = "BETTING_MINI";
+    private static final String GAME_ID = "11111111-2222-3333-4444-555555555555";
+    private static final String GAME_NAME = "BauCua";
 
     private MeterRegistry registry;
     private BotMetrics metrics;
@@ -43,6 +48,8 @@ class BotMetricsTest {
         MDC.put(BotMdc.BOT_GROUP_ID, GROUP_ID);
         MDC.put(BotMdc.ENVIRONMENT_ID, ENV_ID);
         MDC.put(BotMdc.GAME_TYPE, GAME_TYPE);
+        MDC.put(BotMdc.GAME_ID, GAME_ID);
+        MDC.put(BotMdc.GAME_NAME, GAME_NAME);
     }
 
     @Test
@@ -55,9 +62,71 @@ class BotMetricsTest {
                 .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
                 .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
                 .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .tag(BotMdc.GAME_ID, GAME_ID)
+                .tag(BotMdc.GAME_NAME, GAME_NAME)
                 .counter();
         assertThat(c).isNotNull();
         assertThat(c.count()).isEqualTo(1.0);
+    }
+
+    /* ----- GRAFANA_PER_GAME_ENV_DASHBOARDS Phase 1 — gameId / gameName labels + gameType fix ----- */
+
+    @Test
+    void gameLabels_areEmittedAcrossDashboardCounters() {
+        // Every dashboard-relevant counter must carry gameId + gameName (sourced
+        // from the Game entity the bot holds) so the per-Game dashboard can filter.
+        setBotMdc();
+        metrics.incBotMessage("endGame");
+        metrics.incBetsPlaced(2, 200L);
+        metrics.incBotWinnings(300L);
+        metrics.incBotJackpot(1_000L);
+        metrics.incBotFailure();
+        metrics.incBotDeadSeconds(5);
+        metrics.incBotWsEvent("connected");
+        metrics.incBotReconnect("watchdog");
+
+        String[] names = {
+                BotMetrics.BOT_MESSAGES_TOTAL,
+                BotMetrics.BOT_BETS_PLACED_TOTAL,
+                BotMetrics.BOT_BET_AMOUNT_TOTAL,
+                BotMetrics.BOT_WINNINGS_TOTAL,
+                BotMetrics.BOT_JACKPOTS_TOTAL,
+                BotMetrics.BOT_JACKPOT_AMOUNT_TOTAL,
+                BotMetrics.BOT_FAILURES_TOTAL,
+                BotMetrics.BOT_DEAD_SECONDS_TOTAL,
+                BotMetrics.BOT_WS_CONNECTIONS_TOTAL,
+                BotMetrics.BOT_RECONNECTS_TOTAL
+        };
+        for (String name : names) {
+            Counter c = registry.find(name)
+                    .tag(BotMdc.GAME_ID, GAME_ID)
+                    .tag(BotMdc.GAME_NAME, GAME_NAME)
+                    .counter();
+            assertThat(c).as("counter %s carries gameId + gameName", name).isNotNull();
+        }
+    }
+
+    @Test
+    void gameType_carriesEnumNotGameName() {
+        // Regression guard for the latent naming bug (Findings): gameType used to be
+        // populated from game.getName(). It must now be the GameType enum, and the
+        // game's display name lives on the separate gameName label.
+        setBotMdc();
+        metrics.incBotMessage("endGame");
+
+        Counter c = registry.find(BotMetrics.BOT_MESSAGES_TOTAL)
+                .tag("cmd", "endGame")
+                .tag(BotMdc.GAME_TYPE, "BETTING_MINI")  // enum, not "BauCua"
+                .tag(BotMdc.GAME_NAME, "BauCua")        // name moved to its own label
+                .counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(1.0);
+
+        // The game name must NOT appear under the gameType tag.
+        Counter mislabeled = registry.find(BotMetrics.BOT_MESSAGES_TOTAL)
+                .tag(BotMdc.GAME_TYPE, "BauCua")
+                .counter();
+        assertThat(mislabeled).isNull();
     }
 
     @Test
@@ -265,9 +334,15 @@ class BotMetricsTest {
                 .anyMatch(t -> BotMdc.ENVIRONMENT_ID.equals(t.getKey()));
         boolean hasGame = c.getId().getTags().stream()
                 .anyMatch(t -> BotMdc.GAME_TYPE.equals(t.getKey()));
+        boolean hasGameId = c.getId().getTags().stream()
+                .anyMatch(t -> BotMdc.GAME_ID.equals(t.getKey()));
+        boolean hasGameName = c.getId().getTags().stream()
+                .anyMatch(t -> BotMdc.GAME_NAME.equals(t.getKey()));
         assertThat(hasGroup).isFalse();
         assertThat(hasEnv).isFalse();
         assertThat(hasGame).isFalse();
+        assertThat(hasGameId).isFalse();
+        assertThat(hasGameName).isFalse();
     }
 
     @Test
@@ -374,7 +449,9 @@ class BotMetricsTest {
                 "cmd",
                 BotMdc.BOT_GROUP_ID,
                 BotMdc.ENVIRONMENT_ID,
-                BotMdc.GAME_TYPE
+                BotMdc.GAME_TYPE,
+                BotMdc.GAME_ID,
+                BotMdc.GAME_NAME
         );
         // Cardinality control: bot identity must NOT include per-bot tags.
         assertThat(keys).doesNotContain(BotMdc.BOT_USER_NAME, BotMdc.BOT_ID);

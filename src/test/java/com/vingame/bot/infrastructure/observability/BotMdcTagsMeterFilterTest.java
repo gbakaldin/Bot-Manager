@@ -38,7 +38,9 @@ class BotMdcTagsMeterFilterTest {
     void map_botMetric_attachesMdcTags() {
         MDC.put(BotMdc.BOT_GROUP_ID, "g1");
         MDC.put(BotMdc.ENVIRONMENT_ID, "e1");
-        MDC.put(BotMdc.GAME_TYPE, "BauCua");
+        MDC.put(BotMdc.GAME_TYPE, "BETTING_MINI");
+        MDC.put(BotMdc.GAME_ID, "game-uuid-1");
+        MDC.put(BotMdc.GAME_NAME, "BauCua");
 
         Meter.Id mapped = filter.map(id("bot_messages_total", Tags.of("cmd", "endGame")));
 
@@ -47,7 +49,9 @@ class BotMdcTagsMeterFilterTest {
                         org.assertj.core.groups.Tuple.tuple("cmd", "endGame"),
                         org.assertj.core.groups.Tuple.tuple(BotMdc.BOT_GROUP_ID, "g1"),
                         org.assertj.core.groups.Tuple.tuple(BotMdc.ENVIRONMENT_ID, "e1"),
-                        org.assertj.core.groups.Tuple.tuple(BotMdc.GAME_TYPE, "BauCua")
+                        org.assertj.core.groups.Tuple.tuple(BotMdc.GAME_TYPE, "BETTING_MINI"),
+                        org.assertj.core.groups.Tuple.tuple(BotMdc.GAME_ID, "game-uuid-1"),
+                        org.assertj.core.groups.Tuple.tuple(BotMdc.GAME_NAME, "BauCua")
                 );
     }
 

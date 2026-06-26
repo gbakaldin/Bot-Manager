@@ -3,6 +3,7 @@ package com.vingame.bot.domain.bot.core;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
@@ -64,6 +65,7 @@ class BotTest {
         Game game = Game.builder()
                 .id("g1")
                 .name("BauCua")
+                .gameType(GameType.BETTING_MINI)
                 .pluginName("BauCua")
                 .offset(2000)
                 .numberOfOptions(6)
