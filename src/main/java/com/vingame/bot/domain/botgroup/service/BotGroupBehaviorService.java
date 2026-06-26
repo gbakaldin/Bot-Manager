@@ -775,7 +775,7 @@ public class BotGroupBehaviorService {
     // ---- Per-game / per-env info + status snapshots (used by ObservabilityConfig) ----
 
     /**
-     * Identity tuple for the {@code game_info} join gauge (AD-2): the stable Mongo
+     * Identity tuple for the {@code game_join} join gauge (AD-2): the stable Mongo
      * {@code _id} ({@code gameId}), the readable {@code gameName}, and the
      * {@code gameType} enum name. {@code gameId} is the Mongo {@code _id} (a UUID
      * string), NOT {@link Game#getGameId()} (the env-scoped numeric channel) — see AD-8.
@@ -784,7 +784,7 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Identity tuple for the {@code environment_info} join gauge (AD-2): the
+     * Identity tuple for the {@code environment_join} join gauge (AD-2): the
      * environment id and its readable name (threaded into {@link BotGroupRuntime}
      * at group start from {@code Environment.getName()}).
      */
@@ -800,7 +800,7 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Distinct set of games currently backing live bots, for the {@code game_info}
+     * Distinct set of games currently backing live bots, for the {@code game_join}
      * join gauge. Sourced from each bot's {@link BotConfiguration#getGame()} so the
      * dropdown is populated the moment a group starts, before the first bet (AD-2).
      */
@@ -820,7 +820,7 @@ public class BotGroupBehaviorService {
 
     /**
      * Distinct set of environments currently backing live bots, for the
-     * {@code environment_info} join gauge. The readable name comes from
+     * {@code environment_join} join gauge. The readable name comes from
      * {@link BotGroupRuntime#getEnvironmentName()} (threaded in at start, AD-2);
      * if absent (e.g. a runtime built without an Environment), the id is used as a
      * fallback display so the series still resolves.
@@ -858,7 +858,7 @@ public class BotGroupBehaviorService {
     /**
      * Snapshot count of live bots grouped by {@code (environmentId, status)},
      * backing the {@code bots_by_env_status} MultiGauge (AD-3). The env name for
-     * the dashboard comes from the {@code environment_info} join, not this map.
+     * the dashboard comes from the {@code environment_join} join, not this map.
      */
     public Map<EnvStatusKey, Integer> countBotsByEnvAndStatus() {
         Map<EnvStatusKey, Integer> counts = new LinkedHashMap<>();

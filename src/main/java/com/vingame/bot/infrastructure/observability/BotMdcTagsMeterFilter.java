@@ -54,8 +54,8 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
             // Phases 2 & 3 info/breakdown gauges: these carry their own
             // game/env/status tags from live iteration and must not also inherit
             // MDC tags from the refresher thread.
-            "game_info",
-            "environment_info",
+            "game_join",
+            "environment_join",
             "bots_by_game_status",
             "bots_by_env_status"
     );

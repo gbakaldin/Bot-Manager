@@ -48,7 +48,7 @@ public class BotGroupRuntime {
     private final String groupId;
     private final String environmentId;
     // Readable environment display name, threaded in at group start from
-    // Environment.getName() so the environment_info join gauge (AD-2) can expose
+    // Environment.getName() so the environment_join join gauge (AD-2) can expose
     // it without a per-scrape DB lookup. May be null for callers that construct a
     // runtime without an Environment (older tests / ad-hoc tooling).
     private final String environmentName;
@@ -91,7 +91,7 @@ public class BotGroupRuntime {
 
     /**
      * Create a new runtime for a bot group, carrying the readable environment
-     * name for the {@code environment_info} join gauge (AD-2).
+     * name for the {@code environment_join} join gauge (AD-2).
      *
      * @param groupId         The bot group ID
      * @param botCount        Number of bots in the group (used for initial capacity, not thread pool sizing)

@@ -17,9 +17,9 @@ import java.util.concurrent.TimeUnit;
  * Owns the Phase 2 / Phase 3 {@link MultiGauge}s and refreshes their row sets from
  * live bot state on a fixed cadence.
  * <ul>
- *   <li><b>game_info</b> {@code {gameId, gameName, gameType}} value 1 — join gauge
+ *   <li><b>game_join</b> {@code {gameId, gameName, gameType}} value 1 — join gauge
  *       so a dashboard maps {@code gameId} to readable names (AD-2).</li>
- *   <li><b>environment_info</b> {@code {environmentId, environmentName}} value 1 —
+ *   <li><b>environment_join</b> {@code {environmentId, environmentName}} value 1 —
  *       env-name join gauge; {@code environmentName} is threaded into the runtime at
  *       group start (AD-2).</li>
  *   <li><b>bots_by_game_status</b> {@code {gameId, gameName, status}} — bot count per
@@ -29,6 +29,14 @@ import java.util.concurrent.TimeUnit;
  * </ul>
  * All four meter names are on the {@link BotMdcTagsMeterFilter} aggregate allow-list,
  * so they never inherit MDC tags from the refresher thread.
+ * <p>
+ * <b>Why {@code _join}, not {@code _info}:</b> {@code _info} is a <em>reserved
+ * Prometheus metric-name suffix</em>. Micrometer's {@code PrometheusMeterRegistry}
+ * routes any meter whose name ends in {@code _info} through an {@code InfoSnapshot},
+ * whose exposition strips the reserved suffix — so a meter named {@code game_info}
+ * scrapes as bare {@code game} and a {@code label_values(game_info, …)} dashboard
+ * query returns an empty vector. The plain {@code _join} suffix is not reserved, so
+ * these value-1 join gauges render verbatim alongside the sibling status gauges.
  * <p>
  * Refresh is driven by a dedicated single-thread virtual-thread scheduler (project
  * idiom), aligned to the Prometheus scrape interval. {@link MultiGauge#register}
@@ -91,10 +99,10 @@ public class InfoGaugeRefresher {
      * deterministically without scheduling.
      */
     static InfoGauges registerInfoGauges(MeterRegistry registry) {
-        MultiGauge gameInfo = MultiGauge.builder("game_info")
+        MultiGauge gameInfo = MultiGauge.builder("game_join")
                 .description("Join gauge mapping gameId to its readable gameName and gameType (value always 1)")
                 .register(registry);
-        MultiGauge environmentInfo = MultiGauge.builder("environment_info")
+        MultiGauge environmentInfo = MultiGauge.builder("environment_join")
                 .description("Join gauge mapping environmentId to its readable environmentName (value always 1)")
                 .register(registry);
         MultiGauge botsByGameStatus = MultiGauge.builder("bots_by_game_status")
