@@ -47,6 +47,11 @@ public class BotGroupRuntime {
 
     private final String groupId;
     private final String environmentId;
+    // Readable environment display name, threaded in at group start from
+    // Environment.getName() so the environment_info join gauge (AD-2) can expose
+    // it without a per-scrape DB lookup. May be null for callers that construct a
+    // runtime without an Environment (older tests / ad-hoc tooling).
+    private final String environmentName;
     // CopyOnWriteArrayList: bot creation writes infrequently while the Prometheus
     // scrape thread reads via gauge suppliers in ObservabilityConfig. Avoids CME
     // without coarse external locking.
@@ -81,8 +86,23 @@ public class BotGroupRuntime {
      * @param environmentId The environment ID (used for MDC logging context)
      */
     public BotGroupRuntime(String groupId, int botCount, String environmentId) {
+        this(groupId, botCount, environmentId, null);
+    }
+
+    /**
+     * Create a new runtime for a bot group, carrying the readable environment
+     * name for the {@code environment_info} join gauge (AD-2).
+     *
+     * @param groupId         The bot group ID
+     * @param botCount        Number of bots in the group (used for initial capacity, not thread pool sizing)
+     * @param environmentId   The environment ID (used for MDC logging context)
+     * @param environmentName The readable environment display name (from
+     *                        {@code Environment.getName()}); may be null
+     */
+    public BotGroupRuntime(String groupId, int botCount, String environmentId, String environmentName) {
         this.groupId = groupId;
         this.environmentId = environmentId;
+        this.environmentName = environmentName;
         this.botInstances = new CopyOnWriteArrayList<>();
         this.botFutures = new CopyOnWriteArrayList<>();
         this.executor = createExecutor(groupId);

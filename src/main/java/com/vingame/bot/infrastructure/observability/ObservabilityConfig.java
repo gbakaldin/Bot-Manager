@@ -35,18 +35,26 @@ public class ObservabilityConfig {
     @Bean
     public MeterBinder botAggregateGauges(BotGroupBehaviorService behaviorService) {
         return registry -> {
+            // strongReference(true): the state object is the singleton
+            // BotGroupBehaviorService, which is always strongly reachable in
+            // production. Micrometer's default weak reference adds no benefit here
+            // and lets the gauge silently return NaN if the object is ever GC'd —
+            // a fragility that also made these gauges flaky under test GC pressure.
             Gauge.builder("bot_groups_running", behaviorService,
                             BotGroupBehaviorService::getRunningGroupCount)
+                    .strongReference(true)
                     .description("Number of bot groups currently running")
                     .register(registry);
 
             Gauge.builder("bots_managed", behaviorService,
                             BotGroupBehaviorService::getTotalManagedBots)
+                    .strongReference(true)
                     .description("Total number of managed bot instances across all running groups")
                     .register(registry);
 
             Gauge.builder("ws_connections_open", behaviorService,
                             BotGroupBehaviorService::getOpenWsConnectionCount)
+                    .strongReference(true)
                     .description("Number of bots with an open WebSocket connection across all running groups")
                     .register(registry);
 
@@ -55,6 +63,7 @@ public class ObservabilityConfig {
             for (BotStatus status : BotStatus.values()) {
                 Gauge.builder("bots_by_status", behaviorService,
                                 s -> s.countBotsByStatus(status))
+                        .strongReference(true)
                         .description("Number of bots currently in the given status across all running groups")
                         .tag("status", status.name())
                         .register(registry);
@@ -66,11 +75,13 @@ public class ObservabilityConfig {
             // many are down right now". Aggregate; no MDC tags.
             Gauge.builder("bots_dead_currently", behaviorService,
                             BotGroupBehaviorService::countBotsDeadCurrently)
+                    .strongReference(true)
                     .description("Number of bots currently in DEAD state across all running groups")
                     .register(registry);
 
             Gauge.builder("groups_dead_currently", behaviorService,
                             BotGroupBehaviorService::countGroupsDeadCurrently)
+                    .strongReference(true)
                     .description("Number of bot groups currently in DEAD state")
                     .register(registry);
         };

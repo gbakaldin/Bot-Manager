@@ -50,7 +50,14 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
             "ws_connections_open",
             "bots_by_status",
             "bots_dead_currently",
-            "groups_dead_currently"
+            "groups_dead_currently",
+            // Phases 2 & 3 info/breakdown gauges: these carry their own
+            // game/env/status tags from live iteration and must not also inherit
+            // MDC tags from the refresher thread.
+            "game_info",
+            "environment_info",
+            "bots_by_game_status",
+            "bots_by_env_status"
     );
 
     @Override

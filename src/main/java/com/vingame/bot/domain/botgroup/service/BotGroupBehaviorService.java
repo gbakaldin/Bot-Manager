@@ -36,6 +36,8 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -236,7 +238,8 @@ public class BotGroupBehaviorService {
                     effectiveStrategyMix(group), botIdentifiers);
 
             // Create runtime state
-            BotGroupRuntime runtime = new BotGroupRuntime(id, group.getBotCount(), group.getEnvironmentId());
+            BotGroupRuntime runtime = new BotGroupRuntime(id, group.getBotCount(),
+                    group.getEnvironmentId(), environment.getName());
             runningGroups.put(id, runtime);
 
             log.info("Creating {} bots for group {} with parallel execution (parallelism={})",
@@ -767,6 +770,107 @@ public class BotGroupBehaviorService {
             if (runtime.getGroupDeadSince() != null) total++;
         }
         return total;
+    }
+
+    // ---- Per-game / per-env info + status snapshots (used by ObservabilityConfig) ----
+
+    /**
+     * Identity tuple for the {@code game_info} join gauge (AD-2): the stable Mongo
+     * {@code _id} ({@code gameId}), the readable {@code gameName}, and the
+     * {@code gameType} enum name. {@code gameId} is the Mongo {@code _id} (a UUID
+     * string), NOT {@link Game#getGameId()} (the env-scoped numeric channel) — see AD-8.
+     */
+    public record GameInfo(String gameId, String gameName, String gameType) {
+    }
+
+    /**
+     * Identity tuple for the {@code environment_info} join gauge (AD-2): the
+     * environment id and its readable name (threaded into {@link BotGroupRuntime}
+     * at group start from {@code Environment.getName()}).
+     */
+    public record EnvInfo(String environmentId, String environmentName) {
+    }
+
+    /** Grouping key for {@code bots_by_game_status}: game identity + bot status. */
+    public record GameStatusKey(String gameId, String gameName, BotStatus status) {
+    }
+
+    /** Grouping key for {@code bots_by_env_status}: environment id + bot status. */
+    public record EnvStatusKey(String environmentId, BotStatus status) {
+    }
+
+    /**
+     * Distinct set of games currently backing live bots, for the {@code game_info}
+     * join gauge. Sourced from each bot's {@link BotConfiguration#getGame()} so the
+     * dropdown is populated the moment a group starts, before the first bet (AD-2).
+     */
+    public Collection<GameInfo> listRunningGameInfo() {
+        Map<String, GameInfo> distinct = new LinkedHashMap<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            for (Bot bot : runtime.getBotInstances()) {
+                Game game = bot.getConfiguration().getGame();
+                if (game == null) continue;
+                String gameType = game.getGameType() != null ? game.getGameType().name() : "";
+                distinct.putIfAbsent(game.getId(),
+                        new GameInfo(game.getId(), game.getName(), gameType));
+            }
+        }
+        return distinct.values();
+    }
+
+    /**
+     * Distinct set of environments currently backing live bots, for the
+     * {@code environment_info} join gauge. The readable name comes from
+     * {@link BotGroupRuntime#getEnvironmentName()} (threaded in at start, AD-2);
+     * if absent (e.g. a runtime built without an Environment), the id is used as a
+     * fallback display so the series still resolves.
+     */
+    public Collection<EnvInfo> listRunningEnvironmentInfo() {
+        Map<String, EnvInfo> distinct = new LinkedHashMap<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            String envId = runtime.getEnvironmentId();
+            if (envId == null) continue;
+            String envName = runtime.getEnvironmentName() != null
+                    ? runtime.getEnvironmentName() : envId;
+            distinct.putIfAbsent(envId, new EnvInfo(envId, envName));
+        }
+        return distinct.values();
+    }
+
+    /**
+     * Snapshot count of live bots grouped by {@code (gameId, gameName, status)},
+     * backing the {@code bots_by_game_status} MultiGauge (AD-3). Reuses the live
+     * iteration shape of {@link #countBotsByStatus(BotStatus)}.
+     */
+    public Map<GameStatusKey, Integer> countBotsByGameAndStatus() {
+        Map<GameStatusKey, Integer> counts = new LinkedHashMap<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            for (Bot bot : runtime.getBotInstances()) {
+                Game game = bot.getConfiguration().getGame();
+                if (game == null) continue;
+                GameStatusKey key = new GameStatusKey(game.getId(), game.getName(), bot.getStatus());
+                counts.merge(key, 1, Integer::sum);
+            }
+        }
+        return counts;
+    }
+
+    /**
+     * Snapshot count of live bots grouped by {@code (environmentId, status)},
+     * backing the {@code bots_by_env_status} MultiGauge (AD-3). The env name for
+     * the dashboard comes from the {@code environment_info} join, not this map.
+     */
+    public Map<EnvStatusKey, Integer> countBotsByEnvAndStatus() {
+        Map<EnvStatusKey, Integer> counts = new LinkedHashMap<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            String envId = runtime.getEnvironmentId();
+            if (envId == null) continue;
+            for (Bot bot : runtime.getBotInstances()) {
+                EnvStatusKey key = new EnvStatusKey(envId, bot.getStatus());
+                counts.merge(key, 1, Integer::sum);
+            }
+        }
+        return counts;
     }
 
     /**
