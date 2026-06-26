@@ -35,7 +35,7 @@ class ProductCodeTest {
                 Arguments.of(ProductCode.P_098, "bc114098"),
                 Arguments.of(ProductCode.P_103, null),
                 Arguments.of(ProductCode.P_105, null),
-                Arguments.of(ProductCode.P_114, null),
+                Arguments.of(ProductCode.P_114, "rik.vip"),
                 Arguments.of(ProductCode.P_116, "bc115116"),
                 Arguments.of(ProductCode.P_118, null),
                 Arguments.of(ProductCode.P_119, null),
