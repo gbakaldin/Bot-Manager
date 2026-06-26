@@ -260,16 +260,25 @@ class TaiXiuJackpotGameBotStreamTest {
         invokeOnStartGame(startGameWithSid(BASE_SID));
         setField("gameState", BettingMiniGameState.BET);
 
-        // Above the cutoff: gate is open.
-        setRemainingTime(3000L);
+        // onStartGame starts a live countdown (startRemainingTimeCountDown) on a
+        // scheduled virtual thread that decrements remainingTime by 1000ms per tick.
+        // Stop it before asserting so the gate is evaluated against the value we set,
+        // not a value the countdown has silently ticked down underneath us. (Asserting
+        // at the exact remainingTime==blockBetTime==3000 boundary against a live timer
+        // was flaky: a single tick under load dropped it to 2000, flipping the gate.)
+        stopCountdown();
+
+        // Above the cutoff (comfortably > 3000): gate is open.
+        setRemainingTime(5000L);
         assertThat(invokeBetCondition())
-                .as("blockBetTime=3000 -> gate open at remainingTime=3000")
+                .as("blockBetTime=3000 -> gate open at remainingTime=5000 (> cutoff)")
                 .isTrue();
 
-        // Below the cutoff: the time gate now closes (it no longer stays open at 0).
-        setRemainingTime(0L);
+        // Below the cutoff (comfortably < 3000): the time gate closes
+        // (it no longer stays open all the way to 0).
+        setRemainingTime(1000L);
         assertThat(invokeBetCondition())
-                .as("blockBetTime=3000 -> gate closed at remainingTime=0")
+                .as("blockBetTime=3000 -> gate closed at remainingTime=1000 (< cutoff)")
                 .isFalse();
     }
 
@@ -401,6 +410,22 @@ class TaiXiuJackpotGameBotStreamTest {
         Field f = Bot.class.getDeclaredField("expectedCurrentBalance");
         f.setAccessible(true);
         return ((AtomicLong) f.get(bot)).get();
+    }
+
+    /**
+     * Stops the live betting countdown started by {@code onStartGame}
+     * ({@code startRemainingTimeCountDown}) so {@code remainingTime} stays exactly
+     * where {@link #setRemainingTime(long)} puts it. Without this, the scheduled
+     * virtual-thread tick races the assertion and can decrement the value mid-test.
+     */
+    private void stopCountdown() throws Exception {
+        Field f = BettingMiniGameBot.class.getDeclaredField("scheduler");
+        f.setAccessible(true);
+        ScheduledExecutorService s = (ScheduledExecutorService) f.get(bot);
+        if (s != null) {
+            s.shutdownNow();
+            f.set(bot, null);
+        }
     }
 
     private void setRemainingTime(long ms) throws Exception {
