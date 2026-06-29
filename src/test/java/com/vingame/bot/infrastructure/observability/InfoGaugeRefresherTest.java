@@ -177,6 +177,53 @@ class InfoGaugeRefresherTest {
     }
 
     @Test
+    void botsByGameStatusGauge_updatesValue_whenCountChangesForExistingTagSet() {
+        // Regression for the MultiGauge overwrite=false freeze: a persisting
+        // (gameId, gameName, status) row whose count changes between refreshes
+        // MUST reflect the new value. Before the fix, register(rows) (overwrite
+        // defaulting to false) kept the first-registered value, so a second bot
+        // group on an already-tracked game stayed invisible (the "7 active bots"
+        // bug — two RIK groups, 7 + 100, gauge stuck at 7).
+        when(behaviorService.countBotsByGameAndStatus()).thenReturn(Map.of(
+                new GameStatusKey("game-uuid-1", "Tai Xiu Jackpot", BotStatus.CONNECTION_AUTHENTICATED), 7));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("bots_by_game_status")
+                .tag("gameId", "game-uuid-1")
+                .tag("status", BotStatus.CONNECTION_AUTHENTICATED.name())
+                .gauge().value()).isEqualTo(7.0);
+
+        // A second group on the same game brings the live count to 107.
+        when(behaviorService.countBotsByGameAndStatus()).thenReturn(Map.of(
+                new GameStatusKey("game-uuid-1", "Tai Xiu Jackpot", BotStatus.CONNECTION_AUTHENTICATED), 107));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("bots_by_game_status")
+                .tag("gameId", "game-uuid-1")
+                .tag("status", BotStatus.CONNECTION_AUTHENTICATED.name())
+                .gauge().value()).isEqualTo(107.0);
+    }
+
+    @Test
+    void botsByEnvStatusGauge_updatesValue_whenCountChangesForExistingTagSet() {
+        // Same overwrite=false freeze, env scope: the per-env count must track
+        // live state across refreshes for a persisting (environmentId, status) row.
+        when(behaviorService.countBotsByEnvAndStatus()).thenReturn(Map.of(
+                new EnvStatusKey("env-uuid-1", BotStatus.CONNECTION_AUTHENTICATED), 7));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("bots_by_env_status")
+                .tag("environmentId", "env-uuid-1")
+                .tag("status", BotStatus.CONNECTION_AUTHENTICATED.name())
+                .gauge().value()).isEqualTo(7.0);
+
+        when(behaviorService.countBotsByEnvAndStatus()).thenReturn(Map.of(
+                new EnvStatusKey("env-uuid-1", BotStatus.CONNECTION_AUTHENTICATED), 107));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("bots_by_env_status")
+                .tag("environmentId", "env-uuid-1")
+                .tag("status", BotStatus.CONNECTION_AUTHENTICATED.name())
+                .gauge().value()).isEqualTo(107.0);
+    }
+
+    @Test
     void statusMultiGauges_areOnTheAggregateExclusionList() {
         MDC.put(BotMdc.BOT_GROUP_ID, "group-xyz");
         MDC.put(BotMdc.ENVIRONMENT_ID, "env-xyz");

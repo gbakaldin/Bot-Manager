@@ -117,6 +117,18 @@ public class InfoGaugeRefresher {
     /**
      * Re-register the row set of all four MultiGauges from the current live bot
      * iteration. Side-effect-isolated so tests can drive a deterministic refresh.
+     * <p>
+     * <b>Every register call passes {@code overwrite=true}.</b> Micrometer's
+     * {@link MultiGauge#register(Iterable)} (single-arg) defaults to
+     * {@code overwrite=false}, which, for a row whose tag-set already exists, keeps
+     * the <em>original</em> gauge bound to its first-registered value and silently
+     * discards the new one — so the value freezes at whatever it was when that
+     * {@code (gameId, status)} / {@code (environmentId, status)} tuple first
+     * appeared. That made a second bot group on an already-tracked game/env (or any
+     * status-count change on a persisting row) invisible to the gauge. Passing
+     * {@code true} removes and re-creates each row every cycle so the value tracks
+     * the live count. Stale-row dropping is unaffected (rows absent from the new set
+     * are removed either way).
      */
     static void refresh(BotGroupBehaviorService behaviorService, InfoGauges gauges) {
         gauges.gameInfo().register(behaviorService.listRunningGameInfo().stream()
@@ -125,14 +137,14 @@ public class InfoGaugeRefresher {
                                 "gameName", nullSafe(g.gameName()),
                                 "gameType", nullSafe(g.gameType())),
                         1))
-                .toList());
+                .toList(), true);
 
         gauges.environmentInfo().register(behaviorService.listRunningEnvironmentInfo().stream()
                 .map(e -> MultiGauge.Row.of(
                         Tags.of("environmentId", nullSafe(e.environmentId()),
                                 "environmentName", nullSafe(e.environmentName())),
                         1))
-                .toList());
+                .toList(), true);
 
         gauges.botsByGameStatus().register(behaviorService.countBotsByGameAndStatus().entrySet().stream()
                 .map(en -> MultiGauge.Row.of(
@@ -140,14 +152,14 @@ public class InfoGaugeRefresher {
                                 "gameName", nullSafe(en.getKey().gameName()),
                                 "status", en.getKey().status().name()),
                         en.getValue()))
-                .toList());
+                .toList(), true);
 
         gauges.botsByEnvStatus().register(behaviorService.countBotsByEnvAndStatus().entrySet().stream()
                 .map(en -> MultiGauge.Row.of(
                         Tags.of("environmentId", nullSafe(en.getKey().environmentId()),
                                 "status", en.getKey().status().name()),
                         en.getValue()))
-                .toList());
+                .toList(), true);
     }
 
     private static String nullSafe(String value) {
