@@ -50,19 +50,21 @@ public class MetricsQueryService {
      * resolved scope name.
      */
     public MetricsSummaryDTO summary(MetricScope scope, String id) {
+        // Live "now" instant queries pass null to the client so they dedupe within
+        // the cache TTL (AD-8); `now` is used only for the DTO's generatedAt.
         Instant now = Instant.now();
-        String scopeName = resolveScopeName(scope, id, now);
+        String scopeName = resolveScopeName(scope, id, null);
 
         Map<String, Double> metrics = new LinkedHashMap<>();
         for (MetricKey key : MetricKey.values()) {
             if (!key.supports(scope) || key.isMultiSeries()) {
                 continue; // multi-series keys are not scalar summary panels
             }
-            PrometheusResult result = client.queryInstant(key.promql(scope, id), now);
+            PrometheusResult result = client.queryInstant(key.promql(scope, id), null);
             metrics.put(key.key(), firstScalar(result));
         }
 
-        Map<String, Double> botsByStatus = resolveBotsByStatus(scope, id, now);
+        Map<String, Double> botsByStatus = resolveBotsByStatus(scope, id, null);
 
         return MetricsSummaryDTO.builder()
                 .scope(scope.name())

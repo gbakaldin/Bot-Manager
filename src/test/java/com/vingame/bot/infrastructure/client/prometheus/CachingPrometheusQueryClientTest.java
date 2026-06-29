@@ -176,6 +176,69 @@ class CachingPrometheusQueryClientTest {
         verify(delegate, times(1)).queryRange(eq("q"), any(), any(), any());
     }
 
+    // ---- live "now" instant dedup (review fix): null time keys time-independently ----
+
+    @Test
+    void liveNowInstantQueriesWithinTtlDedupeToSingleDelegateCall() {
+        HttpPrometheusQueryClient delegate = mock(HttpPrometheusQueryClient.class);
+        when(delegate.queryInstant(eq("up"), any())).thenReturn(someResult());
+        CachingPrometheusQueryClient cache = new CachingPrometheusQueryClient(delegate, 5);
+
+        // Two live "now" polls (caller passes null) a "second" apart must hit the
+        // cache once — the bug was folding getEpochSecond() into the key.
+        cache.queryInstant("up", null);
+        cache.queryInstant("up", null);
+        cache.queryInstant("up", null);
+
+        verify(delegate, times(1)).queryInstant(eq("up"), any());
+    }
+
+    @Test
+    void liveNowAndExplicitInstantDoNotCollide() {
+        HttpPrometheusQueryClient delegate = mock(HttpPrometheusQueryClient.class);
+        when(delegate.queryInstant(eq("up"), any())).thenReturn(someResult());
+        CachingPrometheusQueryClient cache = new CachingPrometheusQueryClient(delegate, 60);
+
+        cache.queryInstant("up", null);                                  // live now
+        cache.queryInstant("up", Instant.ofEpochSecond(1700000000L));    // historical
+
+        verify(delegate, times(2)).queryInstant(eq("up"), any());
+    }
+
+    // ---- delimiter-free key: no collision across field boundaries ----
+
+    @Test
+    void instantKeysDoNotCollideAcrossPromqlBoundary() {
+        // With a concatenated string key, promql "a" + (time)"b" could collide with
+        // promql "ab". The composite-record key cannot — distinct components, distinct key.
+        HttpPrometheusQueryClient delegate = mock(HttpPrometheusQueryClient.class);
+        when(delegate.queryInstant(any(), any())).thenReturn(someResult());
+        CachingPrometheusQueryClient cache = new CachingPrometheusQueryClient(delegate, 60);
+
+        // "a" at epoch 0 vs "a0" at "now" — must be two distinct cache entries.
+        cache.queryInstant("a", Instant.ofEpochSecond(0L));
+        cache.queryInstant("a0", null);
+
+        verify(delegate, times(1)).queryInstant(eq("a"), any());
+        verify(delegate, times(1)).queryInstant(eq("a0"), any());
+        assertThat(cache.snapshot()).hasSize(2);
+    }
+
+    @Test
+    void rangeKeysDoNotCollideAcrossFieldBoundaries() {
+        HttpPrometheusQueryClient delegate = mock(HttpPrometheusQueryClient.class);
+        when(delegate.queryRange(any(), any(), any(), any())).thenReturn(someResult());
+        CachingPrometheusQueryClient cache = new CachingPrometheusQueryClient(delegate, 60);
+
+        // promql "x" / start 1 / end 23 vs promql "x" / start 12 / end 3 — a
+        // delimiter-free concatenation could alias; the record key cannot.
+        cache.queryRange("x", Instant.ofEpochSecond(1L), Instant.ofEpochSecond(23L), Duration.ofSeconds(60));
+        cache.queryRange("x", Instant.ofEpochSecond(12L), Instant.ofEpochSecond(3L), Duration.ofSeconds(60));
+
+        verify(delegate, times(2)).queryRange(eq("x"), any(), any(), any());
+        assertThat(cache.snapshot()).hasSize(2);
+    }
+
     // ---- thread-safety: concurrent cold-miss loads must not corrupt state ----
 
     @Test
