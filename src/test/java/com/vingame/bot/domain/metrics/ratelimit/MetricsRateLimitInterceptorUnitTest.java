@@ -9,13 +9,14 @@ import org.springframework.mock.web.MockHttpServletResponse;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * QA-added direct unit coverage for {@link MetricsRateLimitInterceptor} that the
- * dev's MockMvc test does not reach: token-bucket refill over real time,
- * {@code X-Forwarded-For} client-key extraction (single + multi-IP), the burst
- * capacity equalling the configured per-minute limit, the 429 body, and bucket
- * isolation by forwarded IP. These exercise {@code preHandle} against
- * {@link MockHttpServletRequest}/{@link MockHttpServletResponse} so the bucket
- * arithmetic is observed without HTTP plumbing.
+ * Direct unit coverage for {@link MetricsRateLimitInterceptor}: token-bucket
+ * refill over real time, the burst capacity equalling the configured per-minute
+ * limit, the 429 body, and — post-review — that buckets are keyed on the real TCP
+ * peer ({@code getRemoteAddr()}) and <b>not</b> on the client-controlled
+ * {@code X-Forwarded-For} header (security: spoof bypass + memory-DoS), and that
+ * the bucket map stays bounded under a flood of distinct peers. These exercise
+ * {@code preHandle} against {@link MockHttpServletRequest}/{@link MockHttpServletResponse}
+ * so the bucket arithmetic is observed without HTTP plumbing.
  */
 @DisplayName("MetricsRateLimitInterceptor (unit)")
 class MetricsRateLimitInterceptorUnitTest {
@@ -86,53 +87,39 @@ class MetricsRateLimitInterceptorUnitTest {
         assertThat(call(interceptor, r)).isTrue();
     }
 
+    // ---- keying: real peer (getRemoteAddr), never the spoofable X-Forwarded-For ----
+
     @Test
-    @DisplayName("X-Forwarded-For with a single IP keys the bucket by that IP, not remoteAddr")
-    void forwardedForSingleIp() {
+    @DisplayName("buckets key on remoteAddr — X-Forwarded-For is ignored, so rotating it does not bypass the limit")
+    void xffRotationDoesNotBypassLimit() {
         MetricsRateLimitInterceptor interceptor = new MetricsRateLimitInterceptor(2);
 
-        // Two requests via the same forwarded IP but different remoteAddr → same bucket.
-        assertThat(call(interceptor, req("10.0.0.1", "203.0.113.7"))).isTrue();
-        assertThat(call(interceptor, req("10.0.0.2", "203.0.113.7"))).isTrue();
-        // Third on the same forwarded IP → bucket drained regardless of remoteAddr.
-        assertThat(call(interceptor, req("10.0.0.3", "203.0.113.7"))).isFalse();
-    }
-
-    @Test
-    @DisplayName("X-Forwarded-For with multiple IPs keys on the first (original client) IP")
-    void forwardedForMultipleIps() {
-        MetricsRateLimitInterceptor interceptor = new MetricsRateLimitInterceptor(2);
-
-        // "client, proxy1, proxy2" → key on the leftmost client IP.
-        assertThat(call(interceptor, req("10.0.0.1", "198.51.100.5, 203.0.113.1, 203.0.113.2"))).isTrue();
-        assertThat(call(interceptor, req("10.0.0.9", "198.51.100.5, 10.10.10.10"))).isTrue();
-        assertThat(call(interceptor, req("10.0.0.9", "198.51.100.5"))).isFalse(); // same leftmost IP, drained
-
-        // A different leftmost client IP gets its own fresh bucket.
-        assertThat(call(interceptor, req("10.0.0.9", "198.51.100.6, 203.0.113.1"))).isTrue();
-    }
-
-    @Test
-    @DisplayName("distinct forwarded client IPs maintain independent buckets")
-    void distinctForwardedIpsAreIndependent() {
-        MetricsRateLimitInterceptor interceptor = new MetricsRateLimitInterceptor(1);
-
+        // Same real peer, attacker rotating XFF on every request → still one bucket.
         assertThat(call(interceptor, req("10.0.0.1", "1.1.1.1"))).isTrue();
-        assertThat(call(interceptor, req("10.0.0.1", "1.1.1.1"))).isFalse();
-        // Different forwarded IP → fresh bucket.
         assertThat(call(interceptor, req("10.0.0.1", "2.2.2.2"))).isTrue();
+        // Bucket drained despite a fresh forwarded value — XFF is not trusted.
+        assertThat(call(interceptor, req("10.0.0.1", "3.3.3.3"))).isFalse();
     }
 
     @Test
-    @DisplayName("blank X-Forwarded-For falls back to remoteAddr")
-    void blankForwardedFallsBackToRemoteAddr() {
+    @DisplayName("distinct remoteAddr peers maintain independent buckets")
+    void distinctRemoteAddrsAreIndependent() {
         MetricsRateLimitInterceptor interceptor = new MetricsRateLimitInterceptor(1);
 
-        assertThat(call(interceptor, req("10.0.0.1", "   "))).isTrue();
-        // Same remoteAddr (blank XFF ignored) → drained.
-        assertThat(call(interceptor, req("10.0.0.1", "   "))).isFalse();
-        // Different remoteAddr → fresh bucket.
+        assertThat(call(interceptor, req("10.0.0.1", null))).isTrue();
+        assertThat(call(interceptor, req("10.0.0.1", null))).isFalse();
+        // Different peer → fresh bucket.
         assertThat(call(interceptor, req("10.0.0.2", null))).isTrue();
+    }
+
+    @Test
+    @DisplayName("a null remoteAddr falls back to a stable 'unknown' key")
+    void nullRemoteAddrFallsBack() {
+        MetricsRateLimitInterceptor interceptor = new MetricsRateLimitInterceptor(1);
+
+        assertThat(call(interceptor, req(null, "1.1.1.1"))).isTrue();
+        // Same fallback key (XFF ignored) → drained.
+        assertThat(call(interceptor, req(null, "2.2.2.2"))).isFalse();
     }
 
     @Test
@@ -143,5 +130,54 @@ class MetricsRateLimitInterceptorUnitTest {
 
         assertThat(call(interceptor, r)).isTrue(); // capacity floored to 1
         assertThat(call(interceptor, r)).isFalse();
+    }
+
+    // ---- bounded map: a flood of distinct peers cannot grow the map unboundedly ----
+
+    @Test
+    @DisplayName("the bucket map stays bounded under a flood of distinct full-bucket peers")
+    void bucketMapStaysBounded() throws Exception {
+        // capacity 1 → each peer makes one allowed call, immediately leaving a
+        // drained bucket. Let those buckets refill to full, then flood with new
+        // peers: the sweep evicts the refilled (full) buckets at the cap.
+        MetricsRateLimitInterceptor interceptor = new MetricsRateLimitInterceptor(600); // 10 tokens/sec → fast refill
+
+        // Far more distinct peers than MAX_BUCKETS, each touched once then left to refill.
+        for (int i = 0; i < 25_000; i++) {
+            call(interceptor, req("10." + (i >> 16 & 0xFF) + "." + (i >> 8 & 0xFF) + "." + (i & 0xFF), null));
+        }
+
+        int size = bucketMapSize(interceptor);
+        // MAX_BUCKETS is 10_000; the map must never exceed it after sweeps fire.
+        assertThat(size).isLessThanOrEqualTo(10_000);
+    }
+
+    @Test
+    @DisplayName("429 still fires on exhaustion even after the map has been swept")
+    void limitStillEnforcedAfterSweep() {
+        MetricsRateLimitInterceptor interceptor = new MetricsRateLimitInterceptor(600);
+
+        // Churn many distinct peers to trigger sweeps.
+        for (int i = 0; i < 25_000; i++) {
+            call(interceptor, req("172.16." + (i >> 8 & 0xFF) + "." + (i & 0xFF), null));
+        }
+
+        // A specific peer's limit is still enforced: drain its burst then expect 429.
+        MockHttpServletRequest r = req("192.168.0.1", null);
+        int allowed = 0;
+        for (int i = 0; i < 600; i++) {
+            if (call(interceptor, r)) {
+                allowed++;
+            }
+        }
+        assertThat(allowed).isGreaterThan(0);
+        assertThat(call(interceptor, r)).isFalse();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static int bucketMapSize(MetricsRateLimitInterceptor interceptor) throws Exception {
+        java.lang.reflect.Field f = MetricsRateLimitInterceptor.class.getDeclaredField("buckets");
+        f.setAccessible(true);
+        return ((java.util.Map<String, ?>) f.get(interceptor)).size();
     }
 }
