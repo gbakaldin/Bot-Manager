@@ -290,6 +290,7 @@ public class ApiGatewayClient {
                 .device("Computer")
                 .browser("WEB")
                 .source(appId)
+                .type("BOT")
                 .build();
         HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(apiGateway + registrationPath))
