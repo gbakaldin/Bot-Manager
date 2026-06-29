@@ -174,3 +174,126 @@ start/end are legitimately part of the key).
   shaped at every call site, or can free-form ids occur? The answer determines
   whether the injection fix can be a strict allow-list (preferred) or needs full
   PromQL string-escaping.
+
+---
+
+# Re-review
+
+Branch: feat/metrics-api
+Reviewed diff: `git diff 0ac7c83..HEAD` (commits `88dabdd`, `cb9a0f3`, `73e51d1`)
+
+## Verdict
+
+PASS
+
+All three prior blocking findings (2 `security` + 1 `bug`) are properly closed.
+One new advisory `smell` on the rate-limit bound (non-blocking) — see below.
+
+## Disposition of prior findings
+
+### [security] PromQL injection — CLOSED
+`MetricScope.selector(String id)` (`MetricScope.java:55`) now validates against
+`VALID_ID = \$?[A-Za-z0-9_-]+` and throws `BadRequestException` on any miss or
+`null`. Verified:
+- **Single chokepoint, no bypass.** Every selector in the package is built via
+  `scope.selector(id)`. The only two call sites are `MetricKey.promql`
+  (`MetricKey.java:138`) and `MetricsQueryService.resolveScopeName`
+  (`MetricsQueryService.java:140`). The summary path (`queryInstant` for each
+  scalar key + `bots_by_status` + scope-name resolution) and the timeseries path
+  (`queryRange` + scope-name resolution) both route exclusively through these,
+  for both `GAME` and `ENVIRONMENT`. No code constructs a `label="..."` matcher
+  independently.
+- **Regex prevents breakout.** `matches()` anchors the whole string; the class
+  `[A-Za-z0-9_-]` admits no double-quote, backslash, brace, whitespace, or
+  newline (`.`/`DOTALL` not used), so the `id="<...>"` matcher cannot be escaped.
+- **Leading `$` is safe.** Permitted only to render the Grafana template-variable
+  form pinned by the parity test; `$` carries no breakout meaning inside a quoted
+  PromQL label value, and the quote/backslash exclusion is what closes the hole.
+- **Null handled** — explicit `id == null` guard before the matcher.
+- **400 mapping confirmed** — `RestExceptionHandler.handleBadRequest`
+  (`RestExceptionHandler.java:80`) maps `BadRequestException` → `ResponseEntity.badRequest()`.
+
+### [bug] Instant-query cache key defeated the TTL — CLOSED
+- **Live "now" dedupes within TTL.** `MetricsQueryService.summary` now passes
+  `null` for every live instant query (`MetricsQueryService.java:56,63,67`), and
+  uses the real `Instant.now()` only for the DTO's `generatedAt`
+  (`MetricsQueryService.java:75`). `CachingPrometheusQueryClient.queryInstant`
+  maps `time == null` to a time-independent key
+  (`CacheKey.instant(promql, null)`, `CachingPrometheusQueryClient.java:65-66`),
+  so polls seconds apart collapse to one key inside the 5s TTL.
+- **Explicit historical instants stay distinct** — a non-null `Instant` folds the
+  epoch-second into the key, kept separate from live "now" and from each other.
+- **Record covers all fields, no collision.** `CacheKey(Kind, String promql,
+  Long start, Long end, Long step)` is a record; generated `equals`/`hashCode`
+  cover all five components. `kind` separates the INSTANT and RANGE namespaces,
+  so an instant and a range with the same promql never collide.
+- **File is genuinely text now.** `file(1)` reports "Java source, UTF-8 text" for
+  both the working tree and the `HEAD` blob; a NUL-byte scan finds zero NUL bytes
+  (5838 bytes with and without NUL-stripping); `git grep -I` (skips binaries)
+  returns the file's lines, i.e. git classifies the HEAD blob as text. The `Bin`
+  marker in `git diff 0ac7c83..HEAD --stat` and the `- -` numstat are artifacts of
+  the *start* of the range still holding the old binary blob — git flags a diff
+  binary if either side is; the committed result is text. CLOSED.
+
+### [security] Rate-limit bucket map — CLOSED (keying + arithmetic); residual smell on the bound
+- **Keying no longer spoofable — CLOSED.** `clientKey`
+  (`MetricsRateLimitInterceptor.java:98`) reads only `getRemoteAddr()` (null →
+  `"unknown"`); `X-Forwarded-For` is no longer consulted, so the header-rotation
+  bypass and the header-driven unbounded growth are both gone. The class javadoc
+  documents the proxy trade-off (behind a shared LB this collapses to a coarse
+  near-global limit) honestly; acceptable for the v1 "shield internal Prometheus"
+  goal.
+- **Token-bucket arithmetic still correct after the change.** `tryConsume`
+  (`:119`) refills `min(capacity, tokens + elapsed·refillPerNano)` then consumes
+  `1.0`; `lastRefillNanos` advances monotonically; new buckets start full. The new
+  `isFull` predicate (`:132`) recomputes refill read-only (does not mutate
+  `lastRefillNanos`) — a clean pure predicate. The `get`-then-`computeIfAbsent`
+  pattern (`:64-69`) is race-safe.
+
+## Findings
+
+### [smell] Bucket-map bound is sweep-on-insert with no hard ceiling; the sweep is idleness-dependent
+`src/main/java/com/vingame/bot/domain/metrics/ratelimit/MetricsRateLimitInterceptor.java:66-69,93-95`
+
+`MAX_BUCKETS` only *triggers* `sweepFullBuckets()` on insert; it is not a hard
+cap. If the sweep frees nothing, the code still falls through to
+`computeIfAbsent` and inserts, so the map can grow past `MAX_BUCKETS`. Eviction
+eligibility is `isFull()` — i.e. a bucket is reclaimable only after it has been
+idle long enough to refill to capacity (~`60/capacity` s ≈ 0.5 s at the default
+120/min). Under a sustained flood of *distinct, never-reused* source addresses
+arriving faster than they refill (feasible from a directly-exposed host facing an
+IPv6 /64), every bucket at sweep time is recently-active and therefore not full,
+so the sweep removes ~nothing and the map keeps growing.
+
+This is materially weaker than the original (XFF) defect — that vector was free
+over a single connection via a forged header; this one requires genuinely
+distinct *completed-TCP* peer addresses (spoofed sources can't finish the
+handshake to reach `preHandle`), and any proxy/LB in front collapses all clients
+to one key, making the map size 1. Each `Bucket` is tens of bytes, and the sweep
+reclaims aggressively the moment a flood pauses. So this is a hardening gap, not
+a live exploitable DoS on a normal deployment — hence `smell`, not blocking
+`security`.
+
+Fix shape (optional, for a true bound): after `sweepFullBuckets()`, if the map is
+still at the cap, enforce a hard ceiling — e.g. evict the entry with the oldest
+`lastRefillNanos` (closest to refilled), or simply skip rate-limiting / reject
+when saturated, or run a periodic scheduled sweep on a virtual thread that also
+drops sufficiently-old buckets regardless of fullness. Mirrors the cache's
+guarantee (the cache's TTL makes *every* entry reclaimable after 5 s; this map's
+eligibility is attacker-controllable via never reusing a key).
+
+## Notes
+
+- The keying/cache/injection changes are accompanied by focused tests
+  (`MetricScopeTest`, `MetricsControllerInjectionTest`,
+  `CachingPrometheusQueryClientTest`, expanded `MetricsRateLimitInterceptorUnitTest`).
+  Test adequacy is QA's call, not mine, but the diff is self-consistent with the
+  documented behavior.
+- The prior advisory on `MetricKey.promql` counting `%` chars to size format args
+  is unchanged and remains a minor smell (still correct for today's all-`%s`
+  templates).
+
+## Re-review verdict
+
+PASS — no remaining `bug` or `security` findings. One advisory `smell` (rate-limit
+bound) left to author discretion.
