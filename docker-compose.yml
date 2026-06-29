@@ -70,6 +70,13 @@ services:
     image: prom/prometheus:v2.55.0
     ports:
       - "9090:9090"
+    # Specifying `command:` overrides the image's default command entirely, so
+    # the two Prometheus defaults must be restated alongside the retention flag
+    # or config loading / TSDB path break. See METRICS_API.md AD-1.
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
     volumes:
       # Bind-mounted config so sgame can edit without root, matching the
       # ./logs and ./grafana/provisioning patterns. See

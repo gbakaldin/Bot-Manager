@@ -43,3 +43,14 @@ startup.sh
 
 ### Deploy-generated env file (HOST_UID/HOST_GID written by deploy.sh) ###
 .env
+
+### Deploy payloads / build artifacts (never commit — ~hundreds of MB) ###
+bot.tar
+infra-images.tar.gz
+*.tar
+*.tar.gz
+
+### Runtime logs ###
+logs/
+app/
+*.log
