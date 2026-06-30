@@ -245,11 +245,11 @@ public abstract class Bot {
             if (success) {
                 log.debug("Bot {}: Deposit successful, fetching new balance...", userName);
                 if (metrics != null) metrics.incBotAutoDeposit(true);
-                lastFetchedBalance = apiGatewayClient.getBalance(
+                recordFetchedBalance(apiGatewayClient.getBalance(
                     getClient().getAuthToken(),
                     credentials.getFingerprint(),
                     userName
-                );
+                ));
                 expectedCurrentBalance.set(lastFetchedBalance);
                 log.debug("Bot {}: New balance: {}", userName, expectedCurrentBalance);
             } else {
@@ -266,11 +266,11 @@ public abstract class Bot {
 
         if (Math.abs(lastFetchedBalance - expectedCurrentBalance.get()) > 1_000_000L) {
             log.debug("checkBalance() fetching from server (delta > 1M)");
-            lastFetchedBalance = apiGatewayClient.getBalance(
+            recordFetchedBalance(apiGatewayClient.getBalance(
                 getClient().getAuthToken(),
                 credentials.getFingerprint(),
                 userName
-            );
+            ));
             log.debug("checkBalance() fetched: {}", lastFetchedBalance);
             expectedCurrentBalance.set(lastFetchedBalance);
         } else {
@@ -278,6 +278,29 @@ public abstract class Bot {
         }
 
         return expectedCurrentBalance.get();
+    }
+
+    /**
+     * Single anchor for every authoritative server balance fetch
+     * (METRICS_IMPROVEMENT Phase 1, AD-1). Both {@code checkBalance()} and the
+     * post-deposit re-fetch in {@code deposit()} route through here, and nowhere
+     * else updates {@code lastFetchedBalance} from a server fetch.
+     * <p>
+     * Computes {@code delta = previousFetched - newBalance} and increments
+     * {@code bot_money_drained_total} by {@code max(0, delta)} — a downward move
+     * (real burn) records the drop; an upward move (the deposit top-up jump, or a
+     * net-gain round) yields a negative delta that floors to 0, so top-ups never
+     * register as drain (AD-1/AD-2). The first-ever fetch ({@code lastFetchedBalance
+     * < 0}) only sets the anchor and records nothing.
+     * <p>
+     * Metric-only: no INFO lines (the existing DEBUG balance logs stay).
+     */
+    private void recordFetchedBalance(long newBalance) {
+        if (lastFetchedBalance >= 0 && metrics != null) {
+            long delta = lastFetchedBalance - newBalance;
+            metrics.incMoneyDrained(Math.max(0, delta));
+        }
+        lastFetchedBalance = newBalance;
     }
 
     protected long getMinBalance() {

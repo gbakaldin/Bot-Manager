@@ -75,6 +75,10 @@ public class BotMetrics {
     // Decision 5). Same MDC-driven per-bot tag shape as the rest.
     public static final String BOT_CREATION_FAILURES_TOTAL = "bot_creation_failures_total";
 
+    // METRICS_IMPROVEMENT Phase 1 — observed real-balance depletion ("money
+    // drain"). Same per-bot tag shape as the other bot_* counters (AD-3).
+    public static final String BOT_MONEY_DRAINED_TOTAL = "bot_money_drained_total";
+
     private final MeterRegistry registry;
 
     public BotMetrics(MeterRegistry registry) {
@@ -299,6 +303,34 @@ public class BotMetrics {
                 .tags(mdcTags())
                 .register(registry)
                 .increment(seconds);
+    }
+
+    /**
+     * Accumulate observed real-balance depletion ("money drain"), in currency
+     * units, by {@code amount} (METRICS_IMPROVEMENT Phase 1). Same per-bot tag
+     * shape as the other {@code bot_*} counters ({@code botGroupId},
+     * {@code environmentId}, {@code gameType}, {@code gameId}, {@code gameName}
+     * via {@code mdcTags()} — AD-3). No {@code botId}, so all bots in a group
+     * share one series.
+     * <p>
+     * Driven by {@code Bot.recordFetchedBalance}: on every authoritative server
+     * balance fetch it increments by {@code max(0, previousFetched - newFetched)}.
+     * Non-positive amounts are silently dropped — the caller floors at 0, so the
+     * deposit top-up jump (a large NEGATIVE delta) never registers as drain and
+     * needs no special-casing (AD-1).
+     * <p>
+     * <b>Intended upward bias (AD-2):</b> net-gain windows contribute 0 rather
+     * than offsetting prior drain, so this counter over-states true net depletion.
+     * That is deliberate — "money drain" is a burn gauge, not net P&amp;L. Net
+     * P&amp;L would be {@code bet - winnings}, which was explicitly rejected for
+     * this metric because balance is independent ground truth.
+     */
+    public void incMoneyDrained(long amount) {
+        if (amount <= 0) return;
+        Counter.builder(BOT_MONEY_DRAINED_TOTAL)
+                .tags(mdcTags())
+                .register(registry)
+                .increment(amount);
     }
 
     /**

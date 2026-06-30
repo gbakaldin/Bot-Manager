@@ -493,6 +493,38 @@ class BotMetricsTest {
         assertThat(amount.count()).isEqualTo(15_000.0);
     }
 
+    /* ----- METRICS_IMPROVEMENT Phase 1 — money-drain counter ----- */
+
+    @Test
+    void incMoneyDrained_addsAmountAndAttachesMdcTags() {
+        setBotMdc();
+        metrics.incMoneyDrained(3_000_000L);
+        metrics.incMoneyDrained(1_500_000L);
+
+        Counter c = registry.find(BotMetrics.BOT_MONEY_DRAINED_TOTAL)
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
+                .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .tag(BotMdc.GAME_ID, GAME_ID)
+                .tag(BotMdc.GAME_NAME, GAME_NAME)
+                .counter();
+        assertThat(c).isNotNull();
+        assertThat(c.count()).isEqualTo(4_500_000.0);
+    }
+
+    @Test
+    void incMoneyDrained_nonPositiveValuesAreIgnored() {
+        // The Bot helper floors at 0 (deposit top-up jump / net-gain windows yield
+        // a negative delta). A zero/negative amount must never reach the registry —
+        // the counter is monotonic and we don't want phantom-zero series.
+        setBotMdc();
+        metrics.incMoneyDrained(0);
+        metrics.incMoneyDrained(-5_000_000L);
+
+        Counter c = registry.find(BotMetrics.BOT_MONEY_DRAINED_TOTAL).counter();
+        assertThat(c).isNull();
+    }
+
     /* ----- RESTART_LIFECYCLE_FIX — bot-creation failure counter ----- */
 
     @Test

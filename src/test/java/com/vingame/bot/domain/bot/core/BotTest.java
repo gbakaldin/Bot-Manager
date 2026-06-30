@@ -7,14 +7,21 @@ import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import com.vingame.bot.infrastructure.observability.BotMdcTagsMeterFilter;
 import com.vingame.websocketparser.VingameWebSocketClient;
 import com.vingame.websocketparser.auth.TokensProvider;
 import com.vingame.websocketparser.scenario.Scenario;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.slf4j.MDC;
 
 import java.lang.reflect.Field;
 import java.util.function.Consumer;
@@ -246,6 +253,126 @@ class BotTest {
             assertThat(bot.getLastFetchedBalance()).isEqualTo(1_000_000L);
             assertThat(bot.getExpectedBalance()).isEqualTo(1_000_000L);
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
+        }
+    }
+
+    /* ----- money-drain instrumentation (METRICS_IMPROVEMENT Phase 1) ----- */
+
+    @Nested
+    @DisplayName("money-drain on authoritative balance fetch")
+    class MoneyDrainTests {
+
+        private static final String GROUP_ID = "group-1";
+        private static final String ENV_ID = "env-1";
+        private static final String GAME_TYPE = "BETTING_MINI";
+        private static final String GAME_ID = "g1";
+        private static final String GAME_NAME = "BauCua";
+
+        private MeterRegistry registry;
+
+        @BeforeEach
+        void wireRealMetrics() {
+            // Use a real BotMetrics + SimpleMeterRegistry so the drain counter,
+            // its value, and its labels can be asserted end-to-end through the
+            // checkBalance / deposit fetch paths. MDC must be populated for the
+            // mdcTags() identity labels to attach.
+            registry = new SimpleMeterRegistry();
+            registry.config().meterFilter(new BotMdcTagsMeterFilter());
+            bot.setMetrics(new BotMetrics(registry));
+
+            MDC.put(BotMdc.BOT_GROUP_ID, GROUP_ID);
+            MDC.put(BotMdc.ENVIRONMENT_ID, ENV_ID);
+            MDC.put(BotMdc.GAME_TYPE, GAME_TYPE);
+            MDC.put(BotMdc.GAME_ID, GAME_ID);
+            MDC.put(BotMdc.GAME_NAME, GAME_NAME);
+        }
+
+        @AfterEach
+        void clearMdc() {
+            MDC.clear();
+        }
+
+        private Counter drainCounter() {
+            return registry.find(BotMetrics.BOT_MONEY_DRAINED_TOTAL).counter();
+        }
+
+        @Test
+        @DisplayName("Downward fetch delta accrues drain equal to the drop, carrying full identity labels")
+        void drainAccruesOnBalanceDrop() throws Exception {
+            // lastFetched 10M, expected forced low so delta > 1M -> server fetch.
+            setLong(bot, "lastFetchedBalance", 10_000_000L);
+            ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(-100_000_000L);
+
+            bot.client = wsClient;
+            when(wsClient.getAuthToken()).thenReturn("auth-tok");
+            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(7_000_000L);
+
+            bot.checkBalanceExposed();
+
+            Counter c = registry.find(BotMetrics.BOT_MONEY_DRAINED_TOTAL)
+                    .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                    .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
+                    .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                    .tag(BotMdc.GAME_ID, GAME_ID)
+                    .tag(BotMdc.GAME_NAME, GAME_NAME)
+                    .counter();
+            assertThat(c).isNotNull();
+            assertThat(c.count()).isEqualTo(3_000_000.0); // 10M - 7M
+        }
+
+        @Test
+        @DisplayName("Net-gain fetch (balance rose) floors drain to 0 — no counter")
+        void noDrainOnNetGainFetch() throws Exception {
+            setLong(bot, "lastFetchedBalance", 5_000_000L);
+            ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(-100_000_000L);
+
+            bot.client = wsClient;
+            when(wsClient.getAuthToken()).thenReturn("auth-tok");
+            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(8_000_000L);
+
+            bot.checkBalanceExposed();
+
+            // delta = 5M - 8M = -3M -> floored to 0 -> no series created.
+            assertThat(drainCounter()).isNull();
+        }
+
+        @Test
+        @DisplayName("First-ever fetch sets the anchor and records nothing")
+        void firstFetchRecordsNothing() {
+            // Defaults: lastFetchedBalance = -1 -> anchor only, no drain.
+            bot.client = wsClient;
+            when(wsClient.getAuthToken()).thenReturn("auth-tok");
+            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(50_000_000L);
+
+            bot.checkBalanceExposed();
+
+            assertThat(bot.getLastFetchedBalance()).isEqualTo(50_000_000L);
+            assertThat(drainCounter()).isNull();
+        }
+
+        @Test
+        @SuppressWarnings("unchecked")
+        @DisplayName("Deposit top-up jump (large upward re-fetch) floors drain to 0 — no counter")
+        void noDrainOnDepositTopUpJump() throws Exception {
+            setLong(bot, "lastFetchedBalance", 5_000_000L);
+            ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(5_000_000L);
+
+            bot.client = wsClient;
+            when(wsClient.getAgencyToken()).thenReturn("agency-tok");
+            when(wsClient.getAuthToken()).thenReturn("auth-tok");
+            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(1_005_000_000L);
+
+            doAnswer(inv -> {
+                Consumer<Boolean> cb = inv.getArgument(2);
+                cb.accept(true);
+                return null;
+            }).when(gameMsClient).deposit(eq("agency-tok"), eq(1_000_000_000L), any(Consumer.class));
+
+            bot.deposit();
+
+            // delta = 5M - 1.005B = large negative -> floored to 0 -> no series.
+            assertThat(bot.getLastFetchedBalance()).isEqualTo(1_005_000_000L);
+            assertThat(drainCounter()).isNull();
         }
     }
 
