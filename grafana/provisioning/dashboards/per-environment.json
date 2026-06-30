@@ -717,6 +717,66 @@
           "legendFormat": "failures/s"
         }
       ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Money drain / day (avg per bot)",
+      "description": "Per-bot average real-balance depletion over 24h for the selected environment: sum(increase(bot_money_drained_total))/sum(bots_by_env_status). Drain is observed from server-balance deltas and floored at 0, so net-gain windows contribute 0 — this biases the value UPWARD vs true net depletion (it is a burn gauge, not net P&L; AD-2). Divisor is the current bot count, so the average is approximate if the environment was resized mid-window. 'or vector(0)' renders 0 when no bots/series exist.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 36
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyVND",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "(sum(increase(bot_money_drained_total{environmentId=\"$environmentId\"}[24h])) / sum(bots_by_env_status{environmentId=\"$environmentId\"})) or vector(0)",
+          "legendFormat": "drain/day per bot"
+        }
+      ]
     }
   ]
 }

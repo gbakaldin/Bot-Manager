@@ -63,6 +63,20 @@ public enum MetricKey {
             MetricScope.GAME, "(sum(increase(bot_winnings_total{%s}[$__range])) / sum(increase(bot_bet_amount_total{%s}[$__range]))) or vector(0)",
             MetricScope.ENVIRONMENT, "(sum(increase(bot_winnings_total{%s}[$__range])) / sum(increase(bot_bet_amount_total{%s}[$__range]))) or vector(0)")),
 
+    /**
+     * Per-bot average money drain over the last 24h: total real-balance depletion
+     * for the scope divided by the current bot count. The divisor metric varies by
+     * scope ({@code bots_by_game_status} vs {@code bots_by_env_status}), mirroring
+     * {@link #TOTAL_BOTS}. The {@code [24h]} window is fixed (it IS "per day", not
+     * the user's chart range — AD-4). Drain is floored at 0 per fetch, so net-gain
+     * windows contribute 0 and the value is biased UPWARD vs true net depletion
+     * (a burn gauge, not net P&L — AD-2). {@code or vector(0)} guards the
+     * no-bots / no-series case. per-game.json:775 / per-environment.json:776.
+     */
+    MONEY_DRAIN_PER_DAY("money_drain_per_day", false, Map.of(
+            MetricScope.GAME, "(sum(increase(bot_money_drained_total{%s}[24h])) / sum(bots_by_game_status{%s})) or vector(0)",
+            MetricScope.ENVIRONMENT, "(sum(increase(bot_money_drained_total{%s}[24h])) / sum(bots_by_env_status{%s})) or vector(0)")),
+
     /** Dead time over the last hour (seconds). per-game.json:326 / per-environment.json:326. */
     DEAD_SECONDS_1H("dead_seconds_1h", false, Map.of(
             MetricScope.GAME, "sum(increase(bot_dead_seconds_total{%s}[1h]))",
