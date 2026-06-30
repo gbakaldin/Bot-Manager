@@ -68,9 +68,9 @@ class MetricKeyDashboardParityTest {
 
     @Test
     void environmentOnlyKeysAreNotAvailableForGame() {
-        assertThat(MetricKey.RTP_PER_GAME_5M.supports(MetricScope.GAME)).isFalse();
+        assertThat(MetricKey.RTP_PER_GAME.supports(MetricScope.GAME)).isFalse();
         assertThat(MetricKey.RECONNECT_RATE_5M.supports(MetricScope.GAME)).isFalse();
-        assertThat(MetricKey.RTP_PER_GAME_5M.supports(MetricScope.ENVIRONMENT)).isTrue();
+        assertThat(MetricKey.RTP_PER_GAME.supports(MetricScope.ENVIRONMENT)).isTrue();
     }
 
     /** Collect every panel {@code expr} string from a dashboard JSON. */

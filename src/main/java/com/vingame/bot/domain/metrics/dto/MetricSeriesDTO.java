@@ -11,7 +11,7 @@ import java.util.Map;
 /**
  * One series within a timeseries response. Single-series metrics yield exactly
  * one of these; multi-series metrics ({@code bots_by_status},
- * {@code rtp_per_game_5m}, {@code reconnect_rate_5m}) yield one per label set so
+ * {@code rtp_per_game}, {@code reconnect_rate_5m}) yield one per label set so
  * the UI can legend them (METRICS_API AD-6).
  */
 @Data

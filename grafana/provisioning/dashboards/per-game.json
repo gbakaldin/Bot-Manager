@@ -196,8 +196,8 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "RTP (5m)",
-      "description": "Realized RTP for the selected game: sum(rate(bot_winnings))/sum(rate(bot_bet_amount)). 'or vector(0)' renders 0 when the game has no bets yet (AD-7).",
+      "title": "RTP",
+      "description": "Stake-weighted RTP for the selected game over the selected range: sum(increase(bot_winnings))/sum(increase(bot_bet_amount)). Change the time range for hourly/daily/since-update. 'or vector(0)' renders 0 when the game has no bets yet (AD-7).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -256,7 +256,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(rate(bot_winnings_total{gameId=\"$gameId\"}[5m])) / sum(rate(bot_bet_amount_total{gameId=\"$gameId\"}[5m]))) or vector(0)",
+          "expr": "(sum(increase(bot_winnings_total{gameId=\"$gameId\"}[$__range])) / sum(increase(bot_bet_amount_total{gameId=\"$gameId\"}[$__range]))) or vector(0)",
           "legendFormat": "RTP"
         }
       ]

@@ -9,6 +9,7 @@ import com.vingame.bot.domain.metrics.dto.MetricsTimeseriesDTO;
 import com.vingame.bot.infrastructure.client.prometheus.PrometheusQueryClient;
 import com.vingame.bot.infrastructure.client.prometheus.PrometheusResult;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -38,10 +39,31 @@ public class MetricsQueryService {
     private static final String ENVIRONMENT_NAME_LABEL = "environmentName";
     private static final String STATUS_LABEL = "status";
 
+    /** Grafana-only token stored verbatim in RTP templates; must never reach Prometheus (AD-6). */
+    private static final String RANGE_TOKEN = "$__range";
+
     private final PrometheusQueryClient client;
+
+    /** Concrete window the summary (instant) RTP query resolves {@code $__range} to (AD-6). */
+    @Value("${metrics.rtp.summary-window:30d}")
+    private String rtpSummaryWindow;
+
+    /** Concrete sliding window each timeseries RTP point resolves {@code $__range} to (AD-6). */
+    @Value("${metrics.rtp.timeseries-window:1h}")
+    private String rtpTimeseriesWindow;
 
     public MetricsQueryService(PrometheusQueryClient client) {
         this.client = client;
+    }
+
+    /**
+     * Resolve the Grafana-only {@code $__range} token in a built PromQL to a
+     * concrete duration (AD-6). Non-RTP keys carry no token and pass through
+     * untouched. {@link String#replace(CharSequence, CharSequence)} is non-regex,
+     * so the literal {@code $} is safe.
+     */
+    private String applyWindow(String promql, String window) {
+        return promql.replace(RANGE_TOKEN, window);
     }
 
     /**
@@ -60,7 +82,8 @@ public class MetricsQueryService {
             if (!key.supports(scope) || key.isMultiSeries()) {
                 continue; // multi-series keys are not scalar summary panels
             }
-            PrometheusResult result = client.queryInstant(key.promql(scope, id), null);
+            String promql = applyWindow(key.promql(scope, id), rtpSummaryWindow);
+            PrometheusResult result = client.queryInstant(promql, null);
             metrics.put(key.key(), firstScalar(result));
         }
 
@@ -84,7 +107,8 @@ public class MetricsQueryService {
     public MetricsTimeseriesDTO timeseries(MetricScope scope, String id, MetricKey key,
                                            Instant start, Instant end, Duration step) {
         String scopeName = resolveScopeName(scope, id, end);
-        PrometheusResult result = client.queryRange(key.promql(scope, id), start, end, step);
+        String promql = applyWindow(key.promql(scope, id), rtpTimeseriesWindow);
+        PrometheusResult result = client.queryRange(promql, start, end, step);
 
         List<MetricSeriesDTO> series = result.series().stream()
                 .map(this::toSeriesDTO)

@@ -56,7 +56,7 @@ class MetricsControllerTest {
                 .scope(scope.name())
                 .scopeId(id)
                 .scopeName(name)
-                .metrics(Map.of("total_bots", 12.0, "rtp_5m", 0.95))
+                .metrics(Map.of("total_bots", 12.0, "rtp", 0.95))
                 .botsByStatus(Map.of("CONNECTION_AUTHENTICATED", 10.0))
                 .generatedAt(Instant.now())
                 .build();

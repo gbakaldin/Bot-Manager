@@ -23,10 +23,13 @@ import java.util.Map;
  * ({@code bots_by_game_status} vs {@code bots_by_env_status}), so the catalog is
  * keyed by scope rather than by selector substitution alone.
  * <p>
- * The rate/increase windows ({@code [5m]}/{@code [1m]}/{@code [1h]}) are
+ * Most rate/increase windows ({@code [5m]}/{@code [1m]}/{@code [1h]}) are
  * intrinsic to each metric's definition and are <b>not</b> the user's chart
  * range — the user's {@code from}/{@code to}/{@code step} only parameterize
- * {@code query_range}.
+ * {@code query_range}. The sole exception is RTP, whose template stores the
+ * literal {@code $__range} Grafana token; {@code MetricsQueryService} substitutes
+ * a concrete window per endpoint before dispatch (AD-6) so the token never
+ * reaches Prometheus.
  */
 public enum MetricKey {
 
@@ -47,10 +50,18 @@ public enum MetricKey {
             MetricScope.GAME, "bots_by_game_status{%s}",
             MetricScope.ENVIRONMENT, "bots_by_env_status{%s}")),
 
-    /** 5m RTP (winnings/bet-amount) with the mandatory {@code or vector(0)} guard. per-game.json:259 / per-environment.json:259. */
-    RTP_5M("rtp_5m", false, Map.of(
-            MetricScope.GAME, "(sum(rate(bot_winnings_total{%s}[5m])) / sum(rate(bot_bet_amount_total{%s}[5m]))) or vector(0)",
-            MetricScope.ENVIRONMENT, "(sum(rate(bot_winnings_total{%s}[5m])) / sum(rate(bot_bet_amount_total{%s}[5m]))) or vector(0)")),
+    /**
+     * Stake-weighted RTP (winnings/bet-amount) as a ratio-of-sums over the query
+     * window, with the mandatory {@code or vector(0)} guard. The {@code $__range}
+     * Grafana token is stored verbatim so the dashboard expr matches byte-for-byte;
+     * {@code MetricsQueryService} substitutes a concrete window per endpoint before
+     * dispatch (summary {@code metrics.rtp.summary-window}, timeseries
+     * {@code metrics.rtp.timeseries-window} — AD-6). per-game.json:259 /
+     * per-environment.json:259.
+     */
+    RTP("rtp", false, Map.of(
+            MetricScope.GAME, "(sum(increase(bot_winnings_total{%s}[$__range])) / sum(increase(bot_bet_amount_total{%s}[$__range]))) or vector(0)",
+            MetricScope.ENVIRONMENT, "(sum(increase(bot_winnings_total{%s}[$__range])) / sum(increase(bot_bet_amount_total{%s}[$__range]))) or vector(0)")),
 
     /** Dead time over the last hour (seconds). per-game.json:326 / per-environment.json:326. */
     DEAD_SECONDS_1H("dead_seconds_1h", false, Map.of(
@@ -89,9 +100,14 @@ public enum MetricKey {
 
     // ---- ENVIRONMENT-only ----
 
-    /** Per-game RTP within the environment (multi-series by {@code gameName}). per-environment.json:441 — env only. */
-    RTP_PER_GAME_5M("rtp_per_game_5m", true, Map.of(
-            MetricScope.ENVIRONMENT, "(sum by (gameName) (rate(bot_winnings_total{%s}[5m])) / sum by (gameName) (rate(bot_bet_amount_total{%s}[5m]))) or vector(0)")),
+    /**
+     * Per-game stake-weighted RTP within the environment (multi-series by
+     * {@code gameName}), as a ratio-of-sums over the query window. The
+     * {@code $__range} token is stored verbatim and resolved at dispatch by
+     * {@code MetricsQueryService} (AD-6). per-environment.json:441 — env only.
+     */
+    RTP_PER_GAME("rtp_per_game", true, Map.of(
+            MetricScope.ENVIRONMENT, "(sum by (gameName) (increase(bot_winnings_total{%s}[$__range])) / sum by (gameName) (increase(bot_bet_amount_total{%s}[$__range]))) or vector(0)")),
 
     /** Reconnect rate (5m, multi-series by {@code reason}). per-environment.json:661 — env only. */
     RECONNECT_RATE_5M("reconnect_rate_5m", true, Map.of(

@@ -7,7 +7,9 @@ import com.vingame.bot.domain.metrics.dto.MetricsSummaryDTO;
 import com.vingame.bot.domain.metrics.dto.MetricsTimeseriesDTO;
 import com.vingame.bot.infrastructure.client.prometheus.PrometheusQueryClient;
 import com.vingame.bot.infrastructure.client.prometheus.PrometheusResult;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -27,8 +29,17 @@ import static org.mockito.Mockito.when;
  */
 class MetricsQueryServiceTest {
 
+    private static final String SUMMARY_WINDOW = "30d";
+    private static final String TIMESERIES_WINDOW = "1h";
+
     private final PrometheusQueryClient client = mock(PrometheusQueryClient.class);
     private final MetricsQueryService service = new MetricsQueryService(client);
+
+    @BeforeEach
+    void setWindows() {
+        ReflectionTestUtils.setField(service, "rtpSummaryWindow", SUMMARY_WINDOW);
+        ReflectionTestUtils.setField(service, "rtpTimeseriesWindow", TIMESERIES_WINDOW);
+    }
 
     private static PrometheusResult vector(PrometheusResult.Series... series) {
         return new PrometheusResult(PrometheusResult.ResultType.VECTOR, List.of(series));
@@ -66,7 +77,10 @@ class MetricsQueryServiceTest {
         for (MetricKey key : MetricKey.values()) {
             if (key.supports(MetricScope.GAME) && !key.isMultiSeries()
                     && key != MetricKey.TOTAL_BOTS) {
-                when(client.queryInstant(eq(key.promql(MetricScope.GAME, "g1")), any()))
+                // The service resolves $__range to the summary window before dispatch,
+                // so stub the post-substitution PromQL (no-op for non-RTP keys).
+                String dispatched = key.promql(MetricScope.GAME, "g1").replace("$__range", SUMMARY_WINDOW);
+                when(client.queryInstant(eq(dispatched), any()))
                         .thenReturn(vector(scalarSeries(1.0)));
             }
         }

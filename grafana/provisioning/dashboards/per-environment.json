@@ -196,8 +196,8 @@
     {
       "id": 3,
       "type": "stat",
-      "title": "RTP overall (5m)",
-      "description": "Realized RTP across all games in the selected environment. 'or vector(0)' renders 0 when the env has no bets yet (AD-7).",
+      "title": "RTP overall",
+      "description": "Stake-weighted RTP across all games in the selected environment over the selected range. Change the time range for hourly/daily/since-update. 'or vector(0)' renders 0 when the env has no bets yet (AD-7).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -256,7 +256,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum(rate(bot_winnings_total{environmentId=\"$environmentId\"}[5m])) / sum(rate(bot_bet_amount_total{environmentId=\"$environmentId\"}[5m]))) or vector(0)",
+          "expr": "(sum(increase(bot_winnings_total{environmentId=\"$environmentId\"}[$__range])) / sum(increase(bot_bet_amount_total{environmentId=\"$environmentId\"}[$__range]))) or vector(0)",
           "legendFormat": "RTP"
         }
       ]
@@ -390,8 +390,8 @@
     {
       "id": 6,
       "type": "timeseries",
-      "title": "RTP per game within env (5m)",
-      "description": "Realized RTP broken down by game inside the selected environment — shows which game drags the env's RTP. 'or vector(0)' renders 0 for games with no bets.",
+      "title": "RTP per game within env",
+      "description": "Stake-weighted RTP over the selected range, broken down by game inside the selected environment — shows which game drags the env's RTP. Change the time range for hourly/daily/since-update. 'or vector(0)' renders 0 for games with no bets.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -438,7 +438,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(sum by (gameName) (rate(bot_winnings_total{environmentId=\"$environmentId\"}[5m])) / sum by (gameName) (rate(bot_bet_amount_total{environmentId=\"$environmentId\"}[5m]))) or vector(0)",
+          "expr": "(sum by (gameName) (increase(bot_winnings_total{environmentId=\"$environmentId\"}[$__range])) / sum by (gameName) (increase(bot_bet_amount_total{environmentId=\"$environmentId\"}[$__range]))) or vector(0)",
           "legendFormat": "{{gameName}}"
         }
       ]

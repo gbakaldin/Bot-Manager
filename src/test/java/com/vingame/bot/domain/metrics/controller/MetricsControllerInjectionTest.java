@@ -6,6 +6,7 @@ import com.vingame.bot.infrastructure.client.prometheus.PrometheusQueryClient;
 import com.vingame.bot.infrastructure.client.prometheus.PrometheusResult;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
@@ -39,6 +40,13 @@ class MetricsControllerInjectionTest {
             .standaloneSetup(new MetricsController(service))
             .setControllerAdvice(new RestExceptionHandler())
             .build();
+
+    {
+        // The service is constructed directly (no Spring), so the @Value RTP
+        // window fields are null; set them so the $__range substitution works.
+        ReflectionTestUtils.setField(service, "rtpSummaryWindow", "30d");
+        ReflectionTestUtils.setField(service, "rtpTimeseriesWindow", "1h");
+    }
 
     private static PrometheusResult emptyVector() {
         return new PrometheusResult(PrometheusResult.ResultType.VECTOR, List.of());
