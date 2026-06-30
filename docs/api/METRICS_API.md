@@ -94,7 +94,8 @@ if a dashboard query changes, the template in `MetricKey` must move with it.
 | `bot_groups` | Distinct active bot groups | |
 | `total_bots` | Total bots in scope | |
 | `bots_by_status` | Bot counts per status | ✅ (by `status`) |
-| `rtp_5m` | 5m RTP (winnings/bet-amount), guarded `or vector(0)` so it's never NaN | |
+| `rtp` | Stake-weighted RTP (Σwinnings/Σbet) over the query window, guarded `or vector(0)` so it's never NaN. **Windowed, not 5m** — the window is the query time range (server substitutes 30d for `summary`, a 1h sliding window for `timeseries`). Renamed from `rtp_5m`. | |
+| `money_drain_per_day` | Avg net money drained per bot over 24h (`Σincrease(bot_money_drained_total[24h]) / bot count`), guarded `or vector(0)` | |
 | `dead_seconds_1h` | Dead time over the last hour (seconds) | |
 | `bets_placed_rate_1m` | Bets placed rate (1m) | |
 | `bet_amount_rate_1m` | Bet amount rate (1m) | |
@@ -112,7 +113,7 @@ if a dashboard query changes, the template in `MetricKey` must move with it.
 
 | Metric key | Meaning | Multi-series |
 |------------|---------|:---:|
-| `rtp_per_game_5m` | Per-game RTP within the environment | ✅ (by `gameName`) |
+| `rtp_per_game` | Per-game windowed RTP within the environment (same windowing as `rtp`). Renamed from `rtp_per_game_5m`. | ✅ (by `gameName`) |
 | `reconnect_rate_5m` | Reconnect rate (5m) | ✅ (by `reason`) |
 
 Using a GAME-only key on `/environment` (or vice-versa) returns **400**.
@@ -134,7 +135,8 @@ can't be resolved.
   "scopeName": "Fruit Shop",             // resolved from join gauge; null if unresolved
   "metrics": {                           // metricKey -> current value (non-finite -> null)
     "total_bots": 40.0,
-    "rtp_5m": 0.6407,
+    "rtp": 0.94,
+    "money_drain_per_day": 31200000.0,
     "bets_placed_rate_1m": 896.0,
     "bot_groups": 6.0
     // ... every scalar metric for the scope
