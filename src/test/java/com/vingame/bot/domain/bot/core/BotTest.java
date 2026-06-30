@@ -351,6 +351,50 @@ class BotTest {
         }
 
         @Test
+        @DisplayName("Cached checkBalance path (drift <= 1M) records no drain and never hits the server")
+        void noDrainWhenCachedPathTaken() throws Exception {
+            // drift = |10M - 9.5M| = 500k <= 1M -> checkBalance returns the cached
+            // expectedCurrentBalance without a server fetch, so recordFetchedBalance
+            // is never invoked and no drain accrues.
+            setLong(bot, "lastFetchedBalance", 10_000_000L);
+            ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(9_500_000L);
+
+            bot.client = wsClient;
+
+            long result = bot.checkBalanceExposed();
+
+            assertThat(result).isEqualTo(9_500_000L);
+            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
+            assertThat(drainCounter()).isNull();
+            // anchor must be untouched by a cached read
+            assertThat(bot.getLastFetchedBalance()).isEqualTo(10_000_000L);
+        }
+
+        @Test
+        @DisplayName("Consecutive downward fetches accumulate drain and re-anchor from the latest fetch")
+        void consecutiveDropsAccumulateAndReanchor() throws Exception {
+            setLong(bot, "lastFetchedBalance", 10_000_000L);
+            AtomicLong expected = (AtomicLong) getField(bot, "expectedCurrentBalance");
+
+            bot.client = wsClient;
+            when(wsClient.getAuthToken()).thenReturn("auth-tok");
+
+            // First drop: 10M -> 7M = 3M drain, anchor becomes 7M.
+            expected.set(-100_000_000L);
+            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(7_000_000L);
+            bot.checkBalanceExposed();
+
+            // Second drop computed from the NEW anchor (7M), not the original 10M:
+            // 7M -> 5M = 2M, cumulative 5M.
+            expected.set(-100_000_000L);
+            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(5_000_000L);
+            bot.checkBalanceExposed();
+
+            assertThat(drainCounter().count()).isEqualTo(5_000_000.0);
+            assertThat(bot.getLastFetchedBalance()).isEqualTo(5_000_000L);
+        }
+
+        @Test
         @SuppressWarnings("unchecked")
         @DisplayName("Deposit top-up jump (large upward re-fetch) floors drain to 0 — no counter")
         void noDrainOnDepositTopUpJump() throws Exception {

@@ -161,6 +161,49 @@ class MetricsQueryServiceEdgeTest {
     }
 
     @Test
+    @DisplayName("summary auto-includes the renamed rtp and new money_drain_per_day scalar keys, dropping the old _5m keys (AD-7/AD-8)")
+    void summaryIncludesRenamedAndNewScalarKeys() {
+        when(client.queryInstant(any(), any())).thenReturn(vector(scalar(0.9)));
+
+        MetricsSummaryDTO game = service.summary(MetricScope.GAME, "g1");
+        assertThat(game.getMetrics())
+                .as("renamed RTP key surfaces under its new name on GAME")
+                .containsKey("rtp")
+                .as("new drain key auto-included on GAME (scalar, both scopes)")
+                .containsKey("money_drain_per_day")
+                .as("old _5m RTP keys are gone (no back-compat alias)")
+                .doesNotContainKey("rtp_5m")
+                .as("multi-series rtp_per_game is excluded from the scalar summary map")
+                .doesNotContainKey("rtp_per_game");
+
+        MetricsSummaryDTO env = service.summary(MetricScope.ENVIRONMENT, "e1");
+        assertThat(env.getMetrics())
+                .containsKey("rtp")
+                .containsKey("money_drain_per_day")
+                .doesNotContainKey("rtp_5m")
+                .doesNotContainKey("rtp_per_game_5m");
+    }
+
+    @Test
+    @DisplayName("a non-RTP scalar key carries no $__range token and is dispatched byte-for-byte unchanged")
+    void nonRtpKeyDispatchedUnchanged() {
+        when(client.queryInstant(any(), any())).thenReturn(vector());
+
+        service.summary(MetricScope.GAME, "g1");
+
+        String deadRaw = MetricKey.DEAD_SECONDS_1H.promql(MetricScope.GAME, "g1");
+        assertThat(deadRaw)
+                .as("non-RTP templates carry no Grafana range token")
+                .doesNotContain("$__range");
+
+        ArgumentCaptor<String> queries = ArgumentCaptor.forClass(String.class);
+        verify(client, atLeastOnce()).queryInstant(queries.capture(), any());
+        assertThat(queries.getAllValues())
+                .as("non-RTP key passes through applyWindow() untouched")
+                .contains(deadRaw);
+    }
+
+    @Test
     @DisplayName("timeseries resolves $__range to the timeseries window and never dispatches the raw token (AD-6)")
     void timeseriesResolvesRangeTokenToTimeseriesWindow() {
         when(client.queryInstant(any(), any())).thenReturn(vector());
