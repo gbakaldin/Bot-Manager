@@ -149,7 +149,7 @@ class TaiXiuMessageDeserializationTest {
         // AD-11: a 100%-refunded round must net to zero stake and zero win — NOT a 500k loss.
         assertThat(((HasBetTotals) end).betAmountFor("any-bot")).isZero();   // gB - gR = 0
         assertThat(((HasBetTotals) end).betCountFor("any-bot")).isZero();    // no effective stake
-        assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isZero();  // winnings = G = 0
+        assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isZero();  // winnings = GX - gR = 0
         assertThat(((HasJackpot) end).jackpotFor("any-bot")).isZero();       // iJp=false
     }
 
@@ -166,12 +166,12 @@ class TaiXiuMessageDeserializationTest {
         // effective wagered = gB - gR = 300000.
         assertThat(((HasBetTotals) end).betAmountFor("any-bot")).isEqualTo(300000L);
         assertThat(((HasBetTotals) end).betCountFor("any-bot")).isEqualTo(1);
-        // winnings = G = 120000 directly. A regression to GX-gB would give
+        // winnings = GX - gR = 120000 (== G here, since GX = gR + G). A regression to GX-gB would give
         // 320000-500000 = -180000 (floored to 0) — provably different from G, so this
         // assertion truly pins the G-based formula.
         assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isEqualTo(120000L);
         assertThat(((HasBotWinnings) end).winningsFor("any-bot"))
-                .as("winnings must be G, not GX-gB")
+                .as("winnings must be GX-gR, not GX-gB")
                 .isNotEqualTo(Math.max(0L, end.getGX() - end.getGB()));
     }
 
@@ -188,25 +188,40 @@ class TaiXiuMessageDeserializationTest {
         // No refund -> full bet was at risk.
         assertThat(((HasBetTotals) end).betAmountFor("any-bot")).isEqualTo(500000L);
         assertThat(((HasBetTotals) end).betCountFor("any-bot")).isEqualTo(1);
-        // winnings = G = 80000. A regression to GX-gB would give 80000-500000 = -420000
+        // winnings = GX - gR = 80000 (== G here, since GX = gR + G). A regression to GX-gB would give 80000-500000 = -420000
         // (floored to 0) — provably different from G.
         assertThat(((HasBotWinnings) end).winningsFor("any-bot")).isEqualTo(80000L);
         assertThat(((HasBotWinnings) end).winningsFor("any-bot"))
-                .as("winnings must be G, not GX-gB")
+                .as("winnings must be GX-gR, not GX-gB")
                 .isNotEqualTo(Math.max(0L, end.getGX() - end.getGB()));
     }
 
     @Test
-    @DisplayName("winnings floors at 0 when G < 0 (defensive); reads G not GX-gB")
+    @DisplayName("winnings floors at 0 when GX < gR (defensive); winnings = GX - gR")
     void winningsNeverNegative() {
-        // G is the source of winnings (OI-7). GX is set high to prove GX-gB is NOT used.
+        // Winnings = max(0, GX - gR). A frame where the refund exceeds the gross
+        // settlement (GX < gR) would compute negative — must floor to 0.
         TaiXiuEndGameMessage loss = new TaiXiuEndGameMessage(
                 1004, 1, 2, 3,
-                /*gB*/ 500000L, /*gR*/ 0L, /*G*/ 0L, /*GX*/ 100000L,
+                /*gB*/ 500000L, /*gR*/ 300000L, /*G*/ 0L, /*GX*/ 100000L,
                 0L, 0L, 0L, 0L, false, 0L);
-        assertThat(((HasBotWinnings) loss).winningsFor("x")).isZero();
-        // Effective stake still the full bet (no refund).
-        assertThat(((HasBetTotals) loss).betAmountFor("x")).isEqualTo(500000L);
+        assertThat(((HasBotWinnings) loss).winningsFor("x")).isZero(); // max(0, 100000 - 300000)
+        // Effective stake = gB - gR.
+        assertThat(((HasBetTotals) loss).betAmountFor("x")).isEqualTo(200000L);
+    }
+
+    @Test
+    @DisplayName("P_114 jackpot frame: G/gR absent -> winnings = GX (gross return)")
+    void winningsFromGXWhenGandGRabsent() {
+        // The P_114 taixiuJackpotPlugin EndGame omits G and gR (default 0), carrying
+        // only gB + GX. Winnings = GX - gR = GX. Reading the G field (old contract)
+        // would have returned 0 — the bug that under-reported every RIK win.
+        TaiXiuEndGameMessage win = new TaiXiuEndGameMessage(
+                1104, 4, 6, 3,
+                /*gB*/ 56320000L, /*gR*/ 0L, /*G*/ 0L, /*GX*/ 91443200L,
+                0L, 0L, 0L, 0L, false, 0L);
+        assertThat(((HasBotWinnings) win).winningsFor("x")).isEqualTo(91443200L);
+        assertThat(((HasBetTotals) win).betAmountFor("x")).isEqualTo(56320000L);
     }
 
     @Test

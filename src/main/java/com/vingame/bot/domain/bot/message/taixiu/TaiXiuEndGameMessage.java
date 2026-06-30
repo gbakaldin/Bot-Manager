@@ -126,15 +126,26 @@ public class TaiXiuEndGameMessage extends EndGameMessage
     }
 
     /**
-     * This bot's winnings for the just-completed round = the {@code G} field directly
-     * (gold win money), floored at {@code 0} (AD-11; OI-7 RESOLVED 2026-06-24). Do NOT
-     * compute {@code GX − gB} — that only coincidentally matched {@code G} in the
-     * fully-refunded capture (since {@code GX = gR + G} and {@code gR == gB} there).
+     * This bot's winnings for the just-completed round = {@code GX − gR} (gross
+     * settlement returned minus the refunded stake), floored at {@code 0}.
+     * <p>
+     * <b>Why {@code GX − gR} and not the {@code G} field directly (revises OI-7).</b>
+     * By the modeled invariant {@code GX = gR + G}, {@code GX − gR == G}, so this is
+     * identical to the old {@code G}-field read for the P_116 {@code taixiuPlugin}
+     * product (every captured fixture satisfies it — e.g. partial refund
+     * {@code GX 320k = gR 200k + G 120k}). But the <b>P_114 / {@code taixiuJackpotPlugin}
+     * jackpot variant omits the {@code G} and {@code gR} fields entirely</b> — its
+     * EndGame (cmd 1104) carries only {@code gB} (bet) and {@code GX} (gross return)
+     * — so reading {@code G} returned a Jackson-defaulted {@code 0} and silently
+     * under-reported <i>every</i> P_114 win (frozen {@code bot_winnings_total}/RTP,
+     * and {@code balanceCreditFor}'s {@code gR + winnings} under-credited the wallet).
+     * For P_114 {@code GX − gR == GX − 0 == GX}, the true gross return. Still do NOT
+     * compute {@code GX − gB} (that nets the stake and goes negative on a loss).
      * {@code userName} ignored — the payload is recipient-personalized.
      */
     @Override
     public long winningsFor(String userName) {
-        return Math.max(0L, G);
+        return Math.max(0L, GX - gR);
     }
 
     /**
