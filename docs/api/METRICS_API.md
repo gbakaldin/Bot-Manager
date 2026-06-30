@@ -76,9 +76,13 @@ Parameter rules (all violations → **HTTP 400**, `BadRequestException`):
 - `step` must be **≥ 5s** (Prometheus scrape resolution is 10s; sub-scrape steps just waste points).
 - The window must yield **≤ 11 000 points** (`window / step`) — Prometheus' own max-resolution guard. Too high → 400 telling you to increase `step` or shrink the range.
 
-Note: the rate/increase windows baked into each metric (`[5m]`, `[1m]`, `[1h]`)
-are **intrinsic to the metric definition** and are *not* the user's chart range.
-The user's `from`/`to`/`step` only parameterize the range query envelope.
+Note: for most metrics the rate/increase windows baked into the definition
+(`[5m]`, `[1m]`, `[1h]`, `[24h]`) are **intrinsic** and *not* the user's chart
+range — `from`/`to`/`step` only parameterize the range-query envelope.
+
+**Exception — `rtp` / `rtp_per_game` are windowed by the query range.** These are
+stake-weighted ratio-of-sums over a window that the *server* substitutes (they are
+not fixed-rate metrics). See [RTP windowing](#rtp-windowing) below.
 
 ## Metric catalog
 
@@ -123,6 +127,44 @@ The readable name (`scopeName` in responses) is resolved from the join gauges
 Series created before the `gameId`-label rollout lack the selector label and are
 excluded by design (mirrors dashboard behavior). `scopeName` is `null` if it
 can't be resolved.
+
+### RTP windowing
+
+`rtp` (and the per-env `rtp_per_game`) is **not** a 5-minute rate — it is the
+stake-weighted Return-To-Player over a window:
+`sum(increase(bot_winnings_total[W])) / sum(increase(bot_bet_amount_total[W]))`,
+guarded `or vector(0)`. Because it is a ratio of summed returns to summed wagers
+(not a mean of per-session ratios) it converges to the true long-run RTP as the
+window grows, instead of swinging between 159% and 50% the way the old `rtp_5m`
+did.
+
+The window `W` is chosen by the **server**, by endpoint:
+
+| Endpoint | Window `W` | Property |
+|----------|-----------|----------|
+| `summary` (instant) | long-term, default **30d** | `metrics.rtp.summary-window` |
+| `timeseries` | sliding, default **1h** per point | `metrics.rtp.timeseries-window` |
+
+To read RTP for a specific span (a given hour, a day, since a config change),
+just request the `timeseries` over that range — there are **no** dedicated
+per-hour/per-day metric keys; it's the same metric over a different range.
+
+> **Caveat (transitional):** the `summary` 30d RTP can read artificially low for
+> a while after the winnings-accounting fix (2026-06-30), because the 30d window
+> still includes older history where winnings were under-recorded. RTP over any
+> clean post-fix window is correct; the headline self-heals as the window rolls
+> forward, or lower `metrics.rtp.summary-window` for a sooner-accurate value.
+
+### `money_drain_per_day`
+
+Average net real-balance depletion **per bot** over the last 24h for the scope:
+`sum(increase(bot_money_drained_total[24h])) / sum(bots_by_<scope>_status)`,
+guarded `or vector(0)`. `bot_money_drained_total` is a counter incremented on each
+authoritative balance fetch by `max(0, previousBalance − currentBalance)`, so a
+deposit top-up (a large positive jump) contributes nothing. It is **balance-based
+ground truth** (independent of per-round bet/winnings parsing). Minor known
+upward bias: win-recovery between two fetches is floored to 0, so the figure
+slightly over-states drain. The `[24h]` window is fixed (not the query range).
 
 ## Response shapes
 
@@ -236,6 +278,11 @@ metrics.cache.ttl-seconds=5
 
 # Per-client (per-IP) token-bucket rate limit on /api/v1/metrics/**; over → HTTP 429
 metrics.ratelimit.requests-per-minute=120
+
+# RTP window the server substitutes into rtp / rtp_per_game (see "RTP windowing").
+# summary = long-term headline window; timeseries = sliding window per point.
+metrics.rtp.summary-window=30d
+metrics.rtp.timeseries-window=1h
 ```
 
 ## Prometheus retention (30d)
