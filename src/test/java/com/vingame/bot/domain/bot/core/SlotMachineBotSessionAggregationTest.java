@@ -94,8 +94,9 @@ class SlotMachineBotSessionAggregationTest {
         assertThat(condition.get()).isTrue(); // parks a bet (FIXED → 500 per line)
         spin.get();
 
-        // Total stake = per-line 500 * numLines 25 = 12_500 (matches the debit/metric).
-        verify(aggregator).recordSpin(SlotSessionStrategy.INSTANCE, "slotbot1", 12_500L);
+        // Total stake = per-line 500 * numLines 25 = 12_500 (matches the debit/metric);
+        // the per-line 500 is passed as the bet-size histogram key (Phase 2).
+        verify(aggregator).recordSpin(SlotSessionStrategy.INSTANCE, "slotbot1", 500, 12_500L);
     }
 
     @Test

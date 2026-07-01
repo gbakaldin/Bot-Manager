@@ -17,6 +17,9 @@ import org.slf4j.MDC;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -46,6 +49,10 @@ class SessionAggregationSlotTest {
             "SlotWindow " + GAME_NAME + "/" + GROUP_ID + " #(\\d+) \\| "
                     + "spins since last: (\\d+) \\| total staked: (\\d+) \\| "
                     + "total win: (\\d+) \\| jackpot hits: (\\d+)");
+
+    /** Captures the STRATEGY_DECISION_AGGREGATION Phase 2 segments: bet-size histogram + amount summary. */
+    private static final Pattern SLOT_DECISION_LINE = Pattern.compile(
+            "bets: (.+?) \\| amount min/avg/max: (\\S+)");
 
     private SessionAggregationService service;
     private CapturingAppender appender;
@@ -94,11 +101,11 @@ class SessionAggregationSlotTest {
         setBotMdc();
         // Three bots each spin once (total stake 500 * numLines already folded in by
         // the bot; here we feed the total stake directly). One spin hits a jackpot.
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 12_500L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 500, 12_500L);
         service.recordSpinResult(6_000L, false);
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotB", 12_500L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotB", 500, 12_500L);
         service.recordSpinResult(0L, false);
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotC", 12_500L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotC", 500, 12_500L);
         service.recordSpinResult(50_000L, true); // jackpot
 
         service.flushOnce(System.nanoTime());
@@ -127,15 +134,15 @@ class SessionAggregationSlotTest {
         setBotMdc();
 
         // Window 1: two spins.
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100L);
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotB", 100L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100, 100L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotB", 100, 100L);
         service.flushOnce(System.nanoTime());
 
         // Window 2: three more spins (one jackpot).
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100, 100L);
         service.recordSpinResult(0L, true);
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotB", 100L);
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotC", 100L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotB", 100, 100L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotC", 100, 100L);
         service.flushOnce(System.nanoTime());
 
         List<LogEvent> lines = slotLines();
@@ -164,7 +171,7 @@ class SessionAggregationSlotTest {
     @DisplayName("an idle slot window past TTL is swept (never marks ended, so TTL is the reclaim path)")
     void slotWindow_sweptByTtl() {
         setBotMdc();
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100, 100L);
         long activeAt = System.nanoTime();
 
         // Active within TTL: flushed, not evicted.
@@ -181,7 +188,7 @@ class SessionAggregationSlotTest {
     @DisplayName("evictGroup drops the slot window on group stop")
     void evictGroup_dropsSlotWindow() {
         setBotMdc();
-        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100, 100L);
         service.recordSpinResult(10L, false);
         assertThat(service.liveSessionCount()).isEqualTo(1);
 
@@ -191,6 +198,137 @@ class SessionAggregationSlotTest {
         // A flush after eviction is a clean no-op.
         service.flushOnce(System.nanoTime());
         assertThat(slotLines()).isEmpty();
+    }
+
+    private static Matcher decisionOf(LogEvent e) {
+        Matcher m = SLOT_DECISION_LINE.matcher(e.getMessage().getFormattedMessage());
+        assertThat(m.find()).as("slot window line carries the bet-size decision segments").isTrue();
+        return m;
+    }
+
+    @Test
+    @DisplayName("STRATEGY_DECISION Phase 2: window line shows the bet-size histogram + amount min/avg/max, no lifecycle lines")
+    void slotWindow_showsBetHistogramAndAmountSummary() {
+        setBotMdc();
+        // Per-line bets {100,100,500}; total stakes 2500,2500,12500 → sum 17500 / 3 = 5833.
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100, 2_500L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotB", 100, 2_500L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotC", 500, 12_500L);
+
+        service.flushOnce(System.nanoTime());
+
+        List<LogEvent> lines = slotLines();
+        assertThat(lines).hasSize(1);
+        assertThat(lines.get(0).getLevel()).as("slot decision stays DEBUG").isEqualTo(Level.DEBUG);
+
+        Matcher m = decisionOf(lines.get(0));
+        assertThat(m.group(1)).as("sorted, compact bet-size histogram (keyed on per-line bet)")
+                .isEqualTo("[100]x2 [500]x1");
+        assertThat(m.group(2)).as("amount min/avg/max over the window's total stakes")
+                .isEqualTo("2500/5833/12500");
+
+        // Slots never emit StartGame/EndGame lifecycle lines (AD-12) — no round boundary.
+        assertThat(appender.events()).noneMatch(e ->
+                e.getMessage().getFormattedMessage().contains("entered session")
+                        || e.getMessage().getFormattedMessage().contains(" ended"));
+    }
+
+    @Test
+    @DisplayName("STRATEGY_DECISION Phase 2: the bet-size histogram + min/max are tumbling — a later window reflects ONLY its own spins")
+    void slotBetHistogram_resetsEachWindow() {
+        setBotMdc();
+
+        // Window 1: per-line bets {100,100}.
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100, 2_500L);
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotB", 100, 2_500L);
+        service.flushOnce(System.nanoTime());
+
+        // Window 2: only per-line bet 500 — must not carry any window-1 bucket/min/max.
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotC", 500, 12_500L);
+        service.flushOnce(System.nanoTime());
+
+        List<LogEvent> lines = slotLines();
+        assertThat(lines).hasSize(2);
+
+        Matcher m1 = decisionOf(lines.get(0));
+        assertThat(m1.group(1)).isEqualTo("[100]x2");
+        assertThat(m1.group(2)).as("window 1 min/avg/max").isEqualTo("2500/2500/2500");
+
+        Matcher m2 = decisionOf(lines.get(1));
+        assertThat(m2.group(1)).as("window 2 sees only its own bet size").isEqualTo("[500]x1");
+        assertThat(m2.group(2)).as("window 2 min/avg/max reset to its own single spin")
+                .isEqualTo("12500/12500/12500");
+    }
+
+    @Test
+    @DisplayName("STRATEGY_DECISION Phase 2: a spin-less window renders the '-' placeholders, no divide-by-zero")
+    void slotBetHistogram_emptyWindowRendersPlaceholders() {
+        setBotMdc();
+        // Create the window, flush it, then flush again with no new spins.
+        service.recordSpin(SlotSessionStrategy.INSTANCE, "slotA", 100, 2_500L);
+        service.flushOnce(System.nanoTime());
+        service.flushOnce(System.nanoTime());
+
+        List<LogEvent> lines = slotLines();
+        assertThat(lines).hasSize(2);
+        Matcher m = decisionOf(lines.get(1));
+        assertThat(m.group(1)).as("no bets in the second window").isEqualTo("-");
+        assertThat(m.group(2)).as("no amount summary in the second window").isEqualTo("-");
+    }
+
+    @Test
+    @DisplayName("STRATEGY_DECISION Phase 2: bet-size histogram sums correctly under concurrent recordSpin feeds")
+    void slotBetHistogram_correctUnderConcurrentFeeds() throws InterruptedException {
+        setBotMdc();
+
+        int bots = 120;
+        int[] betValues = {100, 200, 300};
+        LongAdder[] expected = {new LongAdder(), new LongAdder(), new LongAdder()};
+
+        CountDownLatch ready = new CountDownLatch(bots);
+        CountDownLatch go = new CountDownLatch(1);
+        CountDownLatch done = new CountDownLatch(bots);
+        List<Thread> threads = new ArrayList<>();
+
+        for (int i = 0; i < bots; i++) {
+            String bettor = "slotbot-" + i;
+            int idx = i % betValues.length;
+            int perLineBet = betValues[idx];
+            expected[idx].increment();
+            Thread t = new Thread(() -> {
+                setBotMdc();
+                ready.countDown();
+                try {
+                    go.await();
+                    // totalStake == perLineBet keeps the amount summary directly derivable.
+                    service.recordSpin(SlotSessionStrategy.INSTANCE, bettor, perLineBet, perLineBet);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    MDC.clear();
+                    done.countDown();
+                }
+            });
+            threads.add(t);
+            t.start();
+        }
+
+        ready.await(5, TimeUnit.SECONDS);
+        go.countDown();
+        assertThat(done.await(10, TimeUnit.SECONDS)).isTrue();
+
+        // All feeds joined before the flush → a consistent snapshot.
+        service.flushOnce(System.nanoTime());
+
+        List<LogEvent> lines = slotLines();
+        assertThat(lines).hasSize(1);
+        Matcher m = decisionOf(lines.get(0));
+
+        // 120 bots evenly across 3 bet sizes → 40 each; staked 40*(100+200+300)=24000 / 120 = 200.
+        assertThat(m.group(1)).isEqualTo("[100]x" + expected[0].sum()
+                + " [200]x" + expected[1].sum()
+                + " [300]x" + expected[2].sum());
+        assertThat(m.group(2)).isEqualTo("100/200/300");
     }
 
     /** Minimal in-memory log4j2 appender for asserting emitted events + levels. */
