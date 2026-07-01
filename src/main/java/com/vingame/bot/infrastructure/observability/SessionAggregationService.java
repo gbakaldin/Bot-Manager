@@ -36,6 +36,14 @@ import java.util.function.Supplier;
  * one line per active session every 5s — 720 lines/hr/session would breach the INFO
  * low-tens/hr norm).
  * <p>
+ * <b>Slots (Phase 3, AD-12).</b> Slot machines have no shared {@code sid} round and
+ * no StartGame/EndGame, so instead of a session key they use a synthetic per-{@code
+ * (botGroupId, gameId)} rolling window created lazily on the first {@link #recordSpin}
+ * feed and fed win/jackpot data by {@link #recordSpinResult}. The same 5s flush emits
+ * one <b>DEBUG</b> slot window summary per {@code (group, gameId)} via
+ * {@link SlotSessionStrategy}; slots have no INFO lifecycle line. The window reuses the
+ * SAME eviction machinery — TTL sweep and {@code evictGroup} — so it cannot leak either.
+ * <p>
  * <b>Anti-leak invariant (load-bearing).</b> The session map is bounded four ways
  * (AD-8), so unbounded growth — the leak-driven outage this feature exists to
  * prevent — is impossible by construction:
@@ -79,6 +87,16 @@ public class SessionAggregationService {
 
     /** Flush / TTL-sweep interval (AD-7). One tick every 5s. */
     static final long FLUSH_INTERVAL_SECONDS = 5L;
+
+    /**
+     * Synthetic session id for the per-{@code (botGroupId, gameId)} slot window
+     * (AD-12). Slots have no server {@code sid} round, so every spin for a
+     * {@code (group, gameId)} folds into ONE long-lived rolling accumulator under
+     * this sentinel sid. {@code Long.MIN_VALUE} can never collide with a real
+     * server sid (always positive), and {@code gameId} already keeps distinct slot
+     * games apart, so exactly one window exists per {@code (group, gameId)}.
+     */
+    static final long SLOT_WINDOW_SID = Long.MIN_VALUE;
 
     /** Key = {@code (botGroupId, gameId, sid)} (AD-2). */
     record SessionKey(String botGroupId, String gameId, long sid) {
@@ -164,7 +182,12 @@ public class SessionAggregationService {
                 continue;
             }
 
-            if (acc.strategy().hasRoundBoundary() && !acc.isEnded()) {
+            // Emit the periodic summary for every live, not-yet-ended session: the
+            // UpdateBet running line for active round-based sessions and the slot
+            // window line for slots (which never mark `ended`, so they flush until
+            // the TTL sweep or group stop reclaims them — AD-12). Ended-within-grace
+            // round sessions are skipped (their round is closed).
+            if (!acc.isEnded()) {
                 emitFlush(key, acc);
             }
         }
@@ -185,10 +208,13 @@ public class SessionAggregationService {
             acc.nextFlushSeq();
             SessionContext ctx = contextFor(key);
             log.debug(acc.strategy().renderFlushLine(acc, ctx));
-            // Advance the since-last-flush baseline to the just-reported totals so the
-            // next tick's delta ("new bettors since last") counts only arrivals since
-            // now. Single-threaded per flush → no CAS (AD-6).
+            // Advance the since-last-flush baselines to the just-reported totals so the
+            // next tick's deltas ("new bettors since last" / "spins since last") count
+            // only arrivals since now. Both baselines are advanced every tick — each
+            // strategy reads only the one it renders. Single-threaded per flush → no
+            // CAS (AD-6).
             acc.advanceBaseline(acc.bettorCount(), acc.totalStaked());
+            acc.advanceSpinBaseline(acc.betEventCount());
         } finally {
             if (previousMdc != null) {
                 MDC.setContextMap(previousMdc);
@@ -263,6 +289,50 @@ public class SessionAggregationService {
             return;
         }
         acc.recordBet(bettor, amount);
+    }
+
+    /**
+     * Slot spin feed — the outbound {@code spin()} tap (AD-12). Slots have no
+     * StartGame to create the accumulator, so this creates the per-{@code (group,
+     * gameId)} synthetic window lazily on the first spin ({@code computeIfAbsent}
+     * under {@link #SLOT_WINDOW_SID}) and records the staked spin. Lock-free; runs
+     * on the scenario thread with the bot's MDC applied (so the captured snapshot
+     * tags the flush lines).
+     *
+     * @param strategy   the slot render strategy ({@link SlotSessionStrategy#INSTANCE})
+     * @param bettor     the bot's user name (distinct-spinner key)
+     * @param totalStake the total staked for the spin ({@code perLineBet * numLines})
+     */
+    public void recordSpin(SessionAggregationStrategy strategy, String bettor, long totalStake) {
+        SessionKey key = keyFor(SLOT_WINDOW_SID);
+        if (key == null) {
+            return;
+        }
+        SessionAccumulator acc = sessions.computeIfAbsent(key, k ->
+                new SessionAccumulator(strategy, MDC.getCopyOfContextMap(), System.nanoTime()));
+        acc.recordBet(bettor, totalStake);
+        enforceSizeCap();
+    }
+
+    /**
+     * Slot spin-result feed — the inbound {@code onSpinResult} tap (AD-12). Adds the
+     * spin's gross winnings and a jackpot hit (when the frame's {@code iJ} flag is
+     * set) to the same synthetic window. A no-op if the window was already evicted
+     * (TTL/group-stop) or the spin send was never recorded. Lock-free.
+     *
+     * @param winnings this spin's gross winnings ({@code sum(wls[].crd)})
+     * @param jackpot  whether the spin hit a jackpot ({@code iJ})
+     */
+    public void recordSpinResult(long winnings, boolean jackpot) {
+        SessionKey key = keyFor(SLOT_WINDOW_SID);
+        if (key == null) {
+            return;
+        }
+        SessionAccumulator acc = sessions.get(key);
+        if (acc == null) {
+            return;
+        }
+        acc.recordWin(winnings, jackpot);
     }
 
     /**

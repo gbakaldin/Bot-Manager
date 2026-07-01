@@ -43,11 +43,21 @@ public final class SessionAccumulator {
     private final LongAdder winningsTotal = new LongAdder();
     private final LongAdder confirmedBetTotal = new LongAdder();
 
+    // Slot-only aggregate (Phase 3, AD-12). Jackpot-hit count over the synthetic
+    // window — incremented from the spin-result feed when the frame's `iJ` flag is
+    // set. Round-based games never touch it (they have no per-spin jackpot flag on
+    // the flush path), so it stays 0 for betting/Tai Xiu.
+    private final LongAdder jackpotHits = new LongAdder();
+
     // Since-last-flush baseline (Phase 2, AD-6). Advanced only by the single flush
     // thread, so plain volatile fields suffice (no CAS needed — AD-6).
     private final AtomicInteger flushSeq = new AtomicInteger(0);
     private volatile int bettorBaseline = 0;
     private volatile long stakedBaseline = 0L;
+    // Slot "spins since last" baseline (Phase 3, AD-12). Slots have no round
+    // boundary, so the 5s flush reports betEventCount deltas against this baseline
+    // and advances it each tick — the same single-flush-thread contract as above.
+    private volatile long spinBaseline = 0L;
 
     // First-seen EndGame guard (Implementation Notes "First-seen for EndGame"):
     // every bot accumulates its win/bet first, then exactly one CAS winner logs.
@@ -93,6 +103,24 @@ public final class SessionAccumulator {
     }
 
     /**
+     * Record one spin's result into the slot window (Phase 3, AD-12). Adds gross
+     * winnings and, when {@code jackpot} is set, one jackpot hit. Unlike
+     * {@link #recordEnd} this does NOT mark the session {@code ended} — a slot
+     * window is long-lived and reclaimed only by the TTL sweep or group stop, never
+     * by grace-then-evict. Touches {@code lastActivityNanos} so a spinning group's
+     * window never goes idle past TTL.
+     */
+    public void recordWin(long winnings, boolean jackpot) {
+        if (winnings > 0) {
+            winningsTotal.add(winnings);
+        }
+        if (jackpot) {
+            jackpotHits.increment();
+        }
+        touch();
+    }
+
+    /**
      * First-seen EndGame guard. Returns {@code true} for exactly one caller across
      * all N bots observing EndGame for this key; the winner logs the summary.
      */
@@ -134,6 +162,10 @@ public final class SessionAccumulator {
         return confirmedBetTotal.sum();
     }
 
+    public long jackpotHits() {
+        return jackpotHits.sum();
+    }
+
     public long lastActivityNanos() {
         return lastActivityNanos;
     }
@@ -160,9 +192,22 @@ public final class SessionAccumulator {
         return stakedBaseline;
     }
 
+    public long spinBaseline() {
+        return spinBaseline;
+    }
+
     /** Advance the since-last-flush baseline to the current totals (single flush thread). */
     public void advanceBaseline(int bettors, long staked) {
         this.bettorBaseline = bettors;
         this.stakedBaseline = staked;
+    }
+
+    /**
+     * Advance the slot "spins since last" baseline to the current spin count
+     * (Phase 3, AD-12). Single flush thread → no CAS. Called every tick alongside
+     * {@link #advanceBaseline}; round-based sessions ignore this baseline.
+     */
+    public void advanceSpinBaseline(long spins) {
+        this.spinBaseline = spins;
     }
 }
