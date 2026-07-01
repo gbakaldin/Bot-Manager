@@ -31,7 +31,7 @@ public class OutputPrinter {
     }
 
     public static Scenario defaultOutputPrinter(List<Integer> cmd,  PipelineContext context) {
-        return outputPrinter(cmd, log::info, context);
+        return outputPrinter(cmd, log::trace, context);
     }
 
     /**
@@ -40,7 +40,9 @@ public class OutputPrinter {
      * pool, which has no MDC of its own. Wrapping the consumer here ensures every
      * {@code User <name>: ...} line in {@code console.log} is tagged with
      * {@code botGroupId}, {@code environmentId}, {@code gameType}, etc., so Promtail
-     * can promote them to Loki labels.
+     * can promote them to Loki labels. These per-message wire frames are emitted at
+     * DEBUG (per CLAUDE.md logging norms) and only surface when {@code com.vingame.bot}
+     * is drilled in to DEBUG; at the default level no {@code User <name>: ...} lines appear.
      *
      * @param mdcSnapshot snapshot taken from {@code Bot.mdcSnapshot} at the end of
      *                    {@code Bot.initialize()}; may be {@code null}, in which case
@@ -49,7 +51,7 @@ public class OutputPrinter {
     public static Scenario debugOutputPrinter(List<Integer> cmd, String name,
                                               PipelineContext context,
                                               Map<String, String> mdcSnapshot) {
-        Consumer<String> printer = s -> log.info("User {}: {}", name, s);
+        Consumer<String> printer = s -> log.debug("User {}: {}", name, s);
         return outputPrinter(cmd, withMdc(printer, mdcSnapshot), context);
     }
 
@@ -102,7 +104,7 @@ public class OutputPrinter {
                         throw new RuntimeException(e);
                     }
                 })
-                .peek(log::info)
+                .peek(log::trace)
                 .compile();
     }
 
