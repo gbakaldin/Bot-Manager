@@ -1,5 +1,7 @@
 package com.vingame.bot.infrastructure.observability;
 
+import java.util.Map;
+
 /**
  * {@link SessionAggregationStrategy} for slot machines (AGGREGATED_SESSION_LOGGING
  * plan AD-4/AD-12). Slots are spin-based ({@code cmd:1302}) with <b>no shared
@@ -57,12 +59,57 @@ public final class SlotSessionStrategy implements SessionAggregationStrategy {
         // Total staked / total win / jackpot hits are cumulative over the window life
         // (AD-12); only "spins since last" resets each flush via advanceSpinBaseline.
         long spinsSinceLast = acc.flushSpinSnapshot() - acc.spinBaseline();
+        // STRATEGY_DECISION_AGGREGATION Phase 2 (AD-6): fold the per-spin slot decision
+        // into this same line — the tumbling bet-size histogram (keyed on the per-line
+        // bet) and the window's amount min/avg/max over the total stake. Both read the
+        // same window deltas the spins-since-last count uses, so no new baseline is
+        // needed; a fixed-bet slot collapses to a single [500]xN bucket, which is
+        // correct and not special-cased. Total staked/win/jackpot are cumulative
+        // (unchanged); only the histogram + min/max reset each window via the snapshot.
+        long windowStaked = acc.flushStakedSnapshot() - acc.stakedBaseline();
         return "SlotWindow " + ctx.gameName() + "/" + ctx.botGroupId()
                 + " #" + acc.flushSeq()
                 + " | spins since last: " + spinsSinceLast
                 + " | total staked: " + acc.flushStakedSnapshot()
                 + " | total win: " + acc.winningsTotal()
-                + " | jackpot hits: " + acc.jackpotHits();
+                + " | jackpot hits: " + acc.jackpotHits()
+                + " | bets: " + renderBetHistogram(acc.flushOptionSnapshot())
+                + " | amount min/avg/max: " + renderAmountSummary(acc, spinsSinceLast, windowStaked);
+    }
+
+    /**
+     * Render the tumbling bet-size histogram compactly and deterministically, e.g.
+     * {@code [100]x2 [500]x1} (already sorted by bet value — the snapshot is a
+     * {@code TreeMap}). Renders {@code -} for a window with no spins. Mirrors the
+     * betting option histogram (STRATEGY_DECISION_AGGREGATION Phase 1) so both flush
+     * lines share one greppable shape.
+     */
+    private static String renderBetHistogram(Map<Integer, Long> histogram) {
+        if (histogram.isEmpty()) {
+            return "-";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<Integer, Long> e : histogram.entrySet()) {
+            if (sb.length() > 0) {
+                sb.append(' ');
+            }
+            sb.append('[').append(e.getKey()).append("]x").append(e.getValue());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Render {@code min/avg/max} of the per-spin total stake over the window, or
+     * {@code -} for a zero-spin window (avoids a divide-by-zero on avg and a
+     * meaningless identity min/max). Consistent with the betting flush line's amount
+     * summary (STRATEGY_DECISION_AGGREGATION Phase 1).
+     */
+    private static String renderAmountSummary(SessionAccumulator acc, long windowSpins, long windowStaked) {
+        if (windowSpins <= 0) {
+            return "-";
+        }
+        long avg = windowStaked / windowSpins;
+        return acc.flushMinSnapshot() + "/" + avg + "/" + acc.flushMaxSnapshot();
     }
 
     /** Slots have no EndGame lifecycle (AD-12) — never invoked. */
