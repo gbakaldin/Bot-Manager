@@ -1,6 +1,8 @@
 package com.vingame.bot.infrastructure.observability;
 
 import com.vingame.bot.common.logging.BotMdc;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
@@ -8,6 +10,9 @@ import org.springframework.stereotype.Component;
 import java.util.Comparator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 /**
@@ -26,15 +31,29 @@ import java.util.function.Supplier;
  * <p>
  * <b>Emit levels (resolved decision).</b> The StartGame session-entry line and the
  * EndGame results summary emit at <b>INFO</b> — they are per-session/per-round
- * lifecycle, one line per group per round, not per-bot detail. (The 5s UpdateBet
- * flush of Phase 2 is DEBUG.)
+ * lifecycle, one line per group per round, not per-bot detail. The 5s UpdateBet
+ * running summary ({@link #flushOnce(long)}) emits at <b>DEBUG</b> (per-round detail,
+ * one line per active session every 5s — 720 lines/hr/session would breach the INFO
+ * low-tens/hr norm).
  * <p>
- * <b>Anti-leak invariant (load-bearing).</b> The session map is bounded three ways
- * (AD-8): a hard {@link #MAX_SESSIONS} cap enforced on every insert (oldest entry
- * dropped + one WARN on overflow, so a leak is impossible by construction), a
- * per-entry {@code lastActivityNanos} backing the {@link #TTL_NANOS} sweep (Phase 2),
- * and {@link #evictGroup(String)} for group-stop teardown (wired in Phase 2). This
- * phase ships the cap and the removal hooks; the scheduled sweep is Phase 2.
+ * <b>Anti-leak invariant (load-bearing).</b> The session map is bounded four ways
+ * (AD-8), so unbounded growth — the leak-driven outage this feature exists to
+ * prevent — is impossible by construction:
+ * <ol>
+ *   <li>a hard {@link #MAX_SESSIONS} cap enforced on every insert and on each flush
+ *       tick (oldest entry dropped + one WARN on overflow);</li>
+ *   <li>a per-entry {@code lastActivityNanos} backing the {@link #TTL_NANOS} idle
+ *       sweep in the 5s flush task (reclaims sessions whose EndGame was never
+ *       observed — server pruning, disconnect, a group stopped mid-round);</li>
+ *   <li>grace-then-evict of ended sessions ({@link #GRACE_NANOS} after the last
+ *       activity) in the same flush task, so a late straggler EndGame/flush cannot
+ *       resurrect-then-orphan an entry;</li>
+ *   <li>{@link #evictGroup(String)} for immediate group-stop teardown, wired into
+ *       {@code BotGroupBehaviorService.stop}.</li>
+ * </ol>
+ * The flush scheduler is a single app-wide virtual-thread executor started in
+ * {@link #startFlushScheduler()} and shut down cleanly in {@link #stopFlushScheduler()}
+ * so no scheduler thread leaks.
  * <p>
  * All feed methods are lock-free (the accumulator uses {@link java.util.concurrent.atomic.LongAdder}
  * and a concurrent key set) and the first-seen guards are race-free ({@code putIfAbsent}
@@ -48,14 +67,144 @@ public class SessionAggregationService {
     /** Hard cap on live sessions. On overflow the oldest entry is dropped + one WARN. */
     static final int MAX_SESSIONS = 10_000;
 
-    /** Idle TTL after which a session is swept (Phase 2). 60s per plan AD-8. */
+    /** Idle TTL after which a stale/abandoned session is swept. 60s per plan AD-8. */
     static final long TTL_NANOS = 60_000_000_000L;
+
+    /**
+     * Grace period after a session's last activity before an ended session is
+     * removed (AD-8) — one flush interval, so a late straggler EndGame/flush that
+     * touches the entry resets this clock rather than resurrecting an orphan.
+     */
+    static final long GRACE_NANOS = 5_000_000_000L;
+
+    /** Flush / TTL-sweep interval (AD-7). One tick every 5s. */
+    static final long FLUSH_INTERVAL_SECONDS = 5L;
 
     /** Key = {@code (botGroupId, gameId, sid)} (AD-2). */
     record SessionKey(String botGroupId, String gameId, long sid) {
     }
 
     private final ConcurrentHashMap<SessionKey, SessionAccumulator> sessions = new ConcurrentHashMap<>();
+
+    /**
+     * Single app-wide virtual-thread scheduler driving the 5s UpdateBet flush and
+     * the TTL/grace eviction sweep (AD-7). One shared scheduler — not per-group —
+     * keeps thread count flat and matches the singleton model. Started in
+     * {@link #startFlushScheduler()}, shut down in {@link #stopFlushScheduler()}.
+     */
+    private volatile ScheduledExecutorService flushScheduler;
+
+    /**
+     * Start the single app-wide 5s flush + eviction scheduler (AD-7). Mirrors the
+     * virtual-thread scheduled-executor pattern of
+     * {@code BotGroupBehaviorService.startHealthMonitoring}. Runs one tick every
+     * {@link #FLUSH_INTERVAL_SECONDS}s.
+     */
+    @PostConstruct
+    public void startFlushScheduler() {
+        flushScheduler = Executors.newSingleThreadScheduledExecutor(
+                Thread.ofVirtual().name("session-aggregation-flush").factory());
+        flushScheduler.scheduleAtFixedRate(this::runFlush,
+                FLUSH_INTERVAL_SECONDS, FLUSH_INTERVAL_SECONDS, TimeUnit.SECONDS);
+        log.info("SessionAggregationService flush scheduler started ({}s interval, TTL {}s)",
+                FLUSH_INTERVAL_SECONDS, TTL_NANOS / 1_000_000_000L);
+    }
+
+    /**
+     * Shut the flush scheduler down cleanly on context teardown so no virtual-thread
+     * scheduler leaks (load-bearing for the anti-leak invariant).
+     */
+    @PreDestroy
+    public void stopFlushScheduler() {
+        ScheduledExecutorService scheduler = this.flushScheduler;
+        if (scheduler != null) {
+            scheduler.shutdownNow();
+            log.info("SessionAggregationService flush scheduler stopped");
+        }
+    }
+
+    /** Scheduled entry point — never let an exception kill the fixed-rate task. */
+    private void runFlush() {
+        try {
+            flushOnce(System.nanoTime());
+        } catch (Exception e) {
+            log.error("SessionAggregationService flush error: {}", e.getMessage(), e);
+        }
+    }
+
+    /**
+     * One flush + eviction pass (AD-6/AD-7/AD-8). Package-private and clock-injected
+     * ({@code nowNanos}) so tests drive it directly and advance time without sleeping
+     * the 5s interval.
+     * <p>
+     * For each live session, in order:
+     * <ul>
+     *   <li><b>Evict</b> if idle past {@link #TTL_NANOS} (stale/abandoned — EndGame
+     *       never observed) or ended and idle past {@link #GRACE_NANOS} (grace-then-
+     *       evict). Removed with the value-guarded {@code remove(k, v)} so a flush
+     *       racing a concurrent re-insert can't drop a fresh entry.</li>
+     *   <li>Otherwise, for an <b>active</b> round-boundary session (not ended), emit
+     *       ONE DEBUG UpdateBet running-summary line under the entry's captured MDC,
+     *       then advance its since-last-flush baseline and flush sequence.</li>
+     * </ul>
+     * Ended sessions are not logged (avoid spamming a closed round); idle non-ended
+     * sessions past TTL are evicted rather than logged. Finishes with the
+     * {@link #enforceSizeCap()} backstop.
+     */
+    void flushOnce(long nowNanos) {
+        for (Map.Entry<SessionKey, SessionAccumulator> entry : sessions.entrySet()) {
+            SessionKey key = entry.getKey();
+            SessionAccumulator acc = entry.getValue();
+
+            long idleNanos = nowNanos - acc.lastActivityNanos();
+            boolean stale = idleNanos >= TTL_NANOS;
+            boolean endedPastGrace = acc.isEnded() && idleNanos >= GRACE_NANOS;
+            if (stale || endedPastGrace) {
+                sessions.remove(key, acc);
+                continue;
+            }
+
+            if (acc.strategy().hasRoundBoundary() && !acc.isEnded()) {
+                emitFlush(key, acc);
+            }
+        }
+        enforceSizeCap();
+    }
+
+    /**
+     * Emit one UpdateBet flush line for an active session and advance its baseline.
+     * Runs on the single flush thread, so the baseline advance needs no CAS (AD-6);
+     * counters are read lock-free. The line is tagged with the session's captured MDC
+     * so it carries {@code botGroupId}/{@code gameType}/etc. even though the flush
+     * thread has no MDC of its own.
+     */
+    private void emitFlush(SessionKey key, SessionAccumulator acc) {
+        Map<String, String> previousMdc = MDC.getCopyOfContextMap();
+        try {
+            applyMdc(acc.mdcSnapshot());
+            acc.nextFlushSeq();
+            SessionContext ctx = contextFor(key);
+            log.debug(acc.strategy().renderFlushLine(acc, ctx));
+            // Advance the since-last-flush baseline to the just-reported totals so the
+            // next tick's delta ("new bettors since last") counts only arrivals since
+            // now. Single-threaded per flush → no CAS (AD-6).
+            acc.advanceBaseline(acc.bettorCount(), acc.totalStaked());
+        } finally {
+            if (previousMdc != null) {
+                MDC.setContextMap(previousMdc);
+            } else {
+                MDC.clear();
+            }
+        }
+    }
+
+    private static void applyMdc(Map<String, String> snapshot) {
+        if (snapshot != null) {
+            MDC.setContextMap(snapshot);
+        } else {
+            MDC.clear();
+        }
+    }
 
     /**
      * StartGame feed. The FIRST bot to observe {@code sid} for its
@@ -152,10 +301,11 @@ public class SessionAggregationService {
         } else {
             log.info(line);
         }
-        // Note (AD-8): explicit grace-then-evict of the ended key is wired in Phase 2
-        // together with the TTL sweep; until then the size cap + TTL backstop bound
-        // the map. The entry stays until then so a late straggler EndGame/flush does
-        // not resurrect-then-orphan it.
+        // Grace-then-evict (AD-8): recordEnd() marked the entry `ended` and touched
+        // lastActivityNanos, so the next flush tick removes it once idle past
+        // GRACE_NANOS. The entry lingers for the grace window so a late straggler
+        // EndGame/flush touches (and thus re-graces) it rather than resurrecting an
+        // orphan; the TTL sweep is the backstop if the grace clock keeps getting reset.
     }
 
     /**
