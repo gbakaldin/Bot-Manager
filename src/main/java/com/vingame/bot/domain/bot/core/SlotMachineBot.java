@@ -16,6 +16,7 @@ import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.bot.util.OutputPrinter;
 import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.infrastructure.observability.SlotSessionStrategy;
 import com.vingame.websocketparser.ObjectMapperProvider;
 import com.vingame.websocketparser.message.request.ActionRequestMessage;
 import com.vingame.websocketparser.message.response.ActionResponseMessage;
@@ -242,6 +243,15 @@ public class SlotMachineBot extends Bot {
             metrics.incBetsPlaced(bt.betCountFor(getUserName()), totalStake);
         }
 
+        // AGGREGATED_SESSION_LOGGING (AD-12): feed the spin result into the same
+        // synthetic window as the outbound spin — gross winnings + jackpot hit
+        // (`iJ`). Mirrors BettingMiniGameBot.onEndGame → onSessionEnd; here there is
+        // no round boundary, so recordSpinResult never marks the window ended (it is
+        // reclaimed by TTL/group-stop). Null-tolerant for standalone tests.
+        if (sessionAggregator != null) {
+            sessionAggregator.recordSpinResult(winnings, msg.isIJ());
+        }
+
         log.debug("Bot {}: spin result b={}, winnings={}, sid={}, balance={}",
                 getUserName(), msg.getB(), winnings, msg.getSid(), expectedCurrentBalance.get());
 
@@ -320,6 +330,15 @@ public class SlotMachineBot extends Bot {
             // the line set). Winnings (gross) are credited on result.
             long totalStake = amount * numLines;
             creditBalance(totalStake);
+
+            // AGGREGATED_SESSION_LOGGING (AD-12): feed the synthetic per-(group,gameId)
+            // slot window from the outbound spin, mirroring BettingMiniGameBot.bet() →
+            // recordBet. Runs on the mdcSupplier-wrapped scenario thread, so the service
+            // reads this bot's MDC identity and the window is created lazily on the first
+            // spin. Null-tolerant for standalone tests.
+            if (sessionAggregator != null) {
+                sessionAggregator.recordSpin(SlotSessionStrategy.INSTANCE, getUserName(), totalStake);
+            }
 
             List<Integer> ls = new ArrayList<>(numLines);
             for (int i = 0; i < numLines; i++) {
