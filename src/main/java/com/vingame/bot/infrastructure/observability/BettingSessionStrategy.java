@@ -32,13 +32,15 @@ public final class BettingSessionStrategy implements SessionAggregationStrategy 
 
     @Override
     public String renderFlushLine(SessionAccumulator acc, SessionContext ctx) {
-        // Phase 2 (5s UpdateBet flush). Rendered here now so the strategy is
-        // flush-ready; the scheduler that calls this is wired in Phase 2.
-        int newBettors = acc.bettorCount() - acc.bettorBaseline();
+        // Phase 2 (5s UpdateBet flush). Rendered from the flush snapshot captured
+        // once before this call (lost-update fix), so the delta below and the caller's
+        // baseline advance use identical counter values — an arrival mid-flush lands
+        // in the next tick's delta rather than vanishing from both.
+        int newBettors = acc.flushBettorSnapshot() - acc.bettorBaseline();
         return "UpdateBet #" + acc.flushSeq()
                 + " | new bettors since last: " + newBettors
-                + " | total bettors this round: " + acc.bettorCount()
-                + " | total staked: " + acc.totalStaked();
+                + " | total bettors this round: " + acc.flushBettorSnapshot()
+                + " | total staked: " + acc.flushStakedSnapshot();
     }
 
     @Override

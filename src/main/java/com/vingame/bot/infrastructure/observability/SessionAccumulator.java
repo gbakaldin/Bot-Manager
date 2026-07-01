@@ -59,6 +59,17 @@ public final class SessionAccumulator {
     // and advances it each tick — the same single-flush-thread contract as above.
     private volatile long spinBaseline = 0L;
 
+    // Per-tick flush snapshot (lost-update fix). Captured ONCE by the single flush
+    // thread via captureFlushSnapshot() BEFORE the strategy renders, so the rendered
+    // "since last" delta and the subsequent baseline advance read identical values.
+    // A feed arriving mid-render then falls into the NEXT tick's delta instead of
+    // vanishing from both this tick's (rendered before it arrived) and the next's
+    // (baseline already past it). Written and read only on the flush thread within a
+    // single emitFlush call → plain fields, no cross-thread publication.
+    private int flushBettorSnapshot = 0;
+    private long flushStakedSnapshot = 0L;
+    private long flushSpinSnapshot = 0L;
+
     // First-seen EndGame guard (Implementation Notes "First-seen for EndGame"):
     // every bot accumulates its win/bet first, then exactly one CAS winner logs.
     private final AtomicBoolean endLogged = new AtomicBoolean(false);
@@ -209,5 +220,32 @@ public final class SessionAccumulator {
      */
     public void advanceSpinBaseline(long spins) {
         this.spinBaseline = spins;
+    }
+
+    // ---- Flush snapshot (lost-update fix). ----
+
+    /**
+     * Capture the flush-delta counters ONCE for this tick (single flush thread only).
+     * The strategy render then reads {@link #flushBettorSnapshot()} /
+     * {@link #flushStakedSnapshot()} / {@link #flushSpinSnapshot()} and the baseline
+     * advance uses the SAME snapshot, so a bet/spin arriving between render and advance
+     * is neither double-counted nor lost — it simply lands in the next tick's delta.
+     */
+    public void captureFlushSnapshot() {
+        this.flushBettorSnapshot = distinctBettors.size();
+        this.flushStakedSnapshot = totalStaked.sum();
+        this.flushSpinSnapshot = betEventCount.sum();
+    }
+
+    public int flushBettorSnapshot() {
+        return flushBettorSnapshot;
+    }
+
+    public long flushStakedSnapshot() {
+        return flushStakedSnapshot;
+    }
+
+    public long flushSpinSnapshot() {
+        return flushSpinSnapshot;
     }
 }

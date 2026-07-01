@@ -233,6 +233,156 @@ class SessionAggregationFlushTest {
         assertThat(m.group(4)).as("total staked == 100 * 10").isEqualTo(String.valueOf(bots * amountPerBot));
     }
 
+    @Test
+    @DisplayName("a session whose flush throws does NOT skip eviction of the other sessions in the same tick")
+    void poisonedSession_doesNotSkipNeighbourEviction() {
+        setBotMdc();
+        // Active session A whose renderFlushLine throws — it is emitted (active,
+        // not ended, within TTL) so its strategy blows up mid-tick.
+        long throwingSid = SID;
+        service.onSessionStart(throwingSid, new ThrowingFlushStrategy(), () -> "s");
+        // Two normal sessions B and C that we end so they are past-grace and MUST be
+        // evicted in the same tick, regardless of iteration order vs the throwing one.
+        long endedSidB = SID + 1;
+        long endedSidC = SID + 2;
+        service.onSessionStart(endedSidB, BettingSessionStrategy.INSTANCE, () -> "s");
+        service.onSessionStart(endedSidC, BettingSessionStrategy.INSTANCE, () -> "s");
+        service.onSessionEnd(endedSidB, 0L, 100L, () -> "e");
+        service.onSessionEnd(endedSidC, 0L, 100L, () -> "e");
+
+        assertThat(service.liveSessionCount()).as("three sessions live before flush").isEqualTo(3);
+
+        long now = System.nanoTime();
+        // Past grace (B/C evictable) but well within TTL (A stays active → emitted →
+        // throws). The containment must swallow the throw and still evict B and C and
+        // reach enforceSizeCap() at the end of the loop.
+        long flushAt = now + SessionAggregationService.GRACE_NANOS + 1;
+        assertThat(flushAt - now).isLessThan(SessionAggregationService.TTL_NANOS);
+
+        // Does not propagate the strategy exception.
+        service.flushOnce(flushAt);
+
+        assertThat(service.liveSessionCount())
+                .as("both ended neighbours evicted despite the poisoned session throwing")
+                .isEqualTo(1);
+
+        // The containment logged a WARN naming the throwing session, and the loop
+        // reached the end (enforceSizeCap) rather than unwinding.
+        List<LogEvent> warns = appender.events().stream()
+                .filter(e -> e.getLevel() == Level.WARN)
+                .filter(e -> e.getMessage().getFormattedMessage().contains("flush error for session"))
+                .toList();
+        assertThat(warns).as("one contained WARN for the throwing session").hasSize(1);
+        assertThat(warns.get(0).getMessage().getFormattedMessage())
+                .contains(String.valueOf(throwingSid));
+    }
+
+    @Test
+    @DisplayName("flush delta counts a bet arriving between render and advance (no lost update)")
+    void flushDelta_countsBetArrivingBetweenRenderAndAdvance() {
+        setBotMdc();
+        // Strategy that, on the first flush render, injects a fresh bettor — modelling a
+        // recordBet landing AFTER the render read but BEFORE the baseline advance. With
+        // the snapshot-once fix the baseline advances to the pre-injection snapshot, so
+        // the late bettor is reported in the NEXT tick's delta rather than being lost.
+        InjectingFlushStrategy strategy = new InjectingFlushStrategy(service, SID);
+        service.onSessionStart(SID, strategy, () -> "s");
+
+        service.recordBet(SID, "botA", 100L);
+        service.recordBet(SID, "botB", 200L);
+
+        // Tick 1: snapshot = 2 bettors; render injects "lateBot" (now 3 live); baseline
+        // advances to the snapshot (2), not the post-injection count.
+        service.flushOnce(System.nanoTime());
+        // Tick 2: the injected bettor shows up as the one "new since last".
+        service.flushOnce(System.nanoTime());
+
+        List<LogEvent> flushes = flushEvents();
+        assertThat(flushes).hasSize(2);
+
+        Matcher m1 = FLUSH_LINE.matcher(flushes.get(0).getMessage().getFormattedMessage());
+        assertThat(m1.find()).isTrue();
+        assertThat(m1.group(2)).as("tick 1 new bettors (snapshot, pre-injection)").isEqualTo("2");
+        assertThat(m1.group(3)).as("tick 1 total bettors (snapshot)").isEqualTo("2");
+
+        Matcher m2 = FLUSH_LINE.matcher(flushes.get(1).getMessage().getFormattedMessage());
+        assertThat(m2.find()).isTrue();
+        assertThat(m2.group(2))
+                .as("tick 2 counts the bet injected between tick 1's render and advance")
+                .isEqualTo("1");
+        assertThat(m2.group(3)).as("tick 2 total bettors cumulative").isEqualTo("3");
+
+        // The deltas sum to the full distinct-bettor count — nothing lost between
+        // render and advance (with the pre-fix re-read this sum would be 2).
+        int deltaSum = Integer.parseInt(m1.group(2)) + Integer.parseInt(m2.group(2));
+        assertThat(deltaSum).as("no lost update").isEqualTo(3);
+    }
+
+    /** Strategy whose flush render always throws — models a poisoned session. */
+    private static final class ThrowingFlushStrategy implements SessionAggregationStrategy {
+        @Override
+        public boolean hasRoundBoundary() {
+            return true;
+        }
+
+        @Override
+        public String renderStartLine(SessionAccumulator acc, SessionContext ctx) {
+            return BettingSessionStrategy.INSTANCE.renderStartLine(acc, ctx);
+        }
+
+        @Override
+        public String renderFlushLine(SessionAccumulator acc, SessionContext ctx) {
+            throw new IllegalStateException("boom in renderFlushLine");
+        }
+
+        @Override
+        public String renderEndLine(SessionAccumulator acc, SessionContext ctx) {
+            return BettingSessionStrategy.INSTANCE.renderEndLine(acc, ctx);
+        }
+    }
+
+    /**
+     * Strategy that injects one fresh bettor during the first flush render, simulating a
+     * feed arriving between the render read and the baseline advance.
+     */
+    private static final class InjectingFlushStrategy implements SessionAggregationStrategy {
+        private final SessionAggregationService service;
+        private final long sid;
+        private boolean injected = false;
+
+        InjectingFlushStrategy(SessionAggregationService service, long sid) {
+            this.service = service;
+            this.sid = sid;
+        }
+
+        @Override
+        public boolean hasRoundBoundary() {
+            return true;
+        }
+
+        @Override
+        public String renderStartLine(SessionAccumulator acc, SessionContext ctx) {
+            return BettingSessionStrategy.INSTANCE.renderStartLine(acc, ctx);
+        }
+
+        @Override
+        public String renderFlushLine(SessionAccumulator acc, SessionContext ctx) {
+            // Render from the snapshot first (delegate), THEN inject — the injection
+            // lands after the render read but before emitFlush advances the baseline.
+            String line = BettingSessionStrategy.INSTANCE.renderFlushLine(acc, ctx);
+            if (!injected) {
+                injected = true;
+                service.recordBet(sid, "lateBot", 500L);
+            }
+            return line;
+        }
+
+        @Override
+        public String renderEndLine(SessionAccumulator acc, SessionContext ctx) {
+            return BettingSessionStrategy.INSTANCE.renderEndLine(acc, ctx);
+        }
+    }
+
     /** Minimal in-memory log4j2 appender for asserting emitted events + levels. */
     private static final class CapturingAppender extends AbstractAppender {
         private final List<LogEvent> events = new CopyOnWriteArrayList<>();

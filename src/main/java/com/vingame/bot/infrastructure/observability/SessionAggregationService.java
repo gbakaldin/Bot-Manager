@@ -174,21 +174,33 @@ public class SessionAggregationService {
             SessionKey key = entry.getKey();
             SessionAccumulator acc = entry.getValue();
 
-            long idleNanos = nowNanos - acc.lastActivityNanos();
-            boolean stale = idleNanos >= TTL_NANOS;
-            boolean endedPastGrace = acc.isEnded() && idleNanos >= GRACE_NANOS;
-            if (stale || endedPastGrace) {
-                sessions.remove(key, acc);
-                continue;
-            }
+            // Per-session containment (anti-leak, load-bearing). Guard each entry's
+            // eviction/emit in its own try/catch so a single poisoned session (a
+            // renderer/strategy throw) cannot unwind the loop and skip the TTL/grace
+            // eviction of every session after it in this tick, nor the trailing
+            // enforceSizeCap() backstop. Lock-free; the catch only logs and continues.
+            try {
+                long idleNanos = nowNanos - acc.lastActivityNanos();
+                boolean stale = idleNanos >= TTL_NANOS;
+                boolean endedPastGrace = acc.isEnded() && idleNanos >= GRACE_NANOS;
+                if (stale || endedPastGrace) {
+                    sessions.remove(key, acc);
+                    continue;
+                }
 
-            // Emit the periodic summary for every live, not-yet-ended session: the
-            // UpdateBet running line for active round-based sessions and the slot
-            // window line for slots (which never mark `ended`, so they flush until
-            // the TTL sweep or group stop reclaims them — AD-12). Ended-within-grace
-            // round sessions are skipped (their round is closed).
-            if (!acc.isEnded()) {
-                emitFlush(key, acc);
+                // Emit the periodic summary for every live, not-yet-ended session: the
+                // UpdateBet running line for active round-based sessions and the slot
+                // window line for slots (which never mark `ended`, so they flush until
+                // the TTL sweep or group stop reclaims them — AD-12). Ended-within-grace
+                // round sessions are skipped (their round is closed).
+                if (!acc.isEnded()) {
+                    emitFlush(key, acc);
+                }
+            } catch (Exception e) {
+                // Log under the entry's captured MDC (botGroupId/gameType/etc.) so a
+                // persistently-throwing session is visible, then continue to the next
+                // entry — one bad session must not skip its neighbours' eviction.
+                logFlushError(key, acc, e);
             }
         }
         enforceSizeCap();
@@ -207,14 +219,43 @@ public class SessionAggregationService {
             applyMdc(acc.mdcSnapshot());
             acc.nextFlushSeq();
             SessionContext ctx = contextFor(key);
+            // Snapshot the flush-delta counters ONCE before rendering so the rendered
+            // "since last" delta and the baseline advance below read identical values.
+            // Without this the render read and a re-read at advance time straddle a
+            // concurrent recordBet/recordSpin, and the in-between arrival is lost from
+            // both this tick's delta (rendered first) and the next's (baseline already
+            // advanced past it). The flush thread is the sole baseline writer, so this
+            // stays single-writer — no CAS (AD-6).
+            acc.captureFlushSnapshot();
             log.debug(acc.strategy().renderFlushLine(acc, ctx));
-            // Advance the since-last-flush baselines to the just-reported totals so the
-            // next tick's deltas ("new bettors since last" / "spins since last") count
-            // only arrivals since now. Both baselines are advanced every tick — each
-            // strategy reads only the one it renders. Single-threaded per flush → no
-            // CAS (AD-6).
-            acc.advanceBaseline(acc.bettorCount(), acc.totalStaked());
-            acc.advanceSpinBaseline(acc.betEventCount());
+            // Advance the since-last-flush baselines to the SAME snapshot the render
+            // used (not a fresh re-read), so the next tick's deltas ("new bettors since
+            // last" / "spins since last") count only arrivals after the snapshot. Both
+            // baselines are advanced every tick — each strategy reads only the one it
+            // renders.
+            acc.advanceBaseline(acc.flushBettorSnapshot(), acc.flushStakedSnapshot());
+            acc.advanceSpinBaseline(acc.flushSpinSnapshot());
+        } finally {
+            if (previousMdc != null) {
+                MDC.setContextMap(previousMdc);
+            } else {
+                MDC.clear();
+            }
+        }
+    }
+
+    /**
+     * WARN-log a contained per-session flush failure under the session's captured MDC,
+     * restoring the previous MDC afterwards. Kept separate so the containment catch in
+     * {@link #flushOnce(long)} stays a one-liner and cannot itself throw the loop off
+     * course (MDC restore is in a finally).
+     */
+    private void logFlushError(SessionKey key, SessionAccumulator acc, Exception e) {
+        Map<String, String> previousMdc = MDC.getCopyOfContextMap();
+        try {
+            applyMdc(acc.mdcSnapshot());
+            log.warn("SessionAggregationService: flush error for session {} — skipped this tick: {}",
+                    key, e.getMessage(), e);
         } finally {
             if (previousMdc != null) {
                 MDC.setContextMap(previousMdc);

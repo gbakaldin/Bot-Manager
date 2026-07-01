@@ -14,7 +14,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Anti-leak and scheduler-lifecycle coverage for {@link SessionAggregationService}
@@ -123,13 +122,11 @@ class SessionAggregationLifecycleTest {
         assertThatCode(() -> runFlush(service)).doesNotThrowAnyException();
         assertThat(renderCalls.get()).as("the throwing render ran on each tick").isGreaterThanOrEqualTo(2);
 
-        // Characterisation: the raw flushOnce loop has no per-entry try/catch, so a
-        // throwing strategy propagates out of a single pass. Containment lives in
-        // runFlush, not in the loop — documented so a future per-entry guard (which
-        // would also protect sibling sessions within the same tick) is a conscious
-        // change, not a silent regression.
-        assertThatThrownBy(() -> service.flushOnce(System.nanoTime()))
-                .isInstanceOf(RuntimeException.class);
+        // Containment now lives in the flushOnce loop too (per-entry try/catch), not
+        // only in runFlush: a throwing strategy is caught, logged at WARN, and skipped
+        // so sibling sessions within the SAME tick still get their eviction and the
+        // trailing size-cap backstop. So even the raw flushOnce no longer propagates.
+        assertThatCode(() -> service.flushOnce(System.nanoTime())).doesNotThrowAnyException();
     }
 
     @Test

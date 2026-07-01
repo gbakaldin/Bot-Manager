@@ -50,14 +50,17 @@ public final class SlotSessionStrategy implements SessionAggregationStrategy {
 
     @Override
     public String renderFlushLine(SessionAccumulator acc, SessionContext ctx) {
-        // Tumbling-window delta: spins staked since the previous 5s tick. Total
-        // staked / total win / jackpot hits are cumulative over the window life
+        // Tumbling-window delta: spins staked since the previous 5s tick. Rendered
+        // from the flush snapshot captured once before this call (lost-update fix) so
+        // the delta and the caller's baseline advance use identical values; a spin
+        // arriving mid-flush lands in the next tick's delta rather than vanishing.
+        // Total staked / total win / jackpot hits are cumulative over the window life
         // (AD-12); only "spins since last" resets each flush via advanceSpinBaseline.
-        long spinsSinceLast = acc.betEventCount() - acc.spinBaseline();
+        long spinsSinceLast = acc.flushSpinSnapshot() - acc.spinBaseline();
         return "SlotWindow " + ctx.gameName() + "/" + ctx.botGroupId()
                 + " #" + acc.flushSeq()
                 + " | spins since last: " + spinsSinceLast
-                + " | total staked: " + acc.totalStaked()
+                + " | total staked: " + acc.flushStakedSnapshot()
                 + " | total win: " + acc.winningsTotal()
                 + " | jackpot hits: " + acc.jackpotHits();
     }
