@@ -296,7 +296,7 @@ public class SlotMachineBot extends Bot {
                 return false;
             }
             pendingBet.set(Optional.of(chosenBet));
-            log.debug("Bot {}: parked spin bet={} ({} lines)", getUserName(), chosenBet, numLines);
+            log.trace("Bot {}: parked spin bet={} ({} lines)", getUserName(), chosenBet, numLines);
             return true;
         };
     }
@@ -349,7 +349,7 @@ public class SlotMachineBot extends Bot {
                 ls.add(i);
             }
 
-            log.debug("Bot {}: sending spin gid={}, bet={} ({} lines, totalStake={})",
+            log.trace("Bot {}: sending spin gid={}, bet={} ({} lines, totalStake={})",
                     getUserName(), gid, amount, numLines, totalStake);
             return request.spin(gid, amount, ls);
         };

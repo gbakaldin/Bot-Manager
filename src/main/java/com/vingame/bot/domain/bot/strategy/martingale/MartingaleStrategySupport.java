@@ -146,7 +146,7 @@ public abstract class MartingaleStrategySupport implements BettingStrategy {
             }
 
             if (numberOfBetsInCurrentSession >= behavior.getMaxBetsPerRound()) {
-                log.debug("{}.decide: skip — already placed {} bets this round (max {})",
+                log.trace("{}.decide: skip — already placed {} bets this round (max {})",
                         getClass().getSimpleName(),
                         numberOfBetsInCurrentSession, behavior.getMaxBetsPerRound());
                 return Optional.empty();
@@ -158,7 +158,7 @@ public abstract class MartingaleStrategySupport implements BettingStrategy {
             // BotGroup wires it through (BETTING_STRATEGIES Implementation
             // Note 2), so today the gate is effectively a no-op.
             if (ctx.rng().nextInt(100) < behavior.getBetSkipPercentage()) {
-                log.debug("{}.decide: skip — betSkipPercentage gate fired",
+                log.trace("{}.decide: skip — betSkipPercentage gate fired",
                         getClass().getSimpleName());
                 return Optional.empty();
             }
@@ -171,7 +171,7 @@ public abstract class MartingaleStrategySupport implements BettingStrategy {
         }
 
         int option = picker.pick(ctx.game().getEffectiveOptionAffinities(), ctx.rng());
-        log.debug("{}.decide: bet option={}, amount={} (currentBet={}, profile={})",
+        log.trace("{}.decide: bet option={}, amount={} (currentBet={}, profile={})",
                 getClass().getSimpleName(), option, amount, amount, profile);
         return Optional.of(new BetDecision(option, amount));
     }
@@ -215,7 +215,7 @@ public abstract class MartingaleStrategySupport implements BettingStrategy {
             if (clamped.capHit()) {
                 onCapHitReset();
             }
-            log.debug("{}.onRoundEnd: delta={}, prevBet={}, nextBet={} (capHit={})",
+            log.trace("{}.onRoundEnd: delta={}, prevBet={}, nextBet={} (capHit={})",
                     getClass().getSimpleName(), result.balanceDelta(), prevBet,
                     currentBet, clamped.capHit());
         }
@@ -301,7 +301,7 @@ public abstract class MartingaleStrategySupport implements BettingStrategy {
         }
 
         if (aligned > cachedMaxBet) {
-            log.debug("{}: cap hit, target={}, maxBet={}, resetting to minBet={}",
+            log.trace("{}: cap hit, target={}, maxBet={}, resetting to minBet={}",
                     getClass().getSimpleName(), rawTarget, cachedMaxBet, cachedMinBet);
             return new ClampResult(cachedMinBet, true);
         }

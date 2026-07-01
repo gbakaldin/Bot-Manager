@@ -25,7 +25,7 @@ public final class RandomBetStrategy implements SlotStrategy {
     public long chooseBet(SlotBetContext ctx) {
         List<Long> allowed = ctx.allowedBetValues();
         long amount = allowed.get(ctx.rng().nextInt(allowed.size()));
-        log.debug("RandomBetStrategy.chooseBet: amount={}", amount);
+        log.trace("RandomBetStrategy.chooseBet: amount={}", amount);
         return amount;
     }
 }

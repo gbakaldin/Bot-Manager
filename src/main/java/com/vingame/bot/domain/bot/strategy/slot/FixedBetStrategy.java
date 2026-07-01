@@ -26,7 +26,7 @@ public final class FixedBetStrategy implements SlotStrategy {
     @Override
     public long chooseBet(SlotBetContext ctx) {
         long amount = ctx.allowedBetValues().get(0);
-        log.debug("FixedBetStrategy.chooseBet: amount={}", amount);
+        log.trace("FixedBetStrategy.chooseBet: amount={}", amount);
         return amount;
     }
 }
