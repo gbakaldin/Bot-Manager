@@ -2,6 +2,7 @@ package com.vingame.bot.domain.bot.service;
 
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
@@ -64,6 +65,7 @@ public class BotFactory {
     private final EnvironmentClientRegistry clientRegistry;
     private final EventLoopGroup eventLoopGroup;
     private final BotMetrics botMetrics;
+    private final SessionAggregationService sessionAggregator;
     private final BettingStrategyFactory strategyFactory;
     private final SlotStrategyFactory slotStrategyFactory;
 
@@ -71,11 +73,13 @@ public class BotFactory {
     public BotFactory(EnvironmentClientRegistry clientRegistry,
                       EventLoopGroup eventLoopGroup,
                       BotMetrics botMetrics,
+                      SessionAggregationService sessionAggregator,
                       BettingStrategyFactory strategyFactory,
                       SlotStrategyFactory slotStrategyFactory) {
         this.clientRegistry = clientRegistry;
         this.eventLoopGroup = eventLoopGroup;
         this.botMetrics = botMetrics;
+        this.sessionAggregator = sessionAggregator;
         this.strategyFactory = strategyFactory;
         this.slotStrategyFactory = slotStrategyFactory;
     }
@@ -182,6 +186,7 @@ public class BotFactory {
             )
             .setConfiguration(configuration)
             .setMetrics(botMetrics)
+            .setSessionAggregator(sessionAggregator)
             .initialize();
 
         log.info("Successfully created bot {} for environment {}",

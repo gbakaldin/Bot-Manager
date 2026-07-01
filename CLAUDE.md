@@ -41,10 +41,16 @@ raised to INFO without losing lifecycle context. MDC (`botGroupId`, `botId`,
   system. Application startup, bot group create / start / stop / restart,
   group state transitions, scheduled-restart firing, periodic-logout
   scheduler started/stopped, periodic-logout cycle starting (the "why" for
-  the per-bot restart that follows). A 30-bot group running for an hour
-  should produce low tens of INFO lines, not thousands. Do **not** use for
-  per-bot status transitions, per-HTTP-call envelopes, balance checks, or
-  per-message dispatch.
+  the per-bot restart that follows), and the per-session aggregated
+  StartGame session-entry / EndGame results summaries emitted by
+  `SessionAggregationService` (one line per group per round each — these
+  *replace* the per-frame WS flood, they do not add to it). Baseline
+  group-lifecycle INFO is still low tens of lines per hour; the per-round
+  session summaries are additional and scale with round rate (~2 INFO lines
+  per round per active betting/Tai Xiu group), which is the deliberate
+  trade for killing the per-frame flood. (The 5 s UpdateBet running summary
+  is DEBUG, not INFO.) Do **not** use for per-bot status transitions,
+  per-HTTP-call envelopes, balance checks, or per-message dispatch.
 - **DEBUG** — Per-bot / per-message detail. Per-bot status transitions,
   per-bot deposit success/failure, HTTP request/response bodies (login,
   register, verifytoken, updateFullname, deposit success path), reconnect

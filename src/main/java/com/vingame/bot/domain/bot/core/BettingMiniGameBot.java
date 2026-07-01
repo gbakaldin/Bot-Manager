@@ -28,6 +28,8 @@ import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
 import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.infrastructure.observability.BettingSessionStrategy;
+import com.vingame.bot.infrastructure.observability.SessionAggregationStrategy;
 import com.vingame.websocketparser.ObjectMapperProvider;
 import com.vingame.websocketparser.message.request.ActionRequestMessage;
 import com.vingame.websocketparser.message.response.ActionResponseMessage;
@@ -296,6 +298,17 @@ public class BettingMiniGameBot extends Bot {
         return 0L;
     }
 
+    /**
+     * The per-session aggregation strategy for this game type
+     * (AGGREGATED_SESSION_LOGGING AD-4). Betting-mini and Tai Xiu share the
+     * round-based {@link BettingSessionStrategy} singleton (Tai Xiu inherits this
+     * seam unchanged). A subclass with a different session notion (slot, Phase 3)
+     * overrides this to return its own strategy singleton.
+     */
+    protected SessionAggregationStrategy sessionStrategy() {
+        return BettingSessionStrategy.INSTANCE;
+    }
+
     private void onNewSession() {
         long balance = checkBalance();
         BotBehaviorConfig behavior = configuration.getBehaviorConfig();
@@ -364,6 +377,15 @@ public class BettingMiniGameBot extends Bot {
         startRemainingTimeCountDown();
         StartGameMessage msg = data.getData();
         sidStore.set(msg.getSessionId());
+        // AGGREGATED_SESSION_LOGGING (AD-5): the FIRST bot to observe this sid for
+        // the group logs one session-entry line; the other bots are no-ops. Runs on
+        // the mdcConsumer-wrapped netty thread, so the service reads this bot's MDC
+        // identity. The raw sample supplier is lazy — invoked only on the first-seen
+        // path (AD-9), so the 99 losing bots never serialize the frame.
+        if (sessionAggregator != null) {
+            sessionAggregator.onSessionStart(msg.getSessionId(), sessionStrategy(),
+                    () -> String.valueOf(msg));
+        }
         gameState = BettingMiniGameState.BET;
         // Phase 2 of BETTING_STRATEGIES: kick off the in-flight RoundState for
         // bet→result correlation. Balance snapshot mirrors expectedCurrentBalance.
@@ -432,6 +454,17 @@ public class BettingMiniGameBot extends Bot {
                 metrics.incBetsPlaced(bt.betCountFor(getUserName()),
                         bt.betAmountFor(getUserName()));
             }
+        }
+
+        // AGGREGATED_SESSION_LOGGING (AD-5): accumulate this bot's outcome and let the
+        // first bot to observe EndGame log the session summary. Uses endGameSessionId
+        // so Tai Xiu (whose frame has no sid) correlates against the tracked session.
+        // winnings = the value already extracted via HasBotWinnings (correct per game
+        // type, incl. Tai Xiu G); betAmount = server-confirmed stake via HasBetTotals.
+        if (sessionAggregator != null) {
+            long confirmedBet = (msg instanceof HasBetTotals bt2) ? bt2.betAmountFor(getUserName()) : 0L;
+            sessionAggregator.onSessionEnd(endGameSessionId(msg), payout, confirmedBet,
+                    () -> String.valueOf(msg));
         }
 
         // Phase 2 of BETTING_STRATEGIES: finalize the in-flight RoundState into
@@ -582,6 +615,12 @@ public class BettingMiniGameBot extends Bot {
             long currentSid = sidStore.get();
             // Phase 2 of BETTING_STRATEGIES: accumulate bet→result correlation.
             memory.recordBetSent(currentSid, optionId, amount);
+            // AGGREGATED_SESSION_LOGGING (AD-5): outbound stake is the uniform
+            // cross-product source (the UpdateBet frame body carries no stake). Runs
+            // on the mdcSupplier-wrapped scenario thread, so MDC identity is present.
+            if (sessionAggregator != null) {
+                sessionAggregator.recordBet(currentSid, getUserName(), amount);
+            }
             log.debug("Bot {}: sending bet option={}, amount={}, sid={}",
                     getUserName(), optionId, amount, currentSid);
             return request.bet(amount, optionId, currentSid);

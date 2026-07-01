@@ -6,6 +6,7 @@ import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.websocketparser.VingameWebSocketClient;
@@ -46,6 +47,11 @@ public abstract class Bot {
 
     // Observability — set via builder-style setter (BotFactory wires the singleton bean).
     protected BotMetrics metrics;
+
+    // Per-session log aggregation — set via builder-style setter (BotFactory wires the
+    // singleton bean). Null-tolerant exactly like {@code metrics}: unit-test fixtures
+    // that build a bot without Spring leave it null and every feed callsite guards on it.
+    protected SessionAggregationService sessionAggregator;
 
     // Bot runtime configuration (set via builder-style setters)
     @Getter
@@ -138,6 +144,11 @@ public abstract class Bot {
 
     public Bot setMetrics(BotMetrics metrics) {
         this.metrics = metrics;
+        return this;
+    }
+
+    public Bot setSessionAggregator(SessionAggregationService sessionAggregator) {
+        this.sessionAggregator = sessionAggregator;
         return this;
     }
 
