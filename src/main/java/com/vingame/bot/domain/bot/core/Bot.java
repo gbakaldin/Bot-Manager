@@ -31,6 +31,13 @@ public abstract class Bot {
     private static final long[] BACKOFF_SECONDS = {5, 10, 30, 60, 60, 60, 60};
     // Time to wait after submitting a reconnect to confirm the connection is alive
     private static final long RECONNECT_CONFIRM_SECONDS = 3;
+    // Absolute cap on full back-off cycles (re-auth rounds) before the bot is marked
+    // DEAD (RESILIENCE_HARDENING P1, Decision 2/3). Covers the "WS keeps dropping but
+    // re-auth keeps succeeding" case (Gap A) where the loop would otherwise reset
+    // attempt=0 and retry forever. A capped bot transitions to DEAD, which then feeds
+    // the group circuit breaker (deadBotGroupThreshold) — closing Gap B without any
+    // change to BotGroupBehaviorService.monitorHealth.
+    private static final int MAX_RECONNECT_CYCLES = 10;
 
     // Shared environment clients (set via builder-style setters)
     protected ApiGatewayClient apiGatewayClient;
@@ -433,11 +440,25 @@ public abstract class Bot {
     }
 
     private void runWsReconnectLoop() {
+        runWsReconnectLoop(0);
+    }
+
+    /**
+     * WS reconnect worker with an absolute cap on full back-off cycles
+     * (RESILIENCE_HARDENING P1, Gap A). {@code startCycle} is the number of
+     * re-auth cycles already consumed before entering this loop — 0 for the
+     * WS-disconnect path, 1 for {@link #runAuthThenWsLoop()} (which performed an
+     * immediate re-auth before falling through here, so the cap cannot be bypassed
+     * by re-entering via that path).
+     */
+    private void runWsReconnectLoop(int startCycle) {
         // No metric increment here: the reconnect event was already counted by
         // onWsDisconnected (reason=ws-disconnect) or triggerFullReconnect (reason=
         // watchdog). This loop is the worker that retries; falling through from
-        // runAuthThenWsLoop must not double-count either.
+        // runAuthThenWsLoop must not double-count either. The cycle cap below marks
+        // the bot DEAD (not a reconnect event) so it also does not re-increment.
         int attempt = 0;
+        int cycle = startCycle;
         while (!stopped) {
             long delaySecs = BACKOFF_SECONDS[Math.min(attempt, BACKOFF_SECONDS.length - 1)];
             sleep(delaySecs * 1000);
@@ -455,8 +476,17 @@ public abstract class Bot {
 
             attempt++;
 
-            // After full backoff sequence exhausted, re-authenticate and start over
+            // After full backoff sequence exhausted, count the cycle and either
+            // re-authenticate and start over, or give up once the absolute cap is hit.
             if (attempt >= BACKOFF_SECONDS.length) {
+                cycle++;
+                if (cycle >= MAX_RECONNECT_CYCLES) {
+                    log.warn("Bot {}: giving up after {} reconnect cycles — marking DEAD",
+                            userName, cycle);
+                    transitionStatus(BotStatus.DEAD);
+                    reconnecting.set(false);
+                    return;
+                }
                 if (!performReauth()) return; // marks DEAD if auth fails
                 attempt = 0;
             }
@@ -480,7 +510,10 @@ public abstract class Bot {
                 return;
             }
         }
-        runWsReconnectLoop();
+        // This path already consumed one re-auth cycle above; enter the loop at
+        // cycle=1 so the MAX_RECONNECT_CYCLES cap cannot be bypassed via the
+        // watchdog-triggered full-reconnect route.
+        runWsReconnectLoop(1);
     }
 
     private boolean performReauth() {

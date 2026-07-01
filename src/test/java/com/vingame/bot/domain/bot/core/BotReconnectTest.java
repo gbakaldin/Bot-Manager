@@ -13,18 +13,21 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -154,6 +157,54 @@ class BotReconnectTest {
             // Full backoff sequence sleeps (no confirm sleep since tryReconnectWs never returned true)
             assertThat(bot.sleeps).containsExactly(5000L, 10_000L, 30_000L, 60_000L, 60_000L, 60_000L, 60_000L);
             verify(apiGatewayClient, times(1)).authenticate(any());
+        }
+    }
+
+    /* ----- absolute reconnect-cycle cap (RESILIENCE_HARDENING P1, Gap A) ----- */
+
+    @Nested
+    @DisplayName("absolute reconnect-cycle cap")
+    class ReconnectCycleCapTests {
+
+        /**
+         * The 2026-06-30 outage's terminating condition — {@code performReauth()}
+         * marking the bot DEAD when re-auth <i>throws</i> — does NOT cover the case
+         * where re-auth keeps <b>succeeding</b> but the WS keeps dropping (server-side
+         * subscriber pruning). Before the {@code MAX_RECONNECT_CYCLES} cap the loop
+         * reset {@code attempt = 0} after every re-auth and retried forever. This test
+         * pins convergence to DEAD.
+         */
+        @Test
+        @Timeout(value = 10, unit = TimeUnit.SECONDS)
+        @DisplayName("WS always fails but re-auth always succeeds: bot reaches DEAD, does not loop forever")
+        void shouldGiveUpAndDieWhenWsNeverHoldsButReauthSucceeds() throws Exception {
+            setReconnecting(bot, true);
+
+            // Re-auth always succeeds — the "account is fine" case the DEAD-on-throw
+            // path never terminates.
+            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+
+            // Every fresh client comes up but never holds — models a WS subchannel that
+            // is silently pruned right after connect. tryReconnectWs() returns true (no
+            // throw), but the post-connect isOpen() check fails, so no attempt ever
+            // sticks and the loop marches through its cycles.
+            VingameWebSocketClient closedClient = mock(VingameWebSocketClient.class);
+            when(closedClient.isOpen()).thenReturn(false);
+            when(clientFactory.newClient(any(), anyString())).thenReturn(closedClient);
+
+            // @Timeout guards against the pre-fix infinite loop; a hang fails the test.
+            invokePrivate("runWsReconnectLoop");
+
+            // Converged to terminal DEAD and cleared the guard so the group circuit
+            // breaker (deadBotGroupThreshold) can count it — closing Gap A and Gap B.
+            assertThat(bot.getStatus()).isEqualTo(BotStatus.DEAD);
+            assertThat(getReconnecting(bot)).isFalse();
+
+            // MAX_RECONNECT_CYCLES = 10: cycles 1..9 re-authenticate; cycle 10 gives up
+            // BEFORE re-auth. So authenticate() ran exactly 9 times — proving it is the
+            // cap, not an auth failure, that terminated the loop.
+            verify(apiGatewayClient, times(9)).authenticate(any());
+            verify(apiGatewayClient, atLeastOnce()).authenticate(any());
         }
     }
 
