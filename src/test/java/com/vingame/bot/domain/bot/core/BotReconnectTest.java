@@ -206,6 +206,70 @@ class BotReconnectTest {
             verify(apiGatewayClient, times(9)).authenticate(any());
             verify(apiGatewayClient, atLeastOnce()).authenticate(any());
         }
+
+        /**
+         * The watchdog routes through {@link Bot#triggerFullReconnect} →
+         * {@code runAuthThenWsLoop}, which performs one immediate re-auth and then
+         * tail-calls the worker with {@code startCycle = 1}. If that initial re-auth
+         * did NOT count as a cycle (i.e. the loop re-entered at cycle 0) the bot would
+         * get 11 total cycles via this route — silently bypassing the cap. This pins
+         * that the watchdog path still converges to DEAD after exactly the same budget:
+         * one initial re-auth + eight in-loop re-auths (cycles 2..9) = 9 authenticate
+         * calls, cycle 10 gives up before re-auth. A cycle-0 re-entry bug would show 10.
+         */
+        @Test
+        @Timeout(value = 10, unit = TimeUnit.SECONDS)
+        @DisplayName("Watchdog re-entry (runAuthThenWsLoop) cannot bypass the cap: DEAD, initial re-auth counts as cycle 1")
+        void watchdogReentryCannotBypassCap() throws Exception {
+            setReconnecting(bot, true);
+
+            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+
+            VingameWebSocketClient closedClient = mock(VingameWebSocketClient.class);
+            when(closedClient.isOpen()).thenReturn(false);
+            when(clientFactory.newClient(any(), anyString())).thenReturn(closedClient);
+
+            // @Timeout guards against a cap that fails to terminate on this route.
+            invokePrivate("runAuthThenWsLoop");
+
+            assertThat(bot.getStatus()).isEqualTo(BotStatus.DEAD);
+            assertThat(getReconnecting(bot)).isFalse();
+            // 1 initial re-auth (runAuthThenWsLoop) + 8 in-loop (cycles 2..9) = 9.
+            // If runAuthThenWsLoop entered the worker at cycle=0 this would be 10.
+            verify(apiGatewayClient, times(9)).authenticate(any());
+        }
+
+        /**
+         * The cap must not prematurely kill a bot that recovers. WS fails a full
+         * back-off round (7 attempts) and one re-auth cycle, then the next attempt's
+         * client holds — the loop must reset and return cleanly with the guard cleared,
+         * never reaching DEAD.
+         */
+        @Test
+        @Timeout(value = 10, unit = TimeUnit.SECONDS)
+        @DisplayName("Recovers within the cap: WS holds after one failed cycle — bot is NOT marked DEAD")
+        void shouldRecoverWithinCapWithoutDying() throws Exception {
+            setReconnecting(bot, true);
+
+            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+
+            VingameWebSocketClient closed = mock(VingameWebSocketClient.class);
+            when(closed.isOpen()).thenReturn(false);
+            VingameWebSocketClient open = mock(VingameWebSocketClient.class);
+            when(open.isOpen()).thenReturn(true);
+
+            // First 7 attempts (one full back-off round) never hold; after the single
+            // re-auth the 8th attempt's client holds → recovery well within the cap.
+            when(clientFactory.newClient(any(), anyString()))
+                    .thenReturn(closed, closed, closed, closed, closed, closed, closed, open);
+
+            invokePrivate("runWsReconnectLoop");
+
+            assertThat(bot.getStatus()).isNotEqualTo(BotStatus.DEAD);
+            assertThat(getReconnecting(bot)).isFalse();
+            // Exactly one re-auth cycle consumed — far below MAX_RECONNECT_CYCLES.
+            verify(apiGatewayClient, times(1)).authenticate(any());
+        }
     }
 
     /* ----- performReauth ----- */
