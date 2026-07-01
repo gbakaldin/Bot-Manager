@@ -22,6 +22,7 @@ import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.websocketparser.auth.AuthClient;
@@ -67,6 +68,7 @@ public class BotGroupBehaviorService {
     private final GameService gameService;
     private final BotFactory botFactory;
     private final BotMetrics botMetrics;
+    private final SessionAggregationService sessionAggregationService;
 
     /**
      * Max number of bots to create/authenticate simultaneously.
@@ -129,13 +131,15 @@ public class BotGroupBehaviorService {
             EnvironmentService environmentService,
             GameService gameService,
             BotFactory botFactory,
-            BotMetrics botMetrics
+            BotMetrics botMetrics,
+            SessionAggregationService sessionAggregationService
     ) {
         this.botGroupService = botGroupService;
         this.environmentService = environmentService;
         this.gameService = gameService;
         this.botFactory = botFactory;
         this.botMetrics = botMetrics;
+        this.sessionAggregationService = sessionAggregationService;
 
         // Use virtual threads for scheduled tasks
         this.scheduler = Executors.newScheduledThreadPool(4, Thread.ofVirtual().factory());
@@ -290,6 +294,9 @@ public class BotGroupBehaviorService {
                                                failedRuntime.getEnvironmentId());
                         try {
                             failedRuntime.stopAllBots(botMetrics);
+                            // Drop any session entries a partially-started group registered
+                            // before the failure, so a failed start leaks nothing (AD-8).
+                            sessionAggregationService.evictGroup(failedRuntime.getGroupId());
                         } finally {
                             BotMdc.clear();
                         }
@@ -560,6 +567,10 @@ public class BotGroupBehaviorService {
         } finally {
             BotMdc.clear();
         }
+
+        // Drop this group's aggregated-session entries immediately so nothing dangles
+        // (AD-8 group-stop hook). TTL sweep is the backstop; this reclaims on stop.
+        sessionAggregationService.evictGroup(id);
 
         // Remove from runtime map
         runningGroups.remove(id);
