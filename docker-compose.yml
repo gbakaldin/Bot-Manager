@@ -39,9 +39,10 @@ services:
     image: grafana/loki:3.3.2
     ports:
       - "3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/loki-config.yaml
     volumes:
       - loki-data:/loki
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
 
   promtail:
     image: grafana/promtail:3.3.2

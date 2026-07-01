@@ -1,0 +1,52 @@
+# Custom Loki config (RESILIENCE_HARDENING P0c).
+#
+# Overriding -config.file drops the image's bundled /etc/loki/local-config.yaml,
+# so the server/common/schema blocks below are restated verbatim from the 3.3.2
+# default to preserve the existing on-disk data layout (loki-data volume at
+# /loki). The only additions are limits_config.retention_period + the compactor
+# retention block, so the loki-data volume can no longer grow unbounded (it hit
+# 33.7 GB and ENOSPC-killed the whole stack on 2026-06-30).
+
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+# Retention: drop log data older than 7 days.
+limits_config:
+  retention_period: 168h
+
+# The compactor is what actually enforces retention for the tsdb/filesystem
+# store. delete_request_store is mandatory in Loki 3.x once retention_enabled is
+# true, or the server refuses to start.
+compactor:
+  working_directory: /loki/compactor
+  delete_request_store: filesystem
+  retention_enabled: true
+  retention_delete_delay: 2h
+  compaction_interval: 10m
+
+ruler:
+  alertmanager_url: http://localhost:9093
