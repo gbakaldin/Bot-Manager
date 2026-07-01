@@ -35,16 +35,25 @@ public class OutputPrinter {
     }
 
     /**
-     * Builds a debug printer scenario whose log lines carry the supplied MDC snapshot.
+     * Builds a raw per-frame printer scenario whose log lines carry the supplied MDC snapshot.
      * The {@code peek} consumer runs on the per-client {@code netty-ws-message-processor-ws-<userName>}
      * pool, which has no MDC of its own. Wrapping the consumer here ensures every
      * {@code User <name>: ...} line in {@code console.log} is tagged with
      * {@code botGroupId}, {@code environmentId}, {@code gameType}, etc., so Promtail
-     * can promote them to Loki labels. This MDC-tagged per-bot printer emits its frames at
-     * DEBUG (per CLAUDE.md logging norms) — distinct from its siblings
-     * {@code defaultOutputPrinter} and {@code prettifiedOutputPrinter}, whose raw/pretty
-     * wire dumps sit at TRACE. These lines only surface when {@code com.vingame.bot} is
-     * drilled in to DEBUG; at the default level no {@code User <name>: ...} lines appear.
+     * can promote them to Loki labels.
+     * <p>
+     * These raw wire frames now emit at {@code TRACE}, in line with its siblings
+     * {@code defaultOutputPrinter} and {@code prettifiedOutputPrinter}. No per-frame WS
+     * printer logs above TRACE. This finalizes and supersedes the RESILIENCE_HARDENING
+     * Phase P0a demotion — P0a moved only the two sibling printers to TRACE while this
+     * (the printer actually wired into {@code BettingMiniGameBot}/{@code SlotMachineBot})
+     * stayed at DEBUG and kept flooding, because production runs at the DEBUG default.
+     * <p>
+     * At the production DEBUG default the raw frames are now silent; the default-visible
+     * per-session view comes from {@code SessionAggregationService} (INFO per-session
+     * StartGame/EndGame lifecycle summaries, DEBUG 5 s UpdateBet/slot aggregate flush).
+     * The {@code User <name>: ...} frames only resurface when {@code com.vingame.bot} is
+     * drilled in to TRACE via {@code /actuator/loggers} — the opt-in wire-level escape hatch.
      *
      * @param mdcSnapshot snapshot taken from {@code Bot.mdcSnapshot} at the end of
      *                    {@code Bot.initialize()}; may be {@code null}, in which case
@@ -53,7 +62,7 @@ public class OutputPrinter {
     public static Scenario debugOutputPrinter(List<Integer> cmd, String name,
                                               PipelineContext context,
                                               Map<String, String> mdcSnapshot) {
-        Consumer<String> printer = s -> log.debug("User {}: {}", name, s);
+        Consumer<String> printer = s -> log.trace("User {}: {}", name, s);
         return outputPrinter(cmd, withMdc(printer, mdcSnapshot), context);
     }
 

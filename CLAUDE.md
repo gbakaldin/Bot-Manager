@@ -51,10 +51,17 @@ raised to INFO without losing lifecycle context. MDC (`botGroupId`, `botId`,
   trade for killing the per-frame flood. (The 5 s UpdateBet running summary
   is DEBUG, not INFO.) Do **not** use for per-bot status transitions,
   per-HTTP-call envelopes, balance checks, or per-message dispatch.
-- **DEBUG** — Per-bot / per-message detail. Per-bot status transitions,
-  per-bot deposit success/failure, HTTP request/response bodies (login,
-  register, verifytoken, updateFullname, deposit success path), reconnect
-  attempt success, balance fetch, per-bot periodic-logout completion.
+- **DEBUG** — Per-bot / per-session aggregate detail. Per-bot status
+  transitions, per-bot deposit success/failure, HTTP request/response bodies
+  (login, register, verifytoken, updateFullname, deposit success path),
+  reconnect attempt success, balance fetch, per-bot periodic-logout
+  completion, and the 5 s per-session UpdateBet running summary (plus the
+  slot per-`(group,gameId)` window summary) emitted by
+  `SessionAggregationService` — one aggregated line every 5 s per active
+  session, *not* per frame. Raw per-frame WS dispatch is **not** here; it is
+  TRACE-only (see below), so at the production DEBUG default only these
+  aggregates and the INFO session summaries surface — the per-frame flood is
+  gone.
 - **WARN** — Recoverable anomalies that warrant investigation if they
   persist. Bot WS disconnect (triggers retry), watchdog expiry, partial
   registration result, deposit failure for a single bot, deposit non-200
@@ -64,11 +71,19 @@ raised to INFO without losing lifecycle context. MDC (`botGroupId`, `botId`,
   re-authentication failed (bot lost), 5xx upstream, failed to load display
   names, executor interrupted during shutdown. Page-on-ERROR is reasonable;
   keep volume low.
-- **TRACE** — Wire-level / packet-level detail. Now carries the raw and
-  prettified WS frame dumps emitted by `OutputPrinter.defaultOutputPrinter`
-  / `prettifiedOutputPrinter` (RESILIENCE_HARDENING P0a demoted them here
-  from INFO). Keep it to genuine packet-level detail; do not adopt as a
-  verbose-DEBUG junk drawer.
+- **TRACE** — Wire-level / packet-level detail. Carries **all** raw WS frame
+  dumps from `OutputPrinter`: the raw/prettified siblings
+  (`defaultOutputPrinter` / `prettifiedOutputPrinter`, demoted by
+  RESILIENCE_HARDENING P0a) *and* the MDC-tagged per-bot `User <name>: ...`
+  printer (`debugOutputPrinter`, the one actually wired into
+  `BettingMiniGameBot`/`SlotMachineBot`), which AGGREGATED_SESSION_LOGGING
+  Phase 4 moved here from DEBUG — finalizing P0a, which had left this active
+  printer at DEBUG where it kept flooding at the production default. No
+  per-frame WS printer logs above TRACE now; the per-frame `User <name>: ...`
+  drill-in is opt-in via `POST /actuator/loggers/com.vingame.bot
+  {"configuredLevel":"TRACE"}`, and the default-visible per-session view
+  comes from the `SessionAggregationService` INFO/DEBUG summaries. Keep it to
+  genuine packet-level detail; do not adopt as a verbose-DEBUG junk drawer.
 
 When demoting INFO→DEBUG, keep the MDC tag on the line — that is what makes
 the demotion safe. WARN/ERROR are out of scope for routine reclassification;
