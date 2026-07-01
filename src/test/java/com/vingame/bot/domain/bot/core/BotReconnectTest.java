@@ -270,6 +270,45 @@ class BotReconnectTest {
             // Exactly one re-auth cycle consumed — far below MAX_RECONNECT_CYCLES.
             verify(apiGatewayClient, times(1)).authenticate(any());
         }
+
+        /**
+         * Regression for the review's blocking finding: once the cap has marked a bot
+         * DEAD (terminal), a late async WS {@code onDisconnect} or a still-running
+         * watchdog {@code triggerFullReconnect} must NOT resurrect it. Both entry points
+         * now guard on {@code status == DEAD}, so neither re-arms the {@code reconnecting}
+         * flag, spawns a fresh loop, nor performs another re-auth. The bot stays DEAD.
+         */
+        @Test
+        @Timeout(value = 10, unit = TimeUnit.SECONDS)
+        @DisplayName("Post-cap DEAD bot is not resurrected by a late onWsDisconnected or triggerFullReconnect")
+        void deadBotIsNotResurrectedAfterCap() throws Exception {
+            setReconnecting(bot, true);
+
+            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+
+            VingameWebSocketClient closedClient = mock(VingameWebSocketClient.class);
+            when(closedClient.isOpen()).thenReturn(false);
+            when(clientFactory.newClient(any(), anyString())).thenReturn(closedClient);
+
+            // Drive the bot to terminal DEAD via the cap (9 re-auths, cycle 10 gives up).
+            invokePrivate("runWsReconnectLoop");
+            assertThat(bot.getStatus()).isEqualTo(BotStatus.DEAD);
+            assertThat(getReconnecting(bot)).isFalse();
+            verify(apiGatewayClient, times(9)).authenticate(any());
+
+            // A late Netty onDisconnect fires after the guard cleared: must be a no-op.
+            invokePrivate("onWsDisconnected");
+            assertThat(bot.getStatus()).isEqualTo(BotStatus.DEAD);
+            assertThat(getReconnecting(bot)).isFalse();
+
+            // A still-running watchdog triggers a full reconnect: must also be a no-op.
+            bot.triggerFullReconnect("watchdog: no messages");
+            assertThat(bot.getStatus()).isEqualTo(BotStatus.DEAD);
+            assertThat(getReconnecting(bot)).isFalse();
+
+            // No fresh reconnect loop ran on either path — authenticate() count is unchanged.
+            verify(apiGatewayClient, times(9)).authenticate(any());
+        }
     }
 
     /* ----- performReauth ----- */

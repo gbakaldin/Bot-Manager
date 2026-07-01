@@ -58,8 +58,11 @@ raised to INFO without losing lifecycle context. MDC (`botGroupId`, `botId`,
   re-authentication failed (bot lost), 5xx upstream, failed to load display
   names, executor interrupted during shutdown. Page-on-ERROR is reasonable;
   keep volume low.
-- **TRACE** — Reserved for wire-level / packet-level detail. Currently
-  unused; do not adopt as a verbose-DEBUG junk drawer.
+- **TRACE** — Wire-level / packet-level detail. Now carries the raw and
+  prettified WS frame dumps emitted by `OutputPrinter.defaultOutputPrinter`
+  / `prettifiedOutputPrinter` (RESILIENCE_HARDENING P0a demoted them here
+  from INFO). Keep it to genuine packet-level detail; do not adopt as a
+  verbose-DEBUG junk drawer.
 
 When demoting INFO→DEBUG, keep the MDC tag on the line — that is what makes
 the demotion safe. WARN/ERROR are out of scope for routine reclassification;

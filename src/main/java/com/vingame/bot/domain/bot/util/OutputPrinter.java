@@ -40,9 +40,11 @@ public class OutputPrinter {
      * pool, which has no MDC of its own. Wrapping the consumer here ensures every
      * {@code User <name>: ...} line in {@code console.log} is tagged with
      * {@code botGroupId}, {@code environmentId}, {@code gameType}, etc., so Promtail
-     * can promote them to Loki labels. These per-message wire frames are emitted at
-     * DEBUG (per CLAUDE.md logging norms) and only surface when {@code com.vingame.bot}
-     * is drilled in to DEBUG; at the default level no {@code User <name>: ...} lines appear.
+     * can promote them to Loki labels. This MDC-tagged per-bot printer emits its frames at
+     * DEBUG (per CLAUDE.md logging norms) — distinct from its siblings
+     * {@code defaultOutputPrinter} and {@code prettifiedOutputPrinter}, whose raw/pretty
+     * wire dumps sit at TRACE. These lines only surface when {@code com.vingame.bot} is
+     * drilled in to DEBUG; at the default level no {@code User <name>: ...} lines appear.
      *
      * @param mdcSnapshot snapshot taken from {@code Bot.mdcSnapshot} at the end of
      *                    {@code Bot.initialize()}; may be {@code null}, in which case

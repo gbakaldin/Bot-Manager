@@ -400,6 +400,12 @@ public abstract class Bot {
     // ---- Reconnect logic ----
 
     private void onWsDisconnected() {
+        // DEAD is terminal (RESILIENCE_HARDENING P1): a capped/dead bot must never be
+        // resurrected. A late Netty onDisconnect from the last (now-closed) client — or a
+        // still-running watchdog — could otherwise CAS the guard back on and spawn a fresh
+        // reconnect loop, re-arming failure metrics and leaking the Netty client. Guard
+        // consistently with stopped, before the CAS.
+        if (stopped || status == BotStatus.DEAD) return;
         if (!reconnecting.compareAndSet(false, true)) {
             return; // reconnect loop already running — it will handle the retry
         }
@@ -413,7 +419,9 @@ public abstract class Bot {
 
     // Called from the watchdog in BettingMiniGameBot — skips WS backoff, re-auths immediately
     protected void triggerFullReconnect(String reason) {
-        if (stopped) return;
+        // DEAD is terminal (RESILIENCE_HARDENING P1): the watchdog must not revive a bot
+        // the reconnect cap already gave up on. Guard on DEAD alongside stopped, before the CAS.
+        if (stopped || status == BotStatus.DEAD) return;
         if (!reconnecting.compareAndSet(false, true)) {
             return; // reconnect already in progress
         }
@@ -485,6 +493,10 @@ public abstract class Bot {
                             userName, cycle);
                     transitionStatus(BotStatus.DEAD);
                     reconnecting.set(false);
+                    // Close the last WS client so its wired onDisconnect handler can't fire
+                    // later and try to resurrect a DEAD bot (the DEAD guard in
+                    // onWsDisconnected also blocks it — this releases the Netty channel too).
+                    closeClientQuietly();
                     return;
                 }
                 if (!performReauth()) return; // marks DEAD if auth fails
@@ -527,7 +539,29 @@ public abstract class Bot {
             log.error("Bot {}: re-authentication failed — marking DEAD", userName);
             transitionStatus(BotStatus.DEAD);
             reconnecting.set(false);
+            // Terminal DEAD (e.g. "account does not exist"): close the last WS client so its
+            // onDisconnect handler can't fire later and re-arm the reconnect machinery.
+            closeClientQuietly();
             return false;
+        }
+    }
+
+    /**
+     * Close the current WS {@code client} if open, swallowing any error. Used on terminal
+     * DEAD paths so the client's wired {@code onDisconnect} handler cannot fire afterwards
+     * and revive the bot. Null- and double-close-safe: reads {@code client} once and guards
+     * on {@code isOpen()}; the DEAD status guard in {@link #onWsDisconnected()} makes any
+     * onDisconnect that does fire a no-op regardless.
+     */
+    private void closeClientQuietly() {
+        VingameWebSocketClient c = this.client;
+        if (c != null && c.isOpen()) {
+            try {
+                c.close();
+            } catch (Exception e) {
+                log.debug("Bot {}: error closing WS client on terminal DEAD path: {}",
+                        userName, e.getMessage());
+            }
         }
     }
 
