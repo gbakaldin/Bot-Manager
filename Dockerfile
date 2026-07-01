@@ -15,4 +15,5 @@ EXPOSE 8080
 
 ENTRYPOINT ["java", \
     "-XX:MaxRAMPercentage=75.0", \
+    "-XX:+ExitOnOutOfMemoryError", \
     "-jar", "Bot.jar"]
