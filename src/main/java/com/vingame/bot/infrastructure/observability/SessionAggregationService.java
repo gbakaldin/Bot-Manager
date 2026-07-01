@@ -318,9 +318,12 @@ public class SessionAggregationService {
      *
      * @param sid    the session the bet was staked in ({@code sidStore.get()})
      * @param bettor the bot's user name (distinct-bettor key)
+     * @param option the strategy-decision option/eid the bot bet on
+     *               ({@code decision.optionId()}) — the per-window histogram key
+     *               (STRATEGY_DECISION_AGGREGATION Phase 1, AD-1)
      * @param amount the staked amount
      */
-    public void recordBet(long sid, String bettor, long amount) {
+    public void recordBet(long sid, String bettor, int option, long amount) {
         SessionKey key = keyFor(sid);
         if (key == null) {
             return;
@@ -329,7 +332,7 @@ public class SessionAggregationService {
         if (acc == null) {
             return;
         }
-        acc.recordBet(bettor, amount);
+        acc.recordBet(bettor, option, amount);
     }
 
     /**

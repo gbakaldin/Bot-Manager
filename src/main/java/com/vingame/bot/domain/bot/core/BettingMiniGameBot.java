@@ -619,7 +619,7 @@ public class BettingMiniGameBot extends Bot {
             // cross-product source (the UpdateBet frame body carries no stake). Runs
             // on the mdcSupplier-wrapped scenario thread, so MDC identity is present.
             if (sessionAggregator != null) {
-                sessionAggregator.recordBet(currentSid, getUserName(), amount);
+                sessionAggregator.recordBet(currentSid, getUserName(), optionId, amount);
             }
             log.debug("Bot {}: sending bet option={}, amount={}, sid={}",
                     getUserName(), optionId, amount, currentSid);
