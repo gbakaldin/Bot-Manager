@@ -69,19 +69,21 @@ public class BotGroupController {
 
     @Operation(
             summary = "Filter bot groups within an environment",
-            description = "Returns the bot groups in the given environment matching the filter body. " +
-                    "The environment is taken from the path; an empty body returns every group in that environment.")
+            description = "Returns the bot groups in the given environment matching the filter body, sorted " +
+                    "per the sortBy/sortDir fields. The environment is taken from the path; an empty body " +
+                    "returns every group in that environment (default sort CREATED_TIME desc).")
     @PostMapping("/{envId}/filter")
     public ResponseEntity<List<BotGroupDTO>> filter(
             @PathVariable @Parameter(description = "Environment id to scope the filter to") String envId,
             @Parameter(description = "The filter to query the bot groups by")
             @RequestBody BotGroupFilter filter) {
-        List<BotGroupDTO> dtos = service.filter(envId, filter).stream()
-                .map(group -> {
-                    BotGroupDTO dto = mapper.toDTO(group);
-                    // Embed group-level runtime stats per BOTGROUP_GAME_MANAGEMENT
-                    // Phase 3 / AD-13. Phase 4 will additionally sort on these keys.
-                    dto.setStats(behaviorService.computeStats(group.getId()));
+        // Load → enrich with runtime stats → sort in-memory (BOTGROUP_GAME_MANAGEMENT
+        // Phase 4 / AD-11). The enriched rows carry the pre-computed Phase 3 stats,
+        // so mapping here just embeds them (AD-13) without recomputation.
+        List<BotGroupDTO> dtos = behaviorService.filterSorted(envId, filter).stream()
+                .map(row -> {
+                    BotGroupDTO dto = mapper.toDTO(row.group());
+                    dto.setStats(row.stats());
                     return dto;
                 })
                 .toList();

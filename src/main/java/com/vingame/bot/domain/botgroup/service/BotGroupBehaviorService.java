@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.botgroup.service;
 
 import com.vingame.bot.common.exception.BadRequestException;
+import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyAssignment;
@@ -16,8 +17,11 @@ import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatsDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
+import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.sort.BotGroupSortRow;
+import com.vingame.bot.domain.botgroup.sort.BotGroupSorter;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
@@ -40,6 +44,7 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -785,6 +790,55 @@ public class BotGroupBehaviorService {
                 .averageBalance(averageBalance)
                 .averageWinning(averageWinning)
                 .build();
+    }
+
+    /**
+     * Env-scoped bot-group filter with in-memory sorting (BOTGROUP_GAME_MANAGEMENT
+     * Phase 4 / AD-11). Loads the matching groups from Mongo (via
+     * {@link BotGroupService#filter(String, BotGroupFilter)}), enriches each with the
+     * Phase 3 runtime stats, the runtime {@code actualStatus}, and the resolved
+     * game-type name, then sorts the enriched rows in memory per AD-12. No Mongo-side
+     * aggregation and no persisted derived fields.
+     *
+     * <p>The returned {@link BotGroupSortRow}s carry the pre-computed stats so the
+     * controller can map to DTOs without recomputing. The sort key/direction come
+     * from {@code filter.sortBy}/{@code filter.sortDir}; an unknown key surfaces as
+     * HTTP 400 via {@link com.vingame.bot.domain.botgroup.sort.BotSortKey#resolve}.
+     */
+    public List<BotGroupSortRow> filterSorted(String environmentId, BotGroupFilter filter) {
+        List<BotGroup> groups = botGroupService.filter(environmentId, filter);
+        Map<String, String> gameTypeById = resolveGameTypes(groups);
+        List<BotGroupSortRow> rows = groups.stream()
+                .map(group -> new BotGroupSortRow(
+                        group,
+                        computeStats(group.getId()),
+                        getActualStatus(group.getId()),
+                        group.getGameId() == null ? null : gameTypeById.get(group.getGameId())))
+                .toList();
+        return BotGroupSorter.sort(rows, filter.getSortBy(), filter.getSortDir());
+    }
+
+    /**
+     * Resolve the {@code gameType} enum name for each distinct {@code gameId}
+     * (Game Mongo {@code _id}) referenced by the groups — looked up once per
+     * distinct id (AD-11 note). A missing game (deleted out from under the group)
+     * maps to {@code null}, which the {@code GAME_TYPE} sort key treats as N/A.
+     */
+    private Map<String, String> resolveGameTypes(List<BotGroup> groups) {
+        Map<String, String> byId = new HashMap<>();
+        for (BotGroup group : groups) {
+            String gameId = group.getGameId();
+            if (gameId == null || byId.containsKey(gameId)) {
+                continue;
+            }
+            try {
+                Game game = gameService.findById(gameId);
+                byId.put(gameId, game.getGameType() != null ? game.getGameType().name() : null);
+            } catch (ResourceNotFoundException e) {
+                byId.put(gameId, null);
+            }
+        }
+        return byId;
     }
 
     /**
