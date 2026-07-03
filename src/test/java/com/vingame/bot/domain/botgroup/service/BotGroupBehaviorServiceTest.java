@@ -1018,6 +1018,10 @@ class BotGroupBehaviorServiceTest {
         // Provide non-null counters so BotHealthDTO mapping (.get() calls) doesn't NPE.
         lenient().when(b.getTotalBetsPlaced()).thenReturn(new AtomicLong(0));
         lenient().when(b.getTotalBetAmount()).thenReturn(new AtomicLong(0));
+        // Phase-3 stats accumulators: computeStats (via getHealth) reads these,
+        // so the mock must mirror a real Bot's non-null AtomicLong fields.
+        lenient().when(b.getRoundsObserved()).thenReturn(new AtomicLong(0));
+        lenient().when(b.getCumulativeWinnings()).thenReturn(new AtomicLong(0));
         return b;
     }
 }
