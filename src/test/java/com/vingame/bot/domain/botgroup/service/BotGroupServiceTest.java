@@ -710,6 +710,54 @@ class BotGroupServiceTest {
         }
 
         @Test
+        @DisplayName("Should reject a mismatch even when registration is skipped (existing-group migration)")
+        void shouldRejectMismatchOnSkipRegistrationPath() {
+            // The existing-group migration path (skipRegistration=true) bypasses the
+            // auth fan-out but must still enforce AD-7 before persisting.
+            BotGroup group = BotGroup.builder()
+                    .name("Migrated Mismatch Group")
+                    .environmentId("env-1")
+                    .gameId("game-99")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(5)
+                    .build();
+
+            when(gameService.findById("game-99"))
+                    .thenReturn(Game.builder().id("game-99").environmentId("env-OTHER").build());
+
+            assertThatThrownBy(() -> service.save(group, true))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("game-99")
+                    .hasMessageContaining("env-OTHER")
+                    .hasMessageContaining("env-1");
+
+            // Rejected before persistence; the skip path never touched the registry either.
+            verify(clientRegistry, never()).getClients(anyString());
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("Should not run the gameId-in-env check on the update (existing group) path")
+        void shouldNotValidateGameEnvOnUpdate() {
+            // AD-7 is a new-group create-time guard only. update() merges + persists
+            // without re-checking game/env, so a stale mismatch must not block a PATCH.
+            BotGroup existing = BotGroup.builder()
+                    .id("existing-1")
+                    .name("Existing Group")
+                    .environmentId("env-1")
+                    .gameId("game-99")
+                    .build();
+            when(repository.findById("existing-1")).thenReturn(Optional.of(existing));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            service.update("existing-1", BotGroupDTO.builder().name("Renamed").build());
+
+            verify(gameService, never()).findById(anyString());
+            verify(repository).save(existing);
+        }
+
+        @Test
         @DisplayName("Should no-op the check when the group carries no gameId")
         void shouldSkipWhenNoGameId() {
             BotGroup group = BotGroup.builder()

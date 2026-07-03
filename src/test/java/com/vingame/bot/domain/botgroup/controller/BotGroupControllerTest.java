@@ -215,6 +215,19 @@ class BotGroupControllerTest {
         }
 
         @Test
+        @DisplayName("Old unscoped POST /filter/ route no longer maps (moved to /{envId}/filter)")
+        void oldUnscopedFilterRouteIsGone() throws Exception {
+            // AD-5: env moved from the body to a mandatory path segment; the old
+            // /filter/ contract must not silently resolve to the new handler.
+            mockMvc.perform(post("/api/v1/bot-group/filter/")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{}"))
+                    .andExpect(status().is4xxClientError());
+
+            verify(service, never()).filter(any(), any(BotGroupFilter.class));
+        }
+
+        @Test
         @DisplayName("Should return 200 OK with empty list when no matches")
         void shouldReturnOkWithEmptyListWhenNoMatches() throws Exception {
             // Arrange

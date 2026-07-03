@@ -87,3 +87,87 @@ capturing `environmentId` from the path.
 ## Failures
 
 None.
+
+---
+
+# QA — BOTGROUP_GAME_MANAGEMENT (Phase 2: BotGroup env-in-path filter)
+
+**Verdict:** PASS
+**Build:** `mvn clean install` → 1140 tests, 0 failures, 0 errors
+
+## Scope reviewed
+
+`git diff 16a84d6..HEAD` — Phase 2 only:
+- `BotGroupFilter` drops `environmentId` (moves to the path, mandatory).
+- `BotGroupService.filter(String environmentId, BotGroupFilter)` — env now always
+  constrains the query (from the arg); empty body returns every group in that env.
+- `BotGroupService.validateGameEnvironmentMatch` on the create path (both the
+  registering and `skipRegistration` branches): mismatch → `BadRequestException`
+  (400); guarded when the group has no `gameId` or the game's `environmentId` is
+  null.
+- `BotGroupController`: `POST /filter/` replaced by `POST /{envId}/filter`; the
+  unscoped `GET /` (findAll) hard-removed (AD-6). `service.findAll()` stays for
+  internal callers.
+
+## Tests added / updated
+
+Dev delivered a solid first pass (route move + empty-body + the four AD-7 cases +
+`GET /` removal). QA added 3 tests closing the load-bearing gaps Dev's set left:
+
+- `src/test/java/com/vingame/bot/domain/botgroup/service/BotGroupServiceTest.java`
+  - `GameEnvironmentValidationTests.shouldRejectMismatchOnSkipRegistrationPath` —
+    AD-7 also fires on the `skipRegistration=true` existing-group migration branch
+    (which bypasses the auth fan-out): mismatch → 400, `repository.save` and
+    `clientRegistry.getClients` never reached. Dev only exercised the registering
+    branch.
+  - `GameEnvironmentValidationTests.shouldNotValidateGameEnvOnUpdate` — AD-7 is a
+    create-only guard; `update()` merges + persists without re-checking game/env, so
+    a pre-existing mismatch cannot block a PATCH (`gameService.findById` never
+    called).
+- `src/test/java/com/vingame/bot/domain/botgroup/controller/BotGroupControllerTest.java`
+  - `FilterTests.oldUnscopedFilterRouteIsGone` — the old `POST /filter/` contract no
+    longer maps (4xx) and never resolves to the new handler; complements the
+    existing `GET /` removal test.
+
+Pre-existing Dev tests kept and verified green: filter always carries the env-scope
+criterion (name/gameId narrowing within env; empty body = env-scope-only query),
+the AD-7 mismatch/match/null-env/no-gameId quartet (mismatch verified to reject
+before fan-out and persist), the new `POST /{envId}/filter` route (by-gameId,
+empty-body-all-in-env passing the path env, empty result), and the removed
+unscoped `GET /`.
+
+## Coverage of the diff
+
+- `BotGroupFilter` (env field removed) ← compiled against by every filter test; no
+  body env field remains to assert.
+- `BotGroupService.filter(env, filter)` ← `BotGroupServiceTest.FilterTests`
+  (env always present; name/gameId within scope; empty body = only `environmentId`
+  key).
+- `BotGroupService.validateGameEnvironmentMatch` ←
+  `GameEnvironmentValidationTests` (mismatch→400 before fan-out/persist on both the
+  registering and skip-registration branches; match/null-env/no-gameId allowed;
+  not invoked on update).
+- `BotGroupController` `POST /{envId}/filter` + removed `GET /` + removed
+  `POST /filter/` ← `BotGroupControllerTest.FilterTests` / `GetAllRemovedTests`
+  (env from path forwarded to the service; old routes 4xx, `findAll`/`filter`
+  never invoked).
+
+## Gaps
+
+- **Real Mongo env-scope semantics** are asserted structurally (the captured
+  `Query` carries `environmentId == <arg>`), not against a live database —
+  consistent with the existing `MongoTemplate`-mocked unit idiom. End-to-end env
+  scoping is covered by Verification step 4 (staging curl). No Testcontainers test
+  added.
+- **Exact 404-vs-405 status** for the removed `GET /` and old `POST /filter/`
+  routes is asserted as `is4xxClientError` rather than a fixed code — the precise
+  status is Spring dispatcher behavior (a sibling method mapping on the same path
+  yields 405, otherwise 404) and not app logic. Verification step 5 pins the
+  staging expectation (404/405, not 200).
+- **Unrelated untracked file** `src/main/java/com/vingame/bot/T.java` remains in the
+  working tree (not part of this diff, not committed on this branch). Flagged again
+  so it is not accidentally committed. Out of QA scope.
+
+## Failures
+
+None.
