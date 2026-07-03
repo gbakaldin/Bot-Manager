@@ -141,6 +141,30 @@ class GameServiceTest {
         }
 
         @Test
+        @DisplayName("Env criterion is an $or of {environmentId: env} and {environmentId: null} (structural)")
+        void envCriterionOrStructure() {
+            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(List.of());
+
+            service.filter(BrandCode.G2, ProductCode.P_097, "env-097", GameFilter.builder().build());
+
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
+            Object orClause = queryCaptor.getValue().getQueryObject().get("$or");
+            assertThat(orClause).isInstanceOf(List.class);
+            @SuppressWarnings("unchecked")
+            List<org.bson.Document> branches = (List<org.bson.Document>) orClause;
+            // Exactly two branches: the scoped env, and the defensive null-env fallback.
+            assertThat(branches).hasSize(2);
+            assertThat(branches).anySatisfy(b ->
+                    assertThat(b.get("environmentId")).isEqualTo("env-097"));
+            // The fallback branch must carry an explicit null (matches null OR absent
+            // in Mongo) — this is what keeps unmigrated docs visible (AD-3).
+            assertThat(branches).anySatisfy(b -> {
+                assertThat(b.containsKey("environmentId")).isTrue();
+                assertThat(b.get("environmentId")).isNull();
+            });
+        }
+
+        @Test
         @DisplayName("Should filter by game type")
         void shouldFilterByGameType() {
             List<Game> expected = List.of(Game.builder().id("1").gameType(GameType.BETTING_MINI).build());
@@ -290,6 +314,46 @@ class GameServiceTest {
 
             assertThatThrownBy(() -> service.update("missing", GameDTO.builder().build()))
                     .isInstanceOf(ResourceNotFoundException.class);
+        }
+
+        @Test
+        @DisplayName("update routes through save: re-stamps updatedAt and preserves createdAt (AD-16)")
+        void updateRestampsUpdatedAtAndPreservesCreatedAt() {
+            java.time.Instant created = java.time.Instant.parse("2020-01-01T00:00:00Z");
+            java.time.Instant staleUpdated = java.time.Instant.parse("2020-06-01T00:00:00Z");
+            Game existing = Game.builder()
+                    .id("game-1")
+                    .name("Old")
+                    .createdAt(created)
+                    .updatedAt(staleUpdated)
+                    .build();
+            GameDTO dto = GameDTO.builder().name("New").build();
+
+            when(repository.findById("game-1")).thenReturn(Optional.of(existing));
+            when(repository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Game result = service.update("game-1", dto);
+
+            // createdAt is stamped once and must survive an update untouched...
+            assertThat(result.getCreatedAt()).isEqualTo(created);
+            // ...while updatedAt is re-stamped on this mutation (no longer the stale value).
+            assertThat(result.getUpdatedAt()).isNotNull().isAfter(staleUpdated);
+        }
+
+        @Test
+        @DisplayName("update stamps updatedAt even when the existing doc had none (unmigrated)")
+        void updateStampsUpdatedAtWhenPreviouslyNull() {
+            Game existing = Game.builder().id("game-1").name("Old").build(); // no timestamps
+            GameDTO dto = GameDTO.builder().name("New").build();
+
+            when(repository.findById("game-1")).thenReturn(Optional.of(existing));
+            when(repository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Game result = service.update("game-1", dto);
+
+            // First save through the update path stamps both; createdAt == updatedAt here.
+            assertThat(result.getUpdatedAt()).isNotNull();
+            assertThat(result.getCreatedAt()).isNotNull().isEqualTo(result.getUpdatedAt());
         }
     }
 

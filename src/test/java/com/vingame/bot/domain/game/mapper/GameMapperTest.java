@@ -81,6 +81,40 @@ class GameMapperTest {
         }
 
         @Test
+        @DisplayName("Maps environmentId, createdAt and updatedAt onto the read DTO (Phase 1)")
+        void shouldMapEnvScopeAndTimestamps() {
+            java.time.Instant created = java.time.Instant.parse("2026-07-03T00:00:00Z");
+            java.time.Instant updated = java.time.Instant.parse("2026-07-04T12:00:00Z");
+            Game entity = Game.builder()
+                    .id("game-1")
+                    .brandCode(BrandCode.G2)
+                    .productCode(ProductCode.P_097)
+                    .environmentId("env-097")
+                    .createdAt(created)
+                    .updatedAt(updated)
+                    .name("BauCua")
+                    .build();
+
+            GameDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getEnvironmentId()).isEqualTo("env-097");
+            assertThat(dto.getCreatedAt()).isEqualTo(created);
+            assertThat(dto.getUpdatedAt()).isEqualTo(updated);
+        }
+
+        @Test
+        @DisplayName("Leaves environmentId/createdAt/updatedAt null when the (unmigrated) entity has none")
+        void shouldEmitNullEnvScopeForUnmigratedEntity() {
+            Game entity = Game.builder().id("legacy").name("Legacy").numberOfOptions(2).build();
+
+            GameDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getEnvironmentId()).isNull();
+            assertThat(dto.getCreatedAt()).isNull();
+            assertThat(dto.getUpdatedAt()).isNull();
+        }
+
+        @Test
         @DisplayName("Surfaces a null optionAffinities (not a crash) when entity is misconfigured")
         void shouldNotCrashOnMisconfiguredEntity() {
             // A Game with neither field set is misconfigured. toDTO must still
@@ -275,6 +309,38 @@ class GameMapperTest {
             mapper.updateEntityFromDTO(null, entity);
 
             assertThat(entity.getName()).isEqualTo("Old");
+        }
+
+        @Test
+        @DisplayName("Never overwrites environmentId/createdAt/updatedAt from the write DTO (path + service authoritative)")
+        void shouldNotOverwriteEnvScopeOrTimestamps() {
+            java.time.Instant created = java.time.Instant.parse("2026-01-01T00:00:00Z");
+            java.time.Instant updated = java.time.Instant.parse("2026-01-02T00:00:00Z");
+            Game entity = Game.builder()
+                    .id("game-1")
+                    .name("Old")
+                    .environmentId("env-original")
+                    .createdAt(created)
+                    .updatedAt(updated)
+                    .build();
+
+            // A DTO that (mistakenly or maliciously) carries these read-side-only
+            // fields must NOT be able to move a game between environments or rewrite
+            // its audit stamps. The controller path sets environmentId; GameService
+            // stamps createdAt/updatedAt. The mapper must ignore all three.
+            GameDTO dto = GameDTO.builder()
+                    .name("New")
+                    .environmentId("env-hijack")
+                    .createdAt(java.time.Instant.parse("1999-01-01T00:00:00Z"))
+                    .updatedAt(java.time.Instant.parse("1999-01-02T00:00:00Z"))
+                    .build();
+
+            mapper.updateEntityFromDTO(dto, entity);
+
+            assertThat(entity.getName()).isEqualTo("New");
+            assertThat(entity.getEnvironmentId()).isEqualTo("env-original");
+            assertThat(entity.getCreatedAt()).isEqualTo(created);
+            assertThat(entity.getUpdatedAt()).isEqualTo(updated);
         }
     }
 
