@@ -11,7 +11,12 @@ import lombok.NoArgsConstructor;
  *
  * <p>{@code brandCode}/{@code productCode}/{@code envId} moved to the request
  * path (BOTGROUP_GAME_MANAGEMENT AD-4), so they are no longer body fields.
- * ({@code sortBy}/{@code sortDir} are added in Phase 5.)
+ *
+ * <p>{@code sortBy}/{@code sortDir} (Phase 5) drive the in-memory sort applied
+ * after the env-scoped load + aggregate enrichment. {@code sortBy} is resolved
+ * case-insensitively against {@link com.vingame.bot.domain.game.sort.GameSortKey}
+ * (null/blank → {@code CREATED_TIME}; unknown → 400); {@code sortDir} against
+ * {@code asc}/{@code desc} (null/blank/unknown → {@code desc}).
  */
 @Data
 @Builder
@@ -21,4 +26,6 @@ public class GameFilter {
 
     private GameType gameType;
     private String name;
+    private String sortBy;
+    private String sortDir;
 }

@@ -22,9 +22,14 @@ import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.sort.BotGroupSortRow;
 import com.vingame.bot.domain.botgroup.sort.BotGroupSorter;
+import com.vingame.bot.domain.brand.model.BrandCode;
+import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.domain.game.model.GameFilter;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
+import com.vingame.bot.domain.game.sort.GameSortRow;
+import com.vingame.bot.domain.game.sort.GameSorter;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
@@ -816,6 +821,48 @@ public class BotGroupBehaviorService {
                         group.getGameId() == null ? null : gameTypeById.get(group.getGameId())))
                 .toList();
         return BotGroupSorter.sort(rows, filter.getSortBy(), filter.getSortDir());
+    }
+
+    /**
+     * Env-scoped game filter with in-memory sorting (BOTGROUP_GAME_MANAGEMENT
+     * Phase 5). Loads the matching games via
+     * {@link GameService#filter(BrandCode, ProductCode, String, GameFilter)}, then
+     * enriches each with the aggregates over the bot groups referencing it (via
+     * {@link BotGroupService#findByGameId} — {@code BotGroup.gameId} is the Game
+     * Mongo {@code _id}, Implementation Note 1), and sorts the enriched rows in
+     * memory per AD-11/AD-12. No Mongo-side aggregation, no persisted derived fields.
+     *
+     * <p>The sort key/direction come from {@code filter.sortBy}/{@code filter.sortDir};
+     * an unknown key surfaces as HTTP 400 via {@link com.vingame.bot.domain.game.sort.GameSortKey#resolve}.
+     */
+    public List<GameSortRow> filterGamesSorted(BrandCode brandCode, ProductCode productCode,
+                                               String environmentId, GameFilter filter) {
+        List<Game> games = gameService.filter(brandCode, productCode, environmentId, filter);
+        List<GameSortRow> rows = games.stream()
+                .map(this::enrichGame)
+                .toList();
+        return GameSorter.sort(rows, filter.getSortBy(), filter.getSortDir());
+    }
+
+    /**
+     * Compute the per-game aggregates over the bot groups referencing it (Phase 5).
+     * {@code botGroupCount}/{@code botCount} are configured aggregates (never N/A);
+     * {@code activeGroupCount}/{@code activeBotCount} are runtime sums (0 when the
+     * game is inactive, gated to N/A by the sort keys). Computed once per game.
+     */
+    private GameSortRow enrichGame(Game game) {
+        List<BotGroup> groups = botGroupService.findByGameId(game.getId());
+        int botCount = 0;
+        int activeGroupCount = 0;
+        int activeBotCount = 0;
+        for (BotGroup group : groups) {
+            botCount += group.getBotCount();
+            if (isGroupRunning(group.getId())) {
+                activeGroupCount++;
+            }
+            activeBotCount += getRunningBotCountForGroup(group.getId());
+        }
+        return new GameSortRow(game, groups.size(), botCount, activeGroupCount, activeBotCount);
     }
 
     /**

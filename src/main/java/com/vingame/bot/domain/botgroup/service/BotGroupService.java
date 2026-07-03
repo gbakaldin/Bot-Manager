@@ -74,6 +74,15 @@ public class BotGroupService {
     }
 
     /**
+     * All bot groups referencing a given game. {@code gameId} is the Game Mongo
+     * {@code _id} (BOTGROUP_GAME_MANAGEMENT Implementation Note 1), matching
+     * {@code BotGroup.gameId}. Used by the Phase 5 game-sort aggregate enrichment.
+     */
+    public List<BotGroup> findByGameId(String gameId) {
+        return repository.findByGameId(gameId);
+    }
+
+    /**
      * Filter bot groups within a single environment. The environment is taken
      * from the path (mandatory) per BOTGROUP_GAME_MANAGEMENT AD-5 — it is no
      * longer a body field. An empty filter body returns every group in that env;

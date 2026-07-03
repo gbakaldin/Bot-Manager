@@ -10,6 +10,7 @@ import com.vingame.bot.domain.game.model.GameFilter;
 import com.vingame.bot.domain.game.model.GameType;
 
 import java.util.Arrays;
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.game.service.GameService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -36,11 +37,14 @@ public class GameController {
 
     private final GameService service;
     private final GameMapper mapper;
+    private final BotGroupBehaviorService behaviorService;
 
     @Autowired
-    public GameController(GameService service, GameMapper mapper) {
+    public GameController(GameService service, GameMapper mapper,
+                          BotGroupBehaviorService behaviorService) {
         this.service = service;
         this.mapper = mapper;
+        this.behaviorService = behaviorService;
     }
 
     @Operation(
@@ -77,7 +81,10 @@ public class GameController {
 
     @Operation(
             summary = "Filter games with given criteria",
-            description = "Returns a list of games in the given brand/product/environment matching the filter body")
+            description = "Returns a list of games in the given brand/product/environment matching the filter body, "
+                    + "sorted per the sortBy/sortDir fields (default CREATED_TIME desc). Aggregate sort keys "
+                    + "(BOT_GROUP_COUNT/BOT_COUNT/ACTIVE_GROUP_COUNT/ACTIVE_BOT_COUNT) are computed over the bot "
+                    + "groups referencing each game.")
     @PostMapping("/{brandCode}/{productCode}/{envId}/filter")
     public ResponseEntity<List<GameDTO>> filter(
             @PathVariable @Parameter(description = "Brand code", example = "G2") BrandCode brandCode,
@@ -85,8 +92,11 @@ public class GameController {
             @PathVariable @Parameter(description = "Environment id", example = "097-staging") String envId,
             @Parameter(description = "Filter criteria for games")
             @RequestBody GameFilter filter) {
-        List<GameDTO> dtos = service.filter(brandCode, productCode, envId, filter).stream()
-                .map(mapper::toDTO)
+        // Load → enrich with per-game aggregates → sort in-memory (BOTGROUP_GAME_MANAGEMENT
+        // Phase 5 / AD-11). Enrichment lives in BotGroupBehaviorService because the
+        // active-* aggregates are runtime-sourced (it owns runningGroups).
+        List<GameDTO> dtos = behaviorService.filterGamesSorted(brandCode, productCode, envId, filter).stream()
+                .map(row -> mapper.toDTO(row.game()))
                 .toList();
         return ResponseEntity.ok(dtos);
     }
