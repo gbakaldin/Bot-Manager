@@ -82,3 +82,78 @@ non-empty precondition.
   that no scoped read will ever return. Brand/product get enum-parse validation for free; env
   does not. Consider a light existence check if this becomes a support burden — acceptable to
   defer.
+
+---
+
+# Code Review — BOTGROUP_GAME_MANAGEMENT (Phase 2)
+
+Branch: feat/botgroup-game-management
+Reviewed diff: `git diff 16a84d6..HEAD`
+
+Scope: Phase 2 only — BotGroup env-in-path filter (`POST /{envId}/filter`), hard-removal of the
+unscoped `GET /` list, and the `gameId ∈ env` create-time validation. Code-quality only; plan
+compliance, test adequacy, and deploy mechanics are out of scope.
+
+## Verdict
+
+PASS
+
+## Findings
+
+### [smell] AD-7 validation throws an undocumented 404 for an unknown `gameId`
+`src/main/java/com/vingame/bot/domain/botgroup/service/BotGroupService.java:248`
+
+`validateGameEnvironmentMatch` calls `gameService.findById(gameId)`, which throws
+`ResourceNotFoundException` (→ HTTP 404) when the referenced game does not exist. Two small issues:
+
+- The method's Javadoc documents only the `BadRequestException` (400) mismatch throw; the 404 path
+  is invisible to a reader. A `POST /api/v1/bot-group/` create with a bogus `gameId` now surfaces
+  as a 404, which reads oddly for a create (the *requested* resource isn't missing — a body
+  reference is). A 400 would be more semantically honest for a client-supplied bad reference.
+- Functionally this is fine and arguably an improvement (a group can no longer be created pointing
+  at a non-existent game). Not a bug — the behavior is safe and fails fast. Fix shape (optional):
+  note the 404 in the Javadoc, or catch `ResourceNotFoundException` and re-wrap as a
+  `BadRequestException` with a "referenced game does not exist" message so the create path returns
+  a consistent 400 for all bad-`gameId` inputs.
+
+## Notes
+
+- **Env scoping cannot be bypassed (verified).** `BotGroupService.filter`
+  (`BotGroupService.java:83`) applies `Criteria.where("environmentId").is(environmentId)`
+  *unconditionally* before any body-derived criteria, and `environmentId` comes from the mandatory
+  `@PathVariable` (`BotGroupController.java:69-71`) — not from the body. `BotGroupFilter` no longer
+  carries `environmentId`, so there is no field a crafted/empty body could use to widen or escape
+  the scope. An empty body yields exactly `{environmentId: <path>}` and the service test asserts
+  `containsExactly("environmentId")`. Airtight.
+
+- **AD-7 guard runs before fan-out and persist (verified).** `validateGameEnvironmentMatch` is
+  invoked at `BotGroupService.java:136`, immediately after `configValidation.validate` and *before*
+  `validateUsernameLength`, the `clientRegistry.getClients` / `registerUsers` registration fan-out
+  (`:144-152`), and `repository.save` (`:183`). It is inside the `isNewGroup` branch only, matching
+  AD-7's "new-group path only". A mismatch therefore costs zero wasted auth calls and leaves no
+  partial state.
+
+- **Null-guard logic is exactly right (verified).** `gameId == null` → no-op return;
+  `gameEnvironmentId == null` → skipped (the migration-window fallback, so an unmigrated game never
+  spuriously blocks creation); only both-non-null-and-differ throws. It neither over-blocks a valid
+  create nor lets a real cross-env mismatch through. `botGroup.getEnvironmentId()` being null would
+  make a non-null game env "not equal" and correctly trip the 400.
+
+- **The `gameId == null` no-op is a sound judgment call.** A group created without a `gameId` has
+  nothing to validate, so the early return is correct rather than a gap. If a `gameId` is in fact
+  mandatory for a group, that invariant belongs to `configValidation` / DTO bean-validation (which
+  runs first at `:133`), not to this env-matching guard — so this method correctly stays
+  single-responsibility. No action needed.
+
+- **`BotGroup.gameId` correctly treated as the Game Mongo `_id` (verified).**
+  `gameService.findById(gameId)` resolves via `GameRepository.findById` (`GameService.java:34-37`),
+  i.e. the Mongo `_id`, consistent with the plan's Implementation Note 1 and the existing
+  `BotGroupBehaviorService` join. No confusion with the numeric channel `Game.gameId`.
+
+- **`GET /` removal did not strand `findAll()` (verified).** `BotGroupService.findAll()`
+  (`BotGroupService.java:63`) is still consumed by `EnvironmentController`
+  (`EnvironmentController.java:68,89`) for env stat enrichment, so the service method correctly
+  stays. Only the HTTP endpoint was removed. All other routes are intact: `GET /{id}`, `POST /`
+  create, `PATCH /{id}`, `DELETE /{id}`, and the `/{id}/{action}` lifecycle endpoints. No routing
+  collision between the new `POST /{envId}/filter` and the `POST /{id}/start|stop|restart|
+  schedule-restart` family — the second path segment (`filter` vs the action names) disambiguates.

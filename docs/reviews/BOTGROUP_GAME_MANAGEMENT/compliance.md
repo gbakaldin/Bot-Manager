@@ -1,4 +1,4 @@
-# Compliance — BOTGROUP_GAME_MANAGEMENT (Phase 1 only)
+# Compliance — BOTGROUP_GAME_MANAGEMENT (Phases 1–2)
 
 Branch: `feat/botgroup-game-management`
 Plan reviewed: `docs/plans/BOTGROUP_GAME_MANAGEMENT.md` (at commit 8fafc65)
@@ -95,6 +95,111 @@ service/controller), its tests, the migration script, and the plan doc itself.
 No Phase 2–7 code leaked in early (e.g., no `sortBy`/`sortDir`, no
 `BotGroupStatsDTO`, no cascade delete). This is correct given only Phase 1 is
 reported done.
+
+## Amendments to the plan
+
+None.
+
+---
+
+# Compliance — BOTGROUP_GAME_MANAGEMENT — Phase 2
+
+Branch: `feat/botgroup-game-management`
+Plan reviewed: `docs/plans/BOTGROUP_GAME_MANAGEMENT.md` (at commit 8fafc65)
+Diff reviewed: `git diff 16a84d6..HEAD` (single commit 2c32ded, exactly Phase 2)
+
+Scope of this verdict: **Phase 2 only** (BotGroup env-in-path filter; hard-remove
+`GET /` findAll; guarded gameId∈env validation at create). Phase 1 verdict above
+is unchanged. Phases 3–7 are not yet on the branch.
+
+## Verdict
+
+PASS
+
+## Phase-by-phase
+
+### Phase 2 — BotGroup env-in-path filter; remove `GET /`; gameId∈env validation
+Status: implemented
+
+Every Phase 2 plan bullet is delivered and consistent with AD-5/AD-6/AD-7 and the
+Implementation Notes:
+
+- **`BotGroupFilter.java`** — `environmentId` removed; `name` and `gameId` kept.
+  `sortBy`/`sortDir` correctly NOT added (those are Phase 4). Matches the Phase 2
+  bullet and AD-5.
+- **`BotGroupService.filter(String environmentId, BotGroupFilter)`** — env now
+  comes from the mandatory arg and is **always** applied as a criterion
+  (`Criteria.where("environmentId").is(environmentId)`); the old optional-body
+  branch is gone. `name`/`gameId` narrow within that scope. An empty body yields a
+  query whose only criterion is `environmentId` (asserted by the strengthened unit
+  test `containsExactly("environmentId")`). Matches AD-5 and Verification #4.
+- **`BotGroupController.java`** — `POST /filter/` replaced by
+  `POST /{envId}/filter` with `@PathVariable envId` threaded into the service
+  (AD-5). `GET /` findAll is hard-deleted — method, mapping, and OpenAPI block all
+  removed, no redirect/deprecation shim (AD-6). `GET /{id}`, `/{id}/health`,
+  `/{id}/status`, lifecycle endpoints, and `POST /` create are untouched, as AD-6
+  requires. Verified `service.findAll()` remains (still used by
+  `EnvironmentController`) — only the HTTP endpoint was removed.
+- **gameId∈env validation (AD-7, non-vetoable)** — `validateGameEnvironmentMatch`
+  is invoked on the new-group path immediately after `configValidation.validate`
+  (the AD-7 ordering: "after config validation"). It looks up
+  `gameService.findById(group.gameId)` and throws `BadRequestException` (→ 400 via
+  `RestExceptionHandler`) only when the game's `environmentId` is **non-null** and
+  differs from the group's. Null-env game → allowed (defensive migration-window
+  guard, AD-7 / AD-3 / Impl Note 2). `GameService` is injected via constructor;
+  `BadRequestException` already imported. Matches AD-7 and Verification (implicit
+  in create path).
+
+## Judgment call — no-op when `gameId` is null
+
+The Dev flagged one addition not literally spelled out in AD-7: a
+`if (gameId == null) return;` guard before the `findById` lookup. Assessment:
+
+- **Consistent with the plan's stated intent.** AD-7 says the check "is guarded so
+  it never blocks the Game migration window," and Impl Note 2 says the fallback
+  exists so an unmigrated/edge-case game "does not spuriously trip the AD-7
+  validation." A null `gameId` would make `gameService.findById(null)` throw
+  (not-found / illegal-arg), which would block group creation for a reason
+  unrelated to an env mismatch — exactly the "never blocks" failure mode AD-7
+  is written to avoid. The no-op honors that intent.
+- **AD-7 is silent, not contradicted.** AD-7 enumerates the null-`environmentId`
+  case but does not address null `gameId`; the Dev filled an unspecified gap in
+  the one direction consistent with the surrounding decisions. This is not drift
+  (no specified behavior was deviated from) and not a plan error (the plan made no
+  false assumption). Per the drift policy this is a Dev judgment call within the
+  plan's intent, not a case for PLAN_AMENDED.
+- **No amendment needed.** The behavior is defensive-only (staging has 0 groups
+  with null `gameId`, AD-3), fully covered by a dedicated unit test
+  (`shouldSkipWhenNoGameId` asserts `gameService.findById` is never called), and
+  introduces no contradiction with the plan text. Recording it here in the
+  compliance record is sufficient; the plan does not require editing.
+
+## Build + suite
+
+- `mvn -o test -Dtest=BotGroupServiceTest,BotGroupControllerTest` (with the
+  project JDK 21): **BUILD SUCCESS**, `Tests run: 57, Failures: 0, Errors: 0,
+  Skipped: 0`.
+- New/updated Phase 2 coverage verified green: filter always env-scoped
+  (`shouldScopeByEnvironmentId`), name/gameId narrowing carries the env scope,
+  empty-body path-only scoping (`shouldReturnAllInEnvWhenBodyEmpty`), env-mismatch
+  → 400 (`shouldRejectWhenGameEnvMismatch`, also asserts no registration fan-out
+  and no persist), env-match accepted, null-env game accepted, and null-gameId
+  no-op. Controller: `unscopedListAllIsGone` asserts `GET /api/v1/bot-group/` now
+  returns 4xx and `service.findAll()` is never called; filter tests hit
+  `POST /{envId}/filter` and verify the env id is passed from the path.
+- No stale callers of the old single-arg `filter(BotGroupFilter)` or of
+  `BotGroupFilter.getEnvironmentId()/setEnvironmentId()` remain in `src/main`.
+
+## Drift
+
+None. Diff faithfully implements Phase 2 as specified.
+
+## Out-of-scope changes
+
+None. The diff touches only `BotGroupController`, `BotGroupFilter`,
+`BotGroupService` (main) and their two test classes. No Phase 3–7 code leaked in
+early (no `BotGroupStatsDTO`, no `BotSortKey`, no `sortBy`/`sortDir`, no cascade
+delete). Correct given only Phase 2 is reported done.
 
 ## Amendments to the plan
 
