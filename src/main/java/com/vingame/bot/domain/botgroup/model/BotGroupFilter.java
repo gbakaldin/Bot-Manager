@@ -12,6 +12,5 @@ import lombok.Setter;
 public class BotGroupFilter {
 
     private String name;
-    private String environmentId;
     private String gameId;
 }

@@ -15,6 +15,8 @@ import com.vingame.bot.domain.botgroup.validation.BotGroupConfigValidationServic
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
+import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -34,18 +36,21 @@ public class BotGroupService {
     private final BotGroupMapper mapper;
     private final EnvironmentClientRegistry clientRegistry;
     private final EnvironmentService environmentService;
+    private final GameService gameService;
     private final MongoTemplate mongoTemplate;
     private final BotGroupConfigValidationService configValidation;
 
     public BotGroupService(BotGroupRepository repository, BotGroupMapper mapper,
                            EnvironmentClientRegistry clientRegistry,
                            EnvironmentService environmentService,
+                           GameService gameService,
                            MongoTemplate mongoTemplate,
                            BotGroupConfigValidationService configValidation) {
         this.repository = repository;
         this.mapper = mapper;
         this.clientRegistry = clientRegistry;
         this.environmentService = environmentService;
+        this.gameService = gameService;
         this.mongoTemplate = mongoTemplate;
         this.configValidation = configValidation;
     }
@@ -67,11 +72,15 @@ public class BotGroupService {
         return repository.findByTargetStatus(status);
     }
 
-    public List<BotGroup> filter(BotGroupFilter filter) {
+    /**
+     * Filter bot groups within a single environment. The environment is taken
+     * from the path (mandatory) per BOTGROUP_GAME_MANAGEMENT AD-5 — it is no
+     * longer a body field. An empty filter body returns every group in that env;
+     * {@code name}/{@code gameId} narrow within the scope.
+     */
+    public List<BotGroup> filter(String environmentId, BotGroupFilter filter) {
         Query query = new Query();
-        if (filter.getEnvironmentId() != null) {
-            query.addCriteria(Criteria.where("environmentId").is(filter.getEnvironmentId()));
-        }
+        query.addCriteria(Criteria.where("environmentId").is(environmentId));
         if (filter.getName() != null) {
             query.addCriteria(Criteria.where("name").regex("^" + Pattern.quote(filter.getName()) + "$", "i"));
         }
@@ -122,6 +131,9 @@ public class BotGroupService {
             // wasted auth calls (AD-9). The seam is game-type-agnostic here — the
             // orchestrator resolves the GameType and selects the validator.
             configValidation.validate(botGroup);
+
+            // Referenced game must belong to the group's environment (AD-7).
+            validateGameEnvironmentMatch(botGroup);
 
             if (skipRegistration) {
                 log.info("Skipping user registration for bot group '{}' (existing group migration)",
@@ -209,6 +221,37 @@ public class BotGroupService {
                     "Username too long for product %s: prefix '%s' + botCount %d yields max length %d, " +
                     "but product cap is %d. Shorten the prefix or reduce the bot count.",
                     productCode.name(), prefix, botCount, maxLength, cap));
+        }
+    }
+
+    /**
+     * Validates that the game referenced by {@code botGroup.gameId} (the Game
+     * Mongo {@code _id}) belongs to the same environment as the group (AD-7).
+     * <p>
+     * The check is <b>guarded</b>: it is skipped when the game's
+     * {@code environmentId} is null, which is the defensive read-side state for an
+     * unmigrated Game during the Phase 1 backfill window — it must never block
+     * group creation while the migration is in flight (AD-3/AD-7). Once the
+     * game is env-scoped, a mismatch is a client error (HTTP 400).
+     * <p>
+     * No-op when the group carries no {@code gameId}.
+     *
+     * @throws BadRequestException if the game's non-null {@code environmentId}
+     *         differs from the group's {@code environmentId}; mapped to HTTP 400 by
+     *         {@link com.vingame.bot.common.exception.RestExceptionHandler}.
+     */
+    private void validateGameEnvironmentMatch(BotGroup botGroup) {
+        String gameId = botGroup.getGameId();
+        if (gameId == null) {
+            return;
+        }
+        Game game = gameService.findById(gameId);
+        String gameEnvironmentId = game.getEnvironmentId();
+        if (gameEnvironmentId != null && !gameEnvironmentId.equals(botGroup.getEnvironmentId())) {
+            throw new BadRequestException(String.format(
+                    "Game %s belongs to environment %s but bot group '%s' targets environment %s. " +
+                    "The referenced game must belong to the group's environment.",
+                    gameId, gameEnvironmentId, botGroup.getName(), botGroup.getEnvironmentId()));
         }
     }
 

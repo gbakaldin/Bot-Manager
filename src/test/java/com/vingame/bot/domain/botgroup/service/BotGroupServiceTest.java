@@ -15,6 +15,8 @@ import com.vingame.bot.domain.botgroup.validation.BotGroupConfigValidationServic
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
+import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
 import org.junit.jupiter.api.DisplayName;
@@ -58,6 +60,9 @@ class BotGroupServiceTest {
 
     @Mock
     private EnvironmentService environmentService;
+
+    @Mock
+    private GameService gameService;
 
     @Mock
     private MongoTemplate mongoTemplate;
@@ -141,15 +146,12 @@ class BotGroupServiceTest {
     class FilterTests {
 
         @Test
-        @DisplayName("Should filter by environment ID")
-        void shouldFilterByEnvironmentId() {
+        @DisplayName("Should always scope by the environment id from the path arg")
+        void shouldScopeByEnvironmentId() {
             List<BotGroup> expected = List.of(BotGroup.builder().id("1").environmentId("env-a").build());
             when(mongoTemplate.find(any(Query.class), eq(BotGroup.class))).thenReturn(expected);
 
-            BotGroupFilter filter = new BotGroupFilter();
-            filter.setEnvironmentId("env-a");
-
-            List<BotGroup> result = service.filter(filter);
+            List<BotGroup> result = service.filter("env-a", new BotGroupFilter());
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
@@ -162,7 +164,7 @@ class BotGroupServiceTest {
         }
 
         @Test
-        @DisplayName("Should filter by name (case-insensitive)")
+        @DisplayName("Should filter by name (case-insensitive) within the env scope")
         void shouldFilterByName() {
             List<BotGroup> expected = List.of(BotGroup.builder().id("2").name("Test Group").build());
             when(mongoTemplate.find(any(Query.class), eq(BotGroup.class))).thenReturn(expected);
@@ -170,13 +172,15 @@ class BotGroupServiceTest {
             BotGroupFilter filter = new BotGroupFilter();
             filter.setName("test group");
 
-            List<BotGroup> result = service.filter(filter);
+            List<BotGroup> result = service.filter("env-a", filter);
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
             Query capturedQuery = queryCaptor.getValue();
             String queryString = capturedQuery.toString();
             assertThat(queryString).contains("name");
+            // Env scope is always present
+            assertThat(capturedQuery.getQueryObject().get("environmentId")).isEqualTo("env-a");
             // Strengthened: assert the value is a case-insensitive anchored Pattern
             Object nameCriterion = capturedQuery.getQueryObject().get("name");
             assertThat(nameCriterion).isInstanceOf(Pattern.class);
@@ -186,7 +190,7 @@ class BotGroupServiceTest {
         }
 
         @Test
-        @DisplayName("Should filter by game ID")
+        @DisplayName("Should filter by game ID within the env scope")
         void shouldFilterByGameId() {
             List<BotGroup> expected = List.of(BotGroup.builder().id("1").gameId("game-1").build());
             when(mongoTemplate.find(any(Query.class), eq(BotGroup.class))).thenReturn(expected);
@@ -194,7 +198,7 @@ class BotGroupServiceTest {
             BotGroupFilter filter = new BotGroupFilter();
             filter.setGameId("game-1");
 
-            List<BotGroup> result = service.filter(filter);
+            List<BotGroup> result = service.filter("env-a", filter);
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
@@ -204,21 +208,23 @@ class BotGroupServiceTest {
             assertThat(queryString).contains("game-1");
             // Strengthened: assert exact value
             assertThat(capturedQuery.getQueryObject().get("gameId")).isEqualTo("game-1");
+            assertThat(capturedQuery.getQueryObject().get("environmentId")).isEqualTo("env-a");
         }
 
         @Test
-        @DisplayName("Should query with no criteria when filter is empty")
-        void shouldReturnAllWhenNoCriteria() {
+        @DisplayName("Empty filter body returns everything in the env (env scope only)")
+        void shouldReturnAllInEnvWhenBodyEmpty() {
             List<BotGroup> all = List.of(
-                    BotGroup.builder().id("1").build(),
-                    BotGroup.builder().id("2").build()
+                    BotGroup.builder().id("1").environmentId("env-a").build(),
+                    BotGroup.builder().id("2").environmentId("env-a").build()
             );
             when(mongoTemplate.find(any(Query.class), eq(BotGroup.class))).thenReturn(all);
 
-            assertThat(service.filter(new BotGroupFilter())).hasSize(2);
+            assertThat(service.filter("env-a", new BotGroupFilter())).hasSize(2);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
-            // Empty query should have no criteria
-            assertThat(queryCaptor.getValue().getQueryObject()).isEmpty();
+            // Only the env scope should be present — no name/gameId criteria
+            assertThat(queryCaptor.getValue().getQueryObject().keySet()).containsExactly("environmentId");
+            assertThat(queryCaptor.getValue().getQueryObject().get("environmentId")).isEqualTo("env-a");
         }
     }
 
@@ -603,6 +609,133 @@ class BotGroupServiceTest {
             verify(environmentService, never()).findById(anyString());
             verify(clientRegistry, never()).getClients(anyString());
             verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
+        }
+    }
+
+    @Nested
+    @DisplayName("save - gameId in environment validation (AD-7)")
+    class GameEnvironmentValidationTests {
+
+        @Test
+        @DisplayName("Should reject with 400 when the game belongs to a different environment")
+        void shouldRejectWhenGameEnvMismatch() {
+            BotGroup group = BotGroup.builder()
+                    .name("Mismatch Group")
+                    .environmentId("env-1")
+                    .gameId("game-99")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(5)
+                    .build();
+
+            when(gameService.findById("game-99"))
+                    .thenReturn(Game.builder().id("game-99").environmentId("env-OTHER").build());
+
+            assertThatThrownBy(() -> service.save(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("game-99")
+                    .hasMessageContaining("env-OTHER")
+                    .hasMessageContaining("env-1");
+
+            // Validation runs before any registration fan-out and before persistence.
+            verify(clientRegistry, never()).getClients(anyString());
+            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("Should accept when the game belongs to the group's environment")
+        void shouldAcceptWhenGameEnvMatches() {
+            BotGroup group = BotGroup.builder()
+                    .name("Match Group")
+                    .environmentId("env-1")
+                    .gameId("game-1")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(3)
+                    .build();
+
+            when(gameService.findById("game-1"))
+                    .thenReturn(Game.builder().id("game-1").environmentId("env-1").build());
+
+            UserRegistrationResult successResult = UserRegistrationResult.builder()
+                    .totalRequested(3)
+                    .successCount(3)
+                    .failureCount(0)
+                    .build();
+
+            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
+            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
+            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
+            when(apiGatewayClient.registerUsers("bot", "pass", 3)).thenReturn(successResult);
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.save(group);
+
+            assertThat(result.getId()).isNotNull().isNotEmpty();
+            verify(repository).save(group);
+        }
+
+        @Test
+        @DisplayName("Should allow a null-env game defensively during the migration window")
+        void shouldAllowNullEnvGame() {
+            BotGroup group = BotGroup.builder()
+                    .name("Null Env Game Group")
+                    .environmentId("env-1")
+                    .gameId("game-unmigrated")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(2)
+                    .build();
+
+            when(gameService.findById("game-unmigrated"))
+                    .thenReturn(Game.builder().id("game-unmigrated").environmentId(null).build());
+
+            UserRegistrationResult successResult = UserRegistrationResult.builder()
+                    .totalRequested(2)
+                    .successCount(2)
+                    .failureCount(0)
+                    .build();
+
+            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
+            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
+            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
+            when(apiGatewayClient.registerUsers("bot", "pass", 2)).thenReturn(successResult);
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.save(group);
+
+            assertThat(result.getId()).isNotNull().isNotEmpty();
+            verify(repository).save(group);
+        }
+
+        @Test
+        @DisplayName("Should no-op the check when the group carries no gameId")
+        void shouldSkipWhenNoGameId() {
+            BotGroup group = BotGroup.builder()
+                    .name("No Game Group")
+                    .environmentId("env-1")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(2)
+                    .build();
+
+            UserRegistrationResult successResult = UserRegistrationResult.builder()
+                    .totalRequested(2)
+                    .successCount(2)
+                    .failureCount(0)
+                    .build();
+
+            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
+            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
+            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
+            when(apiGatewayClient.registerUsers("bot", "pass", 2)).thenReturn(successResult);
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            service.save(group);
+
+            verify(gameService, never()).findById(anyString());
+            verify(repository).save(group);
         }
     }
 

@@ -36,6 +36,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -131,69 +133,27 @@ class BotGroupControllerTest {
     }
 
     @Nested
-    @DisplayName("GET /api/v1/bot-group/")
-    class GetAllTests {
+    @DisplayName("GET /api/v1/bot-group/ (removed, AD-6)")
+    class GetAllRemovedTests {
 
         @Test
-        @DisplayName("Should return 200 OK with list of bot groups")
-        void shouldReturnOkWithListOfBotGroups() throws Exception {
-            // Arrange
-            BotGroup group1 = BotGroup.builder()
-                    .id("1")
-                    .name("Group 1")
-                    .gameId("game-baucua")
-                    .build();
-
-            BotGroup group2 = BotGroup.builder()
-                    .id("2")
-                    .name("Group 2")
-                    .gameId("game-baucua-mini")
-                    .build();
-
-            BotGroupDTO dto1 = BotGroupDTO.builder()
-                    .id("1")
-                    .name("Group 1")
-                    .gameId("game-baucua")
-                    .build();
-
-            BotGroupDTO dto2 = BotGroupDTO.builder()
-                    .id("2")
-                    .name("Group 2")
-                    .gameId("game-baucua-mini")
-                    .build();
-
-            when(service.findAll()).thenReturn(List.of(group1, group2));
-            when(mapper.toDTO(group1)).thenReturn(dto1);
-            when(mapper.toDTO(group2)).thenReturn(dto2);
-
-            // Act & Assert
+        @DisplayName("Unscoped list-all endpoint is hard-removed — no longer maps")
+        void unscopedListAllIsGone() throws Exception {
+            // AD-6: superseded by the env-scoped filter; no redirect/deprecation shim.
             mockMvc.perform(get("/api/v1/bot-group/"))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.length()").value(2))
-                    .andExpect(jsonPath("$[0].id").value("1"))
-                    .andExpect(jsonPath("$[1].id").value("2"));
-        }
+                    .andExpect(status().is4xxClientError());
 
-        @Test
-        @DisplayName("Should return 200 OK with empty list when no bot groups exist")
-        void shouldReturnOkWithEmptyListWhenNoBotGroupsExist() throws Exception {
-            // Arrange
-            when(service.findAll()).thenReturn(List.of());
-
-            // Act & Assert
-            mockMvc.perform(get("/api/v1/bot-group/"))
-                    .andExpect(status().isOk())
-                    .andExpect(jsonPath("$.length()").value(0));
+            verify(service, never()).findAll();
         }
     }
 
     @Nested
-    @DisplayName("POST /api/v1/bot-group/filter/")
+    @DisplayName("POST /api/v1/bot-group/{envId}/filter")
     class FilterTests {
 
         @Test
-        @DisplayName("Should return 200 OK with filtered bot groups by game type")
-        void shouldReturnOkWithFilteredBotGroupsByGameType() throws Exception {
+        @DisplayName("Should return 200 OK with filtered bot groups by game id")
+        void shouldReturnOkWithFilteredBotGroupsByGameId() throws Exception {
             // Arrange
             BotGroupFilter filter = new BotGroupFilter();
             filter.setGameId("game-baucua");
@@ -210,11 +170,11 @@ class BotGroupControllerTest {
                     .gameId("game-baucua")
                     .build();
 
-            when(service.filter(any(BotGroupFilter.class))).thenReturn(List.of(group));
+            when(service.filter(eq("env-123"), any(BotGroupFilter.class))).thenReturn(List.of(group));
             when(mapper.toDTO(group)).thenReturn(dto);
 
             // Act & Assert
-            mockMvc.perform(post("/api/v1/bot-group/filter/")
+            mockMvc.perform(post("/api/v1/bot-group/{envId}/filter", "env-123")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(filter)))
                     .andExpect(status().isOk())
@@ -224,12 +184,8 @@ class BotGroupControllerTest {
         }
 
         @Test
-        @DisplayName("Should return 200 OK with filtered bot groups by environment ID")
-        void shouldReturnOkWithFilteredBotGroupsByEnvironmentId() throws Exception {
-            // Arrange
-            BotGroupFilter filter = new BotGroupFilter();
-            filter.setEnvironmentId("env-123");
-
+        @DisplayName("Empty body returns all groups in the env, passing the env id from the path")
+        void shouldReturnAllInEnvWithEmptyBody() throws Exception {
             BotGroup group = BotGroup.builder()
                     .id("1")
                     .name("Environment Group")
@@ -244,16 +200,18 @@ class BotGroupControllerTest {
                     .gameId("game-baucua")
                     .build();
 
-            when(service.filter(any(BotGroupFilter.class))).thenReturn(List.of(group));
+            when(service.filter(eq("env-123"), any(BotGroupFilter.class))).thenReturn(List.of(group));
             when(mapper.toDTO(group)).thenReturn(dto);
 
             // Act & Assert
-            mockMvc.perform(post("/api/v1/bot-group/filter/")
+            mockMvc.perform(post("/api/v1/bot-group/{envId}/filter", "env-123")
                             .contentType(MediaType.APPLICATION_JSON)
-                            .content(objectMapper.writeValueAsString(filter)))
+                            .content("{}"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.length()").value(1))
                     .andExpect(jsonPath("$[0].environmentId").value("env-123"));
+
+            verify(service).filter(eq("env-123"), any(BotGroupFilter.class));
         }
 
         @Test
@@ -263,10 +221,10 @@ class BotGroupControllerTest {
             BotGroupFilter filter = new BotGroupFilter();
             filter.setName("NonExistentGroup");
 
-            when(service.filter(any(BotGroupFilter.class))).thenReturn(List.of());
+            when(service.filter(eq("env-123"), any(BotGroupFilter.class))).thenReturn(List.of());
 
             // Act & Assert
-            mockMvc.perform(post("/api/v1/bot-group/filter/")
+            mockMvc.perform(post("/api/v1/bot-group/{envId}/filter", "env-123")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(filter)))
                     .andExpect(status().isOk())

@@ -63,24 +63,15 @@ public class BotGroupController {
     }
 
     @Operation(
-            summary = "Get the full list of created bot groups",
-            description = "Returns a list of all bot groups, does not support paging yet")
-    @GetMapping("/")
-    public ResponseEntity<List<BotGroupDTO>> findAll() {
-        List<BotGroupDTO> dtos = service.findAll().stream()
-                .map(mapper::toDTO)
-                .toList();
-        return ResponseEntity.ok(dtos);
-    }
-
-    @Operation(
-            summary = "Filter all bot groups with given specs",
-            description = "Returns a list of all bot groups containing the provided filter values")
-    @PostMapping("/filter/")
+            summary = "Filter bot groups within an environment",
+            description = "Returns the bot groups in the given environment matching the filter body. " +
+                    "The environment is taken from the path; an empty body returns every group in that environment.")
+    @PostMapping("/{envId}/filter")
     public ResponseEntity<List<BotGroupDTO>> filter(
+            @PathVariable @Parameter(description = "Environment id to scope the filter to") String envId,
             @Parameter(description = "The filter to query the bot groups by")
             @RequestBody BotGroupFilter filter) {
-        List<BotGroupDTO> dtos = service.filter(filter).stream()
+        List<BotGroupDTO> dtos = service.filter(envId, filter).stream()
                 .map(mapper::toDTO)
                 .toList();
         return ResponseEntity.ok(dtos);
