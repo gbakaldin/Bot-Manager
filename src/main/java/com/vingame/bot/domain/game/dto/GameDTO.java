@@ -9,6 +9,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.Instant;
 import java.util.Map;
 
 @Data
@@ -21,6 +22,19 @@ public class GameDTO {
     private String id;
     private BrandCode brandCode;
     private ProductCode productCode;
+
+    /**
+     * Environment this game belongs to. Read-side only — on create it is set
+     * from the request path by the controller (mirroring brand/product), never
+     * from the request body.
+     */
+    private String environmentId;
+
+    /** Read-side only. First-persist timestamp; never written from the DTO. */
+    private Instant createdAt;
+
+    /** Read-side only. Last-persist timestamp; never written from the DTO. */
+    private Instant updatedAt;
 
     private String name;
     private String description;

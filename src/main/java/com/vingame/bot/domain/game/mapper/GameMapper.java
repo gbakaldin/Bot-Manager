@@ -39,6 +39,9 @@ public interface GameMapper {
                 .id(entity.getId())
                 .brandCode(entity.getBrandCode())
                 .productCode(entity.getProductCode())
+                .environmentId(entity.getEnvironmentId())
+                .createdAt(entity.getCreatedAt())
+                .updatedAt(entity.getUpdatedAt())
                 .name(entity.getName())
                 .description(entity.getDescription())
                 .gameType(entity.getGameType())
@@ -102,6 +105,10 @@ public interface GameMapper {
             return;
         }
 
+        // environmentId, createdAt and updatedAt are intentionally NOT mapped here:
+        // environmentId is set from the create path/request path (authoritative),
+        // createdAt is stamped once on first save, and updatedAt is (re)stamped by
+        // GameService.save on every persist. The write DTO never mutates them.
         entity.setBrandCode(Optional.ofNullable(dto.getBrandCode()).orElse(entity.getBrandCode()));
         entity.setProductCode(Optional.ofNullable(dto.getProductCode()).orElse(entity.getProductCode()));
         entity.setName(Optional.ofNullable(dto.getName()).orElse(entity.getName()));

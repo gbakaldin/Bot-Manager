@@ -140,17 +140,18 @@ class GameControllerTest {
     }
 
     @Nested
-    @DisplayName("GET /api/v1/game/{brandCode}/{productCode}")
-    class FindByBrandAndProductTests {
+    @DisplayName("GET /api/v1/game/{brandCode}/{productCode}/{envId}")
+    class FindByBrandProductEnvTests {
 
         @Test
-        @DisplayName("Should return 200 OK with list of games for given brand and product")
+        @DisplayName("Should return 200 OK with list of games for given brand, product and env")
         void shouldReturnOkWithListOfGames() throws Exception {
             // Arrange
             Game game1 = Game.builder()
                     .id("g1")
                     .brandCode(BrandCode.G2)
                     .productCode(ProductCode.P_097)
+                    .environmentId("env-097")
                     .name("BauCua")
                     .build();
 
@@ -158,6 +159,7 @@ class GameControllerTest {
                     .id("g2")
                     .brandCode(BrandCode.G2)
                     .productCode(ProductCode.P_097)
+                    .environmentId("env-097")
                     .name("BauCuaMini")
                     .build();
 
@@ -165,6 +167,7 @@ class GameControllerTest {
                     .id("g1")
                     .brandCode(BrandCode.G2)
                     .productCode(ProductCode.P_097)
+                    .environmentId("env-097")
                     .name("BauCua")
                     .build();
 
@@ -172,20 +175,22 @@ class GameControllerTest {
                     .id("g2")
                     .brandCode(BrandCode.G2)
                     .productCode(ProductCode.P_097)
+                    .environmentId("env-097")
                     .name("BauCuaMini")
                     .build();
 
-            when(service.findByBrandAndProduct(BrandCode.G2, ProductCode.P_097))
+            when(service.findByBrandProductEnv(BrandCode.G2, ProductCode.P_097, "env-097"))
                     .thenReturn(List.of(game1, game2));
             when(mapper.toDTO(game1)).thenReturn(dto1);
             when(mapper.toDTO(game2)).thenReturn(dto2);
 
             // Act & Assert
-            mockMvc.perform(get("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097"))
+            mockMvc.perform(get("/api/v1/game/{brandCode}/{productCode}/{envId}", "G2", "P_097", "env-097"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.length()").value(2))
                     .andExpect(jsonPath("$[0].id").value("g1"))
                     .andExpect(jsonPath("$[0].name").value("BauCua"))
+                    .andExpect(jsonPath("$[0].environmentId").value("env-097"))
                     .andExpect(jsonPath("$[1].id").value("g2"))
                     .andExpect(jsonPath("$[1].name").value("BauCuaMini"));
         }
@@ -194,11 +199,11 @@ class GameControllerTest {
         @DisplayName("Should return 200 OK with empty list when no games found")
         void shouldReturnOkWithEmptyListWhenNoGames() throws Exception {
             // Arrange
-            when(service.findByBrandAndProduct(BrandCode.G4, ProductCode.P_118))
+            when(service.findByBrandProductEnv(BrandCode.G4, ProductCode.P_118, "env-118"))
                     .thenReturn(List.of());
 
             // Act & Assert
-            mockMvc.perform(get("/api/v1/game/{brandCode}/{productCode}", "G4", "P_118"))
+            mockMvc.perform(get("/api/v1/game/{brandCode}/{productCode}/{envId}", "G4", "P_118", "env-118"))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.length()").value(0));
         }
@@ -206,7 +211,7 @@ class GameControllerTest {
         @Test
         @DisplayName("Should return 500 Internal Server Error with sanitised body when service throws")
         void shouldReturnInternalServerErrorWhenServiceThrows() throws Exception {
-            when(service.findByBrandAndProduct(BrandCode.G2, ProductCode.P_097))
+            when(service.findByBrandProductEnv(BrandCode.G2, ProductCode.P_097, "env-097"))
                     .thenThrow(new RuntimeException("boom"));
 
             // Must carry the structured {type, msg} body so the advice is
@@ -214,7 +219,7 @@ class GameControllerTest {
             // would be empty). The 500 fallback intentionally sanitises the
             // msg — raw RuntimeException messages can carry Mongo hostnames,
             // bean wiring failures, etc.
-            mockMvc.perform(get("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097"))
+            mockMvc.perform(get("/api/v1/game/{brandCode}/{productCode}/{envId}", "G2", "P_097", "env-097"))
                     .andExpect(status().isInternalServerError())
                     .andExpect(jsonPath("$.type").value("Internal error"))
                     .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
@@ -225,16 +230,14 @@ class GameControllerTest {
     }
 
     @Nested
-    @DisplayName("POST /api/v1/game/filter/")
+    @DisplayName("POST /api/v1/game/{brandCode}/{productCode}/{envId}/filter")
     class FilterTests {
 
         @Test
-        @DisplayName("Should return 200 OK with filtered games")
+        @DisplayName("Should return 200 OK with filtered games and pass path scope to service")
         void shouldReturnOkWithFilteredGames() throws Exception {
-            // Arrange
+            // Arrange — brand/product/env come from the path, only gameType/name in body.
             GameFilter filter = GameFilter.builder()
-                    .brandCode(BrandCode.G2)
-                    .productCode(ProductCode.P_097)
                     .gameType(GameType.BETTING_MINI)
                     .name("Bau")
                     .build();
@@ -243,6 +246,7 @@ class GameControllerTest {
                     .id("g1")
                     .brandCode(BrandCode.G2)
                     .productCode(ProductCode.P_097)
+                    .environmentId("env-097")
                     .name("BauCua")
                     .gameType(GameType.BETTING_MINI)
                     .build();
@@ -251,21 +255,25 @@ class GameControllerTest {
                     .id("g1")
                     .brandCode(BrandCode.G2)
                     .productCode(ProductCode.P_097)
+                    .environmentId("env-097")
                     .name("BauCua")
                     .gameType(GameType.BETTING_MINI)
                     .build();
 
-            when(service.filter(any(GameFilter.class))).thenReturn(List.of(match));
+            when(service.filter(eq(BrandCode.G2), eq(ProductCode.P_097), eq("env-097"), any(GameFilter.class)))
+                    .thenReturn(List.of(match));
             when(mapper.toDTO(match)).thenReturn(dto);
 
             // Act & Assert
-            mockMvc.perform(post("/api/v1/game/filter/")
+            mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}/{envId}/filter", "G2", "P_097", "env-097")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(filter)))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.length()").value(1))
                     .andExpect(jsonPath("$[0].id").value("g1"))
                     .andExpect(jsonPath("$[0].name").value("BauCua"));
+
+            verify(service).filter(eq(BrandCode.G2), eq(ProductCode.P_097), eq("env-097"), any(GameFilter.class));
         }
 
         @Test
@@ -274,10 +282,11 @@ class GameControllerTest {
             // Arrange
             GameFilter filter = GameFilter.builder().name("Nonexistent").build();
 
-            when(service.filter(any(GameFilter.class))).thenReturn(List.of());
+            when(service.filter(eq(BrandCode.G2), eq(ProductCode.P_097), eq("env-097"), any(GameFilter.class)))
+                    .thenReturn(List.of());
 
             // Act & Assert
-            mockMvc.perform(post("/api/v1/game/filter/")
+            mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}/{envId}/filter", "G2", "P_097", "env-097")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(filter)))
                     .andExpect(status().isOk())
@@ -286,11 +295,11 @@ class GameControllerTest {
     }
 
     @Nested
-    @DisplayName("POST /api/v1/game/{brandCode}/{productCode}")
+    @DisplayName("POST /api/v1/game/{brandCode}/{productCode}/{envId}")
     class CreateTests {
 
         @Test
-        @DisplayName("Should return 200 OK with created game and set brand/product from path")
+        @DisplayName("Should return 200 OK with created game and set brand/product/env from path")
         void shouldReturnOkWithCreatedGame() throws Exception {
             // Arrange — body intentionally omits brandCode/productCode; controller must inject from path.
             // Use the create-time convenience shorthand: numberOfOptions=6 is expanded by
@@ -343,7 +352,7 @@ class GameControllerTest {
             when(mapper.toDTO(savedEntity)).thenReturn(outputDto);
 
             // Act & Assert
-            mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097")
+            mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}/{envId}", "G2", "P_097", "env-097")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(inputDto)))
                     .andExpect(status().isOk())
@@ -352,12 +361,13 @@ class GameControllerTest {
                     .andExpect(jsonPath("$.brandCode").value("G2"))
                     .andExpect(jsonPath("$.productCode.code").value("097"));
 
-            // Verify controller set brandCode/productCode from path before passing to service.save
+            // Verify controller set brandCode/productCode/environmentId from path before service.save
             ArgumentCaptor<Game> captor = ArgumentCaptor.forClass(Game.class);
             verify(service).save(captor.capture());
             Game passedToSave = captor.getValue();
             assertThat(passedToSave.getBrandCode()).isEqualTo(BrandCode.G2);
             assertThat(passedToSave.getProductCode()).isEqualTo(ProductCode.P_097);
+            assertThat(passedToSave.getEnvironmentId()).isEqualTo("env-097");
         }
 
         @Test
@@ -372,7 +382,7 @@ class GameControllerTest {
 
             // Act & Assert — body shape verifies the advice handler actually
             // fired (rather than Spring's bodyless 400 fallback).
-            mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097")
+            mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}/{envId}", "G2", "P_097", "env-097")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(inputDto)))
                     .andExpect(status().isBadRequest())
@@ -391,7 +401,7 @@ class GameControllerTest {
             when(service.save(any(Game.class))).thenThrow(new RuntimeException("DB down"));
 
             // Act & Assert
-            mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}", "G2", "P_097")
+            mockMvc.perform(post("/api/v1/game/{brandCode}/{productCode}/{envId}", "G2", "P_097", "env-097")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(inputDto)))
                     .andExpect(status().isInternalServerError());

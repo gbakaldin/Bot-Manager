@@ -62,13 +62,14 @@ public class GameController {
     }
 
     @Operation(
-            summary = "Get all games for a brand and product",
-            description = "Returns a list of all games available in the specified brand and product")
-    @GetMapping("/{brandCode}/{productCode}")
-    public ResponseEntity<List<GameDTO>> findByBrandAndProduct(
+            summary = "Get all games for a brand, product and environment",
+            description = "Returns a list of all games available in the specified brand, product and environment")
+    @GetMapping("/{brandCode}/{productCode}/{envId}")
+    public ResponseEntity<List<GameDTO>> findByBrandProductEnv(
             @PathVariable @Parameter(description = "Brand code", example = "G2") BrandCode brandCode,
-            @PathVariable @Parameter(description = "Product code", example = "P_097") ProductCode productCode) {
-        List<GameDTO> dtos = service.findByBrandAndProduct(brandCode, productCode).stream()
+            @PathVariable @Parameter(description = "Product code", example = "P_097") ProductCode productCode,
+            @PathVariable @Parameter(description = "Environment id", example = "097-staging") String envId) {
+        List<GameDTO> dtos = service.findByBrandProductEnv(brandCode, productCode, envId).stream()
                 .map(mapper::toDTO)
                 .toList();
         return ResponseEntity.ok(dtos);
@@ -76,12 +77,15 @@ public class GameController {
 
     @Operation(
             summary = "Filter games with given criteria",
-            description = "Returns a list of games matching the provided filter criteria")
-    @PostMapping("/filter/")
+            description = "Returns a list of games in the given brand/product/environment matching the filter body")
+    @PostMapping("/{brandCode}/{productCode}/{envId}/filter")
     public ResponseEntity<List<GameDTO>> filter(
+            @PathVariable @Parameter(description = "Brand code", example = "G2") BrandCode brandCode,
+            @PathVariable @Parameter(description = "Product code", example = "P_097") ProductCode productCode,
+            @PathVariable @Parameter(description = "Environment id", example = "097-staging") String envId,
             @Parameter(description = "Filter criteria for games")
             @RequestBody GameFilter filter) {
-        List<GameDTO> dtos = service.filter(filter).stream()
+        List<GameDTO> dtos = service.filter(brandCode, productCode, envId, filter).stream()
                 .map(mapper::toDTO)
                 .toList();
         return ResponseEntity.ok(dtos);
@@ -89,16 +93,18 @@ public class GameController {
 
     @Operation(
             summary = "Create a new game",
-            description = "Creates a new game configuration. Requires brandCode and productCode.")
-    @PostMapping("/{brandCode}/{productCode}")
+            description = "Creates a new game configuration. Brand, product and environment are taken from the path.")
+    @PostMapping("/{brandCode}/{productCode}/{envId}")
     public ResponseEntity<GameDTO> save(
             @PathVariable @Parameter(description = "Brand code", example = "G2") BrandCode brandCode,
             @PathVariable @Parameter(description = "Product code", example = "P_097") ProductCode productCode,
+            @PathVariable @Parameter(description = "Environment id", example = "097-staging") String envId,
             @Parameter(description = "Game configuration to create")
             @RequestBody GameDTO gameDTO) {
         Game game = mapper.toEntity(gameDTO);
         game.setBrandCode(brandCode);
         game.setProductCode(productCode);
+        game.setEnvironmentId(envId);
         Game saved = service.save(game);
         return ResponseEntity.ok(mapper.toDTO(saved));
     }

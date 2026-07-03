@@ -78,44 +78,66 @@ class GameServiceTest {
     }
 
     @Nested
-    @DisplayName("findByBrandAndProduct")
-    class FindByBrandAndProductTests {
+    @DisplayName("findByBrandProductEnv")
+    class FindByBrandProductEnvTests {
 
         @Test
-        @DisplayName("Should delegate to repository")
+        @DisplayName("Should delegate to env-scoped repository query")
         void shouldDelegateToRepository() {
             List<Game> games = List.of(Game.builder().id("1").build());
-            when(repository.findByBrandCodeAndProductCode(BrandCode.G2, ProductCode.P_097))
+            when(repository.findByBrandCodeAndProductCodeAndEnvironmentId(
+                    BrandCode.G2, ProductCode.P_097, "env-097"))
                     .thenReturn(games);
 
-            List<Game> result = service.findByBrandAndProduct(BrandCode.G2, ProductCode.P_097);
+            List<Game> result = service.findByBrandProductEnv(BrandCode.G2, ProductCode.P_097, "env-097");
 
             assertThat(result).hasSize(1);
-            verify(repository).findByBrandCodeAndProductCode(BrandCode.G2, ProductCode.P_097);
+            verify(repository).findByBrandCodeAndProductCodeAndEnvironmentId(
+                    BrandCode.G2, ProductCode.P_097, "env-097");
         }
     }
 
     @Nested
-    @DisplayName("filter")
+    @DisplayName("filter (env-scoped)")
     class FilterTests {
 
         @Test
-        @DisplayName("Should filter by brand code")
-        void shouldFilterByBrandCode() {
+        @DisplayName("Should always constrain brand, product and env (with null-env fallback)")
+        void shouldConstrainBrandProductEnv() {
             List<Game> expected = List.of(Game.builder().id("1").brandCode(BrandCode.G2).build());
             when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(expected);
 
-            GameFilter filter = GameFilter.builder().brandCode(BrandCode.G2).build();
-
-            List<Game> result = service.filter(filter);
+            List<Game> result = service.filter(
+                    BrandCode.G2, ProductCode.P_097, "env-097", GameFilter.builder().build());
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
             Query capturedQuery = queryCaptor.getValue();
-            String queryString = capturedQuery.toString();
-            assertThat(queryString).contains("brandCode");
-            // Strengthened: assert the exact value
             assertThat(capturedQuery.getQueryObject().get("brandCode")).isEqualTo(BrandCode.G2);
+            assertThat(capturedQuery.getQueryObject().get("productCode")).isEqualTo(ProductCode.P_097);
+            // env is an $or of {environmentId: env} and {environmentId: null} (the
+            // defensive null-env read-side fallback, AD-3).
+            String queryString = capturedQuery.toString();
+            assertThat(queryString).contains("environmentId");
+            assertThat(queryString).contains("$or");
+        }
+
+        @Test
+        @DisplayName("Null-env fallback: an unmigrated (null environmentId) game still matches")
+        void nullEnvFallbackMatches() {
+            // A game persisted before the backfill (environmentId absent) — the $or
+            // branch {environmentId: null} keeps it visible in the scoped filter.
+            Game unmigrated = Game.builder().id("legacy").brandCode(BrandCode.G2)
+                    .productCode(ProductCode.P_097).environmentId(null).build();
+            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(List.of(unmigrated));
+
+            List<Game> result = service.filter(
+                    BrandCode.G2, ProductCode.P_097, "env-097", GameFilter.builder().build());
+
+            assertThat(result).containsExactly(unmigrated);
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
+            // The env criterion must include a null branch so the fallback is real.
+            assertThat(queryCaptor.getValue().toString()).contains("environmentId").contains("$or");
         }
 
         @Test
@@ -126,14 +148,12 @@ class GameServiceTest {
 
             GameFilter filter = GameFilter.builder().gameType(GameType.BETTING_MINI).build();
 
-            List<Game> result = service.filter(filter);
+            List<Game> result = service.filter(BrandCode.G2, ProductCode.P_097, "env-097", filter);
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
             Query capturedQuery = queryCaptor.getValue();
-            String queryString = capturedQuery.toString();
-            assertThat(queryString).contains("gameType");
-            // Strengthened: assert the exact value
+            assertThat(capturedQuery.toString()).contains("gameType");
             assertThat(capturedQuery.getQueryObject().get("gameType")).isEqualTo(GameType.BETTING_MINI);
         }
 
@@ -145,14 +165,11 @@ class GameServiceTest {
 
             GameFilter filter = GameFilter.builder().name("taixiu").build();
 
-            List<Game> result = service.filter(filter);
+            List<Game> result = service.filter(BrandCode.G3, ProductCode.P_114, "env-114", filter);
 
             assertThat(result).hasSize(1);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
             Query capturedQuery = queryCaptor.getValue();
-            String queryString = capturedQuery.toString();
-            assertThat(queryString).contains("name");
-            // Strengthened: assert the value is a case-insensitive Pattern containing the quoted input
             Object nameCriterion = capturedQuery.getQueryObject().get("name");
             assertThat(nameCriterion).isInstanceOf(Pattern.class);
             Pattern namePattern = (Pattern) nameCriterion;
@@ -161,45 +178,25 @@ class GameServiceTest {
         }
 
         @Test
-        @DisplayName("Should apply multiple filter criteria")
-        void shouldApplyMultipleCriteria() {
-            List<Game> expected = List.of(
-                    Game.builder().id("1").brandCode(BrandCode.G2).productCode(ProductCode.P_097).build()
-            );
-            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(expected);
-
-            GameFilter filter = GameFilter.builder()
-                    .brandCode(BrandCode.G2)
-                    .productCode(ProductCode.P_097)
-                    .build();
-
-            List<Game> result = service.filter(filter);
-
-            assertThat(result).hasSize(1);
-            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
-            Query capturedQuery = queryCaptor.getValue();
-            String queryString = capturedQuery.toString();
-            assertThat(queryString).contains("brandCode");
-            assertThat(queryString).contains("productCode");
-            // Strengthened: assert exact values
-            assertThat(capturedQuery.getQueryObject().get("brandCode")).isEqualTo(BrandCode.G2);
-            assertThat(capturedQuery.getQueryObject().get("productCode")).isEqualTo(ProductCode.P_097);
-        }
-
-        @Test
-        @DisplayName("Should query with no criteria when filter is empty")
-        void shouldReturnAllWhenNoCriteria() {
+        @DisplayName("Empty filter body still scopes to brand/product/env only")
+        void emptyBodyScopesToPathOnly() {
             List<Game> all = List.of(
                     Game.builder().id("1").build(),
                     Game.builder().id("2").build()
             );
             when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(all);
 
-            List<Game> result = service.filter(GameFilter.builder().build());
+            List<Game> result = service.filter(
+                    BrandCode.G4, ProductCode.P_118, "env-118", GameFilter.builder().build());
 
             assertThat(result).hasSize(2);
             verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
-            assertThat(queryCaptor.getValue().getQueryObject()).isEmpty();
+            Query capturedQuery = queryCaptor.getValue();
+            // No gameType / name narrowing, but brand/product/env are always present.
+            assertThat(capturedQuery.getQueryObject().get("brandCode")).isEqualTo(BrandCode.G4);
+            assertThat(capturedQuery.getQueryObject().get("productCode")).isEqualTo(ProductCode.P_118);
+            assertThat(capturedQuery.getQueryObject().get("gameType")).isNull();
+            assertThat(capturedQuery.getQueryObject().get("name")).isNull();
         }
     }
 
@@ -238,6 +235,32 @@ class GameServiceTest {
             Game result = service.save(game);
 
             assertThat(result.getId()).isEqualTo("existing-id");
+        }
+
+        @Test
+        @DisplayName("Should stamp createdAt and updatedAt when createdAt is null (AD-14/AD-16)")
+        void shouldStampTimestampsOnCreate() {
+            Game game = Game.builder().id("g").name("New Game").build();
+            when(repository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Game result = service.save(game);
+
+            assertThat(result.getCreatedAt()).isNotNull();
+            assertThat(result.getUpdatedAt()).isNotNull();
+            assertThat(result.getUpdatedAt()).isEqualTo(result.getCreatedAt());
+        }
+
+        @Test
+        @DisplayName("Should preserve existing createdAt and re-stamp updatedAt on re-save")
+        void shouldPreserveCreatedAtAndRestampUpdatedAt() {
+            java.time.Instant created = java.time.Instant.parse("2020-01-01T00:00:00Z");
+            Game game = Game.builder().id("g").createdAt(created).build();
+            when(repository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Game result = service.save(game);
+
+            assertThat(result.getCreatedAt()).isEqualTo(created);
+            assertThat(result.getUpdatedAt()).isNotNull().isAfter(created);
         }
     }
 

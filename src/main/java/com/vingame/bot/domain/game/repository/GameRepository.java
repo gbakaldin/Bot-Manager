@@ -12,5 +12,8 @@ public interface GameRepository extends MongoRepository<Game, String> {
 
     List<Game> findByBrandCodeAndProductCode(BrandCode brandCode, ProductCode productCode);
 
+    List<Game> findByBrandCodeAndProductCodeAndEnvironmentId(
+            BrandCode brandCode, ProductCode productCode, String environmentId);
+
     List<Game> findByGameType(GameType gameType);
 }

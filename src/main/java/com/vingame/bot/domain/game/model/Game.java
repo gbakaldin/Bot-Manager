@@ -12,6 +12,7 @@ import lombok.Setter;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.mapping.Document;
 
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +30,38 @@ public class Game {
     private String id;
     private BrandCode brandCode;
     private ProductCode productCode;
+
+    /**
+     * Environment this game belongs to (the {@code _id} of an
+     * {@link com.vingame.bot.domain.environment.model.Environment}). The same
+     * logical game in two environments is two separate {@link Game} documents,
+     * each with its own {@code _id} and {@code environmentId}.
+     *
+     * <p>Nullable in the entity so pre-migration docs still deserialize during
+     * the deploy window. The BOTGROUP_GAME_MANAGEMENT Phase 1 backfill script
+     * (Releaser-run) sets it on every existing game via the deterministic
+     * {@code (brandCode, productCode) -> environment._id} mapping. Read-side has
+     * a defensive fallback treating a null value as matching any env — it should
+     * never fire post-backfill (AD-1/AD-3).
+     */
+    private String environmentId;
+
+    /**
+     * Instant this game was first persisted. Stamped by
+     * {@link com.vingame.bot.domain.game.service.GameService#save(Game)} when
+     * null; never overwritten on update. Existing docs are backfilled to a fixed
+     * timestamp by the Phase 1 migration script so nothing sorts as N/A on
+     * {@code CREATED_TIME} (AD-14).
+     */
+    private Instant createdAt;
+
+    /**
+     * Instant of the most recent persist. Stamped by
+     * {@link com.vingame.bot.domain.game.service.GameService#save(Game)} on every
+     * save (create and update). Backfilled to the same fixed timestamp as
+     * {@link #createdAt} by the Phase 1 migration script (AD-16).
+     */
+    private Instant updatedAt;
 
     private String name;
     private String description;
