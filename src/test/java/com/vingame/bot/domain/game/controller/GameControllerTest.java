@@ -11,6 +11,8 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameFilter;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
+import com.vingame.bot.domain.game.sort.GameSortRow;
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -55,6 +57,9 @@ class GameControllerTest {
 
     @MockitoBean
     private GameMapper mapper;
+
+    @MockitoBean
+    private BotGroupBehaviorService behaviorService;
 
     @Nested
     @DisplayName("GET /api/v1/game/{id}")
@@ -260,8 +265,8 @@ class GameControllerTest {
                     .gameType(GameType.BETTING_MINI)
                     .build();
 
-            when(service.filter(eq(BrandCode.G2), eq(ProductCode.P_097), eq("env-097"), any(GameFilter.class)))
-                    .thenReturn(List.of(match));
+            when(behaviorService.filterGamesSorted(eq(BrandCode.G2), eq(ProductCode.P_097), eq("env-097"), any(GameFilter.class)))
+                    .thenReturn(List.of(new GameSortRow(match, 1, 0, 0, 0)));
             when(mapper.toDTO(match)).thenReturn(dto);
 
             // Act & Assert
@@ -273,7 +278,7 @@ class GameControllerTest {
                     .andExpect(jsonPath("$[0].id").value("g1"))
                     .andExpect(jsonPath("$[0].name").value("BauCua"));
 
-            verify(service).filter(eq(BrandCode.G2), eq(ProductCode.P_097), eq("env-097"), any(GameFilter.class));
+            verify(behaviorService).filterGamesSorted(eq(BrandCode.G2), eq(ProductCode.P_097), eq("env-097"), any(GameFilter.class));
         }
 
         @Test
@@ -282,7 +287,7 @@ class GameControllerTest {
             // Arrange
             GameFilter filter = GameFilter.builder().name("Nonexistent").build();
 
-            when(service.filter(eq(BrandCode.G2), eq(ProductCode.P_097), eq("env-097"), any(GameFilter.class)))
+            when(behaviorService.filterGamesSorted(eq(BrandCode.G2), eq(ProductCode.P_097), eq("env-097"), any(GameFilter.class)))
                     .thenReturn(List.of());
 
             // Act & Assert
