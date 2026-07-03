@@ -308,3 +308,105 @@ done.
 ## Amendments to the plan
 
 None.
+
+---
+
+# Compliance — BOTGROUP_GAME_MANAGEMENT — Phase 4
+
+Branch: `feat/botgroup-game-management`
+Plan reviewed: `docs/plans/BOTGROUP_GAME_MANAGEMENT.md` (at commit 8fafc65)
+Diff reviewed: `git diff d0d667a..HEAD` (commits 3aad523, b317b90, 308c816 — exactly Phase 4)
+
+Scope of this verdict: **Phase 4 only** (BotGroup sorting + `createdAt`/`updatedAt`).
+Phases 5–7 are not yet on the branch and are out of scope for this review.
+
+## Verdict
+
+PASS
+
+## Phase-by-phase
+
+### Phase 4 — BotGroup sorting (+ `createdAt`/`updatedAt`)
+Status: implemented
+
+Every Phase 4 plan bullet is delivered and consistent with AD-11, AD-12, AD-14,
+AD-16, and the Implementation Notes.
+
+- **Timestamps on BotGroup (AD-14/AD-16).** `BotGroup.createdAt` and
+  `BotGroup.updatedAt` (`Instant`) added
+  (`BotGroup.java`). `BotGroupService.save` stamps `createdAt` once (only when
+  null) and `updatedAt` on every save — matches AD-14 ("set on first save when
+  null") and AD-16 ("stamped on every save"). Migration
+  `scripts/migrations/002_botgroup_timestamps.js` backfills both to a fixed
+  `ISODate` (`2026-07-03`), mirroring migration 001, Releaser-run, idempotent,
+  with post-checks — matches the Phase 4 migration bullet and AD-14/AD-16.
+- **`update()` → `save()` reroute.** `BotGroupService.update` now returns
+  `save(existing)` instead of `repository.save(existing)`, so the `updatedAt`
+  stamp is not bypassed on the PATCH path. This directly honors Implementation
+  Note 9 ("Ensure every persistence path that mutates a group/game routes through
+  the service `save`"). Test `updatePreservesCreatedAtRestampsUpdated` pins that
+  `createdAt` is preserved and `updatedAt` is re-stamped.
+- **`BotSortKey` enum — all 12 keys, no ENVIRONMENT.** STATUS, BOT_COUNT,
+  CREATED_TIME, NAME, BET_AMOUNT, BALANCE, ACTIVE_BOTS, UPDATED_TIME, GAME_TYPE,
+  AVG_WINNING, ACTIVE_TIME, MAX_PER_ROUND — exactly the plan's list, no
+  ENVIRONMENT key (asserted absent by test `noEnvironmentKey`). Extractors match
+  the plan's mapping: BET_AMOUNT → configured `maxBet`, MAX_PER_ROUND →
+  `maxTotalBetPerRound`, BOT_COUNT → configured `botCount`, GAME_TYPE → resolved
+  game's `gameType` name, UPDATED_TIME → `updatedAt`, CREATED_TIME → `createdAt`.
+  Runtime keys read the Phase 3 `BotGroupStatsDTO`.
+- **`equalsIgnoreCase` resolution / default / unknown → 400 (AD-11).**
+  `BotSortKey.resolve` trims + `equalsIgnoreCase`; null/blank → `CREATED_TIME`;
+  unknown → `BadRequestException` (→ 400). `SortDirection.resolve` is
+  `equalsIgnoreCase` against asc/desc; null/blank/unknown → `DESC` (lenient, per
+  AD-11 — only unknown *keys* are 400). All pinned by tests.
+- **Load → enrich → in-memory sort (AD-11).** `BotGroupBehaviorService.filterSorted`
+  loads via `BotGroupService.filter`, enriches each group into a `BotGroupSortRow`
+  (persisted group + Phase 3 stats + `actualStatus` + resolved gameType looked up
+  once per distinct gameId), then sorts in-memory via `BotGroupSorter`. No
+  Mongo-side aggregation, no persisted derived sort fields. Controller reroutes the
+  filter endpoint through `filterSorted`.
+- **N/A deterministic ordering (AD-12).** `BotGroupSorter.compareNaLast` partitions
+  present-vs-null, always appends N/A to the bottom regardless of direction, then
+  `thenComparing` NAME asc, then id. Tests cover N/A-to-bottom for both dirs on
+  BALANCE and GAME_TYPE, the N/A block ordered by NAME asc, and secondary
+  tie-break by NAME then id independent of direction.
+- **STATUS N/A semantics.** STATUS extracts `actualStatus` only when
+  `activeTimeSeconds != null` (i.e. a runtime exists), so a stopped group's status
+  sorts to the bottom — a reasonable realization of AD-12's "STATUS is a
+  runtime-only key, N/A when inactive."
+
+Full build + suite: `mvn clean test` (JDK 21) — **BUILD SUCCESS**,
+`Tests run: 1171, Failures: 0, Errors: 0, Skipped: 0` (up from 1140 at Phase 3).
+The stacktrace visible in build logs is a `RestExceptionHandler`-logged handled
+exception from an unrelated controller test, not a failure.
+
+## The flagged item — BotGroup timestamps landing in Phase 4
+
+Confirmed **consistent with the plan as written**, not drift. AD-14 and AD-16
+both state the fields go on *both* entities, and AD-14 explicitly splits the
+migration into "the Phase 1 (Game) and Phase 4 (BotGroup) migration scripts."
+The Phase 4 plan section is literally titled "BotGroup sorting (+
+`createdAt`/`updatedAt`)" with the BotGroup timestamp addition as its first
+bullet. Phase 1 correctly added the fields to Game only. So the plan **already
+records** that the BotGroup timestamp addition lands in Phase 4 — no amendment is
+needed and none is issued. The dev implemented exactly what AD-14/AD-16 + the
+Phase 4 bullet specify.
+
+## Drift
+
+None. Diff faithfully implements Phase 4 as specified.
+
+## Out-of-scope changes
+
+None. The diff touches only the Phase 4 surface: `BotGroup` (timestamps),
+`BotGroupService` (stamping + `update`→`save` reroute), `BotGroupFilter`
+(`sortBy`/`sortDir`), the new `sort/` package (`BotSortKey`, `SortDirection`,
+`BotGroupSortRow`, `BotGroupSorter`), `BotGroupBehaviorService` (`filterSorted`
++ `resolveGameTypes`), `BotGroupController` (reroute), migration 002, and the
+associated tests. No Phase 5–7 code leaked in early. The `update`→`save` reroute,
+while touching a Phase 2/3-era method, is squarely in service of AD-16 (Phase 4)
+and is called out in Implementation Note 9 — not out-of-scope.
+
+## Amendments to the plan
+
+None.

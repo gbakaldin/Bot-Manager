@@ -235,3 +235,95 @@ None.
   activeCount` and `winningSum / activeCount` drop the fractional part. For a whole-currency
   display average this is fine and intentional; flagging only so the UI author is not surprised the
   mean is floored rather than rounded.
+
+---
+
+# Code Review — BOTGROUP_GAME_MANAGEMENT (Phase 4)
+
+Branch: feat/botgroup-game-management
+Reviewed diff: `git diff d0d667a..HEAD`
+
+Scope: Phase 4 only — BotGroup sorting. New `sort/` package (`BotGroupSorter`,
+`BotSortKey`, `SortDirection`, `BotGroupSortRow`), `filterSorted` wiring in
+`BotGroupBehaviorService`, `createdAt`/`updatedAt` on `BotGroup`, the
+`update()`→`save()` reroute in `BotGroupService`, and the timestamp migration. Test
+coverage is QA's concern; plan compliance is Architect-2's — both out of scope here.
+
+## Verdict
+
+PASS
+
+## Findings
+
+### [smell] STATUS "not running" is inferred from `activeTimeSeconds` rather than the runtime directly
+`src/main/java/com/vingame/bot/domain/botgroup/sort/BotSortKey.java:38`
+
+`STATUS` extracts `row.stats().getActiveTimeSeconds() != null ? row.actualStatus() : null`,
+i.e. it decides whether the group counts as running by reading a *different* runtime
+key's null-ness. For a genuinely inactive group this is correct — `computeStats` returns
+an all-null DTO, so `activeTimeSeconds == null` and STATUS resolves to N/A, matching the
+other runtime-only keys.
+
+The brittleness is the transient window where a runtime exists but `startedAt` has not yet
+been stamped: `computeStats` returns `activeTimeSeconds == null` while still setting
+`activeBots` to a present (possibly `0`) value. In that window STATUS/ACTIVE_TIME/BALANCE
+read N/A but ACTIVE_BOTS reads present — the "runtime-only keys move together" invariant the
+Javadoc implies is briefly violated. It is not a correctness bug (the window is narrow and
+`startedAt` is set in `BotGroupRuntime.start`), and it never affects a truly inactive group,
+so this is advisory. A more direct derivation (`actualStatus != STOPPED`, or gating on the
+runtime's presence) would remove the cross-field coupling. If the current shape is kept, it
+is worth a one-line comment that STATUS deliberately piggybacks on `activeTimeSeconds` so a
+future change to that field's semantics doesn't silently move STATUS.
+
+## Notes
+
+- **Comparator is a valid total order — no contract-violation risk.** `compareNaLast` is
+  antisymmetric and transitive: nulls (N/A) always compare after present values regardless of
+  direction (`a==null → +1`, `b==null → −1`), present values compare by `compareTo` negated for
+  DESC, and the equal/both-null case (`0`) falls through to the `NAME` (nullsLast) then `id`
+  (nullsLast) tie-breaks. The N/A block forms one equivalence class parked at the bottom and
+  broken by the same secondary keys, so `sorted()` cannot throw
+  `IllegalArgumentException: Comparison method violates its general contract`. The DESC negation
+  `-cmp` is also safe from `Integer.MIN_VALUE` overflow: every key type in the catalog
+  (`Instant`, `Integer`, `Long`, `String`, enum) returns bounded `compareTo` values (−1/0/1 for
+  the numeric/temporal ones; char/length-bounded for `String`), none of which is `MIN_VALUE`.
+
+- **N/A-to-bottom holds for inactive groups across all runtime-only keys.** All
+  `BotGroupStatsDTO` fields are boxed (`Long`/`Integer`), and a not-running group yields
+  `builder().build()` (every field null), so BALANCE / ACTIVE_BOTS / ACTIVE_TIME / AVG_WINNING
+  each extract null → N/A. A *running* group with zero active bots correctly reads `activeBots=0`
+  (present, a real zero) while the averages stay null — the intended AD-10 distinction is
+  preserved by the sort.
+
+- **`filterSorted` enriches once per group and once per distinct gameId — no N+1, no drift.**
+  `resolveGameTypes` memoizes `gameService.findById` in a `HashMap` keyed by gameId with a
+  `containsKey` guard, so N groups sharing a game hit Mongo once. `computeStats(group.getId())`
+  is called exactly once per group and the resulting `BotGroupStatsDTO` instance is carried on
+  the row; the controller now embeds `row.stats()` instead of recomputing, so the values used
+  for sorting and the values returned in the DTO are guaranteed identical (the prior double-call
+  drift is gone). The sort is fully in-memory (`rows.stream().sorted(...).toList()`) — no
+  Mongo-side aggregation and no persisted derived fields.
+
+- **`resolveGameTypes` catch is correctly narrow.** It catches only `ResourceNotFoundException`
+  (game deleted out from under the group) and maps to null → GAME_TYPE N/A; it does not broaden
+  to `Exception` or swallow unrelated failures.
+
+- **`BotSortKey.resolve` is genuinely case-insensitive with unknown→400.** `equalsIgnoreCase`
+  on the trimmed input, null/blank → `CREATED_TIME`, unrecognised → `BadRequestException`
+  (HTTP 400 via `RestExceptionHandler`), and the message enumerates valid keys.
+  `SortDirection.resolve` is deliberately lenient (unknown → DESC) per AD-11 — only an unknown
+  *key* is a 400, matching the documented contract.
+
+- **`update()`→`save()` reroute preserves update semantics.** `existing` always has a non-null
+  id, so `save(existing, false)` takes the `isNewGroup == false` branch: no registration, no
+  `configValidation.validate` re-run (validation already ran in `update()` on the merged entity),
+  just the new `createdAt`-if-null / `updatedAt`-always stamping plus the persist. The only
+  behavioural delta versus the old `repository.save(existing)` is the timestamp stamp and an added
+  DEBUG "Updating existing bot group" log line — both intended. `createdAt` is write-once
+  (guarded by null-check) so an update cannot clobber the original creation instant.
+
+- **Timestamps are runtime-only derived state persisted on write, not recomputed on read** —
+  consistent with the "no persisted derived fields for sort" intent, since createdAt/updatedAt
+  are first-class group metadata, not aggregates. Existing docs are backfilled by
+  `scripts/migrations/002_botgroup_timestamps.js` so nothing sorts as N/A on CREATED_TIME/
+  UPDATED_TIME after deploy (migration content itself is Releaser's concern).
