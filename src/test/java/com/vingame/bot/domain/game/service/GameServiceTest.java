@@ -82,18 +82,48 @@ class GameServiceTest {
     class FindByBrandProductEnvTests {
 
         @Test
-        @DisplayName("Should delegate to env-scoped repository query")
-        void shouldDelegateToRepository() {
+        @DisplayName("Should scope by brand, product and env (with the same null-env fallback as filter)")
+        void shouldScopeBrandProductEnv() {
             List<Game> games = List.of(Game.builder().id("1").build());
-            when(repository.findByBrandCodeAndProductCodeAndEnvironmentId(
-                    BrandCode.G2, ProductCode.P_097, "env-097"))
-                    .thenReturn(games);
+            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(games);
 
             List<Game> result = service.findByBrandProductEnv(BrandCode.G2, ProductCode.P_097, "env-097");
 
             assertThat(result).hasSize(1);
-            verify(repository).findByBrandCodeAndProductCodeAndEnvironmentId(
-                    BrandCode.G2, ProductCode.P_097, "env-097");
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
+            Query capturedQuery = queryCaptor.getValue();
+            assertThat(capturedQuery.getQueryObject().get("brandCode")).isEqualTo(BrandCode.G2);
+            assertThat(capturedQuery.getQueryObject().get("productCode")).isEqualTo(ProductCode.P_097);
+            // Same defensive null-env $or fallback that filter carries (AD-3) — the
+            // two read paths must not drift.
+            Object orClause = capturedQuery.getQueryObject().get("$or");
+            assertThat(orClause).isInstanceOf(List.class);
+            @SuppressWarnings("unchecked")
+            List<org.bson.Document> branches = (List<org.bson.Document>) orClause;
+            assertThat(branches).hasSize(2);
+            assertThat(branches).anySatisfy(b ->
+                    assertThat(b.get("environmentId")).isEqualTo("env-097"));
+            assertThat(branches).anySatisfy(b -> {
+                assertThat(b.containsKey("environmentId")).isTrue();
+                assertThat(b.get("environmentId")).isNull();
+            });
+        }
+
+        @Test
+        @DisplayName("List route returns unmigrated (null-env) games for a scope during the deploy window")
+        void listRouteReturnsNullEnvGames() {
+            // Before the Releaser runs the backfill, every game still has
+            // environmentId == null. The list route must surface them (same as
+            // filter) rather than returning an empty array (AD-3).
+            Game unmigrated = Game.builder().id("legacy").brandCode(BrandCode.G2)
+                    .productCode(ProductCode.P_097).environmentId(null).build();
+            when(mongoTemplate.find(any(Query.class), eq(Game.class))).thenReturn(List.of(unmigrated));
+
+            List<Game> result = service.findByBrandProductEnv(BrandCode.G2, ProductCode.P_097, "env-097");
+
+            assertThat(result).containsExactly(unmigrated);
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Game.class));
+            assertThat(queryCaptor.getValue().toString()).contains("environmentId").contains("$or");
         }
     }
 

@@ -40,9 +40,14 @@ public class GameService {
      * List the games for a {@code (brandCode, productCode, environmentId)} scope.
      * Env-scoped per BOTGROUP_GAME_MANAGEMENT AD-4 — the same logical game in two
      * environments is two distinct {@link Game} documents.
+     * <p>
+     * Shares the same env criteria as {@link #filter} — including the defensive
+     * null-env read-side fallback (AD-3) — so the two read paths cannot drift: an
+     * unmigrated (null-env) doc stays visible on the list route during the deploy
+     * window exactly as it does on the filter route.
      */
     public List<Game> findByBrandProductEnv(BrandCode brandCode, ProductCode productCode, String environmentId) {
-        return repository.findByBrandCodeAndProductCodeAndEnvironmentId(brandCode, productCode, environmentId);
+        return mongoTemplate.find(scopeQuery(brandCode, productCode, environmentId), Game.class);
     }
 
     /**
@@ -54,6 +59,24 @@ public class GameService {
      * never fire on backfilled data.
      */
     public List<Game> filter(BrandCode brandCode, ProductCode productCode, String environmentId, GameFilter filter) {
+        Query query = scopeQuery(brandCode, productCode, environmentId);
+        if (filter.getGameType() != null) {
+            query.addCriteria(Criteria.where("gameType").is(filter.getGameType()));
+        }
+        if (filter.getName() != null) {
+            query.addCriteria(Criteria.where("name").regex(Pattern.quote(filter.getName()), "i"));
+        }
+        return mongoTemplate.find(query, Game.class);
+    }
+
+    /**
+     * Build the shared {@code (brandCode, productCode, environmentId)} scope query
+     * used by both env-scoped read paths ({@link #findByBrandProductEnv} and
+     * {@link #filter}). Brand and product are always constrained; the env criteria
+     * carries the defensive null-env fallback (AD-3) so a game whose
+     * {@code environmentId} is null/absent matches any env during the deploy window.
+     */
+    private Query scopeQuery(BrandCode brandCode, ProductCode productCode, String environmentId) {
         Query query = new Query();
         query.addCriteria(Criteria.where("brandCode").is(brandCode));
         query.addCriteria(Criteria.where("productCode").is(productCode));
@@ -62,13 +85,7 @@ public class GameService {
         query.addCriteria(new Criteria().orOperator(
                 Criteria.where("environmentId").is(environmentId),
                 Criteria.where("environmentId").is(null)));
-        if (filter.getGameType() != null) {
-            query.addCriteria(Criteria.where("gameType").is(filter.getGameType()));
-        }
-        if (filter.getName() != null) {
-            query.addCriteria(Criteria.where("name").regex(Pattern.quote(filter.getName()), "i"));
-        }
-        return mongoTemplate.find(query, Game.class);
+        return query;
     }
 
     public Game save(Game game) {

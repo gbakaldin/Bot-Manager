@@ -252,12 +252,22 @@ fallback.
   `environmentId`/`createdAt` (path + create are authoritative).
 - `GameFilter.java`: remove `brandCode`/`productCode`; keep `gameType`, `name`.
   (sortBy/sortDir added in Phase 5.)
-- `GameRepository.java`: add `findByBrandCodeAndProductCodeAndEnvironmentId(...)`.
+- `GameRepository.java`: no env-scoped read method — a derived query cannot express
+  the null-env `$or` fallback, so **both** env-scoped read paths build the scope
+  `Query` in `GameService` instead (see below). (Corrected: an earlier draft added a
+  derived `findByBrandCodeAndProductCodeAndEnvironmentId`, which does a strict
+  `environmentId == envId` match with no fallback — that would have returned an empty
+  list on the list route for every scope during the deploy window while `filter`
+  returned the games. Fixed so both paths share one criteria builder.)
 - `GameService.java`:
-  - `findByBrandProductEnv(brand, product, envId)`.
-  - `filter(brand, product, envId, filter)` — add env/brand/product criteria; keep
-    the null-env **read-side fallback** (a game with null `environmentId` matches
-    any env). Defensive-only per AD-3 — never expected to fire post-backfill.
+  - `findByBrandProductEnv(brand, product, envId)` and
+    `filter(brand, product, envId, filter)` **share one private env-criteria helper**
+    (`scopeQuery`) so their env semantics cannot drift. Brand and product are always
+    constrained; the env criterion carries the null-env **read-side fallback** (a game
+    with null/absent `environmentId` matches any env) on **both** paths — so an
+    unmigrated doc stays visible on the list route exactly as it does on the filter
+    route during the deploy window. Defensive-only per AD-3 — never expected to fire
+    post-backfill.
   - `save`: set `createdAt = Instant.now()` when null; set `updatedAt = Instant.now()`
     on every save (AD-14, AD-16).
 - `GameController.java`: rework list/create/filter to the AD-4 routes; set
