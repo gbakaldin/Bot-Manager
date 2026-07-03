@@ -231,9 +231,15 @@ public class SlotMachineBot extends Bot {
             lastRoundWinnings = winnings;
             if (winnings > 0) {
                 expectedCurrentBalance.addAndGet(winnings);
+                // Mirror bot_winnings_total value-for-value (BOTGROUP_GAME_MANAGEMENT
+                // AD-8): same winnings>0 guard as the metric, not gated on metrics.
+                cumulativeWinnings.addAndGet(winnings);
                 if (metrics != null) metrics.incBotWinnings(winnings);
             }
         }
+        // One completed spin observed (BOTGROUP_GAME_MANAGEMENT AD-9). For slot groups
+        // "rounds" means completed spins — there is no StartGame/EndGame round boundary.
+        roundsObserved.incrementAndGet();
         if (metrics != null && msg instanceof HasBetTotals bt) {
             // Bet-amount metric must reflect TOTAL stake = per-line b * numLines,
             // matching the gate and the debit (AD-13). betAmountFor() returns only

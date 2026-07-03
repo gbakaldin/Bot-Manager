@@ -103,6 +103,25 @@ public abstract class Bot {
     @Getter
     protected volatile long lastRoundWinnings = 0;
 
+    // In-memory cumulative winnings, mirroring the {@code bot_winnings_total}
+    // Prometheus counter value-for-value (BOTGROUP_GAME_MANAGEMENT AD-8). Incremented
+    // at the exact site that calls {@code metrics.incBotWinnings(w)} in the endgame /
+    // spin-result path, guarded on {@code w > 0} — but, unlike the metric, NOT gated on
+    // {@code metrics != null}: it backs the group "average winning" stat independently
+    // of whether Prometheus is wired. Read only via the group stats enrichment (never
+    // from Prometheus in the sort/enrich path, AD-4).
+    @Getter
+    protected final AtomicLong cumulativeWinnings = new AtomicLong(0);
+
+    // Per-bot count of completed rounds observed since this bot was constructed
+    // (BOTGROUP_GAME_MANAGEMENT AD-9). Incremented once per completed round —
+    // {@code onEndGame} for betting/Tai Xiu, spin-result for slots. The group
+    // "rounds since last restart" stat is the MAX of this counter across the
+    // group's bots (dedup-free and robust to server-side subscriber pruning).
+    // Resets naturally because bots are freshly built on every start/restart.
+    @Getter
+    protected final AtomicLong roundsObserved = new AtomicLong(0);
+
     @Getter
     private volatile BotStatus status = BotStatus.AUTHENTICATING;
 

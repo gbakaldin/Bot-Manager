@@ -434,6 +434,9 @@ public class BettingMiniGameBot extends Bot {
             long w = hw.winningsFor(getUserName());
             payout = w;
             lastRoundWinnings = w;
+            // Mirror bot_winnings_total value-for-value (BOTGROUP_GAME_MANAGEMENT AD-8):
+            // same w>0 guard as the metric, but not gated on metrics != null.
+            if (w > 0) cumulativeWinnings.addAndGet(w);
             if (metrics != null && w > 0) metrics.incBotWinnings(w);
         }
         // Refund-aware balance credit (AD-11). Default is 0 (BettingMini
@@ -475,6 +478,10 @@ public class BettingMiniGameBot extends Bot {
         // so stateful strategies (Martingale, trend-followers) can update
         // their interpretive state. RandomBehaviorStrategy is a no-op.
         // memory and strategy are both non-null post-initializeSubclass.
+        // One completed round observed (BOTGROUP_GAME_MANAGEMENT AD-9). The group
+        // "rounds since last restart" stat is the max of this counter across bots.
+        roundsObserved.incrementAndGet();
+
         Optional<Integer> winningOption = Optional.empty();
         RoundResult roundResult = memory.completeRound(endGameSessionId(msg), winningOption, payout);
         memory.recordGlobalWin(winningOption);
