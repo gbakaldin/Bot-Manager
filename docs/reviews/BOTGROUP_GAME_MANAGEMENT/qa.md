@@ -265,3 +265,97 @@ covering the load-bearing Phase-3 logic, which had no dedicated coverage:
 ## Failures
 
 None.
+
+---
+
+# QA — BOTGROUP_GAME_MANAGEMENT (Phase 4: BotGroup sorting)
+
+**Verdict:** PASS
+**Build:** `mvn clean install` → 1184 tests, 0 failures, 0 errors (13 new)
+
+## Scope reviewed
+
+`git diff d0d667a..HEAD` — Phase 4 only:
+- `BotGroup` gains `createdAt` / `updatedAt` (`Instant`); `BotGroupService.save`
+  stamps `createdAt` once and `updatedAt` on every save, and `update` now routes
+  its persist through `save` so a PATCH re-stamps `updatedAt` (AD-14/AD-16).
+- New `sort` package: `BotSortKey` (12-key catalog + `equalsIgnoreCase` resolve,
+  null/blank→`CREATED_TIME`, unknown→`BadRequestException`/400), `SortDirection`
+  (lenient resolve, default `DESC`), `BotGroupSortRow` (enriched row), and
+  `BotGroupSorter` (AD-12 comparator: present values by direction, N/A pinned to
+  the bottom regardless of direction, tie-break NAME asc then id asc).
+- `BotGroupBehaviorService.filterSorted(envId, filter)` — load (via
+  `BotGroupService.filter`) → enrich (Phase-3 stats + actualStatus + gameType
+  resolved once per distinct gameId) → in-memory sort.
+- `BotGroupFilter` gains `sortBy` / `sortDir`; the controller filter delegates to
+  `filterSorted` and embeds the pre-computed stats.
+- `scripts/migrations/002_botgroup_timestamps.js` (Releaser-run, not executed here).
+
+## Tests added / updated
+
+Dev delivered a strong first pass (`BotGroupSorterTest` per-key + resolution +
+tie-break, `BotGroupBehaviorServiceFilterSortedTest` wiring, `BotGroupServiceTest`
+timestamp stamping, `BotGroupControllerTest` filter/route/400). QA closed the
+load-bearing gaps the task called out — several keys were only exercised in one
+direction, and N/A-to-bottom was proven only for BALANCE and GAME_TYPE:
+
+- `src/test/java/com/vingame/bot/domain/botgroup/sort/BotGroupSorterExhaustiveTest.java` (12 — new file)
+  - One parameterized case per `BotSortKey` (all 12: STATUS, BOT_COUNT,
+    CREATED_TIME, NAME, BET_AMOUNT, BALANCE, ACTIVE_BOTS, UPDATED_TIME, GAME_TYPE,
+    AVG_WINNING, ACTIVE_TIME, MAX_PER_ROUND). Each case asserts the full asc AND
+    desc order, and — for the runtime-only / resolved keys — that the N/A
+    (null-extracted) row is the tail in BOTH directions. Present rows are named so
+    that NAME order is the reverse of value order, proving the primary key (not the
+    tie-break) drives the ordering; rows are fed shuffled so a no-op sort cannot pass.
+- `src/test/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorServiceFilterSortedTest.java` (1)
+  - `unknownSortKeyPropagates` — with real groups loaded, an unknown `sortBy`
+    surfaces as `BadRequestException` through the actual `BotGroupSorter.sort` →
+    `BotSortKey.resolve` path (the controller slice only mocks the throw; this pins
+    the real end-to-end propagation the 400 depends on).
+
+Pre-existing Dev tests kept and verified green: per-key ordering + resolution +
+default + no-ENVIRONMENT-key + tie-break (`BotGroupSorterTest`); load→enrich→sort
+wiring incl. gameType-once-per-distinct-id and missing-game→null
+(`BotGroupBehaviorServiceFilterSortedTest`); createdAt-once / updatedAt-every-save /
+update-re-stamps (`BotGroupServiceTest.TimestampTests`); controller filter delegates
+to `filterSorted`, embeds stats, and 400-on-unknown-key (`BotGroupControllerTest`).
+
+## Coverage of the diff
+
+- `BotSortKey` (12 extractors + resolve) ← `BotGroupSorterTest.KeyResolution` +
+  `BotGroupSorterExhaustiveTest` (every key, both directions, N/A-to-bottom).
+- `SortDirection.resolve` ← `BotGroupSorterTest.DirectionResolution` + exercised in
+  every exhaustive case.
+- `BotGroupSorter.comparator` (AD-12: present-by-dir, N/A-last, NAME/id tie-break)
+  ← `BotGroupSorterTest` (BALANCE/GAME_TYPE/STATUS/tie-break) +
+  `BotGroupSorterExhaustiveTest` (exhaustive both-directions + N/A tail).
+- `BotGroupBehaviorService.filterSorted` (+ `resolveGameTypes`) ←
+  `BotGroupBehaviorServiceFilterSortedTest` (load/enrich/sort, distinct-id lookup,
+  missing-game→N/A, unknown-key→400 propagation).
+- `BotGroup.createdAt/updatedAt` + `BotGroupService.save`/`update` stamping ←
+  `BotGroupServiceTest.TimestampTests` (new-group stamps both; update preserves
+  createdAt, moves updatedAt forward) and read by CREATED_TIME/UPDATED_TIME sort
+  cases.
+- `BotGroupFilter.sortBy/sortDir` + controller delegation ← `BotGroupControllerTest.FilterTests`.
+
+## Gaps
+
+- **Real Mongo timestamp persistence** (that `createdAt`/`updatedAt` round-trip
+  through Spring Data) is asserted structurally on the entity, not against a live
+  database — consistent with the existing `MongoTemplate`-mocked unit idiom. Sort
+  behavior over those fields is covered in-memory. End-to-end sort ordering is
+  covered by Verification step 7 (staging curl `sortBy=name` asc + unknown-key→400).
+- **`activeTimeSeconds`-derived N/A for STATUS/runtime keys** is exercised via the
+  Phase-3 stats DTO shape (null fields on a stopped group), not by standing up a
+  live runtime — the enrichment is the Phase-3-covered `computeStats`; Phase 4 only
+  reads its output.
+- **Migration script** `scripts/migrations/002_botgroup_timestamps.js` is a mongosh
+  script run by the Releaser; not unit-testable in the Java suite. Reviewed by
+  inspection alongside the Phase-1 sibling. Left to Releaser post-script checks.
+- **Unrelated untracked file** `src/main/java/com/vingame/bot/T.java` remains in the
+  working tree (not part of this diff, not committed on this branch). Left unstaged
+  as instructed. Out of QA scope.
+
+## Failures
+
+None.

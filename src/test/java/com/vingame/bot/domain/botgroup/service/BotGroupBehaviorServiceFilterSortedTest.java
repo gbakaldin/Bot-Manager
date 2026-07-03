@@ -108,6 +108,22 @@ class BotGroupBehaviorServiceFilterSortedTest {
     }
 
     @Test
+    @DisplayName("An unknown sortBy propagates as BadRequestException (400) through the real sort path")
+    void unknownSortKeyPropagates() {
+        BotGroup g1 = BotGroup.builder().id("g1").name("Alpha").build();
+
+        when(botGroupService.filter(eq("env-1"), any(BotGroupFilter.class)))
+                .thenReturn(List.of(g1));
+
+        BotGroupFilter filter = new BotGroupFilter();
+        filter.setSortBy("nonsense");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.filterSorted("env-1", filter))
+                .isInstanceOf(com.vingame.bot.common.exception.BadRequestException.class)
+                .hasMessageContaining("nonsense");
+    }
+
+    @Test
     @DisplayName("A missing referenced game resolves to null gameType (N/A) without aborting the filter")
     void missingGameYieldsNullType() {
         BotGroup g1 = BotGroup.builder().id("g1").name("Alpha").gameId("gone").build();
