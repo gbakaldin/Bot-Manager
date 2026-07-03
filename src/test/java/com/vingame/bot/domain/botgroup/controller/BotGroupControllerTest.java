@@ -9,6 +9,7 @@ import com.vingame.bot.common.exception.UpstreamRegistrationException;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
+import com.vingame.bot.domain.botgroup.dto.BotGroupStatsDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatusDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
@@ -16,6 +17,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.sort.BotGroupSortRow;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import org.junit.jupiter.api.DisplayName;
@@ -170,7 +172,8 @@ class BotGroupControllerTest {
                     .gameId("game-baucua")
                     .build();
 
-            when(service.filter(eq("env-123"), any(BotGroupFilter.class))).thenReturn(List.of(group));
+            when(behaviorService.filterSorted(eq("env-123"), any(BotGroupFilter.class)))
+                    .thenReturn(List.of(row(group)));
             when(mapper.toDTO(group)).thenReturn(dto);
 
             // Act & Assert
@@ -200,7 +203,8 @@ class BotGroupControllerTest {
                     .gameId("game-baucua")
                     .build();
 
-            when(service.filter(eq("env-123"), any(BotGroupFilter.class))).thenReturn(List.of(group));
+            when(behaviorService.filterSorted(eq("env-123"), any(BotGroupFilter.class)))
+                    .thenReturn(List.of(row(group)));
             when(mapper.toDTO(group)).thenReturn(dto);
 
             // Act & Assert
@@ -211,7 +215,7 @@ class BotGroupControllerTest {
                     .andExpect(jsonPath("$.length()").value(1))
                     .andExpect(jsonPath("$[0].environmentId").value("env-123"));
 
-            verify(service).filter(eq("env-123"), any(BotGroupFilter.class));
+            verify(behaviorService).filterSorted(eq("env-123"), any(BotGroupFilter.class));
         }
 
         @Test
@@ -224,7 +228,7 @@ class BotGroupControllerTest {
                             .content("{}"))
                     .andExpect(status().is4xxClientError());
 
-            verify(service, never()).filter(any(), any(BotGroupFilter.class));
+            verify(behaviorService, never()).filterSorted(any(), any(BotGroupFilter.class));
         }
 
         @Test
@@ -234,7 +238,8 @@ class BotGroupControllerTest {
             BotGroupFilter filter = new BotGroupFilter();
             filter.setName("NonExistentGroup");
 
-            when(service.filter(eq("env-123"), any(BotGroupFilter.class))).thenReturn(List.of());
+            when(behaviorService.filterSorted(eq("env-123"), any(BotGroupFilter.class)))
+                    .thenReturn(List.of());
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{envId}/filter", "env-123")
@@ -242,6 +247,25 @@ class BotGroupControllerTest {
                             .content(objectMapper.writeValueAsString(filter)))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.length()").value(0));
+        }
+
+        @Test
+        @DisplayName("Unknown sort key surfaces as 400 (propagated from the enrich/sort path)")
+        void unknownSortKeyReturnsBadRequest() throws Exception {
+            // AD-11: an unrecognised sortBy resolves to a BadRequestException in
+            // BotSortKey.resolve, mapped to 400 by RestExceptionHandler.
+            when(behaviorService.filterSorted(eq("env-123"), any(BotGroupFilter.class)))
+                    .thenThrow(new BadRequestException("Unknown bot-group sort key 'nonsense'."));
+
+            mockMvc.perform(post("/api/v1/bot-group/{envId}/filter", "env-123")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"sortBy\":\"nonsense\"}"))
+                    .andExpect(status().isBadRequest());
+        }
+
+        private BotGroupSortRow row(BotGroup group) {
+            return new BotGroupSortRow(group, BotGroupStatsDTO.builder().build(),
+                    BotGroupStatus.STOPPED, "BETTING_MINI");
         }
     }
 
