@@ -91,4 +91,14 @@ public class BotGroupDTO {
 
     // Migration flag - when true, skips user registration (for importing existing bots)
     private Boolean existingGroup;
+
+    /**
+     * Group-level runtime statistics (BOTGROUP_GAME_MANAGEMENT Phase 3), read-only.
+     * Set by the controller/service enrichment via
+     * {@link com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService#computeStats(String)}
+     * — NOT part of the create/update write surface (AD-13) and never mapped from
+     * the entity. Null (with @JsonInclude NON_NULL, absent) on write responses;
+     * populated with an all-null-fields block for a stopped group on read.
+     */
+    private BotGroupStatsDTO stats;
 }

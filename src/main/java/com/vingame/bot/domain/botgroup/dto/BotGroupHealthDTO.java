@@ -31,4 +31,10 @@ public class BotGroupHealthDTO {
     private int disconnectedBots;
 
     private List<BotHealthDTO> bots;
+
+    /**
+     * Group-level runtime statistics (BOTGROUP_GAME_MANAGEMENT Phase 3). Present
+     * on every response; all fields null (N/A) when the group is not running.
+     */
+    private BotGroupStatsDTO stats;
 }

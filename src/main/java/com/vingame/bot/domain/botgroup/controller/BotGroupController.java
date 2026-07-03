@@ -59,7 +59,12 @@ public class BotGroupController {
     public ResponseEntity<BotGroupDTO> findById(
             @PathVariable @Parameter(description = "ID of the bot group to retrieve") String id) {
         BotGroup botGroup = service.findById(id);
-        return ResponseEntity.ok(mapper.toDTO(botGroup));
+        BotGroupDTO dto = mapper.toDTO(botGroup);
+        // Group-level runtime statistics (BOTGROUP_GAME_MANAGEMENT Phase 3, AD-13).
+        // Enriched here rather than in the mapper — stats are runtime-sourced, not
+        // persisted, and must stay off the create/update write surface.
+        dto.setStats(behaviorService.computeStats(id));
+        return ResponseEntity.ok(dto);
     }
 
     @Operation(
@@ -72,7 +77,13 @@ public class BotGroupController {
             @Parameter(description = "The filter to query the bot groups by")
             @RequestBody BotGroupFilter filter) {
         List<BotGroupDTO> dtos = service.filter(envId, filter).stream()
-                .map(mapper::toDTO)
+                .map(group -> {
+                    BotGroupDTO dto = mapper.toDTO(group);
+                    // Embed group-level runtime stats per BOTGROUP_GAME_MANAGEMENT
+                    // Phase 3 / AD-13. Phase 4 will additionally sort on these keys.
+                    dto.setStats(behaviorService.computeStats(group.getId()));
+                    return dto;
+                })
                 .toList();
         return ResponseEntity.ok(dtos);
     }

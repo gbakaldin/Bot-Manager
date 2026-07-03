@@ -13,6 +13,7 @@ import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
+import com.vingame.bot.domain.botgroup.dto.BotGroupStatsDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
@@ -35,6 +36,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -675,6 +677,7 @@ public class BotGroupBehaviorService {
                     .connectedBots(0)
                     .disconnectedBots(0)
                     .bots(List.of())
+                    .stats(computeStats(id))
                     .build();
         }
 
@@ -711,6 +714,76 @@ public class BotGroupBehaviorService {
                 .deadBots(dead)
                 .disconnectedBots(botDtos.size() - connected - reconnecting - dead)
                 .bots(botDtos)
+                .stats(computeStats(id))
+                .build();
+    }
+
+    /**
+     * Compute group-level runtime statistics (BOTGROUP_GAME_MANAGEMENT Phase 3),
+     * reading live state from {@code runningGroups}.
+     * <p>
+     * A group with no runtime (not running) yields an all-null-fields block — every
+     * field renders as N/A. For a running group:
+     * <ul>
+     *   <li>{@code activeTimeSeconds} = seconds between {@code runtime.startedAt} and now (AD-9).</li>
+     *   <li>{@code roundsSinceRestart} = MAX of the per-bot {@code roundsObserved} counter
+     *       across all bots (AD-9); 0 when no bot has observed a round yet.</li>
+     *   <li>{@code activeBots} = count of {@code isConnected()} bots (AD-10).</li>
+     *   <li>{@code averageBalance} / {@code averageWinning} = means over the <em>active</em>
+     *       ({@code isConnected()}) bots only (AD-8/AD-10); {@code null} when zero bots are
+     *       active — never 0 (Implementation Note 5).</li>
+     * </ul>
+     * All averages come from in-memory {@code Bot} accumulators; Prometheus is never
+     * queried here (AD-4).
+     */
+    public BotGroupStatsDTO computeStats(String groupId) {
+        BotGroupRuntime runtime = runningGroups.get(groupId);
+        if (runtime == null) {
+            // Not running → every field N/A.
+            return BotGroupStatsDTO.builder().build();
+        }
+
+        List<Bot> bots = runtime.getBotInstances();
+
+        // Rounds since last restart = max over the group's bots (dedup-free, robust to
+        // subscriber pruning). Bots are freshly built each start/restart, so the counter
+        // is already scoped to "since last restart".
+        long roundsSinceRestart = bots.stream()
+                .mapToLong(bot -> bot.getRoundsObserved().get())
+                .max()
+                .orElse(0L);
+
+        Instant startedAt = runtime.getStartedAt();
+        Long activeTimeSeconds = startedAt != null
+                ? Duration.between(startedAt, Instant.now()).toSeconds()
+                : null;
+
+        // Averages over active (isConnected) bots only. Zero active bots → null (N/A),
+        // not 0 — a live runtime whose bots are all reconnecting must still read N/A.
+        List<Bot> activeBots = bots.stream()
+                .filter(Bot::isConnected)
+                .toList();
+        int activeCount = activeBots.size();
+
+        Long averageBalance = null;
+        Long averageWinning = null;
+        if (activeCount > 0) {
+            long balanceSum = activeBots.stream()
+                    .mapToLong(Bot::getExpectedBalance)
+                    .sum();
+            long winningSum = activeBots.stream()
+                    .mapToLong(bot -> bot.getCumulativeWinnings().get())
+                    .sum();
+            averageBalance = balanceSum / activeCount;
+            averageWinning = winningSum / activeCount;
+        }
+
+        return BotGroupStatsDTO.builder()
+                .roundsSinceRestart(roundsSinceRestart)
+                .activeTimeSeconds(activeTimeSeconds)
+                .activeBots(activeCount)
+                .averageBalance(averageBalance)
+                .averageWinning(averageWinning)
                 .build();
     }
 
