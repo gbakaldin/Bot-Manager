@@ -204,3 +204,107 @@ delete). Correct given only Phase 2 is reported done.
 ## Amendments to the plan
 
 None.
+
+---
+
+# Compliance — BOTGROUP_GAME_MANAGEMENT — Phase 3
+
+Branch: `feat/botgroup-game-management`
+Plan reviewed: `docs/plans/BOTGROUP_GAME_MANAGEMENT.md`
+Diff reviewed: `git diff 930001f..HEAD` (commits e7a7180, 25162ba, 62ce2af — exactly Phase 3)
+
+Scope of this verdict: **Phase 3 only** (BotGroup statistics: runtime counters +
+stats DTO). Phase 1 and Phase 2 verdicts above are unchanged. Phases 4–7 are not
+yet on the branch.
+
+## Verdict
+
+PASS
+
+## Phase-by-phase
+
+### Phase 3 — BotGroup statistics (runtime counters + stats DTO)
+Status: implemented
+
+Every Phase 3 plan bullet is delivered and consistent with AD-8, AD-9, AD-10,
+AD-13, and Implementation Notes 3/4/5:
+
+- **`Bot.java`** — adds `final AtomicLong cumulativeWinnings` and
+  `final AtomicLong roundsObserved`, both `@Getter`, both initialized to 0. The
+  Javadoc cites AD-8/AD-9 and correctly states the mirror-`bot_winnings_total`
+  and max-across-bots semantics. Matches the Phase 3 bullet.
+- **`BettingMiniGameBot.onEndGame`** — `cumulativeWinnings.addAndGet(w)` is placed
+  at the exact site that increments the metric, under the **same `w > 0` guard**
+  but **not** gated on `metrics != null` — exactly AD-8 ("mirror value-for-value…
+  incremented at the exact site that calls `metrics.incBotWinnings(w)`").
+  `roundsObserved.incrementAndGet()` fires once per completed round in
+  `onEndGame`, matching AD-9.
+- **`SlotMachineBot`** — `cumulativeWinnings.addAndGet(winnings)` inside the
+  `winnings > 0` block alongside `metrics.incBotWinnings`, again ungated on
+  `metrics`. `roundsObserved.incrementAndGet()` fires on every spin-result,
+  satisfying AD-9 and Implementation Note 3 (slot "rounds" = completed spins; the
+  hook was wired rather than left at 0, which the note permitted as a fallback but
+  did not prefer).
+- **`BotGroupStatsDTO`** — new, all five fields boxed/nullable, exactly the plan's
+  shape: `roundsSinceRestart` (Long), `activeTimeSeconds` (Long), `activeBots`
+  (Integer), `averageBalance` (Long), `averageWinning` (Long). Javadoc documents
+  the null=N/A convention and the active-only averaging. Matches AD-13.
+- **`BotGroupBehaviorService.computeStats(String groupId)`** — reads
+  `runningGroups`; null runtime → all-null block (`builder().build()`), so every
+  field renders N/A for a not-running group (AD-13). For a running group:
+  `roundsSinceRestart` = `max` of per-bot `roundsObserved` (0 when none yet),
+  `activeTimeSeconds` = `Duration.between(startedAt, now).toSeconds()`,
+  `activeBots` = count of `isConnected()` bots, and `averageBalance`/
+  `averageWinning` are means over the **active (`isConnected`) bots only**,
+  returning `null` (not 0) when `activeCount == 0`. This is AD-8/AD-9/AD-10 and
+  Implementation Note 5 verbatim. No Prometheus access anywhere in the method
+  (AD-4 / Implementation Note 4) — averages come only from the in-memory `Bot`
+  accumulators.
+- **Wiring** — stats embedded into `GET /{id}` (controller enrichment, kept out of
+  the mapper deliberately so it stays off the create/update write surface, AD-13),
+  into both branches of `getHealth` (`BotGroupHealthDTO.stats`, present on every
+  response), and into the env-scoped filter list items
+  (`BotGroupController.filter` sets `dto.setStats(...)` per item). `BotGroupDTO`
+  gains a read-only nullable `stats` field, never mapped from the entity. This
+  matches the Phase 3 wiring bullet exactly.
+
+## The flagged item — stats embedded in the filter list items during Phase 3
+
+Confirmed **within Phase 3 scope**, not premature Phase 4 work. The Phase 3 plan
+bullet reads: "Wire stats into `GET /{id}` response and `GET /{id}/health` (embed
+the block), **and into the Phase-2 filter list items (see Phase 4 DTO)**." The
+parenthetical "see Phase 4 DTO" is a forward cross-reference (Phase 4 adds the
+enriched-item sorting on top of these keys), not a deferral — the sentence's main
+clause explicitly directs wiring the block into the filter list items in Phase 3.
+AD-13 independently mandates the block be "embedded in **both** the filter list
+items and `GET /{id}` / `/{id}/health`." The Dev embedded it via
+`BotGroupDTO.stats`, which is the AD-13 shape (a dedicated `BotGroupStatsDTO`
+embedded in the list item). Phase 4 will layer the comparator/sort over these same
+enriched items; nothing here pre-implements Phase 4 (no `BotSortKey`, no
+`sortBy`/`sortDir`, no comparator). No drift.
+
+## Build + suite
+
+`mvn clean install` (full project, JDK 21): **BUILD SUCCESS**,
+`Tests run: 1140, Failures: 0, Errors: 0, Skipped: 0`. The dev's earlier
+`-DskipTests` regression (two `getHealth` tests NPE'd on the new `.get()` calls
+against un-stubbed Bot mocks) is fixed: `BotGroupBehaviorServiceTest` now stubs
+`getRoundsObserved()` / `getCumulativeWinnings()` with non-null `AtomicLong`s
+(commit 62ce2af). The full suite is green with tests enabled — verified by an
+actual `mvn clean install` run, not a skip.
+
+## Drift
+
+None. Diff faithfully implements Phase 3 as specified.
+
+## Out-of-scope changes
+
+None. The diff touches only `Bot`, `BettingMiniGameBot`, `SlotMachineBot`
+(counters), the new `BotGroupStatsDTO`, `BotGroupDTO`/`BotGroupHealthDTO` (stats
+field), `BotGroupController`/`BotGroupBehaviorService` (enrichment), and one test
+class. No Phase 4–7 code leaked in early. Correct given only Phase 3 is reported
+done.
+
+## Amendments to the plan
+
+None.

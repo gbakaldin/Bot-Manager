@@ -157,3 +157,81 @@ PASS
   create, `PATCH /{id}`, `DELETE /{id}`, and the `/{id}/{action}` lifecycle endpoints. No routing
   collision between the new `POST /{envId}/filter` and the `POST /{id}/start|stop|restart|
   schedule-restart` family — the second path segment (`filter` vs the action names) disambiguates.
+
+---
+
+# Code Review — BOTGROUP_GAME_MANAGEMENT (Phase 3)
+
+Branch: feat/botgroup-game-management
+Reviewed diff: `git diff 930001f..HEAD`
+
+Scope: Phase 3 only — BotGroup statistics. The per-bot `cumulativeWinnings` / `roundsObserved`
+accumulators (`Bot`, `BettingMiniGameBot`, `SlotMachineBot`), `BotGroupStatsDTO`, the
+`computeStats` enrichment on `BotGroupBehaviorService`, and the DTO wiring into `findById` /
+filter-list / health responses. Code-quality only; plan compliance, test adequacy, and deploy
+mechanics are out of scope.
+
+## Verdict
+
+PASS
+
+## Findings
+
+None.
+
+## Notes
+
+- **`cumulativeWinnings` mirrors `bot_winnings_total` value-for-value (verified — AD-8).** In
+  `BettingMiniGameBot.onEndGame` (`:439-440`) the accumulator adds the exact same `w` under the
+  exact same `w > 0` guard as `metrics.incBotWinnings(w)` on the very next line — the only
+  difference being the intended de-coupling from `metrics != null`, so the stat is populated even
+  when Prometheus is unwired. `SlotMachineBot.onSpinResult` (`:232-237`) does the same: both
+  `cumulativeWinnings.addAndGet(winnings)` and `incBotWinnings(winnings)` sit inside the single
+  `if (winnings > 0)` block with the identical value. There is no site where the metric increments
+  and the accumulator does not (or vice-versa), so no drift is possible short of a duplicate
+  server frame — which would double-count both counters identically, keeping them in lockstep.
+
+- **`roundsObserved` increments exactly once per completed round/spin (verified — AD-9).**
+  Betting/Tai Xiu: a single `roundsObserved.incrementAndGet()` at `BettingMiniGameBot:483`, once
+  per `onEndGame`, unconditional and outside any winnings guard — so a zero-winnings round still
+  counts. Slot: a single increment at `SlotMachineBot:242`, placed *after* the foreign-gid
+  defensive early-return (`:219-224`), so a stray/foreign frame that bails out does not inflate the
+  count; every accepted spin result counts exactly once. No path double-increments within a single
+  handler invocation.
+
+- **`computeStats` returns N/A correctly for a non-running group (verified).** `runningGroups.get`
+  miss → `BotGroupStatsDTO.builder().build()`, i.e. every boxed field null → all N/A. Averages are
+  computed only when `activeCount > 0`, so `averageBalance`/`averageWinning` stay null (never `0`)
+  for a live runtime whose bots are all reconnecting/disconnected — matching Implementation Note 5.
+  `balanceSum / activeCount` and `winningSum / activeCount` are unreachable when `activeCount == 0`,
+  so there is no divide-by-zero. The `activeBots`/`connectedBots` health count and the stats
+  `activeBots` both use the same `Bot.isConnected()` predicate (`client != null && client.isOpen()`),
+  so the two numbers in a health response share one definition and cannot semantically disagree.
+
+- **Active-time and thread-safety are sound.** `activeTimeSeconds` derives from
+  `runtime.getStartedAt()` with an explicit null guard (`:runtime.startedAt` is set once in
+  `BotGroupRuntime.start`), so a runtime that exists but has not stamped `startedAt` yields null
+  rather than a bogus duration. All cross-thread reads are safe: `roundsObserved` /
+  `cumulativeWinnings` / `expectedCurrentBalance` are `AtomicLong` (read via `.get()` /
+  `Bot::getExpectedBalance`), and `runtime.getBotInstances()` is a `CopyOnWriteArrayList`, so the
+  stats-thread stream iterates a stable snapshot while bot IO threads keep incrementing. No shared
+  mutable non-atomic state is touched.
+
+- **Enrichment stays off the write surface and is not Phase-4-ish (verified — AD-13).** `stats` is
+  set only in the controller read paths (`findById`, filter list) and `getHealth`, never in the
+  mapper and never on create/update. The filter-list lambda does exactly one thing beyond mapping —
+  `dto.setStats(computeStats(group.getId()))` — with no sorting, ordering, or filtering on the stat
+  keys; the "Phase 4 will additionally sort" comment correctly defers that. `BotGroupStatsDTO`
+  carries no persistence annotations and is never read back from Mongo.
+
+- **Minor (not a finding): the health path iterates the bot list twice.** `getHealth` builds
+  `botDtos` (one pass, computing the connected count) and then calls `computeStats(id)`, which
+  re-fetches the runtime and re-streams the same bots for max/sum/active-count. Given
+  `CopyOnWriteArrayList` and group sizes in the tens-to-~100 range this is negligible, and keeping
+  `computeStats` self-contained (so `findById`/filter can call it standalone) is a reasonable
+  trade. No change needed.
+
+- **Minor (not a finding): integer-division averages truncate toward zero.** `balanceSum /
+  activeCount` and `winningSum / activeCount` drop the fractional part. For a whole-currency
+  display average this is fine and intentional; flagging only so the UI author is not surprised the
+  mean is floored rather than rounded.
