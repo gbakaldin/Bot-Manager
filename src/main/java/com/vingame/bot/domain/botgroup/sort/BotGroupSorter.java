@@ -41,31 +41,11 @@ public final class BotGroupSorter {
      */
     static Comparator<BotGroupSortRow> comparator(BotSortKey key, SortDirection direction) {
         Comparator<BotGroupSortRow> primary =
-                (a, b) -> compareNaLast(key.extract(a), key.extract(b), direction);
+                (a, b) -> SortComparators.compareNaLast(key.extract(a), key.extract(b), direction);
         return primary
                 .thenComparing(row -> row.group().getName(),
                         Comparator.nullsLast(Comparator.naturalOrder()))
                 .thenComparing(row -> row.group().getId(),
                         Comparator.nullsLast(Comparator.naturalOrder()));
-    }
-
-    /**
-     * Null-last, direction-aware value compare. Nulls (N/A) always sort after
-     * present values regardless of {@code direction}; present values are ordered
-     * ascending then negated for {@code DESC}.
-     */
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private static int compareNaLast(Comparable a, Comparable b, SortDirection direction) {
-        if (a == null && b == null) {
-            return 0;
-        }
-        if (a == null) {
-            return 1;   // a is N/A → after b
-        }
-        if (b == null) {
-            return -1;  // b is N/A → after a
-        }
-        int cmp = a.compareTo(b);
-        return direction == SortDirection.DESC ? -cmp : cmp;
     }
 }
