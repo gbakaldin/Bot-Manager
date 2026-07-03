@@ -10,6 +10,7 @@ import lombok.Setter;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.mongodb.core.mapping.Document;
 
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -82,6 +83,22 @@ public class BotGroup {
      * pick up the new value, mirroring {@link #strategyMix}.
      */
     private SlotStrategyId slotStrategyId;
+
+    /**
+     * Instant this group was first persisted. Stamped by
+     * {@link com.vingame.bot.domain.botgroup.service.BotGroupService#save(BotGroup, boolean)}
+     * when null; never overwritten afterwards. Backs the {@code CREATED_TIME} sort
+     * key (BOTGROUP_GAME_MANAGEMENT AD-14). Existing docs are backfilled to a fixed
+     * timestamp by the Phase 4 migration script so nothing sorts as N/A.
+     */
+    private Instant createdAt;
+
+    /**
+     * Instant of the most recent persist. Stamped on every save (create and
+     * update). Backs the {@code UPDATED_TIME} sort key (AD-16). Backfilled to the
+     * same fixed timestamp as {@link #createdAt} by the Phase 4 migration script.
+     */
+    private Instant updatedAt;
 
     // Lifecycle management - target state (what admin wants)
     private BotGroupStatus targetStatus;

@@ -31,6 +31,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Query;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.regex.Pattern;
@@ -492,6 +493,52 @@ class BotGroupServiceTest {
             service.delete("123");
 
             verify(repository).deleteById("123");
+        }
+    }
+
+    @Nested
+    @DisplayName("timestamp stamping (Phase 4, AD-14/AD-16)")
+    class TimestampTests {
+
+        @Test
+        @DisplayName("New group save stamps both createdAt and updatedAt")
+        void newGroupStampsBoth() {
+            BotGroup group = BotGroup.builder()
+                    .name("Fresh Group")
+                    .environmentId("env-1")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(5)
+                    .build();
+
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Instant before = Instant.now();
+            BotGroup result = service.save(group, true);
+
+            assertThat(result.getCreatedAt()).isNotNull().isAfterOrEqualTo(before);
+            assertThat(result.getUpdatedAt()).isNotNull().isAfterOrEqualTo(before);
+        }
+
+        @Test
+        @DisplayName("Update re-stamps updatedAt but preserves the original createdAt")
+        void updatePreservesCreatedAtRestampsUpdated() {
+            Instant original = Instant.parse("2026-01-01T00:00:00Z");
+            BotGroup existing = BotGroup.builder()
+                    .id("existing-id")
+                    .name("Existing")
+                    .environmentId("env-1")
+                    .createdAt(original)
+                    .updatedAt(original)
+                    .build();
+
+            when(repository.findById("existing-id")).thenReturn(Optional.of(existing));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.update("existing-id", BotGroupDTO.builder().name("Renamed").build());
+
+            assertThat(result.getCreatedAt()).isEqualTo(original);
+            assertThat(result.getUpdatedAt()).isAfter(original);
         }
     }
 

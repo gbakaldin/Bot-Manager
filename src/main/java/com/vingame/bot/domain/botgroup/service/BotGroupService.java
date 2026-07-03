@@ -24,6 +24,7 @@ import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -180,6 +181,15 @@ public class BotGroupService {
             log.debug("Updating existing bot group '{}' (ID: {})", botGroup.getName(), botGroup.getId());
         }
 
+        // Timestamp stamping (BOTGROUP_GAME_MANAGEMENT AD-14 / AD-16): createdAt is
+        // set once on first persist; updatedAt is (re)stamped on every save so the
+        // CREATED_TIME / UPDATED_TIME sort keys always have a value.
+        Instant now = Instant.now();
+        if (botGroup.getCreatedAt() == null) {
+            botGroup.setCreatedAt(now);
+        }
+        botGroup.setUpdatedAt(now);
+
         return repository.save(botGroup);
     }
 
@@ -261,7 +271,9 @@ public class BotGroupService {
         // Validate the post-merge entity (AD-6) so cross-field PATCH rules — e.g.
         // lowering maxBet below the persisted minBet — are caught before save.
         configValidation.validate(existing);
-        return repository.save(existing);
+        // Route through save so updatedAt is (re)stamped on every mutation (AD-16);
+        // existing has an id so this is the update path (no registration).
+        return save(existing);
     }
 
     public void delete(String id) {
