@@ -11,6 +11,7 @@ import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.domain.game.sort.GameSortRow;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
+import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -21,7 +22,11 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.lang.reflect.Field;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -124,5 +129,100 @@ class BotGroupBehaviorServiceGameFilterSortedTest {
         assertThatThrownBy(() -> service.filterGamesSorted(BrandCode.G2, ProductCode.P_097, "env-1", filter))
                 .isInstanceOf(com.vingame.bot.common.exception.BadRequestException.class)
                 .hasMessageContaining("nonsense");
+    }
+
+    @Test
+    @DisplayName("ACTIVE_* aggregates count ONLY running groups; configured BOT_COUNT sums ALL referencing groups")
+    void activeAggregatesCountRunningOnly() {
+        Game active = Game.builder().id("g-active").name("Active").build();
+        Game idle = Game.builder().id("g-idle").name("Idle").build();
+
+        // g-active is referenced by three groups: two running, one stopped.
+        // Configured botCount is summed over ALL three (10+5+8 = 23). The active-*
+        // aggregates count only the running two: 2 groups, 4+2 = 6 running bots.
+        BotGroup a1 = BotGroup.builder().id("grp-a1").gameId("g-active").botCount(10).build();
+        BotGroup a2 = BotGroup.builder().id("grp-a2").gameId("g-active").botCount(5).build();
+        BotGroup a3 = BotGroup.builder().id("grp-a3").gameId("g-active").botCount(8).build();
+        // g-idle: one referencing group, not running.
+        BotGroup b1 = BotGroup.builder().id("grp-b1").gameId("g-idle").botCount(4).build();
+
+        when(gameService.filter(any(), any(), eq("env-1"), any(GameFilter.class)))
+                .thenReturn(List.of(active, idle));
+        when(botGroupService.findByGameId("g-active")).thenReturn(List.of(a1, a2, a3));
+        when(botGroupService.findByGameId("g-idle")).thenReturn(List.of(b1));
+
+        // Register runtimes: grp-a1 (4 running bots) and grp-a2 (2 running bots) are
+        // ACTIVE; grp-a3 and grp-b1 have no runtime (not running).
+        registerRunningGroup("grp-a1", 4);
+        registerRunningGroup("grp-a2", 2);
+        try {
+            GameFilter filter = new GameFilter();
+            filter.setSortBy("ACTIVE_BOT_COUNT");
+            filter.setSortDir("desc");
+
+            List<GameSortRow> rows = service.filterGamesSorted(BrandCode.G2, ProductCode.P_097, "env-1", filter);
+
+            // Active game (present value) sorts before the idle game (N/A → bottom).
+            assertThat(rows).extracting(r -> r.game().getId()).containsExactly("g-active", "g-idle");
+
+            GameSortRow activeRow = rows.get(0);
+            assertThat(activeRow.botGroupCount()).isEqualTo(3);       // all referencing groups
+            assertThat(activeRow.botCount()).isEqualTo(23);          // Σ configured over ALL three
+            assertThat(activeRow.activeGroupCount()).isEqualTo(2);   // only the two running
+            assertThat(activeRow.activeBotCount()).isEqualTo(6);     // 4 + 2 running bots
+            assertThat(activeRow.active()).isTrue();
+
+            GameSortRow idleRow = rows.get(1);
+            assertThat(idleRow.botGroupCount()).isEqualTo(1);
+            assertThat(idleRow.botCount()).isEqualTo(4);             // configured, even though inactive
+            assertThat(idleRow.activeGroupCount()).isZero();
+            assertThat(idleRow.activeBotCount()).isZero();
+            assertThat(idleRow.active()).isFalse();
+        } finally {
+            removeRunningGroup("grp-a1");
+            removeRunningGroup("grp-a2");
+        }
+    }
+
+    /* ---- runtime-injection helpers (mirror the Phase 3 stats test) ---- */
+
+    /**
+     * Register an ACTIVE runtime for {@code groupId} with {@code runningBots}
+     * non-completed bot futures, so {@code isGroupRunning} is true and
+     * {@code getRunningBotCountForGroup} returns {@code runningBots}.
+     */
+    private void registerRunningGroup(String groupId, int runningBots) {
+        BotGroupRuntime runtime = new BotGroupRuntime(groupId, runningBots, "env-1");
+        try {
+            Field f = BotGroupRuntime.class.getDeclaredField("botFutures");
+            f.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            List<Future<?>> futures = (List<Future<?>>) f.get(runtime);
+            futures.clear();
+            for (int i = 0; i < runningBots; i++) {
+                futures.add(new CompletableFuture<>()); // never completed → isDone() == false
+            }
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        runningGroups().put(groupId, runtime);
+    }
+
+    private void removeRunningGroup(String groupId) {
+        BotGroupRuntime runtime = runningGroups().remove(groupId);
+        if (runtime != null) {
+            runtime.getExecutor().shutdownNow();
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, BotGroupRuntime> runningGroups() {
+        try {
+            Field f = BotGroupBehaviorService.class.getDeclaredField("runningGroups");
+            f.setAccessible(true);
+            return (Map<String, BotGroupRuntime>) f.get(service);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }

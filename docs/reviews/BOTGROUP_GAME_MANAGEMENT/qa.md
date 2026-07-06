@@ -359,3 +359,91 @@ to `filterSorted`, embeds stats, and 400-on-unknown-key (`BotGroupControllerTest
 ## Failures
 
 None.
+
+---
+
+# QA — BOTGROUP_GAME_MANAGEMENT (Phase 5: Game sorting)
+
+**Verdict:** PASS
+**Build:** `mvn clean install` → 1200 tests, 0 failures, 0 errors
+
+## Scope reviewed
+
+`git diff 379eeb7..HEAD` — Phase 5 only:
+- `GameSortKey` enum (CREATED_TIME, BOT_GROUP_COUNT, BOT_COUNT, GAME_TYPE, NAME,
+  ACTIVE_GROUP_COUNT, ACTIVE_BOT_COUNT — no BRAND/PRODUCT); `equalsIgnoreCase`
+  `resolve` with null/blank → CREATED_TIME default and unknown → 400; ACTIVE_*
+  keys gated to N/A when the game is inactive.
+- `GameSortRow` record (game + botGroupCount/botCount/activeGroupCount/activeBotCount,
+  `active()` = activeGroupCount > 0).
+- `GameSorter.sort`/`comparator` (AD-11/AD-12), reusing `SortDirection` + the
+  extracted shared `SortComparators.compareNaLast`.
+- `SortComparators` — the null-last/direction-aware compare extracted out of
+  `BotGroupSorter` so Phase 4 and Phase 5 share one N/A-to-bottom rule.
+- `GameFilter` gains `sortBy`/`sortDir`.
+- `BotGroupBehaviorService.filterGamesSorted` + private `enrichGame`
+  (load via `gameService.filter` → per-game aggregate over
+  `botGroupService.findByGameId` → in-memory sort); `BotGroupService.findByGameId`;
+  `GameController.filter` delegates to the behavior service.
+
+## Tests added / updated
+
+Dev delivered a strong first pass (`GameSorterTest`, `BotGroupBehaviorServiceGameFilterSortedTest`).
+QA extended two files to close the load-bearing gaps the task called out:
+
+- `src/test/java/com/vingame/bot/domain/game/sort/GameSorterTest.java`
+  - `ValueKeys.countOrdering` — extended to assert BOTH directions for BOT_GROUP_COUNT
+    and BOT_COUNT (Dev had asc-only / desc-only respectively), so every count key is
+    pinned asc AND desc.
+  - `ValueKeys.createdTimeDesc` (new) — explicit CREATED_TIME desc ordering (Dev only
+    had asc + the implicit default), completing asc/desc for the 7th key.
+- `src/test/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorServiceGameFilterSortedTest.java`
+  - `activeAggregatesCountRunningOnly` (new) — registers real ACTIVE runtimes for two
+    of a game's three referencing groups (with 4 and 2 non-completed bot futures) and
+    leaves the third + a second game's group not running. Asserts
+    `botGroupCount`=3 and `botCount`=23 (Σ configured over **all** three referencing
+    groups, running or not), while `activeGroupCount`=2 and `activeBotCount`=6 count
+    **only** the running groups/bots. Also asserts the active game sorts above the
+    idle game (N/A → bottom) under ACTIVE_BOT_COUNT desc. This is the only test that
+    exercises the runtime side of `enrichGame` — Dev's cases register no runtimes, so
+    active-* was always 0 there.
+
+## Coverage of the diff
+
+- `GameSortKey` (7 extractors + resolve) ← `GameSorterTest.KeyResolution`
+  (equalsIgnoreCase / whitespace-trim / null-blank default / unknown→400 /
+  no BRAND-PRODUCT) + `ValueKeys` + `ActiveKeys` (every key, both directions).
+- `GameSorter.comparator` (AD-12: present-by-dir, N/A-last, NAME/id tie-break)
+  ← `GameSorterTest.ActiveKeys` (ACTIVE_* N/A-to-bottom both dirs), `TieBreak`
+  (equal-primary → NAME asc → id; N/A block ordered by NAME asc).
+- `GameSortRow.active()` ← `GameSorterTest` (inactive rows → N/A) +
+  `BotGroupBehaviorServiceGameFilterSortedTest.activeAggregatesCountRunningOnly`
+  (active()=true for a running-referenced game, false for an idle one).
+- `SortComparators.compareNaLast` (extracted) ← exercised transitively by both the
+  Game (Phase 5) and BotGroup (Phase 4) sorter suites; `BotGroupSorterTest` +
+  `BotGroupSorterExhaustiveTest` remain green, confirming the refactor is behavior-
+  preserving for the Phase-4 sort.
+- `BotGroupBehaviorService.filterGamesSorted` + `enrichGame` ←
+  `BotGroupBehaviorServiceGameFilterSortedTest` (load/enrich/sort wiring;
+  BOT_COUNT sums configured over referencing groups; ACTIVE_* count running only;
+  unknown-key→400 through the real path; findByGameId called once per game).
+- `BotGroupService.findByGameId` ← same service test (mocked; delegates to repo).
+
+## Gaps
+
+- **Controller HTTP slice for the sorted filter** (that `GameController.filter`
+  delegates to `behaviorService.filterGamesSorted` and maps `row.game()` to DTO) is
+  covered structurally by the existing `GameControllerTest` update in the diff; the
+  service wiring is unit-covered directly. End-to-end ordering is Verification step 8
+  (staging curl `sortBy=name` desc + game sort-keys).
+- **Slot vs betting game-type** in aggregates is immaterial to sorting — the enrich
+  path sums configured `botCount` and counts running groups/bots regardless of type;
+  not separately parameterized.
+- **Live Mongo `findByGameId` round-trip** is mocked, consistent with the repository-
+  mocked unit idiom used across the suite.
+- **Unrelated untracked file** `src/main/java/com/vingame/bot/T.java` remains in the
+  working tree — not part of this diff, left unstaged as instructed. Out of QA scope.
+
+## Failures
+
+None.

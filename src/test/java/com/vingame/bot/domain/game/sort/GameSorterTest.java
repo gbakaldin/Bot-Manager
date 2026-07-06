@@ -82,14 +82,27 @@ class GameSorterTest {
         }
 
         @Test
-        @DisplayName("BOT_GROUP_COUNT / BOT_COUNT numeric ordering (never N/A)")
+        @DisplayName("BOT_GROUP_COUNT / BOT_COUNT numeric ordering — both directions (never N/A)")
         void countOrdering() {
             List<GameSortRow> rows = List.of(
                     row(game("a", "a", null, null), 3, 30, 0, 0),
                     row(game("b", "b", null, null), 1, 10, 0, 0),
                     row(game("c", "c", null, null), 2, 20, 0, 0));
             assertThat(ids(GameSorter.sort(rows, "BOT_GROUP_COUNT", "asc"))).containsExactly("b", "c", "a");
+            assertThat(ids(GameSorter.sort(rows, "BOT_GROUP_COUNT", "desc"))).containsExactly("a", "c", "b");
+            assertThat(ids(GameSorter.sort(rows, "BOT_COUNT", "asc"))).containsExactly("b", "c", "a");
             assertThat(ids(GameSorter.sort(rows, "BOT_COUNT", "desc"))).containsExactly("a", "c", "b");
+        }
+
+        @Test
+        @DisplayName("CREATED_TIME desc (explicit) — newest first")
+        void createdTimeDesc() {
+            Instant older = Instant.parse("2026-01-01T00:00:00Z");
+            Instant newer = Instant.parse("2026-06-01T00:00:00Z");
+            List<GameSortRow> rows = List.of(
+                    row(game("old", "old", null, older), 0, 0, 0, 0),
+                    row(game("new", "new", null, newer), 0, 0, 0, 0));
+            assertThat(ids(GameSorter.sort(rows, "CREATED_TIME", "desc"))).containsExactly("new", "old");
         }
 
         @Test
