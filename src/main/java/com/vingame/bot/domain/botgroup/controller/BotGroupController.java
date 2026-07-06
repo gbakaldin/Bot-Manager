@@ -11,6 +11,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
+import com.vingame.bot.domain.botgroup.sort.BotSortKey;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,6 +27,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.validation.annotation.Validated;
 
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -65,6 +67,16 @@ public class BotGroupController {
         // persisted, and must stay off the create/update write surface.
         dto.setStats(behaviorService.computeStats(id));
         return ResponseEntity.ok(dto);
+    }
+
+    @Operation(
+            summary = "List supported bot-group sort keys",
+            description = "Returns the valid sortBy values for the env-scoped bot-group filter, driven off the "
+                    + "BotSortKey enum (BOTGROUP_GAME_MANAGEMENT Phase 4/6). Frontend uses this to build the sort "
+                    + "dropdown so it cannot drift from the server's accepted keys.")
+    @GetMapping("/sort-keys")
+    public ResponseEntity<List<String>> getSortKeys() {
+        return ResponseEntity.ok(Arrays.stream(BotSortKey.values()).map(Enum::name).toList());
     }
 
     @Operation(

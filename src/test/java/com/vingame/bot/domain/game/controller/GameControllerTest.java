@@ -11,6 +11,7 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameFilter;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
+import com.vingame.bot.domain.game.sort.GameSortKey;
 import com.vingame.bot.domain.game.sort.GameSortRow;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import org.junit.jupiter.api.DisplayName;
@@ -508,6 +509,22 @@ class GameControllerTest {
                     .andExpect(jsonPath("$.length()").value(GameType.values().length))
                     .andExpect(jsonPath("$[*].code").value(org.hamcrest.Matchers.hasItem("BETTING_MINI")))
                     .andExpect(jsonPath("$[*].displayName").value(org.hamcrest.Matchers.hasItem("Betting mini")));
+        }
+    }
+
+    @Nested
+    @DisplayName("GET /api/v1/game/sort-keys")
+    class GetSortKeysTests {
+
+        @Test
+        @DisplayName("Should return every GameSortKey enum name")
+        void shouldReturnAllGameSortKeys() throws Exception {
+            var perform = mockMvc.perform(get("/api/v1/game/sort-keys"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.length()").value(GameSortKey.values().length));
+            for (GameSortKey key : GameSortKey.values()) {
+                perform.andExpect(jsonPath("$[*]").value(org.hamcrest.Matchers.hasItem(key.name())));
+            }
         }
     }
 

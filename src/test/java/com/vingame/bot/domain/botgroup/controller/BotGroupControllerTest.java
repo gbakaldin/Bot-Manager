@@ -18,6 +18,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.sort.BotGroupSortRow;
+import com.vingame.bot.domain.botgroup.sort.BotSortKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import org.junit.jupiter.api.DisplayName;
@@ -146,6 +147,22 @@ class BotGroupControllerTest {
                     .andExpect(status().is4xxClientError());
 
             verify(service, never()).findAll();
+        }
+    }
+
+    @Nested
+    @DisplayName("GET /api/v1/bot-group/sort-keys")
+    class GetSortKeysTests {
+
+        @Test
+        @DisplayName("Should return every BotSortKey enum name")
+        void shouldReturnAllBotSortKeys() throws Exception {
+            var perform = mockMvc.perform(get("/api/v1/bot-group/sort-keys"))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.length()").value(BotSortKey.values().length));
+            for (BotSortKey key : BotSortKey.values()) {
+                perform.andExpect(jsonPath("$[*]").value(org.hamcrest.Matchers.hasItem(key.name())));
+            }
         }
     }
 

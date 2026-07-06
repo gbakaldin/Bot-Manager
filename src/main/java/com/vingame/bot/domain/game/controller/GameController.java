@@ -10,6 +10,7 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameFilter;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
+import com.vingame.bot.domain.game.sort.GameSortKey;
 
 import java.util.Arrays;
 import io.swagger.v3.oas.annotations.Operation;
@@ -53,6 +54,16 @@ public class GameController {
     @GetMapping("/types")
     public ResponseEntity<List<GameTypeDTO>> getGameTypes() {
         return ResponseEntity.ok(Arrays.stream(GameType.values()).map(GameTypeDTO::of).toList());
+    }
+
+    @Operation(
+            summary = "List supported game sort keys",
+            description = "Returns the valid sortBy values for the game filter, driven off the GameSortKey enum "
+                    + "(BOTGROUP_GAME_MANAGEMENT Phase 5/6). Frontend uses this to build the sort dropdown so it "
+                    + "cannot drift from the server's accepted keys.")
+    @GetMapping("/sort-keys")
+    public ResponseEntity<List<String>> getSortKeys() {
+        return ResponseEntity.ok(Arrays.stream(GameSortKey.values()).map(Enum::name).toList());
     }
 
     @Operation(
