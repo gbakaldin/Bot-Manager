@@ -7,7 +7,10 @@ import com.vingame.bot.domain.game.dto.GameDTO;
 import com.vingame.bot.domain.game.mapper.GameMapper;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameFilter;
+import com.vingame.bot.domain.botgroup.model.BotGroup;
+import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import com.vingame.bot.domain.game.repository.GameRepository;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
@@ -24,16 +27,28 @@ public class GameService {
     private final GameRepository repository;
     private final GameMapper mapper;
     private final MongoTemplate mongoTemplate;
+    private final BotGroupService botGroupService;
 
-    public GameService(GameRepository repository, GameMapper mapper, MongoTemplate mongoTemplate) {
+    public GameService(GameRepository repository, GameMapper mapper, MongoTemplate mongoTemplate,
+                       @Lazy BotGroupService botGroupService) {
         this.repository = repository;
         this.mapper = mapper;
         this.mongoTemplate = mongoTemplate;
+        this.botGroupService = botGroupService;
     }
 
     public Game findById(String id) {
         return repository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Game not found with id: " + id));
+    }
+
+    /**
+     * All games belonging to an environment (strict {@code environmentId} match).
+     * Backs the Environment→Games cascade delete (BOTGROUP_GAME_MANAGEMENT
+     * AD-15 / Phase 7).
+     */
+    public List<Game> findByEnvironmentId(String environmentId) {
+        return repository.findByEnvironmentId(environmentId);
     }
 
     /**
@@ -107,7 +122,18 @@ public class GameService {
         return save(existing);
     }
 
+    /**
+     * Delete a game, cascading to every bot group that references it
+     * (BOTGROUP_GAME_MANAGEMENT AD-15 / Phase 7). {@code BotGroup.gameId} is the
+     * Game Mongo {@code _id} (Implementation Note 1), so the referencing groups
+     * are those returned by {@code findByGameId(id)}. Each is deleted via
+     * {@link BotGroupService#delete(String)} (stop → logout → stop-managing)
+     * before the game document itself, so no orphan group is left behind.
+     */
     public void delete(String id) {
+        for (BotGroup group : botGroupService.findByGameId(id)) {
+            botGroupService.delete(group.getId());
+        }
         repository.deleteById(id);
     }
 }

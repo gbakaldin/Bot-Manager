@@ -9,8 +9,12 @@ import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.model.EnvironmentFilter;
 import com.vingame.bot.domain.environment.model.EnvironmentType;
 import com.vingame.bot.domain.environment.repository.EnvironmentRepository;
-import jakarta.annotation.PostConstruct;
+import com.vingame.bot.domain.botgroup.model.BotGroup;
+import com.vingame.bot.domain.botgroup.service.BotGroupService;
+import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.domain.game.service.GameService;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
@@ -29,6 +33,8 @@ public class EnvironmentService {
     private final EnvironmentRepository repository;
     private final EnvironmentMapper mapper;
     private final MongoTemplate mongoTemplate;
+    private final GameService gameService;
+    private final BotGroupService botGroupService;
 
     @Value("${bot.periodic-logout.enabled:true}")
     private boolean defaultPeriodicLogoutEnabled;
@@ -36,10 +42,13 @@ public class EnvironmentService {
     @Value("${bot.periodic-logout.interval-minutes:60}")
     private int defaultPeriodicLogoutIntervalMinutes;
 
-    public EnvironmentService(EnvironmentRepository repository, EnvironmentMapper mapper, MongoTemplate mongoTemplate) {
+    public EnvironmentService(EnvironmentRepository repository, EnvironmentMapper mapper, MongoTemplate mongoTemplate,
+                              GameService gameService, @Lazy BotGroupService botGroupService) {
         this.repository = repository;
         this.mapper = mapper;
         this.mongoTemplate = mongoTemplate;
+        this.gameService = gameService;
+        this.botGroupService = botGroupService;
     }
 
     public Environment findById(String id) {
@@ -123,7 +132,28 @@ public class EnvironmentService {
         return merged;
     }
 
+    /**
+     * Delete an environment, cascading in the order Environment → Games →
+     * BotGroups (BOTGROUP_GAME_MANAGEMENT AD-15 / Phase 7).
+     * <p>
+     * Each game in the env is deleted first via {@link GameService#delete(String)},
+     * which itself cascades to the bot groups that reference it (stop → logout →
+     * stop-managing → delete). Any bot group still pointing at this environment
+     * afterwards — e.g. one whose {@code gameId} is null or resolves to a game in
+     * another env — is then deleted via {@link BotGroupService#delete(String)}
+     * (already-deleted groups no longer appear in the fresh query, and delete is
+     * idempotent). Only once no group or game references the environment is the
+     * environment document removed, so no orphan is left behind. No users are
+     * deregistered on the bot server — there is no such API and leftover accounts
+     * are expected.
+     */
     public void delete(String id) {
+        for (Game game : gameService.findByEnvironmentId(id)) {
+            gameService.delete(game.getId());
+        }
+        for (BotGroup group : botGroupService.findByEnvironmentId(id)) {
+            botGroupService.delete(group.getId());
+        }
         repository.deleteById(id);
     }
 }

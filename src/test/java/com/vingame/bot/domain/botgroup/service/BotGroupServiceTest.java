@@ -77,6 +77,9 @@ class BotGroupServiceTest {
     @Mock
     private BotGroupConfigValidationService configValidation;
 
+    @Mock
+    private BotGroupBehaviorService behaviorService;
+
     @Captor
     private ArgumentCaptor<Query> queryCaptor;
 
@@ -488,11 +491,15 @@ class BotGroupServiceTest {
     class DeleteTests {
 
         @Test
-        @DisplayName("Should call repository.deleteById")
-        void shouldCallRepositoryDelete() {
+        @DisplayName("Should stop+logout the group then call repository.deleteById (cascade order)")
+        void shouldStopLogoutThenDelete() {
             service.delete("123");
 
-            verify(repository).deleteById("123");
+            // stopAndLogout must run before the document is removed so the runtime
+            // is torn down and every bot logs out before the group vanishes (AD-15).
+            org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(behaviorService, repository);
+            inOrder.verify(behaviorService).stopAndLogout("123");
+            inOrder.verify(repository).deleteById("123");
         }
     }
 

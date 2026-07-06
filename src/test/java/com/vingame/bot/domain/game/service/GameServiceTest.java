@@ -45,6 +45,9 @@ class GameServiceTest {
     @Mock
     private MongoTemplate mongoTemplate;
 
+    @Mock
+    private com.vingame.bot.domain.botgroup.service.BotGroupService botGroupService;
+
     @Captor
     private ArgumentCaptor<Query> queryCaptor;
 
@@ -392,11 +395,29 @@ class GameServiceTest {
     class DeleteTests {
 
         @Test
-        @DisplayName("Should call repository.deleteById")
+        @DisplayName("Should delete the game when no bot group references it")
         void shouldCallRepositoryDelete() {
+            when(botGroupService.findByGameId("game-1")).thenReturn(List.of());
+
             service.delete("game-1");
 
             verify(repository).deleteById("game-1");
+            verify(botGroupService, org.mockito.Mockito.never()).delete(org.mockito.ArgumentMatchers.anyString());
+        }
+
+        @Test
+        @DisplayName("Should cascade-delete every referencing bot group before the game (AD-15)")
+        void shouldCascadeToBotGroups() {
+            when(botGroupService.findByGameId("game-1")).thenReturn(List.of(
+                    com.vingame.bot.domain.botgroup.model.BotGroup.builder().id("g-a").build(),
+                    com.vingame.bot.domain.botgroup.model.BotGroup.builder().id("g-b").build()));
+
+            service.delete("game-1");
+
+            org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(botGroupService, repository);
+            inOrder.verify(botGroupService).delete("g-a");
+            inOrder.verify(botGroupService).delete("g-b");
+            inOrder.verify(repository).deleteById("game-1");
         }
     }
 }

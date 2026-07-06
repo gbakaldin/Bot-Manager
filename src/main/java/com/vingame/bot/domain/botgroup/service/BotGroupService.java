@@ -19,6 +19,7 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
@@ -40,13 +41,15 @@ public class BotGroupService {
     private final GameService gameService;
     private final MongoTemplate mongoTemplate;
     private final BotGroupConfigValidationService configValidation;
+    private final BotGroupBehaviorService behaviorService;
 
     public BotGroupService(BotGroupRepository repository, BotGroupMapper mapper,
                            EnvironmentClientRegistry clientRegistry,
                            EnvironmentService environmentService,
                            GameService gameService,
                            MongoTemplate mongoTemplate,
-                           BotGroupConfigValidationService configValidation) {
+                           BotGroupConfigValidationService configValidation,
+                           @Lazy BotGroupBehaviorService behaviorService) {
         this.repository = repository;
         this.mapper = mapper;
         this.clientRegistry = clientRegistry;
@@ -54,6 +57,7 @@ public class BotGroupService {
         this.gameService = gameService;
         this.mongoTemplate = mongoTemplate;
         this.configValidation = configValidation;
+        this.behaviorService = behaviorService;
     }
 
     public BotGroup findById(String id) {
@@ -285,7 +289,17 @@ public class BotGroupService {
         return save(existing);
     }
 
+    /**
+     * Delete a bot group, first stopping it and logging every bot out of the
+     * game server (BOTGROUP_GAME_MANAGEMENT AD-15 / Phase 7). The
+     * stop→logout→stop-managing sequence lives in
+     * {@link BotGroupBehaviorService#stopAndLogout(String)} (it owns the runtime
+     * map); it is a no-op for a group that is not running, so deleting an
+     * already-stopped group is safe. No attempt is made to deregister users on
+     * the bot server — there is no such API and leftover accounts are expected.
+     */
     public void delete(String id) {
+        behaviorService.stopAndLogout(id);
         repository.deleteById(id);
     }
 }

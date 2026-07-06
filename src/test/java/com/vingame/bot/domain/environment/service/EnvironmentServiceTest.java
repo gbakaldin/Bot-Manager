@@ -48,6 +48,12 @@ class EnvironmentServiceTest {
     @Mock
     private MongoTemplate mongoTemplate;
 
+    @Mock
+    private com.vingame.bot.domain.game.service.GameService gameService;
+
+    @Mock
+    private com.vingame.bot.domain.botgroup.service.BotGroupService botGroupService;
+
     @Captor
     private ArgumentCaptor<Query> queryCaptor;
 
@@ -408,11 +414,32 @@ class EnvironmentServiceTest {
     class DeleteTests {
 
         @Test
-        @DisplayName("Should call repository.deleteById")
+        @DisplayName("Should delete the environment when it has no games or groups")
         void shouldCallRepositoryDelete() {
+            when(gameService.findByEnvironmentId("env-1")).thenReturn(List.of());
+            when(botGroupService.findByEnvironmentId("env-1")).thenReturn(List.of());
+
             service.delete("env-1");
 
             verify(repository).deleteById("env-1");
+        }
+
+        @Test
+        @DisplayName("Should cascade Environment -> Games -> BotGroups in order (AD-15)")
+        void shouldCascadeGamesThenGroupsThenEnv() {
+            when(gameService.findByEnvironmentId("env-1")).thenReturn(List.of(
+                    com.vingame.bot.domain.game.model.Game.builder().id("game-a").build()));
+            when(botGroupService.findByEnvironmentId("env-1")).thenReturn(List.of(
+                    com.vingame.bot.domain.botgroup.model.BotGroup.builder().id("group-orphan").build()));
+
+            service.delete("env-1");
+
+            // Games are deleted first (each cascades to its own groups), then any
+            // bot group still pointing at this env, then the env document itself.
+            org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(gameService, botGroupService, repository);
+            inOrder.verify(gameService).delete("game-a");
+            inOrder.verify(botGroupService).delete("group-orphan");
+            inOrder.verify(repository).deleteById("env-1");
         }
     }
 }
