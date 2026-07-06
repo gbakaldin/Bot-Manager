@@ -616,6 +616,42 @@ class BotGroupBehaviorServiceTest {
             verify(sessionAggregationService).evictGroup("g-1");
             assertThat(runningGroups()).doesNotContainKey("g-1");
         }
+
+        @Test
+        @DisplayName("Logs every bot out BEFORE evicting session state / dropping the group (ordering)")
+        void logsOutBeforeTeardown() {
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 2, "env-1");
+            Bot b1 = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
+            Bot b2 = mockBot(BotStatus.STARTED, true);
+            putBots(runtime, List.of(b1, b2));
+            runningGroups().put("g-1", runtime);
+
+            service.stopAndLogout("g-1");
+
+            // Server-side logout for every bot must happen before the session-agg
+            // eviction that ends the teardown — logout while the runtime is still
+            // intact, then evict. inOrder spans the bot mocks and the agg mock.
+            org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(b1, b2, sessionAggregationService);
+            inOrder.verify(b1).logout();
+            inOrder.verify(b2).logout();
+            inOrder.verify(sessionAggregationService).evictGroup("g-1");
+        }
+
+        @Test
+        @DisplayName("Does NOT persist a STOPPED status — the caller deletes the document next (no DB round-trip)")
+        void doesNotPersistStoppedStatus() {
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 1, "env-1");
+            Bot b1 = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
+            putBots(runtime, List.of(b1));
+            runningGroups().put("g-1", runtime);
+
+            service.stopAndLogout("g-1");
+
+            // Unlike stop(), stopAndLogout must not write STOPPED back to Mongo:
+            // BotGroupService.delete removes the document immediately afterwards,
+            // so a save would be a wasted round-trip on a doomed document.
+            verify(botGroupService, never()).save(any(BotGroup.class));
+        }
     }
 
     @Nested

@@ -512,3 +512,115 @@ ordering regression the set-membership tests would miss.
 ## Failures
 
 None.
+
+---
+
+# QA — BOTGROUP_GAME_MANAGEMENT (Phase 7: cascading deletes)
+
+**Verdict:** PASS
+**Build:** `mvn clean install` → 1215 tests, 0 failures, 0 errors (6 new)
+
+## Scope reviewed
+
+`git diff 966448e..HEAD` — Phase 7 only:
+- `BotGroupBehaviorService.stopAndLogout(id)` — the teardown half of the cascade
+  (AD-15): no-op when the group is not running; else flip out of ACTIVE → per-bot
+  `bot.logout()` (tolerating one throwing) → existing `stopAllBots` teardown →
+  `sessionAggregationService.evictGroup` → drop from `runningGroups`. Deliberately
+  does NOT persist STOPPED (the caller deletes the doc next).
+- `BotGroupService.delete` = `behaviorService.stopAndLogout(id)` then
+  `repository.deleteById(id)`.
+- `GameService.delete` cascades to `botGroupService.findByGameId(id)` groups
+  (each `delete`d) then deletes the game.
+- `EnvironmentService.delete` deletes each `gameService.findByEnvironmentId(id)`
+  game (each cascading to its groups), then any remaining
+  `botGroupService.findByEnvironmentId(id)` orphan group, then the env.
+- New `GameRepository.findByEnvironmentId` / `GameService.findByEnvironmentId`.
+- `@Lazy` on the three back-references (`BotGroupService.behaviorService`,
+  `GameService.botGroupService`, `EnvironmentService.botGroupService`) to break the
+  Spring construction cycles.
+
+## Tests added / updated
+
+Dev delivered a solid first pass (`stopAndLogout` happy/no-op/tolerate-throw;
+per-level cascade `inOrder` tests that re-mock the downstream `service.delete`).
+QA closed the load-bearing gaps the task called out — the documented "no DB
+round-trip" behavior and the logout-before-teardown ordering were unasserted, and
+no test exercised the true multi-service delegation chain end-to-end:
+
+- `src/test/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorServiceTest.java` (2)
+  - `StopAndLogoutTests.logsOutBeforeTeardown` — `inOrder` across the bot mocks and
+    the session-agg mock: every `bot.logout()` fires BEFORE `evictGroup`, i.e. bots
+    log out while the runtime is still intact, then teardown evicts. Guards the
+    ordering the cascade depends on.
+  - `StopAndLogoutTests.doesNotPersistStoppedStatus` — `verify(botGroupService,
+    never()).save(...)`: unlike `stop()`, `stopAndLogout` must not write STOPPED back
+    to Mongo (the caller deletes the doc next; a save would be a wasted round-trip on
+    a doomed document — the exact behavior the javadoc claims).
+- `src/test/java/com/vingame/bot/domain/botgroup/service/CascadeDeleteChainTest.java` (4 — new file)
+  - Wires the **real** `EnvironmentService` + `GameService` + `BotGroupService`
+    together (only the three repositories and the behavior service are mocks) so the
+    actual production cascade is exercised through every hop — the existing per-level
+    tests re-mock `service.delete` and never prove the chain end-to-end. The `@Lazy`
+    runtime cycle is mirrored by giving `BotGroupService` a mock `GameService` (its
+    delete path never touches `gameService`) and handing the real `BotGroupService`
+    to the real `GameService`/`EnvironmentService`.
+  - `fullChainDeletesEverythingInOrder` — env→game→group: `inOrder` proves
+    `stopAndLogout("group-1")` → `botGroupRepo.deleteById("group-1")` →
+    `gameRepo.deleteById("game-a")` → `envRepo.deleteById("env-1")`, strictly in that
+    order (no parent removed while a child still references it — AD-15).
+  - `orphanGroupSweptBeforeEnv` — a group referencing the env directly (null gameId /
+    cross-env game, found only by the env-scoped sweep) is stopped-and-deleted before
+    the env doc: no orphan left behind.
+  - `idempotentWhenGroupsAlreadyStopped` — a no-op `stopAndLogout` (models an
+    already-stopped group) still deletes the group and completes the game+env cascade.
+  - `gameWithNoGroupsDeletesOnlyGame` — deleting a game with no referencing groups
+    deletes only the game; no stray `stopAndLogout` / group deletion.
+
+Pre-existing Dev tests kept and verified green: `stopAndLogout` happy path (both
+bots logged out, evict, dropped from `runningGroups`, status flipped STOPPED),
+no-op-when-not-running, tolerate-logout-throw; `BotGroupService.delete`
+stop-then-deleteById `inOrder`; `GameService.delete` cascade-to-groups `inOrder` +
+no-groups path; `EnvironmentService.delete` games-then-groups-then-env `inOrder` +
+empty path.
+
+## Coverage of the diff
+
+- `BotGroupBehaviorService.stopAndLogout` ← `BotGroupBehaviorServiceTest.StopAndLogoutTests`
+  (happy teardown, no-op, tolerate-throw, logout-before-evict ordering, no-STOPPED-save).
+- `BotGroupService.delete` ← `BotGroupServiceTest.DeleteTests` (stop→delete `inOrder`)
+  + `CascadeDeleteChainTest` (real delegation to the behavior-service mock + repo).
+- `GameService.delete` (+ `findByEnvironmentId`) ← `GameServiceTest.DeleteTests`
+  (cascade `inOrder`, no-groups) + `CascadeDeleteChainTest.gameWithNoGroupsDeletesOnlyGame`
+  (real BotGroupService delegation).
+- `EnvironmentService.delete` ← `EnvironmentServiceTest.DeleteTests`
+  (games→groups→env `inOrder`, empty) + `CascadeDeleteChainTest` (full real chain,
+  orphan sweep, already-stopped idempotency).
+- `GameRepository.findByEnvironmentId` ← exercised via `GameService.findByEnvironmentId`
+  delegation in the env cascade (derived-query method, no custom impl to unit-test).
+- `@Lazy` cycle break ← `mvn clean install` boots the full context in the
+  integration/controller slices without a `BeanCurrentlyInCreationException`; the
+  manual wiring in `CascadeDeleteChainTest` also confirms no construction cycle in the
+  delete path.
+
+## Gaps
+
+- **Real Spring `@Lazy` proxy resolution** is proven by the app-context tests booting
+  green, not by a dedicated cycle-detection test — a fresh `@SpringBootTest` would add
+  nothing beyond what the existing controller slices already establish.
+- **Live Mongo cascade round-trip** (that `deleteById` / `findByGameId` /
+  `findByEnvironmentId` actually remove/return docs) is mocked, consistent with the
+  repository-mocked unit idiom across the suite. End-to-end deletion + no-orphan is
+  covered by Verification step 11 (staging: create disposable env/game/group, DELETE
+  the env, assert the group filter is empty/404 and the game is 404, grep the log for
+  the group's stop line).
+- **Concurrent periodic-logout race** (the ACTIVE-flip guarding a concurrent tick) is
+  asserted at the state level (`actualStatus == STOPPED` after `stopAndLogout`), not by
+  standing up a real concurrent scheduler — thread-timing tests would be flaky; the
+  status gate is the deterministic invariant.
+- **Unrelated untracked file** `src/main/java/com/vingame/bot/T.java` remains in the
+  working tree — not part of this diff, left unstaged as instructed. Out of QA scope.
+
+## Failures
+
+None.
