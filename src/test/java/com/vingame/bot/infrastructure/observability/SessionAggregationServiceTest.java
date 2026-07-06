@@ -143,11 +143,11 @@ class SessionAggregationServiceTest {
         service.onSessionStart(SID, BettingSessionStrategy.INSTANCE, () -> "start-raw");
 
         // Three distinct bettors stake different amounts in this session.
-        service.recordBet(SID, "botA", 100L);
-        service.recordBet(SID, "botB", 250L);
-        service.recordBet(SID, "botC", 300L);
+        service.recordBet(SID, "botA", 0, 100L);
+        service.recordBet(SID, "botB", 0, 250L);
+        service.recordBet(SID, "botC", 0, 300L);
         // botA bets a second time — a bet event, not a new distinct bettor.
-        service.recordBet(SID, "botA", 50L);
+        service.recordBet(SID, "botA", 0, 50L);
 
         // Every bot observes EndGame; only the first-close bot logs.
         service.onSessionEnd(SID, 400L, 100L, () -> "end-raw");
@@ -172,8 +172,8 @@ class SessionAggregationServiceTest {
     void taiXiu_winningsFlowThrough() {
         setBotMdc();
         service.onSessionStart(SID, BettingSessionStrategy.INSTANCE, () -> "start");
-        service.recordBet(SID, "tx1", 1_000L);
-        service.recordBet(SID, "tx2", 2_000L);
+        service.recordBet(SID, "tx1", 0, 1_000L);
+        service.recordBet(SID, "tx2", 0, 2_000L);
         // Tai Xiu winnings = G (extracted by the bot via HasBotWinnings); the service
         // logs exactly what it is handed.
         service.onSessionEnd(SID, 3_000L, 1_000L, () -> "end");
@@ -205,7 +205,7 @@ class SessionAggregationServiceTest {
     void noMdc_isNoOp() {
         MDC.clear();
         service.onSessionStart(SID, BettingSessionStrategy.INSTANCE, () -> "s");
-        service.recordBet(SID, "bot", 100L);
+        service.recordBet(SID, "bot", 0, 100L);
         service.onSessionEnd(SID, 0L, 0L, () -> "e");
         assertThat(service.liveSessionCount()).isEqualTo(0);
         assertThat(eventsContaining("entered session")).isEmpty();

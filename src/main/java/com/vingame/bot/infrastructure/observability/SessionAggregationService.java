@@ -318,9 +318,12 @@ public class SessionAggregationService {
      *
      * @param sid    the session the bet was staked in ({@code sidStore.get()})
      * @param bettor the bot's user name (distinct-bettor key)
+     * @param option the strategy-decision option/eid the bot bet on
+     *               ({@code decision.optionId()}) — the per-window histogram key
+     *               (STRATEGY_DECISION_AGGREGATION Phase 1, AD-1)
      * @param amount the staked amount
      */
-    public void recordBet(long sid, String bettor, long amount) {
+    public void recordBet(long sid, String bettor, int option, long amount) {
         SessionKey key = keyFor(sid);
         if (key == null) {
             return;
@@ -329,7 +332,7 @@ public class SessionAggregationService {
         if (acc == null) {
             return;
         }
-        acc.recordBet(bettor, amount);
+        acc.recordBet(bettor, option, amount);
     }
 
     /**
@@ -342,16 +345,20 @@ public class SessionAggregationService {
      *
      * @param strategy   the slot render strategy ({@link SlotSessionStrategy#INSTANCE})
      * @param bettor     the bot's user name (distinct-spinner key)
+     * @param perLineBet the per-line bet the bot chose — the slot analogue of the
+     *                   betting option/eid (the "decision"), fed into the same
+     *                   per-window bet-size histogram
+     *                   (STRATEGY_DECISION_AGGREGATION Phase 2, AD-6)
      * @param totalStake the total staked for the spin ({@code perLineBet * numLines})
      */
-    public void recordSpin(SessionAggregationStrategy strategy, String bettor, long totalStake) {
+    public void recordSpin(SessionAggregationStrategy strategy, String bettor, int perLineBet, long totalStake) {
         SessionKey key = keyFor(SLOT_WINDOW_SID);
         if (key == null) {
             return;
         }
         SessionAccumulator acc = sessions.computeIfAbsent(key, k ->
                 new SessionAccumulator(strategy, MDC.getCopyOfContextMap(), System.nanoTime()));
-        acc.recordBet(bettor, totalStake);
+        acc.recordBet(bettor, perLineBet, totalStake);
         enforceSizeCap();
     }
 

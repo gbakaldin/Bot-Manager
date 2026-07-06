@@ -72,7 +72,7 @@ public final class RandomBehaviorStrategy implements BettingStrategy {
                 numberOfBetsInCurrentSession = 0;
             }
             if (numberOfBetsInCurrentSession >= behavior.getMaxBetsPerRound()) {
-                log.debug("RandomBehaviorStrategy.decide: skip — already placed {} bets this round (max {})",
+                log.trace("RandomBehaviorStrategy.decide: skip — already placed {} bets this round (max {})",
                         numberOfBetsInCurrentSession, behavior.getMaxBetsPerRound());
                 return Optional.empty();
             }
@@ -80,7 +80,7 @@ public final class RandomBehaviorStrategy implements BettingStrategy {
             // Skip-percentage gate (mirrors legacy shouldBet — order of RNG
             // calls matters for the equivalence test in Phase 5).
             if (ctx.rng().nextInt(100) < behavior.getBetSkipPercentage()) {
-                log.debug("RandomBehaviorStrategy.decide: skip — betSkipPercentage gate fired");
+                log.trace("RandomBehaviorStrategy.decide: skip — betSkipPercentage gate fired");
                 return Optional.empty();
             }
             numberOfBetsInCurrentSession++;
@@ -100,7 +100,7 @@ public final class RandomBehaviorStrategy implements BettingStrategy {
         List<Integer> options = List.copyOf(ctx.game().getEffectiveOptionAffinities().keySet());
         int option = options.get(ctx.rng().nextInt(options.size()));
 
-        log.debug("RandomBehaviorStrategy.decide: bet option={}, amount={}", option, amount);
+        log.trace("RandomBehaviorStrategy.decide: bet option={}, amount={}", option, amount);
         return Optional.of(new BetDecision(option, amount));
     }
 
@@ -108,7 +108,7 @@ public final class RandomBehaviorStrategy implements BettingStrategy {
     public void onRoundEnd(RoundResult result) {
         // No-op: RNG has no memory. Future strategies (Martingale, trend-follower)
         // mutate interpretive state here.
-        log.debug("RandomBehaviorStrategy.onRoundEnd: sessionId={}, payout={}, delta={}",
+        log.trace("RandomBehaviorStrategy.onRoundEnd: sessionId={}, payout={}, delta={}",
                 result.sessionId(), result.payout(), result.balanceDelta());
     }
 }

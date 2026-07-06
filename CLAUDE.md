@@ -58,10 +58,22 @@ raised to INFO without losing lifecycle context. MDC (`botGroupId`, `botId`,
   completion, and the 5 s per-session UpdateBet running summary (plus the
   slot per-`(group,gameId)` window summary) emitted by
   `SessionAggregationService` — one aggregated line every 5 s per active
-  session, *not* per frame. Raw per-frame WS dispatch is **not** here; it is
-  TRACE-only (see below), so at the production DEBUG default only these
-  aggregates and the INFO session summaries surface — the per-frame flood is
-  gone.
+  session, *not* per frame. As of STRATEGY_DECISION_AGGREGATION that 5 s
+  UpdateBet summary also carries the **strategy-decision distribution** —
+  betting option histogram (`options: [0]x12 [5]x20`) and amount min/avg/max
+  for betting/Tai Xiu, and the bet-size histogram (`bets: [100]x30`) for the
+  slot window — making it the default-visible betting-behavior view. Raw
+  per-frame WS dispatch is **not** here, and **neither are the per-bot,
+  per-bet strategy-decision lines** (the "sending bet / parked decision /
+  decide: bet / chooseBet / sending spin" family): STRATEGY_DECISION_AGGREGATION
+  folded that signal into the 5 s aggregate above and demoted the per-bot
+  drill-in to TRACE (see below), further superseding the interim per-bot
+  strategy DEBUG levels AGGREGATED_SESSION_LOGGING had left in place. Per-bot
+  **balance fetch and status transitions stay DEBUG** — they are not a
+  strategy decision and are not covered by the aggregate. So at the production
+  DEBUG default only these aggregates, balance/status/deposit lines, and the
+  INFO session summaries surface — the per-frame flood and the per-bet
+  decision flood are both gone.
 - **WARN** — Recoverable anomalies that warrant investigation if they
   persist. Bot WS disconnect (triggers retry), watchdog expiry, partial
   registration result, deposit failure for a single bot, deposit non-200
@@ -71,19 +83,28 @@ raised to INFO without losing lifecycle context. MDC (`botGroupId`, `botId`,
   re-authentication failed (bot lost), 5xx upstream, failed to load display
   names, executor interrupted during shutdown. Page-on-ERROR is reasonable;
   keep volume low.
-- **TRACE** — Wire-level / packet-level detail. Carries **all** raw WS frame
-  dumps from `OutputPrinter`: the raw/prettified siblings
-  (`defaultOutputPrinter` / `prettifiedOutputPrinter`, demoted by
-  RESILIENCE_HARDENING P0a) *and* the MDC-tagged per-bot `User <name>: ...`
-  printer (`debugOutputPrinter`, the one actually wired into
+- **TRACE** — Wire-level / packet-level detail **plus per-bot strategy-decision
+  drill-in**. Carries **all** raw WS frame dumps from `OutputPrinter`: the
+  raw/prettified siblings (`defaultOutputPrinter` / `prettifiedOutputPrinter`,
+  demoted by RESILIENCE_HARDENING P0a) *and* the MDC-tagged per-bot
+  `User <name>: ...` printer (`debugOutputPrinter`, the one actually wired into
   `BettingMiniGameBot`/`SlotMachineBot`), which AGGREGATED_SESSION_LOGGING
   Phase 4 moved here from DEBUG — finalizing P0a, which had left this active
-  printer at DEBUG where it kept flooding at the production default. No
-  per-frame WS printer logs above TRACE now; the per-frame `User <name>: ...`
-  drill-in is opt-in via `POST /actuator/loggers/com.vingame.bot
-  {"configuredLevel":"TRACE"}`, and the default-visible per-session view
-  comes from the `SessionAggregationService` INFO/DEBUG summaries. Keep it to
-  genuine packet-level detail; do not adopt as a verbose-DEBUG junk drawer.
+  printer at DEBUG where it kept flooding at the production default. As of
+  STRATEGY_DECISION_AGGREGATION Phase 3 it also carries the per-bot, per-bet
+  **strategy-decision** lines demoted from DEBUG (`BettingMiniGameBot` "sending
+  bet" / "strategy parked decision" / "strategy skipped tick",
+  `SlotMachineBot` "parked spin" / "sending spin",
+  `RandomBehaviorStrategy`/`MartingaleStrategySupport` "decide: bet" /
+  skip-gate / "onRoundEnd" / "cap hit", and `FixedBetStrategy`/`RandomBetStrategy`
+  "chooseBet") — the group-level view of those decisions now rides the 5 s
+  aggregate at DEBUG (option/bet histogram + amount summary), while the per-bot
+  detail is TRACE-only. No per-frame WS printer logs and no per-bet decision
+  logs above TRACE now; both drill-ins are opt-in via
+  `POST /actuator/loggers/com.vingame.bot {"configuredLevel":"TRACE"}`, and the
+  default-visible per-session view comes from the `SessionAggregationService`
+  INFO/DEBUG summaries. Keep it to genuine packet-level / per-bet-decision
+  detail; do not adopt as a verbose-DEBUG junk drawer.
 
 When demoting INFO→DEBUG, keep the MDC tag on the line — that is what makes
 the demotion safe. WARN/ERROR are out of scope for routine reclassification;

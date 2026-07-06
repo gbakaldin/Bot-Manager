@@ -97,13 +97,13 @@ class SessionAggregationFlushTest {
         service.onSessionStart(SID, BettingSessionStrategy.INSTANCE, () -> "s");
 
         // First window: two distinct bettors stake 100 + 200 = 300.
-        service.recordBet(SID, "botA", 100L);
-        service.recordBet(SID, "botB", 200L);
+        service.recordBet(SID, "botA", 0, 100L);
+        service.recordBet(SID, "botB", 0, 200L);
         service.flushOnce(System.nanoTime());
 
         // Second window: one new bettor (+ a repeat from botA that is not a new bettor).
-        service.recordBet(SID, "botC", 50L);
-        service.recordBet(SID, "botA", 25L);
+        service.recordBet(SID, "botC", 0, 50L);
+        service.recordBet(SID, "botA", 0, 25L);
         service.flushOnce(System.nanoTime());
 
         List<LogEvent> flushes = flushEvents();
@@ -136,7 +136,7 @@ class SessionAggregationFlushTest {
     void endedSession_evictedAfterGrace() {
         setBotMdc();
         service.onSessionStart(SID, BettingSessionStrategy.INSTANCE, () -> "s");
-        service.recordBet(SID, "botA", 100L);
+        service.recordBet(SID, "botA", 0, 100L);
         service.onSessionEnd(SID, 0L, 100L, () -> "e");
         long endedAt = System.nanoTime(); // >= the accumulator's lastActivityNanos
 
@@ -155,7 +155,7 @@ class SessionAggregationFlushTest {
     void staleSession_sweptByTtl() {
         setBotMdc();
         service.onSessionStart(SID, BettingSessionStrategy.INSTANCE, () -> "s");
-        service.recordBet(SID, "botA", 100L);
+        service.recordBet(SID, "botA", 0, 100L);
         long activeAt = System.nanoTime();
 
         // Still active well within TTL: flushed, not evicted.
@@ -174,7 +174,7 @@ class SessionAggregationFlushTest {
         setBotMdc();
         service.onSessionStart(SID, BettingSessionStrategy.INSTANCE, () -> "s");
         service.onSessionStart(SID + 1, BettingSessionStrategy.INSTANCE, () -> "s");
-        service.recordBet(SID, "botA", 100L);
+        service.recordBet(SID, "botA", 0, 100L);
         assertThat(service.liveSessionCount()).isEqualTo(2);
 
         service.evictGroup(GROUP_ID);
@@ -205,7 +205,7 @@ class SessionAggregationFlushTest {
                 ready.countDown();
                 try {
                     go.await();
-                    service.recordBet(SID, bettor, amountPerBot);
+                    service.recordBet(SID, bettor, 0, amountPerBot);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } finally {
@@ -288,8 +288,8 @@ class SessionAggregationFlushTest {
         InjectingFlushStrategy strategy = new InjectingFlushStrategy(service, SID);
         service.onSessionStart(SID, strategy, () -> "s");
 
-        service.recordBet(SID, "botA", 100L);
-        service.recordBet(SID, "botB", 200L);
+        service.recordBet(SID, "botA", 0, 100L);
+        service.recordBet(SID, "botB", 0, 200L);
 
         // Tick 1: snapshot = 2 bettors; render injects "lateBot" (now 3 live); baseline
         // advances to the snapshot (2), not the post-injection count.
@@ -372,7 +372,7 @@ class SessionAggregationFlushTest {
             String line = BettingSessionStrategy.INSTANCE.renderFlushLine(acc, ctx);
             if (!injected) {
                 injected = true;
-                service.recordBet(sid, "lateBot", 500L);
+                service.recordBet(sid, "lateBot", 0, 500L);
             }
             return line;
         }

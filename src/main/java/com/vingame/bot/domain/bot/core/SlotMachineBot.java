@@ -302,7 +302,7 @@ public class SlotMachineBot extends Bot {
                 return false;
             }
             pendingBet.set(Optional.of(chosenBet));
-            log.debug("Bot {}: parked spin bet={} ({} lines)", getUserName(), chosenBet, numLines);
+            log.trace("Bot {}: parked spin bet={} ({} lines)", getUserName(), chosenBet, numLines);
             return true;
         };
     }
@@ -342,8 +342,12 @@ public class SlotMachineBot extends Bot {
             // recordBet. Runs on the mdcSupplier-wrapped scenario thread, so the service
             // reads this bot's MDC identity and the window is created lazily on the first
             // spin. Null-tolerant for standalone tests.
+            // STRATEGY_DECISION_AGGREGATION (Phase 2, AD-6): the per-line `amount` IS the
+            // slot decision — pass it as the bet-size histogram key (bet values fit int),
+            // alongside the total stake, into the same per-window histogram the betting
+            // option distribution uses.
             if (sessionAggregator != null) {
-                sessionAggregator.recordSpin(SlotSessionStrategy.INSTANCE, getUserName(), totalStake);
+                sessionAggregator.recordSpin(SlotSessionStrategy.INSTANCE, getUserName(), (int) amount, totalStake);
             }
 
             List<Integer> ls = new ArrayList<>(numLines);
@@ -351,7 +355,7 @@ public class SlotMachineBot extends Bot {
                 ls.add(i);
             }
 
-            log.debug("Bot {}: sending spin gid={}, bet={} ({} lines, totalStake={})",
+            log.trace("Bot {}: sending spin gid={}, bet={} ({} lines, totalStake={})",
                     getUserName(), gid, amount, numLines, totalStake);
             return request.spin(gid, amount, ls);
         };

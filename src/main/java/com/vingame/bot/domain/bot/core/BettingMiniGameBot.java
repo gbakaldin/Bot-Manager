@@ -626,9 +626,9 @@ public class BettingMiniGameBot extends Bot {
             // cross-product source (the UpdateBet frame body carries no stake). Runs
             // on the mdcSupplier-wrapped scenario thread, so MDC identity is present.
             if (sessionAggregator != null) {
-                sessionAggregator.recordBet(currentSid, getUserName(), amount);
+                sessionAggregator.recordBet(currentSid, getUserName(), optionId, amount);
             }
-            log.debug("Bot {}: sending bet option={}, amount={}, sid={}",
+            log.trace("Bot {}: sending bet option={}, amount={}, sid={}",
                     getUserName(), optionId, amount, currentSid);
             return request.bet(amount, optionId, currentSid);
         };
@@ -653,7 +653,9 @@ public class BettingMiniGameBot extends Bot {
      * is present, ensuring the downstream supplier always sees a non-empty
      * parked value.
      *
-     * <p>Per CLAUDE.md the per-tick decide() outcome is DEBUG-level.
+     * <p>Per CLAUDE.md the per-tick decide() outcome is TRACE-level
+     * (STRATEGY_DECISION_AGGREGATION: the signal now rides the 5s aggregate
+     * flush; the per-bet drill-in is TRACE).
      */
     private Supplier<Boolean> betCondition() {
         return () -> {
@@ -665,11 +667,11 @@ public class BettingMiniGameBot extends Bot {
             }
             Optional<BetDecision> decision = decideBet(buildBetContext());
             if (decision.isEmpty()) {
-                log.debug("Bot {}: strategy skipped tick (no decision)", getUserName());
+                log.trace("Bot {}: strategy skipped tick (no decision)", getUserName());
                 return false;
             }
             pendingDecision.set(decision);
-            log.debug("Bot {}: strategy parked decision option={}, amount={}",
+            log.trace("Bot {}: strategy parked decision option={}, amount={}",
                     getUserName(), decision.get().optionId(), decision.get().amount());
             return true;
         };

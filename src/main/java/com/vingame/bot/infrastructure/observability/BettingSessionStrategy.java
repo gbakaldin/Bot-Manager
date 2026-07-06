@@ -1,5 +1,7 @@
 package com.vingame.bot.infrastructure.observability;
 
+import java.util.Map;
+
 /**
  * {@link SessionAggregationStrategy} for round-based games — betting-mini and
  * Tai Xiu (AGGREGATED_SESSION_LOGGING plan AD-4). Both game types share this one
@@ -37,10 +39,51 @@ public final class BettingSessionStrategy implements SessionAggregationStrategy 
         // baseline advance use identical counter values — an arrival mid-flush lands
         // in the next tick's delta rather than vanishing from both.
         int newBettors = acc.flushBettorSnapshot() - acc.bettorBaseline();
+        // STRATEGY_DECISION_AGGREGATION Phase 1 (AD-5): fold the per-bot strategy
+        // decision into this same line — the tumbling option histogram and the window's
+        // amount min/avg/max. avg = windowStaked / windowBets, both read as deltas
+        // against the pre-advance baselines (identical to "new bettors since last"), so
+        // no new baseline is needed. total staked is unchanged and NOT re-emitted.
+        long windowBets = acc.flushSpinSnapshot() - acc.spinBaseline();
+        long windowStaked = acc.flushStakedSnapshot() - acc.stakedBaseline();
         return "UpdateBet #" + acc.flushSeq()
                 + " | new bettors since last: " + newBettors
                 + " | total bettors this round: " + acc.flushBettorSnapshot()
-                + " | total staked: " + acc.flushStakedSnapshot();
+                + " | total staked: " + acc.flushStakedSnapshot()
+                + " | options: " + renderOptionHistogram(acc.flushOptionSnapshot())
+                + " | amount min/avg/max: " + renderAmountSummary(acc, windowBets, windowStaked);
+    }
+
+    /**
+     * Render the tumbling option histogram compactly and deterministically, e.g.
+     * {@code [0]x2 [1]x1 [5]x3} (already sorted by option id — the snapshot is a
+     * {@code TreeMap}). Renders {@code -} for a window with no option-bearing bets
+     * (e.g. a flush landing entirely in the PAYOUT phase).
+     */
+    private static String renderOptionHistogram(Map<Integer, Long> histogram) {
+        if (histogram.isEmpty()) {
+            return "-";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<Integer, Long> e : histogram.entrySet()) {
+            if (sb.length() > 0) {
+                sb.append(' ');
+            }
+            sb.append('[').append(e.getKey()).append("]x").append(e.getValue());
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Render {@code min/avg/max} over the window, or {@code -} for a zero-bet window
+     * (avoids a divide-by-zero on avg and a meaningless identity min/max).
+     */
+    private static String renderAmountSummary(SessionAccumulator acc, long windowBets, long windowStaked) {
+        if (windowBets <= 0) {
+            return "-";
+        }
+        long avg = windowStaked / windowBets;
+        return acc.flushMinSnapshot() + "/" + avg + "/" + acc.flushMaxSnapshot();
     }
 
     @Override
