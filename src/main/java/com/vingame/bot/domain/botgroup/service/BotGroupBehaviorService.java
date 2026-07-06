@@ -597,6 +597,65 @@ public class BotGroupBehaviorService {
     }
 
     /**
+     * Stop a bot group and log every bot out of the game server before tearing
+     * down the runtime — the teardown half of the cascade-delete path
+     * (BOTGROUP_GAME_MANAGEMENT AD-15 / Phase 7). Per-bot ordering:
+     * flip the group out of ACTIVE → per-bot {@link Bot#logout()} (the same
+     * server-side logout the periodic-logout path uses, minus the reconnect) →
+     * existing stop teardown ({@link BotGroupRuntime#stopAllBots(BotMetrics)} +
+     * evict aggregated-session state) → drop from {@code runningGroups} (stop
+     * managing it).
+     * <p>
+     * Idempotent and tolerant: a group that is not running is a no-op (already
+     * stopped / already removed), and a single {@code logout()} throwing is
+     * logged and skipped so one bad bot cannot abort a cascade.
+     * <p>
+     * Unlike {@link #stop(String)} this does <b>not</b> persist a STOPPED status —
+     * the sole caller ({@code BotGroupService.delete}) deletes the document next,
+     * so a DB round-trip would be wasted.
+     */
+    public void stopAndLogout(String id) {
+        BotGroupRuntime runtime = runningGroups.get(id);
+        if (runtime == null) {
+            log.debug("Bot group {} is not running; nothing to stop/logout before delete", id);
+            return;
+        }
+
+        // Flip out of ACTIVE first so a concurrent periodic-logout tick bails at
+        // its status gate (performPeriodicLogout) instead of reconnecting a bot
+        // we are about to tear down.
+        runtime.setActualStatus(BotGroupStatus.STOPPED);
+
+        // Group MDC so per-bot logout lines and the dead-window credit inside
+        // stopAllBots carry botGroupId/environmentId. Cleared in finally.
+        BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
+        try {
+            // Server-side logout per bot (reuses the periodic-logout path). Tolerate
+            // one bot throwing so the cascade completes. Bot.logout() already
+            // swallows its own exceptions; this is defence in depth.
+            for (Bot bot : runtime.getBotInstances()) {
+                try {
+                    bot.logout();
+                } catch (Exception e) {
+                    log.warn("Logout failed for bot {} in group {} during cascade delete: {}",
+                            bot.getUserName(), id, e.getMessage());
+                }
+            }
+            // Existing stop teardown: graceful WS close per bot, executor + monitor
+            // + logout-scheduler shutdown, group dead-window credit.
+            runtime.stopAllBots(botMetrics);
+        } finally {
+            BotMdc.clear();
+        }
+
+        // Drop aggregated-session entries and stop managing the group.
+        sessionAggregationService.evictGroup(id);
+        runningGroups.remove(id);
+
+        log.info("Bot group {} stopped and logged out (cascade delete)", id);
+    }
+
+    /**
      * Restart a bot group (even if DEAD).
      * <p>
      * RESTART_LIFECYCLE_FIX Architecture Decision 6: if the subsequent {@code start}

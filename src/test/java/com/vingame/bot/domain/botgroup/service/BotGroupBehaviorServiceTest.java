@@ -567,6 +567,58 @@ class BotGroupBehaviorServiceTest {
     }
 
     @Nested
+    @DisplayName("stopAndLogout - cascade-delete teardown (Phase 7)")
+    class StopAndLogoutTests {
+
+        @Test
+        @DisplayName("Logs every bot out, tears down the runtime, evicts session state, and stops managing the group")
+        void logsOutAndTearsDown() {
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 2, "env-1");
+            Bot b1 = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
+            Bot b2 = mockBot(BotStatus.STARTED, true);
+            putBots(runtime, List.of(b1, b2));
+            runningGroups().put("g-1", runtime);
+
+            service.stopAndLogout("g-1");
+
+            // Each bot was logged out of the game server (reuses the periodic-logout path).
+            verify(b1).logout();
+            verify(b2).logout();
+            // Aggregated-session state dropped and the group is no longer managed.
+            verify(sessionAggregationService).evictGroup("g-1");
+            assertThat(runningGroups()).doesNotContainKey("g-1");
+            // Flipped out of ACTIVE so a concurrent periodic-logout tick bails.
+            assertThat(runtime.getActualStatus()).isEqualTo(BotGroupStatus.STOPPED);
+        }
+
+        @Test
+        @DisplayName("Is a no-op for a group that is not running (idempotent)")
+        void noOpWhenNotRunning() {
+            service.stopAndLogout("g-missing");
+
+            verify(sessionAggregationService, never()).evictGroup(anyString());
+        }
+
+        @Test
+        @DisplayName("Tolerates a single bot's logout throwing and still completes the teardown")
+        void toleratesLogoutFailure() {
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 2, "env-1");
+            Bot bad = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
+            Bot good = mockBot(BotStatus.STARTED, true);
+            org.mockito.Mockito.doThrow(new RuntimeException("logout boom")).when(bad).logout();
+            putBots(runtime, List.of(bad, good));
+            runningGroups().put("g-1", runtime);
+
+            service.stopAndLogout("g-1");
+
+            // The healthy bot is still logged out and the teardown still runs.
+            verify(good).logout();
+            verify(sessionAggregationService).evictGroup("g-1");
+            assertThat(runningGroups()).doesNotContainKey("g-1");
+        }
+    }
+
+    @Nested
     @DisplayName("monitorHealth - dead-threshold trigger")
     class MonitorHealthTests {
 
