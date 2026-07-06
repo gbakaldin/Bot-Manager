@@ -624,3 +624,133 @@ Phase 7 code leaked in.
 ## Amendments to the plan
 
 None.
+
+---
+
+# Compliance — BOTGROUP_GAME_MANAGEMENT — Phase 7 (final)
+
+Branch: `feat/botgroup-game-management`
+Plan reviewed: `docs/plans/BOTGROUP_GAME_MANAGEMENT.md`
+Diff reviewed: `git diff 966448e..HEAD` (commits c238993, ef35c6f — exactly
+Phase 7: cascading deletes)
+
+Scope of this verdict: **Phase 7 only** (cascading deletes). Phases 1–6 were
+reviewed and PASSed in the sections above.
+
+## Verdict
+
+PASS
+
+## Phase-by-phase
+
+### Phase 7 — Cascading deletes
+Status: implemented
+
+Every plan bullet is delivered, and each is consistent with AD-15 and
+Implementation Notes 6/7.
+
+- `BotGroupBehaviorService.stopAndLogout(String id)` — implemented exactly as
+  the Phase 7 bullet and AD-15 specify. Ordering: null-runtime → no-op (idempotent
+  for a not-running group); flip `actualStatus` to STOPPED first (so a concurrent
+  periodic-logout tick bails at its status gate before reconnecting a bot about to
+  be torn down); per-bot `bot.logout()` — the same server-side logout the
+  periodic-logout path uses (plan findings lines 85–86), minus the `restart()`,
+  correctly omitted since the group is being deleted; then the existing stop
+  teardown `runtime.stopAllBots(botMetrics)` (graceful WS close, executor/monitor/
+  logout-scheduler shutdown, dead-window credit); then `sessionAggregationService
+  .evictGroup(id)` and `runningGroups.remove(id)`. Matches the plan's
+  "stop → logout → deregister-from-runtime" chain.
+  - Per-bot `logout()` is wrapped in try/catch (log-and-continue) so one bad bot
+    cannot abort the cascade — Implementation Note 7 satisfied.
+  - MDC group context is set around the loop and cleared in `finally` — consistent
+    with the logging norms (per-bot lines carry `botGroupId`/`environmentId`).
+  - Deliberately does **not** persist STOPPED (unlike `stop`) because the sole
+    caller deletes the document next — a documented, sensible deviation from
+    `stop`, not drift. The plan said "reuse the stop teardown," which it does for
+    the runtime half; skipping the DB write on a doomed document is within spec.
+- `BotGroupService.delete` — `behaviorService.stopAndLogout(id)` then
+  `repository.deleteById(id)`, in that order (InOrder-asserted in the test).
+  Matches the Phase 7 bullet: own delete = stop → logout → delete.
+- `GameService.delete` — for each `botGroupService.findByGameId(id)` →
+  `botGroupService.delete(group.getId())`, then `repository.deleteById(id)`.
+  Correctly keys on `findByGameId` (Implementation Note 1: `BotGroup.gameId` is the
+  Game Mongo `_id`). Groups deleted before the game — no orphan. Matches the bullet.
+- `EnvironmentService.delete` — cascade order Environment → Games → BotGroups:
+  first every `gameService.findByEnvironmentId(id)` is deleted (each game cascades
+  to its own groups), then any bot group still in the env via
+  `botGroupService.findByEnvironmentId(id)` (fresh query, so already-deleted groups
+  no longer appear — the "not already removed" semantics of the plan bullet), then
+  the env document. Matches AD-15 ordering exactly.
+- Supporting reads added: `GameRepository.findByEnvironmentId` +
+  `GameService.findByEnvironmentId`. `BotGroupService.findByGameId`/
+  `findByEnvironmentId` already existed (from earlier phases). All present.
+- **No user deregistration on the bot server** — none added anywhere; each
+  Javadoc explicitly records "no such API, leftover accounts expected" per AD-15
+  and Open Item 6. Correct.
+
+### `@Lazy` cycle-break — acceptable, plan-sanctioned, no plan note warranted
+The cascade creates a Spring constructor-injection cycle
+(`GameService → BotGroupService → GameService`, and
+`EnvironmentService → BotGroupService`/`GameService`). Dev broke it with `@Lazy`
+on the injected `BotGroupService`/`BotGroupBehaviorService` at three sites
+(`GameService`, `EnvironmentService`, `BotGroupService`). Implementation Note 6
+**explicitly lists `@Lazy` as one of the sanctioned options** ("...or use `@Lazy`
+on the injected bot-group service. Decide before Phase 7 coding."). This is a
+pre-approved implementation choice, not drift, and does **not** warrant a plan
+amendment or note — the plan already anticipated it. The application context wires
+and the full suite boots, confirming the cycle is actually broken.
+
+## Build + suite
+
+- `mvn clean test` (full project, JDK 21): **Tests run: 1209, Failures: 0,
+  Errors: 0, Skipped: 0 — BUILD SUCCESS.** MapStruct regenerated cleanly on the
+  clean build.
+- Phase 7 test coverage present and asserting the right things: `stopAndLogout`
+  logs-out-and-tears-down, no-op-when-not-running (idempotent), tolerates a bot's
+  `logout()` throwing; `BotGroupService.delete` InOrder(stopAndLogout, deleteById);
+  `GameService.delete` cascades to referencing groups before the game;
+  `EnvironmentService.delete` InOrder(games, groups, env).
+
+## Overall Verification section — satisfiable by the branch (final-phase check)
+
+With Phase 7 landed, every step in the plan's `## Verification` now references
+things that exist on the branch:
+- Items 1–5 (app up, Game env list/filter, bot-group env-in-path filter, old
+  `GET /` gone) → Phases 1–2.
+- Item 6 (statistics block) → Phase 3.
+- Items 7–8 (bot-group / game sorting) → Phases 4–5.
+- Item 9 (sort-key lookups) → Phase 6.
+- Item 10 (metrics unchanged) → AD-2, no code touched — regression guard holds.
+- Item 11 (cascade delete: env with game+group → all gone, no orphan) → Phase 7.
+  Achievable. Minor note: item 11's log-line hint says grep for a
+  "`Periodic logout starting` / stop line"; the cascade actually emits
+  `Bot group {} stopped and logged out (cascade delete)` (plus the per-bot logout
+  lines). The grep-for-a-stop-line-tagged-with-the-group-id still succeeds, so the
+  step is satisfiable as written — not worth a plan amendment.
+- Item 12 (migration verification) → Releaser-run against the Phase 1 script,
+  which ships on the branch.
+
+All Verification steps are achievable against the current diff.
+
+## Drift
+
+None. The Phase 7 diff faithfully implements AD-15 and the Phase 7 plan bullets.
+
+## Out-of-scope changes
+
+None in the committed Phase 7 range (`966448e..HEAD`).
+
+**Working-tree note for the Releaser (not drift, not blocking):** the working
+tree has an *uncommitted* addition to
+`src/test/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorServiceTest.java`
+adding two further `stopAndLogout` tests (logout-before-teardown ordering; does
+not persist STOPPED). They are additive test hardening, fully consistent with the
+shipped implementation, and pass as part of the 1209-green run — but they are not
+yet committed. Releaser should ensure they are committed (or intentionally
+dropped) so the branch state matches what was verified. Separately, the earlier
+`src/main/java/com/vingame/bot/T.java` stray flagged in the Phase 6 section is
+**gone** from the working tree — resolved.
+
+## Amendments to the plan
+
+None.

@@ -477,3 +477,136 @@ does not affect the verdict. Note the sibling `BotGroupController` addition is c
   `.../game/sort-keys | jq -e 'index("BOT_GROUP_COUNT") ...'`) — a JSON string array, not a
   `{key,label}` object. The plan offered the label-DTO as an alternative; the simpler
   string-array form was chosen and is internally consistent with the verification contract.
+
+---
+
+# Code Review — BOTGROUP_GAME_MANAGEMENT (Phase 7)
+
+Branch: feat/botgroup-game-management
+Reviewed diff: `git diff 966448e..HEAD` (Phase 7 — cascading deletes only)
+
+Scope: Phase 7 only — `BotGroupBehaviorService.stopAndLogout`, the `BotGroupService.delete`
+→ `stopAndLogout` wiring, the `GameService.delete` (→ groups) and `EnvironmentService.delete`
+(→ games → groups) cascades, `GameRepository.findByEnvironmentId`, and the three `@Lazy`
+back-references added to break the resulting constructor cycles. Code quality only — plan
+compliance, test coverage, and deploy mechanics are out of scope.
+
+## Verdict
+
+CHANGES_REQUESTED
+
+One `bug` finding (spurious reconnect storm on the teardown path). The cascade ordering,
+idempotency, `@Lazy` cycle-breaking, and no-user-deregistration aspects are all sound — see
+Notes.
+
+## Findings
+
+### [bug] `stopAndLogout` closes each WS before `stopped` is set, deterministically firing a spurious reconnect + WARN + metric per bot
+`src/main/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorService.java:637-643`
+
+The teardown calls `bot.logout()` for every bot **before** `runtime.stopAllBots(...)`.
+`Bot.logout()` is just `stop()` → `client.close()` (`Bot.java:267-274,248-252`) and does
+**not** set the bot's `stopped` flag. Closing the channel fires the wired `onDisconnect`
+handler, whose guard is `if (!stopped) onWsDisconnected()` (`Bot.java:425-426`). Because
+`stopped` is still `false` at that point, `onWsDisconnected()` runs for each bot and
+unconditionally (once past the `reconnecting` CAS):
+
+- `transitionStatus(BotStatus.RECONNECTING)`,
+- logs `WARN "Bot {}: WS disconnected — starting retrial flow"`,
+- `metrics.incBotReconnect("ws-disconnect")`,
+- spawns a `reconnect-<name>` virtual thread.
+
+This is the exact scenario the normal `stop()`/`cleanup()` path is written to avoid:
+`BotGroupRuntime.stopAllBots` → `Bot.cleanup()` sets `stopped = true` **before** calling
+`stop()`/`close()` (`Bot.java:218-227`) specifically so the `onDisconnect` guard suppresses
+the reconnect. `stopAndLogout` defeats that ordering by closing (via `logout()`) while
+`stopped` is still false.
+
+Runtime effect on every cascade delete of an N-bot group: N false `bot_reconnects_total{reason=
+ws-disconnect}` increments and N `WARN "…starting retrial flow"` lines for a *deliberate* admin
+delete. That counter/WARN pair is the codebase's flapping/instability signal (`incBotReconnect`
+is the reconnect-event meter, and CLAUDE.md ties reconnect volume to health alerting), so an
+ordinary delete now manufactures a false instability spike. The increments and log lines are
+**deterministic**, not timing-dependent — they happen synchronously inside `logout()` before
+`stopped` is ever set. The docstring's claim "the same server-side logout … *minus the reconnect*"
+is therefore inaccurate: the reconnect loop *is* spawned; it merely bails.
+
+An actual reconnection is avoided only by timing: `runWsReconnectLoop` sleeps
+`BACKOFF_SECONDS[0]` = 5 s before its first attempt (`Bot.java:499-503,32`), and
+`stopAllBots` → `cleanup()` sets `stopped = true` within milliseconds, so each loop hits
+`if (stopped) return` after the 5 s sleep and never opens a socket. So there is no client leak
+today — but the teardown is relying on a 5 s head-start to neutralise a reconnect it should
+never have triggered, which is fragile (any future shortening of the first backoff, or a slow
+`stopAllBots`, narrows that margin).
+
+Note also that the per-bot `logout()` loop is **functionally redundant** with the teardown that
+follows it: `logout()` and `cleanup()` both reduce to `client.close()`, and there is no separate
+server-side logout API (AD-15). So the loop adds only the spurious reconnect/WARN/metric noise
+and a second close.
+
+Fix shape: drop the explicit `logout()` loop and rely on `runtime.stopAllBots(...)`, whose
+`cleanup()` already closes each WS gracefully *with `stopped` set first* (no reconnect, no false
+metric). If an explicit "logout" step must be retained for symmetry with the periodic-logout
+path, set the bot's `stopped` flag before closing (e.g. a `Bot.shutdown()`/`markStopped()` that
+closes without arming the reconnect), so `onWsDisconnected` is suppressed the same way the normal
+stop path suppresses it.
+
+## Notes
+
+- **Cascade ordering is correct — no orphaned-runtime window (verified).** In all three delete
+  paths the runtime is fully torn down and dropped from `runningGroups` *before* the Mongo doc is
+  removed: `BotGroupService.delete` calls `stopAndLogout(id)` (which ends with
+  `sessionAggregationService.evictGroup(id)` + `runningGroups.remove(id)`) and only then
+  `repository.deleteById(id)` (`BotGroupService.java:301-303`). `GameService.delete` deletes every
+  referencing group (`findByGameId(id)`) before `repository.deleteById(id)`
+  (`GameService.java:133-138`); `EnvironmentService.delete` deletes all games (each cascading to
+  its groups) then any residual groups (`findByEnvironmentId(id)`) before removing the env doc
+  (`EnvironmentService.java:151-158`). There is no point at which a doc is gone from Mongo while its
+  runtime is still running — the dangerous direction is structurally impossible. The only failure
+  residue (if `deleteById` throws after teardown) is a doc with no runtime, which is the safe
+  direction and self-heals on a delete retry.
+
+- **Idempotency / partial-failure tolerance is sound (verified).** `stopAndLogout` is a no-op when
+  the group is not in `runningGroups` (`BotGroupBehaviorService.java:618-621`), so deleting an
+  already-stopped group and re-running a delete are both safe. A single `bot.logout()` throwing is
+  caught and logged (`:639-642`) so one bad bot cannot abort the loop — and `Bot.logout()` already
+  swallows internally, so this is defence in depth. In the env cascade a group reachable both via
+  its game and via `findByEnvironmentId` cannot double-fault: the second query runs *after* the
+  games loop has already deleted those docs, so they no longer appear; and even if one did,
+  `stopAndLogout` (not-running → no-op) + `deleteById` (absent → no-op) are individually idempotent.
+  No orphan is left for a group whose game/env is already gone.
+
+- **`@Lazy` breaks all three cycles without a first-call surprise (verified).** The new edges are
+  `BotGroupService → @Lazy BotGroupBehaviorService`, `GameService → @Lazy BotGroupService`, and
+  `EnvironmentService → @Lazy BotGroupService`; the reverse edges (`BehaviorService → BotGroupService`,
+  `BotGroupService → GameService`, `BotGroupService → EnvironmentService`) stay eager, so each cycle
+  has exactly one lazy proxy and Spring can instantiate the singletons. The lazily-injected beans are
+  used only inside `delete(...)` (runtime, admin-triggered), never in a constructor or
+  `@PostConstruct` — in particular `BehaviorService`'s `@PostConstruct` auto-start does not touch the
+  lazy `behaviorService` handle held by `BotGroupService` — so by first use every singleton is fully
+  built and the proxy just forwards. No bootstrap-order hazard.
+
+- **No user deregistration attempted (verified — AD-15).** Neither `stopAndLogout` nor any delete
+  path calls a bot-server user-deregister API; teardown stops at closing the WS session. Both
+  `BotGroupService.delete` and `EnvironmentService.delete` Javadocs state leftover accounts are
+  expected and there is no such API. Correct per AD-15.
+
+- **Thread-safety of the `runningGroups` mutation is consistent with the existing `stop()` path.**
+  `runningGroups` is a `ConcurrentHashMap` and `botInstances` is a `CopyOnWriteArrayList`, so the
+  per-bot iteration and the `remove(id)` are individually safe against the Prometheus scrape / health
+  monitor iterating `values()`. The `get(id)`…`remove(id)` is a non-atomic check-then-act, so two
+  concurrent `delete`s of the *same* id could both enter `stopAllBots` — but that mirrors the
+  pre-existing `stop(id)` shape, deletes are low-concurrency admin operations, and `stopAllBots`
+  guards on `isShutdown()`, so a double teardown is benign. Not introduced by this phase; noting for
+  completeness rather than as a finding.
+
+- **Minor (not a finding): the `ACTIVE → STOPPED` gate relies on a non-volatile field.**
+  `stopAndLogout` sets `runtime.setActualStatus(STOPPED)` on the caller thread so a concurrent
+  `performPeriodicLogout` tick bails at its `getActualStatus() != ACTIVE` gate
+  (`BotGroupBehaviorService.java:1266-1270`). `BotGroupRuntime.actualStatus` is a plain (non-volatile)
+  Lombok field read on the logout-scheduler thread, so the STOPPED write is not guaranteed
+  immediately visible there. In practice this is a pre-existing property of the field (only
+  `groupDeadSince` is volatile) and is backstopped by `stopAllBots` calling
+  `logoutScheduler.shutdownNow()`, plus the tick's own re-check of status after the reconnect delay —
+  so a leaked reconnect is bounded and self-limiting. Worth a volatile on `actualStatus` eventually,
+  but out of scope for this phase and not relied upon for correctness here.
