@@ -859,8 +859,8 @@ public class BotGroupBehaviorService {
             botCount += group.getBotCount();
             if (isGroupRunning(group.getId())) {
                 activeGroupCount++;
+                activeBotCount += getRunningBotCountForGroup(group.getId());
             }
-            activeBotCount += getRunningBotCountForGroup(group.getId());
         }
         return new GameSortRow(game, groups.size(), botCount, activeGroupCount, activeBotCount);
     }

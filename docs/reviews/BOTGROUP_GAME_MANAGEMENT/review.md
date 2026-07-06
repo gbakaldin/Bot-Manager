@@ -327,3 +327,97 @@ future change to that field's semantics doesn't silently move STATUS.
   are first-class group metadata, not aggregates. Existing docs are backfilled by
   `scripts/migrations/002_botgroup_timestamps.js` so nothing sorts as N/A on CREATED_TIME/
   UPDATED_TIME after deploy (migration content itself is Releaser's concern).
+
+---
+
+# Code Review — BOTGROUP_GAME_MANAGEMENT (Phase 5)
+
+Branch: feat/botgroup-game-management
+Reviewed diff: `git diff 379eeb7..HEAD` (Phase 5 — game sorting only)
+
+Scope: the shared-comparator extraction (`SortComparators`), the game sort surface
+(`GameSortKey` / `GameSortRow` / `GameSorter`), the `filterGamesSorted` + `enrichGame`
+aggregate enrichment in `BotGroupBehaviorService`, `BotGroupService.findByGameId`, and the
+`GameController.filter` rewire. Code quality only — plan compliance, test coverage, and deploy
+mechanics are out of scope.
+
+## Verdict
+
+PASS
+
+No `bug` or `security` findings. Two advisory findings below.
+
+## Findings
+
+### [smell] `enrichGame` sums `activeBotCount` with a looser "running" definition than `active()`
+`src/main/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorService.java:855-867`
+
+`active()` (and thus whether `ACTIVE_GROUP_COUNT`/`ACTIVE_BOT_COUNT` extract N/A) is gated on
+`activeGroupCount`, which increments only via `isGroupRunning` — runtime present **and**
+`actualStatus == ACTIVE`. But `activeBotCount` accumulates `getRunningBotCountForGroup`, which
+checks only `runtime != null` (any group still in `runningGroups`, regardless of status) and
+counts non-done bot futures. The two runtime aggregates therefore key off different
+"running" predicates. Consequences are edge-only and masked, not wrong output:
+
+- A game referenced solely by a group that is in the map but not `ACTIVE` (transient STARTING,
+  or a not-yet-evicted DEAD runtime) has `activeGroupCount == 0` → `active() == false` → both
+  active keys N/A, so any non-zero `activeBotCount` is discarded rather than shown. Fine.
+- A game with one `ACTIVE` group plus a co-referencing non-`ACTIVE`-but-in-map group would fold
+  the latter's still-open futures into `activeBotCount` while excluding it from
+  `activeGroupCount`. In practice a DEAD group's futures are done (count 0) and stopped groups
+  are removed from the map, so this rarely materialises — hence smell, not bug.
+
+Fix shape: gate the `activeBotCount += ...` on the same `isGroupRunning(group.getId())` check
+already used for `activeGroupCount`, so both aggregates share one definition of "running".
+
+### [style] `com.vingame` import placed mid-`java.util` block in GameController
+`src/main/java/com/vingame/bot/domain/game/controller/GameController.java:12-14`
+
+The new `import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;` was inserted
+immediately after `import java.util.Arrays;` and before the other `com.vingame` imports, so a
+project import now sits inside the `java.*` group. Cosmetic; move it up with the other
+`com.vingame.bot.domain.*` imports to match the file's existing ordering.
+
+## Notes
+
+- **`compareNaLast` extraction is behaviour-preserving and remains a valid total order for both
+  sorters.** The moved body is byte-for-byte the Phase 4 logic (nulls → +1/−1 to the bottom
+  regardless of direction, present values by `compareTo` negated for DESC, both-null → 0), only
+  the visibility widened `private → public` and the package-qualified call site changed. Both
+  `BotGroupSorter.comparator` and `GameSorter.comparator` call it identically and append the same
+  `NAME`-then-`id` `nullsLast` tie-breaks, so each is antisymmetric + transitive with the N/A
+  block as one equivalence class parked at the bottom — no `Comparison method violates its
+  general contract` risk. Every `GameSortKey` type (`Instant`, `Integer`, `String`) returns
+  bounded `compareTo` values, so the `-cmp` DESC negation cannot overflow `Integer.MIN_VALUE`.
+
+- **`GameSortKey.resolve` matches the audited Phase 4 contract.** Case-insensitive
+  `equalsIgnoreCase` on the trimmed input, null/blank → `CREATED_TIME` (`DEFAULT`), unknown →
+  `BadRequestException` (HTTP 400) enumerating valid keys. `GameSorter.sort` pairs it with the
+  deliberately-lenient `SortDirection.resolve` (null/blank/unknown → DESC), so only an unknown
+  *key* is a 400 — consistent with the bot-group sorter.
+
+- **`filterGamesSorted` is O(games) with one `findByGameId` per game — no N+1 over groups, no
+  Mongo aggregation.** `enrichGame` issues exactly one `BotGroupRepository.findByGameId` per
+  game and then folds `botCount`/`activeGroupCount`/`activeBotCount` over the returned groups
+  using in-memory `runningGroups` reads (`isGroupRunning`, `getRunningBotCountForGroup` — both
+  O(1)/O(bots) `ConcurrentHashMap` lookups, no DB). Sort is fully in-memory
+  (`rows.stream().sorted(...).toList()`). No persisted derived fields, no Prometheus/gauge
+  coupling. The runtime reads hit a `ConcurrentHashMap`, so the enrichment loop is safe from the
+  virtual-thread lifecycle mutating the map concurrently.
+
+- **`BotGroup.gameId` is correctly the Game Mongo `_id`.** `findByGameId(game.getId())` keys the
+  lookup on the persisted Game `_id`, matching `BotGroup.gameId` (Implementation Note 1) — the
+  same identifier `resolveGameTypes` already uses in Phase 4, so the two enrichment paths agree.
+
+- **Placement in `BotGroupBehaviorService` is sound and does not leak responsibility.** The
+  active-* aggregates are runtime-sourced and this service owns `runningGroups`; `GameService`
+  depends only on `GameRepository`/`GameMapper`/`MongoTemplate` (no back-edge to the behavior
+  service), so hosting `filterGamesSorted` here — rather than injecting the runtime map into
+  `GameService` — avoids the Spring cycle without `GameService` gaining a bot-group dependency.
+  `GameController` now depends on both `GameService` and `BotGroupBehaviorService`; no cycle,
+  since neither service references the controller.
+
+- **Controller maps sorted rows without recomputation.** `filter` maps `row -> mapper.toDTO(
+  row.game())` over the already-sorted, already-enriched rows — the DTO is built from the same
+  `Game` instance the aggregates were computed against, and the aggregates themselves are used
+  only for ordering (not surfaced in `GameDTO`), so there is no sort-vs-response drift.

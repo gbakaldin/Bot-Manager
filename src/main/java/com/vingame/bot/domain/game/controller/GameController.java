@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.game.controller;
 
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.dto.GameDTO;
@@ -8,10 +9,9 @@ import com.vingame.bot.domain.game.mapper.GameMapper;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameFilter;
 import com.vingame.bot.domain.game.model.GameType;
+import com.vingame.bot.domain.game.service.GameService;
 
 import java.util.Arrays;
-import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
-import com.vingame.bot.domain.game.service.GameService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import org.springframework.beans.factory.annotation.Autowired;
