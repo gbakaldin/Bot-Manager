@@ -447,3 +447,68 @@ QA extended two files to close the load-bearing gaps the task called out:
 ## Failures
 
 None.
+
+---
+
+# QA — BOTGROUP_GAME_MANAGEMENT (Phase 6: sort-key lookup endpoints)
+
+**Verdict:** PASS
+**Build:** `mvn clean install` → 1204 tests, 0 failures, 0 errors (2 new)
+
+## Scope reviewed
+
+`git diff ea589d5..HEAD` — Phase 6 only:
+- `GET /api/v1/bot-group/sort-keys` → `ResponseEntity<List<String>>` off
+  `Arrays.stream(BotSortKey.values()).map(Enum::name).toList()`.
+- `GET /api/v1/game/sort-keys` → same off `GameSortKey.values()`.
+Both are pure enum-catalog lookups (no service, no arg) so the frontend sort
+dropdown cannot drift from the keys `BotSortKey.resolve` / `GameSortKey.resolve`
+accept on the filter endpoints.
+
+## Tests added / updated
+
+Dev delivered WebMvcTest slices asserting 200 + list length == `values().length`
+and `hasItem` per enum key (exact set membership). QA added one exact-ordered
+assertion per endpoint — the tightest anti-drift guard — pinning the response to
+the full enum list in declaration order (which is what `values()` streams):
+
+- `src/test/java/com/vingame/bot/domain/botgroup/controller/BotGroupControllerTest.java`
+  - `GetSortKeysTests.shouldReturnExactBotSortKeyListInOrder` — response body
+    equals `Arrays.stream(BotSortKey.values()).map(Enum::name).toList()` via strict
+    JSON array match (`content().json(..., true)`): no extra keys, no missing keys,
+    same order.
+- `src/test/java/com/vingame/bot/domain/game/controller/GameControllerTest.java`
+  - `GetSortKeysTests.shouldReturnExactGameSortKeyListInOrder` — same strict-array
+    contract off `GameSortKey.values()`.
+
+Pre-existing Dev tests kept and verified green: `shouldReturnAllBotSortKeys` /
+`shouldReturnAllGameSortKeys` (200 + length + `hasItem` per key). Together
+length-equals + all-present already implies exact set equality; the QA additions
+make the "exact, ordered, cannot drift" guarantee explicit and also catch an
+ordering regression the set-membership tests would miss.
+
+## Coverage of the diff
+
+- `BotGroupController.getSortKeys` ← `BotGroupControllerTest.GetSortKeysTests`
+  (200, full `BotSortKey` list, exact order).
+- `GameController.getSortKeys` ← `GameControllerTest.GetSortKeysTests`
+  (200, full `GameSortKey` list, exact order).
+- Drift guard vs the filter contract: because both handler and test derive from the
+  same `values()`, and the Phase 4/5 `resolve` tests assert `resolve` accepts every
+  `values()` entry, the lookup list is transitively pinned to the accepted-key set.
+
+## Gaps
+
+- **`{key,label}` DTO shape** (the plan offered `List<String>` OR a
+  `StrategyInfoDTO`-style DTO as alternatives) — Dev chose `List<String>`; the
+  Verification steps (`jq 'index("BALANCE")'`, `index("BOT_GROUP_COUNT")`) assume a
+  flat string array, matching the implementation. No label/i18n surface to test.
+- **Live HTTP round-trip** is the WebMvcTest slice (MockMvc), not a running server —
+  consistent with every other controller slice in the suite. End-to-end is
+  Verification step 9 (staging curl on both `/sort-keys`).
+- **Unrelated untracked file** `src/main/java/com/vingame/bot/T.java` remains in the
+  working tree — not part of this diff, left unstaged as instructed. Out of QA scope.
+
+## Failures
+
+None.

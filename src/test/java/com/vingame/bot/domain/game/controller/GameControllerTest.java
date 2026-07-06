@@ -526,6 +526,16 @@ class GameControllerTest {
                 perform.andExpect(jsonPath("$[*]").value(org.hamcrest.Matchers.hasItem(key.name())));
             }
         }
+
+        @Test
+        @DisplayName("Should return the FULL GameSortKey list in exact enum order (cannot drift from the filter's accepted keys)")
+        void shouldReturnExactGameSortKeyListInOrder() throws Exception {
+            var expected = java.util.Arrays.stream(GameSortKey.values()).map(Enum::name).toList();
+            mockMvc.perform(get("/api/v1/game/sort-keys"))
+                    .andExpect(status().isOk())
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                            .content().json(new ObjectMapper().writeValueAsString(expected), true));
+        }
     }
 
     @Nested

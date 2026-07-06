@@ -164,6 +164,16 @@ class BotGroupControllerTest {
                 perform.andExpect(jsonPath("$[*]").value(org.hamcrest.Matchers.hasItem(key.name())));
             }
         }
+
+        @Test
+        @DisplayName("Should return the FULL BotSortKey list in exact enum order (cannot drift from the filter's accepted keys)")
+        void shouldReturnExactBotSortKeyListInOrder() throws Exception {
+            var expected = java.util.Arrays.stream(BotSortKey.values()).map(Enum::name).toList();
+            mockMvc.perform(get("/api/v1/bot-group/sort-keys"))
+                    .andExpect(status().isOk())
+                    .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers
+                            .content().json(new ObjectMapper().writeValueAsString(expected), true));
+        }
     }
 
     @Nested
