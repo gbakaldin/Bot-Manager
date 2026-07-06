@@ -571,8 +571,8 @@ class BotGroupBehaviorServiceTest {
     class StopAndLogoutTests {
 
         @Test
-        @DisplayName("Logs every bot out, tears down the runtime, evicts session state, and stops managing the group")
-        void logsOutAndTearsDown() {
+        @DisplayName("Cleans up (logs out) every bot via the stopped-first teardown, evicts session state, stops managing the group — and never calls the raw logout()")
+        void cleansUpAndTearsDown() {
             BotGroupRuntime runtime = new BotGroupRuntime("g-1", 2, "env-1");
             Bot b1 = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
             Bot b2 = mockBot(BotStatus.STARTED, true);
@@ -581,9 +581,14 @@ class BotGroupBehaviorServiceTest {
 
             service.stopAndLogout("g-1");
 
-            // Each bot was logged out of the game server (reuses the periodic-logout path).
-            verify(b1).logout();
-            verify(b2).logout();
+            // Each bot is torn down via cleanup() — which sets stopped=true BEFORE
+            // closing the WS (the logout), so onDisconnect's retry is suppressed.
+            verify(b1).cleanup();
+            verify(b2).cleanup();
+            // The raw logout() (close WITHOUT the stopped flag) must never be used on
+            // the delete path — it would manufacture a false reconnect per bot.
+            verify(b1, never()).logout();
+            verify(b2, never()).logout();
             // Aggregated-session state dropped and the group is no longer managed.
             verify(sessionAggregationService).evictGroup("g-1");
             assertThat(runningGroups()).doesNotContainKey("g-1");
@@ -600,25 +605,27 @@ class BotGroupBehaviorServiceTest {
         }
 
         @Test
-        @DisplayName("Tolerates a single bot's logout throwing and still completes the teardown")
-        void toleratesLogoutFailure() {
+        @DisplayName("Tolerates a single bot's cleanup throwing and still completes the teardown")
+        void toleratesCleanupFailure() {
             BotGroupRuntime runtime = new BotGroupRuntime("g-1", 2, "env-1");
             Bot bad = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
             Bot good = mockBot(BotStatus.STARTED, true);
-            org.mockito.Mockito.doThrow(new RuntimeException("logout boom")).when(bad).logout();
+            // stopAllBots wraps each cleanup() in try/catch, so one bad bot cannot
+            // abort the cascade.
+            org.mockito.Mockito.doThrow(new RuntimeException("cleanup boom")).when(bad).cleanup();
             putBots(runtime, List.of(bad, good));
             runningGroups().put("g-1", runtime);
 
             service.stopAndLogout("g-1");
 
-            // The healthy bot is still logged out and the teardown still runs.
-            verify(good).logout();
+            // The healthy bot is still cleaned up and the teardown still runs.
+            verify(good).cleanup();
             verify(sessionAggregationService).evictGroup("g-1");
             assertThat(runningGroups()).doesNotContainKey("g-1");
         }
 
         @Test
-        @DisplayName("Logs every bot out BEFORE evicting session state / dropping the group (ordering)")
+        @DisplayName("Cleans up every bot BEFORE evicting session state / dropping the group (ordering)")
         void logsOutBeforeTeardown() {
             BotGroupRuntime runtime = new BotGroupRuntime("g-1", 2, "env-1");
             Bot b1 = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
@@ -628,12 +635,13 @@ class BotGroupBehaviorServiceTest {
 
             service.stopAndLogout("g-1");
 
-            // Server-side logout for every bot must happen before the session-agg
-            // eviction that ends the teardown — logout while the runtime is still
-            // intact, then evict. inOrder spans the bot mocks and the agg mock.
+            // The stopped-first cleanup (the logout) for every bot must happen before
+            // the session-agg eviction that ends the teardown — clean up while the
+            // runtime is still intact, then evict. inOrder spans the bot mocks and the
+            // agg mock.
             org.mockito.InOrder inOrder = org.mockito.Mockito.inOrder(b1, b2, sessionAggregationService);
-            inOrder.verify(b1).logout();
-            inOrder.verify(b2).logout();
+            inOrder.verify(b1).cleanup();
+            inOrder.verify(b2).cleanup();
             inOrder.verify(sessionAggregationService).evictGroup("g-1");
         }
 

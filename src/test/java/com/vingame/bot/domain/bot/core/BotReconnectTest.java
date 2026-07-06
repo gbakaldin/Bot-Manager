@@ -110,6 +110,54 @@ class BotReconnectTest {
         }
     }
 
+    /* ----- cascade-delete teardown: no false reconnect (BOTGROUP_GAME_MANAGEMENT Phase 7 review) ----- */
+
+    @Nested
+    @DisplayName("cascade-delete teardown suppresses reconnect")
+    class CascadeDeleteReconnectSuppressionTests {
+
+        /**
+         * Load-bearing regression for the Phase 7 review finding. The cascade/normal
+         * delete path tears each bot down via {@link Bot#cleanup()}, which sets
+         * {@code stopped = true} BEFORE closing the WS. When that close fires the wired
+         * {@code onDisconnect} on the library thread, {@link Bot} guards it with
+         * {@code if (!stopped) onWsDisconnected()} and {@code onWsDisconnected} itself
+         * re-checks {@code stopped}. So the WS drop that a delete provokes must produce
+         * ZERO reconnect increments, NO transition to RECONNECTING, and NO reconnect
+         * thread (the {@code reconnecting} guard stays false).
+         * <p>
+         * This is the exact failure mode the review flagged: the earlier
+         * {@code bot.logout()} loop closed the socket WITHOUT setting {@code stopped},
+         * so this same onDisconnect fired the retry for every bot — N false reconnect
+         * events + N reconnect threads per N-bot delete (the prior staging-OOM path).
+         */
+        @Test
+        @DisplayName("A stopped (cleanup) bot does NOT reconnect when its WS disconnect fires — no metric, no RECONNECTING, no thread")
+        void stoppedBotDoesNotReconnectOnWsDisconnect() throws Exception {
+            com.vingame.bot.infrastructure.observability.BotMetrics metrics =
+                    mock(com.vingame.bot.infrastructure.observability.BotMetrics.class);
+            bot.setMetrics(metrics);
+            bot.client = wsClient;
+            when(wsClient.isOpen()).thenReturn(true);
+
+            // Cascade-delete teardown: cleanup() sets stopped=true, THEN closes the WS.
+            bot.cleanup();
+            assertThat(bot.isStopped()).isTrue();
+            verify(wsClient, times(1)).close();
+
+            BotStatus afterCleanup = bot.getStatus();
+
+            // The WS close fires the wired onDisconnect on the library thread. With
+            // stopped set, onWsDisconnected must be a complete no-op.
+            invokePrivate("onWsDisconnected");
+
+            verify(metrics, never()).incBotReconnect(anyString());
+            assertThat(getReconnecting(bot)).isFalse();
+            assertThat(bot.getStatus()).isEqualTo(afterCleanup);
+            assertThat(bot.getStatus()).isNotEqualTo(BotStatus.RECONNECTING);
+        }
+    }
+
     /* ----- runWsReconnectLoop ----- */
 
     @Nested

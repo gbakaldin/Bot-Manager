@@ -599,16 +599,28 @@ public class BotGroupBehaviorService {
     /**
      * Stop a bot group and log every bot out of the game server before tearing
      * down the runtime — the teardown half of the cascade-delete path
-     * (BOTGROUP_GAME_MANAGEMENT AD-15 / Phase 7). Per-bot ordering:
-     * flip the group out of ACTIVE → per-bot {@link Bot#logout()} (the same
-     * server-side logout the periodic-logout path uses, minus the reconnect) →
-     * existing stop teardown ({@link BotGroupRuntime#stopAllBots(BotMetrics)} +
-     * evict aggregated-session state) → drop from {@code runningGroups} (stop
-     * managing it).
+     * (BOTGROUP_GAME_MANAGEMENT AD-15 / Phase 7). Ordering:
+     * flip the group out of ACTIVE → {@link BotGroupRuntime#stopAllBots(BotMetrics)}
+     * (per-bot {@link Bot#cleanup()}: a graceful WS close, which <i>is</i> the
+     * logout — there is no distinct server-side logout API) → evict
+     * aggregated-session state → drop from {@code runningGroups} (stop managing it).
      * <p>
-     * Idempotent and tolerant: a group that is not running is a no-op (already
-     * stopped / already removed), and a single {@code logout()} throwing is
-     * logged and skipped so one bad bot cannot abort a cascade.
+     * <b>No explicit {@code bot.logout()} loop.</b> {@code logout()} closes the
+     * client <i>without</i> first setting the bot's {@code stopped} flag, so the
+     * wired {@code onDisconnect} handler ({@code Bot}: {@code if (!stopped)
+     * onWsDisconnected()}) would fire for every bot — emitting a retry WARN,
+     * incrementing {@code bot_reconnects_total{reason=ws-disconnect}}, and spawning
+     * a {@code reconnect-<name>} virtual thread per bot. On a delete of an N-bot
+     * group that manufactured N false reconnect events + N reconnect threads (the
+     * unbounded-reconnect failure mode behind a prior staging OOM). {@code cleanup()}
+     * (invoked by {@code stopAllBots}) deliberately sets {@code stopped = true}
+     * <i>before</i> closing, so {@code onDisconnect}'s guard suppresses the retry.
+     * Relying on it gives a delete with zero retry WARNs, zero reconnect
+     * increments, and zero reconnect threads.
+     * <p>
+     * Idempotent: a group that is not running is a no-op (already stopped /
+     * already removed). Per-bot {@code cleanup()} failures are swallowed inside
+     * {@code stopAllBots} so one bad bot cannot abort a cascade.
      * <p>
      * Unlike {@link #stop(String)} this does <b>not</b> persist a STOPPED status —
      * the sole caller ({@code BotGroupService.delete}) deletes the document next,
@@ -626,23 +638,14 @@ public class BotGroupBehaviorService {
         // we are about to tear down.
         runtime.setActualStatus(BotGroupStatus.STOPPED);
 
-        // Group MDC so per-bot logout lines and the dead-window credit inside
+        // Group MDC so the per-bot teardown lines and the dead-window credit inside
         // stopAllBots carry botGroupId/environmentId. Cleared in finally.
         BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
         try {
-            // Server-side logout per bot (reuses the periodic-logout path). Tolerate
-            // one bot throwing so the cascade completes. Bot.logout() already
-            // swallows its own exceptions; this is defence in depth.
-            for (Bot bot : runtime.getBotInstances()) {
-                try {
-                    bot.logout();
-                } catch (Exception e) {
-                    log.warn("Logout failed for bot {} in group {} during cascade delete: {}",
-                            bot.getUserName(), id, e.getMessage());
-                }
-            }
-            // Existing stop teardown: graceful WS close per bot, executor + monitor
-            // + logout-scheduler shutdown, group dead-window credit.
+            // Stop teardown: per-bot cleanup() sets stopped=true THEN closes the WS
+            // (the logout) — the stopped-first order is what suppresses onDisconnect's
+            // retry so no false reconnect is manufactured. Also shuts the executor +
+            // monitor + logout-scheduler and credits the group dead-window.
             runtime.stopAllBots(botMetrics);
         } finally {
             BotMdc.clear();
