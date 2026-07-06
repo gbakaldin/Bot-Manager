@@ -421,3 +421,59 @@ project import now sits inside the `java.*` group. Cosmetic; move it up with the
   row.game())` over the already-sorted, already-enriched rows — the DTO is built from the same
   `Game` instance the aggregates were computed against, and the aggregates themselves are used
   only for ordering (not surfaced in `GameDTO`), so there is no sort-vs-response drift.
+
+---
+
+# Code Review — BOTGROUP_GAME_MANAGEMENT (Phase 6)
+
+Branch: feat/botgroup-game-management
+Reviewed diff: `git diff ea589d5..HEAD` (Phase 6 — two `/sort-keys` lookup endpoints only)
+
+Scope: Phase 6 only — `GET /api/v1/bot-group/sort-keys` and `GET /api/v1/game/sort-keys`,
+each returning `List<String>` of enum names. Code quality only; plan compliance, test
+coverage, and deploy mechanics are out of scope for this review.
+
+## Verdict
+
+PASS
+
+## Findings
+
+### [style] GameController still carries a split `java.util` import block
+`src/main/java/com/vingame/bot/domain/game/controller/GameController.java:13-29`
+
+`import java.util.Arrays;` (line 15) sits above the `io.*`/`org.*` groups while
+`import java.util.List;` (line 29) sits below them, so the two `java.util` imports the
+new endpoint relies on are split across the block. This is **pre-existing** — Phase 6
+only added `import com.vingame.bot.domain.game.sort.GameSortKey;` (line 13, correctly
+grouped with the other `com.vingame` imports) and did not introduce or worsen the split
+(it is the same disordering already flagged in the Phase 5 finding above). Purely
+cosmetic; consolidating the `java.util` imports into one group would tidy it. Advisory —
+does not affect the verdict. Note the sibling `BotGroupController` addition is clean:
+`java.util.Arrays` and `java.util.List` are adjacent (lines 30-31).
+
+## Notes
+
+- **Both endpoints are driven off the enums — no drift possible.** `getSortKeys` returns
+  `Arrays.stream(BotSortKey.values()).map(Enum::name).toList()` and the game sibling the
+  same over `GameSortKey.values()`. The keys are materialised from the exact enum the
+  filter resolves against (`BotSortKey.resolve` / `GameSortKey.resolve`, both
+  `key.name().equalsIgnoreCase(raw.trim())`). Since the lookup emits canonical uppercase
+  `name()` values and the resolver accepts case-insensitively, every returned key is an
+  accepted `sortBy` value, and adding/removing an enum constant automatically flows to the
+  lookup — the returned catalog cannot silently diverge from what the filter honors.
+
+- **No route-shadowing conflict with `/{id}`.** In both controllers the literal
+  `/sort-keys` mapping and the `/{id}` path-variable mapping coexist. Spring's path matcher
+  ranks a literal segment above a `{var}` capture regardless of declaration order, so
+  `GET .../sort-keys` binds to `getSortKeys()` and never reaches `findById(String id)`.
+  Same reasoning that already keeps the pre-existing `GET /api/v1/game/types` literal safe
+  next to `/{id}`. Declaration order (sort-keys placed before `/{id}` in bot-group, and
+  between `/types` and `/{id}` in game) is tidy but not load-bearing here.
+
+- **DTO shape matches Verification step 9.** Both endpoints return a bare `List<String>`
+  of enum names, which is exactly what the plan's Verification asserts against
+  (`curl .../bot-group/sort-keys | jq -e 'index("BALANCE") ...'` and
+  `.../game/sort-keys | jq -e 'index("BOT_GROUP_COUNT") ...'`) — a JSON string array, not a
+  `{key,label}` object. The plan offered the label-DTO as an alternative; the simpler
+  string-array form was chosen and is internally consistent with the verification contract.

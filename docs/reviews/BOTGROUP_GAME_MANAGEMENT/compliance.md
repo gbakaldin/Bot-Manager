@@ -524,3 +524,103 @@ out-of-scope. No Phase 6–7 code leaked in early.
 ## Amendments to the plan
 
 None.
+
+---
+
+# Compliance — BOTGROUP_GAME_MANAGEMENT — Phase 6
+
+Branch: `feat/botgroup-game-management`
+Plan reviewed: `docs/plans/BOTGROUP_GAME_MANAGEMENT.md` (at commit 8fafc65)
+Diff reviewed: `git diff ea589d5..HEAD` (commit f232b5e — exactly Phase 6: sort-key lookup endpoints)
+
+Scope of this verdict: **Phase 6 only** (sort-key lookup endpoints). Phase 1–5
+verdicts above are unchanged.
+
+## Verdict
+
+PASS
+
+## Phase-by-phase
+
+### Phase 6 — Sort-key lookup endpoints
+Status: implemented
+
+Both plan bullets are delivered and mirror the existing lookup pattern:
+
+- `GET /api/v1/bot-group/sort-keys` — `BotGroupController.getSortKeys()` returns
+  `ResponseEntity<List<String>>` built from
+  `Arrays.stream(BotSortKey.values()).map(Enum::name).toList()`. Driven directly off
+  the `BotSortKey` enum, so it cannot drift from the keys the Phase-4 filter accepts.
+- `GET /api/v1/game/sort-keys` — `GameController.getSortKeys()`, same shape off
+  `GameSortKey.values()`.
+
+Both mirror the sanctioned lookup precedent (`GameController /types` uses the
+identical `Arrays.stream(GameType.values()).map(...).toList()` shape; StrategyController /
+BrandController /products are the same enum-to-list pattern named in the plan's
+"Lookup-endpoint pattern already exists" finding).
+
+**Enum coverage matches the plan spec exactly:**
+- `BotSortKey` = STATUS, BOT_COUNT, CREATED_TIME, NAME, BET_AMOUNT, BALANCE,
+  ACTIVE_BOTS, UPDATED_TIME, GAME_TYPE, AVG_WINNING, ACTIVE_TIME, MAX_PER_ROUND
+  (the 12 keys named in Phase 4 / AD-11; no ENVIRONMENT key, as specified).
+- `GameSortKey` = CREATED_TIME, BOT_GROUP_COUNT, BOT_COUNT, GAME_TYPE, NAME,
+  ACTIVE_GROUP_COUNT, ACTIVE_BOT_COUNT (the 7 keys named in Phase 5; no
+  BRAND/PRODUCT key, as specified).
+
+**Route placement is safe.** `GET /sort-keys` is a literal-segment mapping and
+coexists with `GET /{id}` in both controllers; Spring's literal-over-path-variable
+precedence resolves `/sort-keys` to the lookup handler, not the by-id handler.
+Confirmed against the mapping inventory (BotGroupController `/{id}` at :60 vs
+`/sort-keys` at :77; GameController `/sort-keys` at :64 vs `/{id}` at :72).
+
+**`List<String>` of enum names is a plan-sanctioned choice, not drift.** Phase 6
+literally offers "`List<String>` (or `{key,label}` DTO mirroring `StrategyInfoDTO`)"
+— the Dev took the first of the two plan-offered options. It is further the *only*
+option that satisfies Verification step 9 as written: that step uses
+`jq -e 'index("BALANCE") != null ...'` / `index("BOT_GROUP_COUNT")`, which is a
+string-array membership test that requires a flat JSON array of strings
+(`["BALANCE", ...]`); a `{key,label}` object array would make `index("BALANCE")`
+return null and fail the check. The Dev's citation of step 9 is therefore correct.
+Per the asymmetric drift policy this is an explicitly-offered plan alternative — no
+deviation to record.
+
+**Verification step 9 is achievable against this diff.** The bot-group endpoint
+returns a JSON string array containing `"BALANCE"` and `"AVG_WINNING"` (both present
+in `BotSortKey`); the game endpoint returns one containing `"BOT_GROUP_COUNT"`
+(present in `GameSortKey`). Both `index(...)` assertions will pass.
+
+## Tests
+
+Both new slice tests match the plan's "trivial slice tests (200 + full key list)"
+gate and assert the *complete* enum set rather than a hardcoded subset (so they stay
+correct as keys are added):
+- `BotGroupControllerTest.GetSortKeysTests#shouldReturnAllBotSortKeys` — 200,
+  `$.length() == BotSortKey.values().length`, and `hasItem(name)` for every key.
+- `GameControllerTest.GetSortKeysTests#shouldReturnAllGameSortKeys` — same over
+  `GameSortKey`.
+
+## Build + suite
+
+- `mvn clean test` (full project, project JDK 21): **Tests run: 1204, Failures: 0,
+  Errors: 0, Skipped: 0 — BUILD SUCCESS.**
+- Note for the record: an initial run surfaced mass *Errors* across unrelated test
+  classes. Root cause was a stray, uncompilable `src/main/java/com/vingame/bot/T.java`
+  present in the working tree (untracked, not part of the Phase 6 commit); once it was
+  gone the full suite was clean and each affected class passed in isolation. Not a
+  Phase 6 defect and not committed — flagged so the Releaser confirms no such stray
+  file ships.
+
+## Drift
+
+None. Diff faithfully implements Phase 6 as specified.
+
+## Out-of-scope changes
+
+None. The diff touches only the four Phase 6 surfaces: the two `getSortKeys`
+handlers (`BotGroupController`, `GameController`) with their imports, and the two
+slice tests. No production logic outside the lookup endpoints was modified; no
+Phase 7 code leaked in.
+
+## Amendments to the plan
+
+None.
