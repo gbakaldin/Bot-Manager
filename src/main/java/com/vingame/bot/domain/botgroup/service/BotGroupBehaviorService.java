@@ -16,6 +16,7 @@ import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatsDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
+import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
@@ -174,6 +175,16 @@ public class BotGroupBehaviorService {
     /**
      * Auto-start bot groups on application startup.
      * Starts all groups where targetStatus == ACTIVE.
+     * <p>
+     * Startup ownership (TIMED_ACTIVATION AD-10): groups with
+     * {@code activationMode == SCHEDULED} are <b>skipped</b> here — the first
+     * activation-reconciler tick owns starting them iff their window is
+     * currently open, avoiding a boot-time start→immediate-stop churn for a
+     * group whose window is closed. Non-scheduled ({@code null}) groups
+     * auto-start on {@code targetStatus == ACTIVE} exactly as before; parked
+     * {@code MANUAL_ON}/{@code MANUAL_OFF} groups are already governed by their
+     * persisted {@code targetStatus}, so they resume correctly with no special
+     * casing.
      */
     @PostConstruct
     public void onStartup() {
@@ -181,6 +192,11 @@ public class BotGroupBehaviorService {
 
         botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE)
                 .forEach(group -> {
+                    if (group.getActivationMode() == ActivationMode.SCHEDULED) {
+                        log.info("Skipping auto-start for scheduled bot group {} (ID: {}) — " +
+                                "the activation reconciler owns it", group.getName(), group.getId());
+                        return;
+                    }
                     try {
                         log.info("Auto-starting bot group: {} (ID: {})", group.getName(), group.getId());
                         start(group.getId());
