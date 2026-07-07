@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
+import com.vingame.bot.domain.bot.coordination.BetCoordinator;
+import com.vingame.bot.domain.bot.coordination.ReservationOutcome;
 import com.vingame.bot.domain.bot.message.request.GameRequest;
 import com.vingame.bot.domain.bot.message.request.Request;
 import com.vingame.bot.domain.bot.strategy.BetContext;
@@ -395,6 +397,11 @@ public class BettingMiniGameBot extends Bot {
         // memory is always non-null post-initializeSubclass (production and
         // tests both call it); see Decision 15.
         memory.beginRound(msg.getSessionId(), expectedCurrentBalance.get());
+        // BET_COORDINATION (AD-4): first-seen begins the round budget; the other
+        // N-1 bots seeing the same sid are idempotent no-ops. Null when off (AD-9).
+        if (coordinator != null) {
+            coordinator.onRound(msg.getSessionId());
+        }
         // pendingDecision is intentionally NOT cleared here. Clearing on the
         // netty thread mid-tick raced with the scenario thread between
         // betCondition() (parks decision) and bet() (consumes decision) —
@@ -486,6 +493,12 @@ public class BettingMiniGameBot extends Bot {
         RoundResult roundResult = memory.completeRound(endGameSessionId(msg), winningOption, payout);
         memory.recordGlobalWin(winningOption);
         strategy.onRoundEnd(roundResult);
+        // BET_COORDINATION (AD-4/AD-6): snapshot the finished round and emit the
+        // one-per-round DEBUG summary. Idempotent across the group's bots. Null
+        // when coordination is off (AD-9).
+        if (coordinator != null) {
+            coordinator.onRoundComplete(endGameSessionId(msg));
+        }
 
         gameState = BettingMiniGameState.PAYOUT;
         if (scheduler != null) {
@@ -566,6 +579,50 @@ public class BettingMiniGameBot extends Bot {
      */
     protected Optional<BetDecision> decideBet(BetContext ctx) {
         return strategy.decide(ctx);
+    }
+
+    /**
+     * BET_COORDINATION (AD-2): gate a strategy-proposed decision through the
+     * group-scoped {@link BetCoordinator}. Runs <em>after</em> {@link #decideBet}
+     * so the option is already TaiXiu-remapped — the coordinator only ever sees
+     * the final, locked entry.
+     *
+     * <p>When {@code coordinator == null} (coordination off, AD-9) this is the
+     * identity: it returns {@code Optional.of(proposed)} and the bet path is
+     * byte-for-byte today's. Otherwise it reserves against the in-flight round:
+     * APPROVE → the same decision, TRIM → a new {@link BetDecision} with the
+     * grid-aligned trimmed amount, REJECT → {@link Optional#empty()} (skip tick).
+     *
+     * <p>Per CLAUDE.md the per-proposal outcome is TRACE only — never DEBUG (the
+     * group-level per-round summary is the coordinator's own DEBUG line).
+     *
+     * @param ctx      the per-tick context (unused today; kept for a future
+     *                 crowd-aware budget that would read it — AD-2 signature).
+     * @param proposed the non-empty decision returned by {@link #decideBet}.
+     * @return the gated decision, or empty to skip the tick on REJECT.
+     */
+    protected Optional<BetDecision> applyCoordination(BetContext ctx, BetDecision proposed) {
+        if (coordinator == null) {
+            return Optional.of(proposed);
+        }
+        ReservationOutcome outcome = coordinator.reserve(sidStore.get(), proposed.optionId(), proposed.amount());
+        switch (outcome.decision()) {
+            case APPROVE -> {
+                log.trace("Bot {}: coordinator APPROVE option={}, amount={}",
+                        getUserName(), proposed.optionId(), proposed.amount());
+                return Optional.of(proposed);
+            }
+            case TRIM -> {
+                log.trace("Bot {}: coordinator TRIM option={}, amount {} -> {}",
+                        getUserName(), proposed.optionId(), proposed.amount(), outcome.amount());
+                return Optional.of(new BetDecision(proposed.optionId(), outcome.amount()));
+            }
+            default -> {
+                log.trace("Bot {}: coordinator REJECT option={}, amount={} (skip tick)",
+                        getUserName(), proposed.optionId(), proposed.amount());
+                return Optional.empty();
+            }
+        }
     }
 
     /**
@@ -665,14 +722,22 @@ public class BettingMiniGameBot extends Bot {
             if (strategy == null) {
                 return false;
             }
-            Optional<BetDecision> decision = decideBet(buildBetContext());
+            BetContext ctx = buildBetContext();
+            Optional<BetDecision> decision = decideBet(ctx);
             if (decision.isEmpty()) {
                 log.trace("Bot {}: strategy skipped tick (no decision)", getUserName());
                 return false;
             }
-            pendingDecision.set(decision);
+            // BET_COORDINATION (AD-2): gate the final (TaiXiu-remapped) decision
+            // through the coordinator, then park the gated result. Identity when
+            // coordination is off; empty result = REJECT → skip this tick.
+            Optional<BetDecision> gated = applyCoordination(ctx, decision.get());
+            if (gated.isEmpty()) {
+                return false;
+            }
+            pendingDecision.set(gated);
             log.trace("Bot {}: strategy parked decision option={}, amount={}",
-                    getUserName(), decision.get().optionId(), decision.get().amount());
+                    getUserName(), gated.get().optionId(), gated.get().amount());
             return true;
         };
     }
