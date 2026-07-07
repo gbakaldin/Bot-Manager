@@ -3,6 +3,7 @@ package com.vingame.bot.domain.botgroup.service;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.common.logging.BotMdc;
+import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyAssignment;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
@@ -274,6 +275,23 @@ public class BotGroupBehaviorService {
                     group.getEnvironmentId(), environment.getName());
             runningGroups.put(id, runtime);
 
+            // BET_COORDINATION (AD-9/AD-10): build a group-scoped coordinator only
+            // when enabled AND the game shares the betting-mini/TaiXiu round model
+            // (SLOT has no shared-round betting — AD-10). Off ⇒ no coordinator,
+            // every bot's ref stays null, the bet path is byte-for-byte today's.
+            if (group.isCoordinationEnabled()
+                    && (game.getGameType() == GameType.BETTING_MINI || game.getGameType() == GameType.TAI_XIU)) {
+                BetCoordinator coordinator = new BetCoordinator(
+                        game.getEffectiveOptionAffinities(),
+                        group.getMaxAggregateStakePerRound(),
+                        group.getMinBet(),
+                        group.getBetIncrement());
+                runtime.setCoordinator(coordinator);
+                log.info("Bet coordinator created for group {} ({} options, aggregate cap {})",
+                        group.getName(), game.getEffectiveOptionAffinities().size(),
+                        group.getMaxAggregateStakePerRound());
+            }
+
             log.info("Creating {} bots for group {} with parallel execution (parallelism={})",
                     group.getBotCount(), group.getName(), botCreationParallelism);
 
@@ -282,6 +300,10 @@ public class BotGroupBehaviorService {
 
             // Start all bots
             for (Bot bot : bots) {
+                // BET_COORDINATION (Phase 3): inject the group-scoped coordinator
+                // BEFORE startBot so the scenario never sees a half-wired bot.
+                // Null when coordination is off ⇒ the bot bypasses coordination.
+                bot.setCoordinator(runtime.getCoordinator());
                 runtime.startBot(bot);
                 log.debug("Started bot {}", bot.getUserName());
             }
@@ -496,7 +518,7 @@ public class BotGroupBehaviorService {
                 .fingerprint(fingerprint)
                 .build();
 
-        BotBehaviorConfig behaviorConfig = BotBehaviorConfig.builder()
+        BotBehaviorConfig.BotBehaviorConfigBuilder behaviorConfigBuilder = BotBehaviorConfig.builder()
                 .minBet(group.getMinBet())
                 .maxBet(group.getMaxBet())
                 .betIncrement(group.getBetIncrement())
@@ -504,8 +526,15 @@ public class BotGroupBehaviorService {
                 .minBetsPerRound(group.getMinBetsPerRound())
                 .maxBetsPerRound(group.getMaxBetsPerRound())
                 .chatEnabled(group.isChatEnabled())
-                .autoDepositEnabled(group.isAutoDepositEnabled())
-                .build();
+                .autoDepositEnabled(group.isAutoDepositEnabled());
+        // BET_COORDINATION (AD-7): under coordination the coordinator is the sole
+        // throttle, so per-bot skip is redundant — pin betSkipPercentage to 0 so
+        // bots propose every eligible tick (maximal headroom for trim-only steering).
+        // Currently unset ⇒ already 0; this makes the invariant explicit/future-proof.
+        if (group.isCoordinationEnabled()) {
+            behaviorConfigBuilder.betSkipPercentage(0);
+        }
+        BotBehaviorConfig behaviorConfig = behaviorConfigBuilder.build();
 
         // Resolve assigned strategy. Defensive fallback: if the username is
         // missing from the assignment map (should never happen — both are built
