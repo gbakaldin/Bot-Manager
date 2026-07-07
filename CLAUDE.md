@@ -340,7 +340,14 @@ Every client that shows this 3-line pattern will be dropped by the server. Clien
 
 **Architecture:**
 - [ ] Spring Plugin Support Framework - move bot scripts and messages to separate plugin module/repository for hot-reload without full restart
-- [ ] Time-based activation (`timeFrom`/`timeUntil` in BotGroup)
+- [x] Time-based activation — recurring time-of-day windows on `BotGroup` via
+  `activationMode` (`SCHEDULED`/`MANUAL_ON`/`MANUAL_OFF`, null = legacy) +
+  `activationWindow` (`{from, to, days}`), reconciled every minute by
+  `ActivationScheduler` driving the existing start/stop lifecycle. **Supersedes**
+  the dormant `timeBased`/`timeFrom`/`timeUntil` fields (removed). See
+  `docs/plans/TIMED_ACTIVATION.md`. REST surface unchanged — activation is set on
+  create/PATCH; `start`/`stop` are unchanged (manual actions park a SCHEDULED group
+  as `MANUAL_ON`/`MANUAL_OFF`).
 - [x] Periodic logout logic - one bot per group logs out per hour (round-robin), configurable via `application.properties` (environment-dependent)
 
 **Code Quality:**

@@ -357,5 +357,71 @@ DELETE /{id}                                              # same path, now stops
 
 ---
 
-*Questions on the contract: see `docs/plans/BOTGROUP_GAME_MANAGEMENT.md` (design + Architecture
-Decisions) and the OpenAPI/Swagger UI at `/swagger-ui.html` on the running instance.*
+## 11. Timed activation (recurring time-of-day windows)
+
+**Feature:** `TIMED_ACTIVATION`. A bot group can now run on a **recurring time-of-day
+schedule** instead of being manually started/stopped. A backend reconciler evaluates the
+window every minute and drives the existing start/stop lifecycle so the group is up only
+while its window is open.
+
+**No new endpoints.** Activation is set through the existing `POST /bot-group/` (create) and
+`PATCH /bot-group/{id}` (update); `start`/`stop`/`restart` are unchanged. Two new
+`BotGroupDTO` fields carry the contract:
+
+### 11.1 New `BotGroupDTO` fields
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `activationMode` | enum `SCHEDULED` \| `MANUAL_ON` \| `MANUAL_OFF`, or omitted | `SCHEDULED` = follow the window. `MANUAL_ON` = always up. `MANUAL_OFF` = parked/down. **Omit** (null) for a legacy non-timed group — behaves exactly as today. |
+| `activationWindow` | object `{ from, to, days }` or omitted | Required when `activationMode == SCHEDULED`. |
+
+`activationWindow` shape:
+
+```jsonc
+// activationWindow
+{
+  "from": "18:00:00",              // "HH:mm:ss" LocalTime — window opens (required when SCHEDULED)
+  "to":   "00:00:00",              // "HH:mm:ss" LocalTime — window closes (required when SCHEDULED)
+  "days": ["FRIDAY", "SATURDAY"]   // array of DayOfWeek enum names; [] or omitted = all seven days
+}
+```
+
+- `days` values are `java.time.DayOfWeek` names, uppercase: `MONDAY`…`SUNDAY`.
+- Windows may cross midnight (`from > to`, e.g. `"22:00:00"`→`"02:00:00"`). For a
+  midnight-crossing window the `days` set is anchored to the day the window **opened**
+  (a Fri 22:00–02:00 window that is `days:["FRIDAY"]` is still active Sat 01:30).
+- Times are interpreted in a single backend-configured business timezone
+  (`Asia/Ho_Chi_Minh`), not the browser's — the FE just sends wall-clock `HH:mm:ss`.
+
+### 11.2 Two gotchas
+
+1. **"Until midnight" is `"to": "00:00:00"`, not `"24:00:00"`.** `24:00:00` is not a valid
+   `LocalTime` and will be rejected. A window that runs to end-of-day uses `to: "00:00:00"`.
+2. **`from == to` is rejected with HTTP 400** (ambiguous zero-length vs all-day). For an
+   always-up group use `activationMode: "MANUAL_ON"` with **no** window — do not send a
+   `00:00:00`→`00:00:00` window.
+
+Also: `SCHEDULED` with no `activationWindow` (or a window missing `from`/`to`) → **400**.
+
+### 11.3 Manual override
+
+Hitting `POST /bot-group/{id}/stop` or `.../start` on a `SCHEDULED` group **parks** it:
+the mode flips to `MANUAL_OFF` (stop) / `MANUAL_ON` (start) so the reconciler stops
+managing it. To hand it back to the schedule, `PATCH` `activationMode: "SCHEDULED"`.
+Groups with `activationMode == null` (legacy) are untouched by this — their start/stop
+behave as before.
+
+### 11.4 FE action
+
+- Add **activation mode** + **window** (`from`/`to` time pickers, `days` multi-select) inputs
+  to the bot-group create/edit form; send them as `activationMode` / `activationWindow`.
+- Use `to: "00:00:00"` for "until midnight"; block `from == to` client-side (or surface the
+  400) and steer "always on" users to `MANUAL_ON`.
+- **Remove the removed fields `timeBased` / `timeFrom` / `timeUntil` from the form** — they
+  no longer exist on `BotGroupDTO` (dropped by this release; the server ignores them).
+
+---
+
+*Questions on the contract: see `docs/plans/BOTGROUP_GAME_MANAGEMENT.md` and
+`docs/plans/TIMED_ACTIVATION.md` (design + Architecture Decisions), and the OpenAPI/Swagger UI
+at `/swagger-ui.html` on the running instance.*
