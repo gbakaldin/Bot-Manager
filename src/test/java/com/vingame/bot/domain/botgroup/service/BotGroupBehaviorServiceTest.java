@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.botgroup.service;
 
 import com.vingame.bot.common.exception.BadRequestException;
+import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.bot.service.BotFactory;
@@ -10,6 +11,7 @@ import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
+import com.vingame.bot.domain.botgroup.dto.CoordinationStateDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
@@ -38,6 +40,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.InvocationTargetException;
 import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
@@ -406,6 +409,82 @@ class BotGroupBehaviorServiceTest {
                 assertThat(dto.getPlayingStatus()).isEqualTo(BotGroupPlayingStatus.PLAYING);
                 assertThat(dto.getStartedAt()).isNotNull();
                 assertThat(dto.getBots()).hasSize(5);
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("getHealth() surfaces the coordinator state when a coordinator is present on the runtime (BET_COORDINATION Phase 4)")
+        void healthSurfacesCoordinationState() {
+            BotGroup group = BotGroup.builder().id("g-1").name("Group").build();
+            when(botGroupService.findById("g-1")).thenReturn(group);
+
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1");
+            runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+            try {
+                // Affinities 3:1 across two options; cap 1000, minBet 100, increment 100.
+                // Target budgets: opt1 = 3/4*1000 = 750, opt2 = 1/4*1000 = 250.
+                Map<Integer, Integer> affinities = new LinkedHashMap<>();
+                affinities.put(1, 3);
+                affinities.put(2, 1);
+                BetCoordinator coordinator = new BetCoordinator(affinities, 1000L, 100L, 100L);
+                coordinator.onRound(42L);
+                coordinator.reserve(42L, 1, 100L);  // APPROVE: 100 fits opt1 budget
+                coordinator.reserve(42L, 2, 300L);  // TRIM: clamped to opt2 budget 250, grid-aligned to 200
+                coordinator.reserve(42L, 1, 50L);   // REJECT: below minBet
+                runtime.setCoordinator(coordinator);
+
+                putBots(runtime, List.of());
+                runningGroups().put("g-1", runtime);
+
+                BotGroupHealthDTO dto = service.getHealth("g-1");
+
+                CoordinationStateDTO coordination = dto.getCoordination();
+                assertThat(coordination).isNotNull();
+                assertThat(coordination.isEnabled()).isTrue();
+                assertThat(coordination.getMaxAggregateStakePerRound()).isEqualTo(1000L);
+                assertThat(coordination.getCurrentAggregateStake()).isEqualTo(300L); // 100 + 200
+                assertThat(coordination.getApproveCount()).isEqualTo(1L);
+                assertThat(coordination.getTrimCount()).isEqualTo(1L);
+                assertThat(coordination.getRejectCount()).isEqualTo(1L);
+
+                assertThat(coordination.getOptions()).hasSize(2);
+                CoordinationStateDTO.OptionStateDTO opt1 = coordination.getOptions().get(0);
+                assertThat(opt1.getOptionId()).isEqualTo(1);
+                assertThat(opt1.getTargetWeight()).isEqualTo(3);
+                assertThat(opt1.getTargetBudget()).isEqualTo(750L);
+                assertThat(opt1.getCommittedStake()).isEqualTo(100L);
+                assertThat(opt1.getRealizedFraction()).isEqualTo(100.0 / 750.0);
+
+                CoordinationStateDTO.OptionStateDTO opt2 = coordination.getOptions().get(1);
+                assertThat(opt2.getOptionId()).isEqualTo(2);
+                assertThat(opt2.getTargetWeight()).isEqualTo(1);
+                assertThat(opt2.getTargetBudget()).isEqualTo(250L);
+                assertThat(opt2.getCommittedStake()).isEqualTo(200L);
+                assertThat(opt2.getRealizedFraction()).isEqualTo(200.0 / 250.0);
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("getHealth() leaves the coordination block null when no coordinator is present (BET_COORDINATION Phase 4)")
+        void healthOmitsCoordinationWhenAbsent() {
+            BotGroup group = BotGroup.builder().id("g-1").name("Group").build();
+            when(botGroupService.findById("g-1")).thenReturn(group);
+
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1");
+            runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+            try {
+                putBots(runtime, List.of());
+                runningGroups().put("g-1", runtime);
+
+                BotGroupHealthDTO dto = service.getHealth("g-1");
+
+                assertThat(dto.getCoordination()).isNull();
             } finally {
                 runtime.getExecutor().shutdownNow();
                 runningGroups().remove("g-1");

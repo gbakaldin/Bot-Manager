@@ -37,4 +37,11 @@ public class BotGroupHealthDTO {
      * on every response; all fields null (N/A) when the group is not running.
      */
     private BotGroupStatsDTO stats;
+
+    /**
+     * Bet-coordinator state (BET_COORDINATION Phase 4, AD-6). Nullable: present
+     * only when the group is running with coordination enabled; absent (null)
+     * when coordination is off or the group is not running.
+     */
+    private CoordinationStateDTO coordination;
 }

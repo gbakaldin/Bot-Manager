@@ -16,6 +16,7 @@ import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatsDTO;
+import com.vingame.bot.domain.botgroup.dto.CoordinationStateDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
@@ -832,6 +833,42 @@ public class BotGroupBehaviorService {
                 .disconnectedBots(botDtos.size() - connected - reconnecting - dead)
                 .bots(botDtos)
                 .stats(computeStats(id))
+                .coordination(buildCoordinationState(runtime.getCoordinator()))
+                .build();
+    }
+
+    /**
+     * Read-side coordinator view (BET_COORDINATION Phase 4, AD-6). Returns
+     * {@code null} when the group has no coordinator (coordination off), so the
+     * {@code coordination} block is absent for off/legacy groups. Otherwise reads
+     * the coordinator's coherent {@code snapshot()} — a single lock acquisition so
+     * the view is never torn against a concurrent reservation — and maps it into
+     * the DTO. Strictly read-only: nothing here mutates coordinator state.
+     */
+    private CoordinationStateDTO buildCoordinationState(BetCoordinator coordinator) {
+        if (coordinator == null) {
+            return null;
+        }
+        BetCoordinator.Snapshot snapshot = coordinator.snapshot();
+        List<CoordinationStateDTO.OptionStateDTO> options = snapshot.options().stream()
+                .map(o -> CoordinationStateDTO.OptionStateDTO.builder()
+                        .optionId(o.optionId())
+                        .targetWeight(o.weight())
+                        .targetBudget(o.targetBudget())
+                        .committedStake(o.committedStake())
+                        .realizedFraction(o.targetBudget() > 0
+                                ? (double) o.committedStake() / o.targetBudget()
+                                : 0.0)
+                        .build())
+                .toList();
+        return CoordinationStateDTO.builder()
+                .enabled(true)
+                .maxAggregateStakePerRound(snapshot.maxAggregateStakePerRound())
+                .currentAggregateStake(snapshot.currentAggregateStake())
+                .approveCount(snapshot.approveCount())
+                .trimCount(snapshot.trimCount())
+                .rejectCount(snapshot.rejectCount())
+                .options(options)
                 .build();
     }
 
