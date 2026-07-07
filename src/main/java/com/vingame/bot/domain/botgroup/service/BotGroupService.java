@@ -7,6 +7,7 @@ import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.common.exception.UpstreamRegistrationException;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
+import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
@@ -276,6 +277,29 @@ public class BotGroupService {
                     "The referenced game must belong to the group's environment.",
                     gameId, gameEnvironmentId, botGroup.getName(), botGroup.getEnvironmentId()));
         }
+    }
+
+    /**
+     * Persist an operator-initiated manual activation-mode override
+     * (TIMED_ACTIVATION AD-4). Flips only the {@code activationMode} of a group
+     * and re-stamps {@code updatedAt}; it does not touch {@code targetStatus}
+     * (that is driven by the explicit start/stop paths) and deliberately does
+     * not re-run game-config validation — parking a group as
+     * {@link com.vingame.bot.domain.botgroup.model.ActivationMode#MANUAL_ON}/
+     * {@link com.vingame.bot.domain.botgroup.model.ActivationMode#MANUAL_OFF}
+     * carries no window requirement.
+     * <p>
+     * <b>Operator-initiated only.</b> The reconciler and the {@code onStartup}
+     * auto-start path must never call this — flipping the mode from those paths
+     * would make a scheduled group permanently park itself on its first
+     * schedule-driven stop, defeating scheduling (AD-4, Implementation Notes).
+     * The controller layer is the sole caller.
+     */
+    public void setActivationMode(String id, ActivationMode mode) {
+        BotGroup group = findById(id);
+        group.setActivationMode(mode);
+        group.setUpdatedAt(Instant.now());
+        repository.save(group);
     }
 
     public BotGroup update(String id, BotGroupDTO updateDTO) {

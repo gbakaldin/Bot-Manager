@@ -5,6 +5,7 @@ import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatusDTO;
 import com.vingame.bot.domain.botgroup.dto.OnCreate;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
+import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
@@ -143,6 +144,7 @@ public class BotGroupController {
     @Operation(summary = "Start bot group", description = "Starts the bot group with the given ID")
     public ResponseEntity<Void> start(@PathVariable String id) {
         behaviorService.start(id);
+        applyManualOverride(id, ActivationMode.MANUAL_ON);
         return ResponseEntity.ok().build();
     }
 
@@ -150,7 +152,32 @@ public class BotGroupController {
     @Operation(summary = "Stop bot group", description = "Stops the bot group with the given ID")
     public ResponseEntity<Void> stop(@PathVariable String id) {
         behaviorService.stop(id);
+        applyManualOverride(id, ActivationMode.MANUAL_OFF);
         return ResponseEntity.ok().build();
+    }
+
+    /**
+     * Operator manual-override integration (TIMED_ACTIVATION AD-4). An operator
+     * {@code /start} or {@code /stop} on a <em>scheduled-capable</em> group (one
+     * whose {@code activationMode} is non-null) parks it as {@code MANUAL_ON} /
+     * {@code MANUAL_OFF} so the next reconciler tick does not undo the action;
+     * the group rejoins the schedule only via an explicit PATCH back to
+     * {@code SCHEDULED}.
+     * <p>
+     * Legacy, non-timed groups ({@code activationMode == null}) are left
+     * completely untouched — their start/stop semantics are unchanged.
+     * <p>
+     * This flip lives <b>only</b> at the controller layer (operator-initiated).
+     * The reconciler and the {@code onStartup} auto-start path call
+     * {@code behaviorService.start/stop} directly and stay mode-neutral — a flip
+     * from those paths would defeat scheduling.
+     */
+    private void applyManualOverride(String id, ActivationMode manualMode) {
+        BotGroup group = service.findById(id);
+        if (group.getActivationMode() == null) {
+            return;
+        }
+        service.setActivationMode(id, manualMode);
     }
 
     @PostMapping("/{id}/restart")

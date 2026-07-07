@@ -7,6 +7,7 @@ import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.common.exception.UpstreamLoginException;
 import com.vingame.bot.common.exception.UpstreamRegistrationException;
 import com.vingame.bot.domain.bot.core.BotStatus;
+import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatsDTO;
@@ -516,13 +517,37 @@ class BotGroupControllerTest {
         @Test
         @DisplayName("Should return 200 OK when bot group is started")
         void shouldReturnOkWhenBotGroupIsStarted() throws Exception {
-            // Arrange
+            // Arrange — legacy null-mode group: activationMode stays null (AD-4),
+            // so the controller must NOT flip the mode after a manual start.
             String groupId = "123";
             doNothing().when(behaviorService).start(groupId);
+            when(service.findById(groupId))
+                    .thenReturn(BotGroup.builder().id(groupId).build());
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
                     .andExpect(status().isOk());
+
+            verify(behaviorService).start(groupId);
+            verify(service, never()).setActivationMode(any(), any());
+        }
+
+        @Test
+        @DisplayName("Manual start parks a SCHEDULED group as MANUAL_ON (AD-4)")
+        void manualStartParksScheduledGroupAsManualOn() throws Exception {
+            // Arrange — scheduled-capable group: an operator start must flip the
+            // mode to MANUAL_ON so the next reconciler tick does not stop it.
+            String groupId = "123";
+            doNothing().when(behaviorService).start(groupId);
+            when(service.findById(groupId)).thenReturn(
+                    BotGroup.builder().id(groupId).activationMode(ActivationMode.SCHEDULED).build());
+
+            // Act & Assert
+            mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
+                    .andExpect(status().isOk());
+
+            verify(behaviorService).start(groupId);
+            verify(service).setActivationMode(groupId, ActivationMode.MANUAL_ON);
         }
 
         @Test
@@ -579,13 +604,37 @@ class BotGroupControllerTest {
         @Test
         @DisplayName("Should return 200 OK when bot group is stopped")
         void shouldReturnOkWhenBotGroupIsStopped() throws Exception {
-            // Arrange
+            // Arrange — legacy null-mode group: activationMode stays null (AD-4),
+            // so the controller must NOT flip the mode after a manual stop.
             String groupId = "123";
             doNothing().when(behaviorService).stop(groupId);
+            when(service.findById(groupId))
+                    .thenReturn(BotGroup.builder().id(groupId).build());
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/stop", groupId))
                     .andExpect(status().isOk());
+
+            verify(behaviorService).stop(groupId);
+            verify(service, never()).setActivationMode(any(), any());
+        }
+
+        @Test
+        @DisplayName("Manual stop parks a SCHEDULED group as MANUAL_OFF (AD-4)")
+        void manualStopParksScheduledGroupAsManualOff() throws Exception {
+            // Arrange — scheduled-capable group: an operator stop must flip the
+            // mode to MANUAL_OFF so the next reconciler tick does not restart it.
+            String groupId = "123";
+            doNothing().when(behaviorService).stop(groupId);
+            when(service.findById(groupId)).thenReturn(
+                    BotGroup.builder().id(groupId).activationMode(ActivationMode.SCHEDULED).build());
+
+            // Act & Assert
+            mockMvc.perform(post("/api/v1/bot-group/{id}/stop", groupId))
+                    .andExpect(status().isOk());
+
+            verify(behaviorService).stop(groupId);
+            verify(service).setActivationMode(groupId, ActivationMode.MANUAL_OFF);
         }
 
         @Test
