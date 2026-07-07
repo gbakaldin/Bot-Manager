@@ -1,12 +1,24 @@
 package com.vingame.bot.domain.bot.coordination;
 
 import com.vingame.bot.domain.bot.coordination.ReservationOutcome.Decision;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.LoggerConfig;
+import org.apache.logging.log4j.core.layout.PatternLayout;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -215,6 +227,90 @@ class BetCoordinatorTest {
     }
 
     @Nested
+    @DisplayName("onRoundComplete idempotency (AD-6)")
+    class OnRoundCompleteIdempotency {
+
+        private static final String LOGGER_NAME = BetCoordinator.class.getName();
+
+        private CapturingAppender appender;
+        private LoggerConfig loggerConfig;
+        private LoggerContext ctx;
+        private Level prevLevel;
+
+        @BeforeEach
+        void setUp() {
+            appender = new CapturingAppender("CapturingAppender-bet-coordinator");
+            appender.start();
+            ctx = (LoggerContext) LogManager.getContext(false);
+            loggerConfig = ctx.getConfiguration().getLoggerConfig(LOGGER_NAME);
+            prevLevel = loggerConfig.getLevel();
+            loggerConfig.addAppender(appender, Level.ALL, null);
+            loggerConfig.setLevel(Level.ALL);
+            ctx.updateLoggers();
+        }
+
+        @AfterEach
+        void tearDown() {
+            loggerConfig.removeAppender(appender.getName());
+            loggerConfig.setLevel(prevLevel);
+            ctx.updateLoggers();
+        }
+
+        private long summaryLinesFor(long sid) {
+            return appender.events().stream()
+                    .map(e -> e.getMessage().getFormattedMessage())
+                    .filter(m -> m.contains("Coordination sid=" + sid + " "))
+                    .count();
+        }
+
+        @Test
+        @DisplayName("repeated onRoundComplete for the same round emits the summary once")
+        void idempotentPerSid() {
+            BetCoordinator c = new BetCoordinator(weights(1, 1), 1000, 10, 10);
+            c.onRound(5L);
+            c.reserve(5L, 0, 100);
+
+            // onEndGame fires once per bot per round → N calls for the same sid.
+            c.onRoundComplete(5L);
+            c.onRoundComplete(5L);
+            c.onRoundComplete(5L);
+
+            assertThat(summaryLinesFor(5L)).isEqualTo(1L);
+        }
+
+        @Test
+        @DisplayName("a genuinely new round emits its own summary again")
+        void newRoundEmitsAgain() {
+            BetCoordinator c = new BetCoordinator(weights(1, 1), 1000, 10, 10);
+
+            c.onRound(5L);
+            c.reserve(5L, 0, 100);
+            c.onRoundComplete(5L);
+            c.onRoundComplete(5L); // duplicate no-op
+
+            c.onRound(6L);
+            c.reserve(6L, 0, 100);
+            c.onRoundComplete(6L);
+            c.onRoundComplete(6L); // duplicate no-op
+
+            assertThat(summaryLinesFor(5L)).isEqualTo(1L);
+            assertThat(summaryLinesFor(6L)).isEqualTo(1L);
+        }
+
+        @Test
+        @DisplayName("no active round (0 sentinel) emits nothing")
+        void noActiveRoundNoOp() {
+            BetCoordinator c = new BetCoordinator(weights(1, 1), 1000, 10, 10);
+            c.onRoundComplete(0L);
+            c.onRoundComplete(99L);
+            assertThat(appender.events().stream()
+                    .map(e -> e.getMessage().getFormattedMessage())
+                    .filter(m -> m.contains("Coordination sid="))
+                    .count()).isZero();
+        }
+    }
+
+    @Nested
     @DisplayName("concurrency")
     class Concurrency {
 
@@ -274,6 +370,24 @@ class BetCoordinatorTest {
                     assertThat(o.committedStake()).isLessThanOrEqualTo(o.targetBudget()));
             // and every committed amount is grid-valid at the aggregate level
             assertThat(snap.currentAggregateStake() % increment).isZero();
+        }
+    }
+
+    /** Minimal in-memory log4j2 appender for asserting emitted summary lines. */
+    private static final class CapturingAppender extends AbstractAppender {
+        private final List<LogEvent> events = new CopyOnWriteArrayList<>();
+
+        CapturingAppender(String name) {
+            super(name, null, PatternLayout.createDefaultLayout(), false, null);
+        }
+
+        @Override
+        public void append(LogEvent event) {
+            events.add(event.toImmutable());
+        }
+
+        List<LogEvent> events() {
+            return new ArrayList<>(events);
         }
     }
 }

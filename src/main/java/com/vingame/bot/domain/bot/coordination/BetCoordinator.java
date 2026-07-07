@@ -44,6 +44,13 @@ public final class BetCoordinator {
     private final ReentrantLock lock = new ReentrantLock();
     private volatile RoundBudget current;
 
+    // First-seen guard for onRoundComplete (AD-6). onRoundComplete does not swap
+    // current, so its N per-bot calls for one round would otherwise each emit the
+    // per-round DEBUG summary. Track the last sid already finalized so only the
+    // first bot to complete a given round logs; the rest are no-ops. Mutated only
+    // under the lock. 0 = no round finalized yet (never collides with the sentinel).
+    private long lastCompletedSessionId;
+
     // Cumulative decision counters since construction (mirroring roundsObserved),
     // read by the health DTO. AtomicLong so the read path never needs the lock
     // for a single counter; they are still incremented under the lock so a
@@ -177,6 +184,15 @@ public final class BetCoordinator {
      * Snapshot the finished round for observability and emit the one-per-round
      * DEBUG summary — realized-vs-target histogram + cumulative approve / trim /
      * reject counts (AD-6). No-op logging when there is no active round.
+     *
+     * <p>First-seen idempotent across the group's bots (AD-6), mirroring
+     * {@link #onRound(long)}: this is called from every bot's {@code onEndGame},
+     * i.e. once per bot per round. Under the lock, only the first call for a given
+     * round's sid emits the summary; the other N−1 bots' calls for the same sid
+     * are a no-op, so the fleet logs one DEBUG line per group per round rather than
+     * one per bot. Since {@code onRoundComplete} does not swap {@code current}, the
+     * round being finalized is {@code current.sessionId()}; the {@code 0} sentinel
+     * (no active round) never logs.
      */
     public void onRoundComplete(long sessionId) {
         long completedSid;
@@ -185,9 +201,10 @@ public final class BetCoordinator {
         lock.lock();
         try {
             RoundBudget b = current;
-            if (b.sessionId() == 0L) {
+            if (b.sessionId() == 0L || b.sessionId() == lastCompletedSessionId) {
                 return;
             }
+            lastCompletedSessionId = b.sessionId();
             completedSid = b.sessionId();
             committedAggregate = b.committedAggregate();
             histogram = optionAffinities.keySet().stream()
