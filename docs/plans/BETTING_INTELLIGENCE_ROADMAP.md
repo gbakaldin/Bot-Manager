@@ -106,6 +106,11 @@ currently ingest (per-side aggregate volume/user counts).
    volume/user counts to subscribers, and can we ingest them? Yes/no gates #6.
 6. **Coordination gate — crowd-aware tier.** Extend #4 to steer relative to real
    players' imbalance. Gated on #5.
+7. **Affinity-aware proposal (strategy).** Bias per-bot option choice by the
+   game's affinity weights so the coordinator (#4) can reach a skewed target
+   distribution, not just enforce its ceiling. Feed-free; complements #4's
+   trim-only "floor" limitation (a trim gate can suppress over-represented
+   options but can't force under-filled ones to fill).
 
 Suggested order: 1 → (2, 3, 4 in parallel) → 5 → 6. #5 can run any time; run it
 early so #6 is unblocked when #4 lands.
