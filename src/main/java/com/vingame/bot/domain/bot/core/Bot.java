@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.bot.core;
 
 import com.vingame.bot.common.logging.BotMdc;
+import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
@@ -52,6 +53,12 @@ public abstract class Bot {
     // singleton bean). Null-tolerant exactly like {@code metrics}: unit-test fixtures
     // that build a bot without Spring leave it null and every feed callsite guards on it.
     protected SessionAggregationService sessionAggregator;
+
+    // Group-scoped bet coordinator — set via builder-style setter by the runtime
+    // startBot loop (one instance per running group; NOT app-scoped, so it is not
+    // wired in BotFactory). Null-tolerant exactly like {@code sessionAggregator}:
+    // null means coordination is off and the bot proposes/sends as it does today.
+    protected BetCoordinator coordinator;
 
     // Bot runtime configuration (set via builder-style setters)
     @Getter
@@ -168,6 +175,18 @@ public abstract class Bot {
 
     public Bot setSessionAggregator(SessionAggregationService sessionAggregator) {
         this.sessionAggregator = sessionAggregator;
+        return this;
+    }
+
+    /**
+     * Wire the group-scoped {@link BetCoordinator}. Null-tolerant and fluent,
+     * mirroring {@link #setSessionAggregator}. A {@code null} argument (coordination
+     * off) leaves the bot on today's byte-for-byte path — {@code applyCoordination}
+     * becomes identity. Injected by the runtime startBot loop before {@code start()},
+     * so the scenario never sees a half-wired bot.
+     */
+    public Bot setCoordinator(BetCoordinator coordinator) {
+        this.coordinator = coordinator;
         return this;
     }
 

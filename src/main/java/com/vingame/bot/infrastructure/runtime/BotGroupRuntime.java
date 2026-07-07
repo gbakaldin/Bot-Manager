@@ -3,6 +3,7 @@ package com.vingame.bot.infrastructure.runtime;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.bot.core.Bot;
+import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
@@ -71,6 +72,13 @@ public class BotGroupRuntime {
 
     // Round-robin index for periodic logout
     private final AtomicInteger logoutIndex = new AtomicInteger(0);
+
+    // Group-scoped bet coordinator (BET_COORDINATION). Nullable: null when the
+    // group's coordinationEnabled is false — every bot's coordinator ref is then
+    // null and the bet path is byte-for-byte today's (AD-9). Built in
+    // BotGroupBehaviorService.start() for BETTING_MINI/TAI_XIU groups (AD-10) and
+    // injected into each bot before startBot.
+    private BetCoordinator coordinator;
 
     // Timestamp of the most recent transition INTO DEAD at the group level.
     // Cleared at stopAllBots() after the dead-window is credited. Volatile because
