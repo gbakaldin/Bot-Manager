@@ -37,12 +37,15 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import org.mockito.InOrder;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
@@ -529,14 +532,15 @@ class BotGroupControllerTest {
                     .andExpect(status().isOk());
 
             verify(behaviorService).start(groupId);
-            verify(service, never()).setActivationMode(any(), any());
+            verify(service, never()).setActivationMode(any(BotGroup.class), any());
         }
 
         @Test
-        @DisplayName("Manual start parks a SCHEDULED group as MANUAL_ON (AD-4)")
+        @DisplayName("Manual start parks a SCHEDULED group as MANUAL_ON before the action (AD-4, TOCTOU)")
         void manualStartParksScheduledGroupAsManualOn() throws Exception {
             // Arrange — scheduled-capable group: an operator start must flip the
-            // mode to MANUAL_ON so the next reconciler tick does not stop it.
+            // mode to MANUAL_ON *before* starting so a reconciler tick racing the
+            // action window sees a non-SCHEDULED mode and cannot stop it.
             String groupId = "123";
             doNothing().when(behaviorService).start(groupId);
             when(service.findById(groupId)).thenReturn(
@@ -546,20 +550,47 @@ class BotGroupControllerTest {
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
                     .andExpect(status().isOk());
 
-            verify(behaviorService).start(groupId);
-            verify(service).setActivationMode(groupId, ActivationMode.MANUAL_ON);
+            // The flip must be persisted BEFORE the lifecycle action.
+            InOrder inOrder = inOrder(service, behaviorService);
+            inOrder.verify(service).setActivationMode(
+                    argThat((BotGroup g) -> groupId.equals(g.getId())), eq(ActivationMode.MANUAL_ON));
+            inOrder.verify(behaviorService).start(groupId);
+        }
+
+        @Test
+        @DisplayName("A failing start rolls back the mode flip, leaving activationMode unchanged (AD-4)")
+        void failingStartRollsBackMode() throws Exception {
+            // Arrange — scheduled-capable group whose start fails: the MANUAL_ON
+            // flip must be reverted to the prior SCHEDULED mode so a failed action
+            // leaves no spurious mode change.
+            String groupId = "123";
+            when(service.findById(groupId)).thenReturn(
+                    BotGroup.builder().id(groupId).activationMode(ActivationMode.SCHEDULED).build());
+            doThrow(new RuntimeException("Start failed")).when(behaviorService).start(groupId);
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
+                    .andExpect(status().isInternalServerError());
+
+            // Flip to MANUAL_ON, then restore SCHEDULED on failure, in that order.
+            InOrder inOrder = inOrder(service, behaviorService);
+            inOrder.verify(service).setActivationMode(any(BotGroup.class), eq(ActivationMode.MANUAL_ON));
+            inOrder.verify(behaviorService).start(groupId);
+            inOrder.verify(service).setActivationMode(any(BotGroup.class), eq(ActivationMode.SCHEDULED));
         }
 
         @Test
         @DisplayName("Should return 400 Bad Request when start throws IllegalArgumentException")
         void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
-            // Arrange
+            // Arrange — legacy null-mode group: no flip, action runs and throws.
             String groupId = "999";
+            when(service.findById(groupId)).thenReturn(BotGroup.builder().id(groupId).build());
             doThrow(new IllegalArgumentException("Not found")).when(behaviorService).start(groupId);
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
                     .andExpect(status().isBadRequest());
+
+            verify(service, never()).setActivationMode(any(BotGroup.class), any());
         }
 
         @Test
@@ -570,6 +601,7 @@ class BotGroupControllerTest {
             // carry Mongo hostnames, Spring wiring failures, JDK HttpClient
             // infra details. The full exception is logged server-side.
             String groupId = "123";
+            when(service.findById(groupId)).thenReturn(BotGroup.builder().id(groupId).build());
             doThrow(new RuntimeException("Start failed")).when(behaviorService).start(groupId);
 
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
@@ -585,6 +617,7 @@ class BotGroupControllerTest {
         @DisplayName("Should return 502 Bad Gateway when start surfaces UpstreamLoginException")
         void shouldReturnBadGatewayWhenUpstreamLogin() throws Exception {
             String groupId = "123";
+            when(service.findById(groupId)).thenReturn(BotGroup.builder().id(groupId).build());
             doThrow(new UpstreamLoginException(
                     "Login failed for user 'authtest1': No data in response"))
                     .when(behaviorService).start(groupId);
@@ -616,14 +649,15 @@ class BotGroupControllerTest {
                     .andExpect(status().isOk());
 
             verify(behaviorService).stop(groupId);
-            verify(service, never()).setActivationMode(any(), any());
+            verify(service, never()).setActivationMode(any(BotGroup.class), any());
         }
 
         @Test
-        @DisplayName("Manual stop parks a SCHEDULED group as MANUAL_OFF (AD-4)")
+        @DisplayName("Manual stop parks a SCHEDULED group as MANUAL_OFF before the action (AD-4, TOCTOU)")
         void manualStopParksScheduledGroupAsManualOff() throws Exception {
             // Arrange — scheduled-capable group: an operator stop must flip the
-            // mode to MANUAL_OFF so the next reconciler tick does not restart it.
+            // mode to MANUAL_OFF *before* stopping so a reconciler tick racing the
+            // action window sees a non-SCHEDULED mode and cannot restart it.
             String groupId = "123";
             doNothing().when(behaviorService).stop(groupId);
             when(service.findById(groupId)).thenReturn(
@@ -633,20 +667,46 @@ class BotGroupControllerTest {
             mockMvc.perform(post("/api/v1/bot-group/{id}/stop", groupId))
                     .andExpect(status().isOk());
 
-            verify(behaviorService).stop(groupId);
-            verify(service).setActivationMode(groupId, ActivationMode.MANUAL_OFF);
+            // The flip must be persisted BEFORE the lifecycle action.
+            InOrder inOrder = inOrder(service, behaviorService);
+            inOrder.verify(service).setActivationMode(
+                    argThat((BotGroup g) -> groupId.equals(g.getId())), eq(ActivationMode.MANUAL_OFF));
+            inOrder.verify(behaviorService).stop(groupId);
+        }
+
+        @Test
+        @DisplayName("A failing stop rolls back the mode flip, leaving activationMode unchanged (AD-4)")
+        void failingStopRollsBackMode() throws Exception {
+            // Arrange — scheduled-capable group whose stop fails: the MANUAL_OFF
+            // flip must be reverted to the prior SCHEDULED mode.
+            String groupId = "123";
+            when(service.findById(groupId)).thenReturn(
+                    BotGroup.builder().id(groupId).activationMode(ActivationMode.SCHEDULED).build());
+            doThrow(new RuntimeException("Stop failed")).when(behaviorService).stop(groupId);
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/stop", groupId))
+                    .andExpect(status().isInternalServerError());
+
+            // Flip to MANUAL_OFF, then restore SCHEDULED on failure, in that order.
+            InOrder inOrder = inOrder(service, behaviorService);
+            inOrder.verify(service).setActivationMode(any(BotGroup.class), eq(ActivationMode.MANUAL_OFF));
+            inOrder.verify(behaviorService).stop(groupId);
+            inOrder.verify(service).setActivationMode(any(BotGroup.class), eq(ActivationMode.SCHEDULED));
         }
 
         @Test
         @DisplayName("Should return 400 Bad Request when stop throws IllegalArgumentException")
         void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
-            // Arrange
+            // Arrange — legacy null-mode group: no flip, action runs and throws.
             String groupId = "999";
+            when(service.findById(groupId)).thenReturn(BotGroup.builder().id(groupId).build());
             doThrow(new IllegalArgumentException("Not found")).when(behaviorService).stop(groupId);
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/stop", groupId))
                     .andExpect(status().isBadRequest());
+
+            verify(service, never()).setActivationMode(any(BotGroup.class), any());
         }
     }
 

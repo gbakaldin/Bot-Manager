@@ -143,16 +143,14 @@ public class BotGroupController {
     @PostMapping("/{id}/start")
     @Operation(summary = "Start bot group", description = "Starts the bot group with the given ID")
     public ResponseEntity<Void> start(@PathVariable String id) {
-        behaviorService.start(id);
-        applyManualOverride(id, ActivationMode.MANUAL_ON);
+        runWithManualOverride(id, ActivationMode.MANUAL_ON, () -> behaviorService.start(id));
         return ResponseEntity.ok().build();
     }
 
     @PostMapping("/{id}/stop")
     @Operation(summary = "Stop bot group", description = "Stops the bot group with the given ID")
     public ResponseEntity<Void> stop(@PathVariable String id) {
-        behaviorService.stop(id);
-        applyManualOverride(id, ActivationMode.MANUAL_OFF);
+        runWithManualOverride(id, ActivationMode.MANUAL_OFF, () -> behaviorService.stop(id));
         return ResponseEntity.ok().build();
     }
 
@@ -164,20 +162,36 @@ public class BotGroupController {
      * the group rejoins the schedule only via an explicit PATCH back to
      * {@code SCHEDULED}.
      * <p>
+     * The mode flip is persisted <b>before</b> the lifecycle action to close a
+     * TOCTOU race with the reconciler: a tick that lands during the action
+     * window sees a non-{@code SCHEDULED} mode, resolves to {@code NONE}, and so
+     * cannot undo the operator's action. If the action ultimately throws, the
+     * prior mode is restored so a failed action leaves no spurious mode change.
+     * <p>
      * Legacy, non-timed groups ({@code activationMode == null}) are left
-     * completely untouched — their start/stop semantics are unchanged.
+     * completely untouched — no flip, their start/stop semantics are unchanged.
      * <p>
      * This flip lives <b>only</b> at the controller layer (operator-initiated).
      * The reconciler and the {@code onStartup} auto-start path call
      * {@code behaviorService.start/stop} directly and stay mode-neutral — a flip
      * from those paths would defeat scheduling.
      */
-    private void applyManualOverride(String id, ActivationMode manualMode) {
+    private void runWithManualOverride(String id, ActivationMode manualMode, Runnable action) {
         BotGroup group = service.findById(id);
         if (group.getActivationMode() == null) {
+            // Legacy, non-timed group — no mode flip, unchanged behavior.
+            action.run();
             return;
         }
-        service.setActivationMode(id, manualMode);
+        ActivationMode priorMode = group.getActivationMode();
+        service.setActivationMode(group, manualMode);
+        try {
+            action.run();
+        } catch (RuntimeException e) {
+            // Roll back the flip so a failed action leaves the mode unchanged.
+            service.setActivationMode(group, priorMode);
+            throw e;
+        }
     }
 
     @PostMapping("/{id}/restart")

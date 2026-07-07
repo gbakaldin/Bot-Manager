@@ -526,6 +526,30 @@ class BotGroupServiceTest {
 
             verify(repository, never()).save(any(BotGroup.class));
         }
+
+        @Test
+        @DisplayName("group overload persists on the already-loaded group without a redundant findById")
+        void groupOverloadPersistsWithoutReread() {
+            BotGroup existing = BotGroup.builder()
+                    .id("123")
+                    .name("Scheduled")
+                    .activationMode(com.vingame.bot.domain.botgroup.model.ActivationMode.SCHEDULED)
+                    .targetStatus(BotGroupStatus.ACTIVE)
+                    .build();
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            service.setActivationMode(existing,
+                    com.vingame.bot.domain.botgroup.model.ActivationMode.MANUAL_ON);
+
+            // No re-read: the caller already holds the document.
+            verify(repository, never()).findById(any());
+            ArgumentCaptor<BotGroup> captor = ArgumentCaptor.forClass(BotGroup.class);
+            verify(repository).save(captor.capture());
+            BotGroup saved = captor.getValue();
+            assertThat(saved.getActivationMode())
+                    .isEqualTo(com.vingame.bot.domain.botgroup.model.ActivationMode.MANUAL_ON);
+            assertThat(saved.getUpdatedAt()).isNotNull();
+        }
     }
 
     @Nested

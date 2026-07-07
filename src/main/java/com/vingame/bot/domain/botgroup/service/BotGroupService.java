@@ -296,7 +296,16 @@ public class BotGroupService {
      * The controller layer is the sole caller.
      */
     public void setActivationMode(String id, ActivationMode mode) {
-        BotGroup group = findById(id);
+        setActivationMode(findById(id), mode);
+    }
+
+    /**
+     * Same contract as {@link #setActivationMode(String, ActivationMode)} but
+     * operates on an already-loaded group, avoiding a redundant {@code findById}
+     * when the caller has read the document (the controller manual-override path
+     * loads it once to inspect {@code activationMode}).
+     */
+    public void setActivationMode(BotGroup group, ActivationMode mode) {
         group.setActivationMode(mode);
         group.setUpdatedAt(Instant.now());
         repository.save(group);
