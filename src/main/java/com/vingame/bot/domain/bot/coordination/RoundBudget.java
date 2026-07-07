@@ -1,6 +1,5 @@
 package com.vingame.bot.domain.bot.coordination;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -46,10 +45,6 @@ final class RoundBudget {
         return sessionId;
     }
 
-    long cap() {
-        return cap;
-    }
-
     /** @return this option's target budget, or {@code 0} if the option is unknown. */
     long budgetOf(int optionId) {
         return budget.getOrDefault(optionId, 0L);
@@ -78,15 +73,5 @@ final class RoundBudget {
     void commit(int optionId, long amount) {
         committed.merge(optionId, amount, Long::sum);
         committedAggregate += amount;
-    }
-
-    /** @return read-only view of the immutable per-option targets. */
-    Map<Integer, Long> budget() {
-        return budget;
-    }
-
-    /** @return read-only snapshot of the committed totals; caller holds the lock. */
-    Map<Integer, Long> committedSnapshot() {
-        return Collections.unmodifiableMap(new HashMap<>(committed));
     }
 }
