@@ -45,6 +45,11 @@ public class BotGroupConfigValidationService {
      *         if the game-type validator rejects the configuration.
      */
     public void validate(BotGroup group) {
+        // Activation config is game-type-independent (TIMED_ACTIVATION AD-7), so
+        // it is checked here for every group rather than in a per-GameType
+        // validator. A null/legacy activationMode passes through unchanged.
+        ActivationRules.validate(group);
+
         String gameId = group.getGameId();
         if (gameId == null || gameId.isBlank()) {
             throw new BadRequestException("gameId is required");
