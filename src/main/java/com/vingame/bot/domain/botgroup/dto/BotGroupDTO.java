@@ -3,6 +3,8 @@ package com.vingame.bot.domain.botgroup.dto;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
+import com.vingame.bot.domain.botgroup.model.ActivationMode;
+import com.vingame.bot.domain.botgroup.model.ActivationWindow;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Positive;
@@ -54,10 +56,19 @@ public class BotGroupDTO {
     private Integer minBetsPerRound;
     private Integer maxBetsPerRound;
 
-    private Boolean timeBased;
+    /**
+     * Activation mode (TIMED_ACTIVATION AD-1). Null = legacy non-timed group.
+     * PATCH is full-replace — a non-null value overwrites the persisted mode
+     * (mirrors {@code slotStrategyId}).
+     */
+    private ActivationMode activationMode;
 
-    private LocalDateTime timeFrom;
-    private LocalDateTime timeUntil;
+    /**
+     * Recurring time-of-day activation window (TIMED_ACTIVATION AD-1). Null unless
+     * the group opts into scheduling. PATCH is full-replace — a non-null value
+     * overwrites the persisted window (mirrors {@code slotStrategyId}).
+     */
+    private ActivationWindow activationWindow;
 
     private Boolean chatEnabled;
     private Boolean autoDepositEnabled;

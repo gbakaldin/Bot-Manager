@@ -34,9 +34,8 @@ public interface BotGroupMapper {
                 .maxTotalBetPerRound(entity.getMaxTotalBetPerRound())
                 .minBetsPerRound(entity.getMinBetsPerRound())
                 .maxBetsPerRound(entity.getMaxBetsPerRound())
-                .timeBased(entity.isTimeBased())
-                .timeFrom(entity.getTimeFrom())
-                .timeUntil(entity.getTimeUntil())
+                .activationMode(entity.getActivationMode())
+                .activationWindow(entity.getActivationWindow())
                 .chatEnabled(entity.isChatEnabled())
                 .autoDepositEnabled(entity.isAutoDepositEnabled())
                 .strategyMix(entity.getStrategyMix())
@@ -72,9 +71,8 @@ public interface BotGroupMapper {
                 .maxTotalBetPerRound(Optional.ofNullable(dto.getMaxTotalBetPerRound()).orElse(0L))
                 .minBetsPerRound(Optional.ofNullable(dto.getMinBetsPerRound()).orElse(0))
                 .maxBetsPerRound(Optional.ofNullable(dto.getMaxBetsPerRound()).orElse(0))
-                .timeBased(Optional.ofNullable(dto.getTimeBased()).orElse(false))
-                .timeFrom(dto.getTimeFrom())
-                .timeUntil(dto.getTimeUntil())
+                .activationMode(dto.getActivationMode())
+                .activationWindow(dto.getActivationWindow())
                 .chatEnabled(Optional.ofNullable(dto.getChatEnabled()).orElse(false))
                 .autoDepositEnabled(Optional.ofNullable(dto.getAutoDepositEnabled()).orElse(false))
                 .strategyMix(dto.getStrategyMix())
@@ -108,9 +106,13 @@ public interface BotGroupMapper {
         entity.setMaxTotalBetPerRound(Optional.ofNullable(dto.getMaxTotalBetPerRound()).orElse(entity.getMaxTotalBetPerRound()));
         entity.setMinBetsPerRound(Optional.ofNullable(dto.getMinBetsPerRound()).orElse(entity.getMinBetsPerRound()));
         entity.setMaxBetsPerRound(Optional.ofNullable(dto.getMaxBetsPerRound()).orElse(entity.getMaxBetsPerRound()));
-        entity.setTimeBased(Optional.ofNullable(dto.getTimeBased()).orElse(entity.isTimeBased()));
-        entity.setTimeFrom(Optional.ofNullable(dto.getTimeFrom()).orElse(entity.getTimeFrom()));
-        entity.setTimeUntil(Optional.ofNullable(dto.getTimeUntil()).orElse(entity.getTimeUntil()));
+        // activationMode / activationWindow PATCH semantics: full-replace if the
+        // DTO supplies the field (non-null); a null DTO field keeps the existing
+        // value. Mirrors slotStrategyId. To hand a scheduled group back to the
+        // schedule after a manual override, PATCH activationMode=SCHEDULED
+        // (TIMED_ACTIVATION AD-4).
+        entity.setActivationMode(Optional.ofNullable(dto.getActivationMode()).orElse(entity.getActivationMode()));
+        entity.setActivationWindow(Optional.ofNullable(dto.getActivationWindow()).orElse(entity.getActivationWindow()));
         entity.setChatEnabled(Optional.ofNullable(dto.getChatEnabled()).orElse(entity.isChatEnabled()));
         entity.setAutoDepositEnabled(Optional.ofNullable(dto.getAutoDepositEnabled()).orElse(entity.isAutoDepositEnabled()));
         // strategyMix PATCH semantics: full-replace if DTO supplies the field

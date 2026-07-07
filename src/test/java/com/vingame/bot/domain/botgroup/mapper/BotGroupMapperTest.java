@@ -5,6 +5,8 @@ import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
+import com.vingame.bot.domain.botgroup.model.ActivationMode;
+import com.vingame.bot.domain.botgroup.model.ActivationWindow;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import org.junit.jupiter.api.DisplayName;
@@ -12,8 +14,11 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mapstruct.factory.Mappers;
 
+import java.time.DayOfWeek;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.List;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -45,9 +50,12 @@ class BotGroupMapperTest {
                     .maxTotalBetPerRound(5000L)
                     .minBetsPerRound(1)
                     .maxBetsPerRound(5)
-                    .timeBased(true)
-                    .timeFrom(now)
-                    .timeUntil(now.plusHours(1))
+                    .activationMode(ActivationMode.SCHEDULED)
+                    .activationWindow(ActivationWindow.builder()
+                            .from(LocalTime.of(18, 0))
+                            .to(LocalTime.of(23, 0))
+                            .days(Set.of(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY))
+                            .build())
                     .chatEnabled(true)
                     .autoDepositEnabled(true)
                     .targetStatus(BotGroupStatus.ACTIVE)
@@ -72,9 +80,12 @@ class BotGroupMapperTest {
             assertThat(dto.getMaxTotalBetPerRound()).isEqualTo(5000L);
             assertThat(dto.getMinBetsPerRound()).isEqualTo(1);
             assertThat(dto.getMaxBetsPerRound()).isEqualTo(5);
-            assertThat(dto.getTimeBased()).isTrue();
-            assertThat(dto.getTimeFrom()).isEqualTo(now);
-            assertThat(dto.getTimeUntil()).isEqualTo(now.plusHours(1));
+            assertThat(dto.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
+            assertThat(dto.getActivationWindow()).isEqualTo(ActivationWindow.builder()
+                    .from(LocalTime.of(18, 0))
+                    .to(LocalTime.of(23, 0))
+                    .days(Set.of(DayOfWeek.SATURDAY, DayOfWeek.SUNDAY))
+                    .build());
             assertThat(dto.getChatEnabled()).isTrue();
             assertThat(dto.getAutoDepositEnabled()).isTrue();
             assertThat(dto.getTargetStatus()).isEqualTo(BotGroupStatus.ACTIVE);
@@ -113,9 +124,12 @@ class BotGroupMapperTest {
                     .maxTotalBetPerRound(5000L)
                     .minBetsPerRound(1)
                     .maxBetsPerRound(5)
-                    .timeBased(true)
-                    .timeFrom(now)
-                    .timeUntil(now.plusHours(1))
+                    .activationMode(ActivationMode.SCHEDULED)
+                    .activationWindow(ActivationWindow.builder()
+                            .from(LocalTime.of(22, 0))
+                            .to(LocalTime.of(2, 0))
+                            .days(Set.of(DayOfWeek.FRIDAY))
+                            .build())
                     .chatEnabled(true)
                     .autoDepositEnabled(true)
                     .targetStatus(BotGroupStatus.STOPPED)
@@ -140,9 +154,12 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxTotalBetPerRound()).isEqualTo(5000L);
             assertThat(entity.getMinBetsPerRound()).isEqualTo(1);
             assertThat(entity.getMaxBetsPerRound()).isEqualTo(5);
-            assertThat(entity.isTimeBased()).isTrue();
-            assertThat(entity.getTimeFrom()).isEqualTo(now);
-            assertThat(entity.getTimeUntil()).isEqualTo(now.plusHours(1));
+            assertThat(entity.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
+            assertThat(entity.getActivationWindow()).isEqualTo(ActivationWindow.builder()
+                    .from(LocalTime.of(22, 0))
+                    .to(LocalTime.of(2, 0))
+                    .days(Set.of(DayOfWeek.FRIDAY))
+                    .build());
             assertThat(entity.isChatEnabled()).isTrue();
             assertThat(entity.isAutoDepositEnabled()).isTrue();
             assertThat(entity.getTargetStatus()).isEqualTo(BotGroupStatus.STOPPED);
@@ -173,7 +190,8 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxTotalBetPerRound()).isEqualTo(0L);
             assertThat(entity.getMinBetsPerRound()).isEqualTo(0);
             assertThat(entity.getMaxBetsPerRound()).isEqualTo(0);
-            assertThat(entity.isTimeBased()).isFalse();
+            assertThat(entity.getActivationMode()).isNull();
+            assertThat(entity.getActivationWindow()).isNull();
             assertThat(entity.isChatEnabled()).isFalse();
             assertThat(entity.isAutoDepositEnabled()).isFalse();
         }
@@ -186,7 +204,6 @@ class BotGroupMapperTest {
         @Test
         @DisplayName("Should overwrite only fields that DTO provides, keeping the rest unchanged")
         void shouldKeepFieldsWhenDtoNull() {
-            LocalDateTime now = LocalDateTime.of(2026, 1, 1, 12, 0);
             BotGroup entity = BotGroup.builder()
                     .id("id-1")
                     .name("Old")
@@ -201,8 +218,11 @@ class BotGroupMapperTest {
                     .maxTotalBetPerRound(5000L)
                     .minBetsPerRound(1)
                     .maxBetsPerRound(5)
-                    .timeBased(true)
-                    .timeFrom(now)
+                    .activationMode(ActivationMode.SCHEDULED)
+                    .activationWindow(ActivationWindow.builder()
+                            .from(LocalTime.of(18, 0))
+                            .to(LocalTime.of(23, 0))
+                            .build())
                     .chatEnabled(true)
                     .autoDepositEnabled(true)
                     .targetStatus(BotGroupStatus.ACTIVE)
@@ -226,8 +246,11 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxTotalBetPerRound()).isEqualTo(5000L);
             assertThat(entity.getMinBetsPerRound()).isEqualTo(1);
             assertThat(entity.getMaxBetsPerRound()).isEqualTo(5);
-            assertThat(entity.isTimeBased()).isTrue();
-            assertThat(entity.getTimeFrom()).isEqualTo(now);
+            assertThat(entity.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
+            assertThat(entity.getActivationWindow()).isEqualTo(ActivationWindow.builder()
+                    .from(LocalTime.of(18, 0))
+                    .to(LocalTime.of(23, 0))
+                    .build());
             assertThat(entity.isChatEnabled()).isTrue();
             assertThat(entity.isAutoDepositEnabled()).isTrue();
             assertThat(entity.getTargetStatus()).isEqualTo(BotGroupStatus.ACTIVE);

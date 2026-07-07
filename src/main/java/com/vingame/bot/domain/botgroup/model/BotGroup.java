@@ -42,10 +42,19 @@ public class BotGroup {
     private int minBetsPerRound;
     private int maxBetsPerRound;
 
-    private boolean timeBased;
+    /**
+     * How this group's lifecycle is governed relative to {@link #activationWindow}
+     * (TIMED_ACTIVATION AD-1). {@code null} = legacy non-timed group, governed
+     * solely by {@link #targetStatus}. Only {@link ActivationMode#SCHEDULED} groups
+     * are driven by the activation reconciler.
+     */
+    private ActivationMode activationMode;
 
-    private LocalDateTime timeFrom;
-    private LocalDateTime timeUntil;
+    /**
+     * Recurring time-of-day activation window (TIMED_ACTIVATION AD-1). Nullable —
+     * required only when {@link #activationMode} is {@link ActivationMode#SCHEDULED}.
+     */
+    private ActivationWindow activationWindow;
 
     private boolean chatEnabled;
     private boolean autoDepositEnabled;

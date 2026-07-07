@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.repository;
 
+import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import org.springframework.data.mongodb.repository.MongoRepository;
@@ -13,4 +14,6 @@ public interface BotGroupRepository extends MongoRepository<BotGroup, String> {
     List<BotGroup> findByGameId(String gameId);
 
     List<BotGroup> findByTargetStatus(BotGroupStatus targetStatus);
+
+    List<BotGroup> findByActivationMode(ActivationMode activationMode);
 }
