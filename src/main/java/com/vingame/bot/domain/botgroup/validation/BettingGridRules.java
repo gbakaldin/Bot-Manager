@@ -32,6 +32,10 @@ import java.util.List;
  *   <li><b>Grid:</b> {@code (maxBet - minBet) % betIncrement == 0}.</li>
  *   <li><b>Cross-field caps:</b> {@code maxTotalBetPerRound >= maxBet} and
  *       {@code maxTotalBetPerRound >= minBet * minBetsPerRound}.</li>
+ *   <li><b>Coordination cap (BET_COORDINATION AD-1):</b> when
+ *       {@code coordinationEnabled} is true, {@code maxAggregateStakePerRound >= minBet}.
+ *       Only enforced when coordination is on; decoupled from the per-bot
+ *       {@code maxTotalBetPerRound}.</li>
  * </ul>
  *
  * <p>The entity's numeric fields are primitives ({@code long}/{@code int}), so by
@@ -126,6 +130,20 @@ final class BettingGridRules {
             violations.add("maxTotalBetPerRound (" + maxTotalBetPerRound
                     + ") must be >= minBet * minBetsPerRound (" + minBet + " * "
                     + minBetsPerRound + " = " + minTotal + ")");
+        }
+
+        // Coordination cap (BET_COORDINATION AD-1). Only constrained when the
+        // group-scoped coordinator is enabled: the aggregate per-round stake cap
+        // must be at least one minBet, since a cap below one min-bet can never
+        // approve a single bet. This is the group/fleet-level cap and is kept
+        // deliberately decoupled from the per-bot maxTotalBetPerRound.
+        if (group.isCoordinationEnabled()) {
+            long maxAggregateStakePerRound = group.getMaxAggregateStakePerRound();
+            if (maxAggregateStakePerRound < minBet) {
+                violations.add("maxAggregateStakePerRound (" + maxAggregateStakePerRound
+                        + ") must be >= minBet (" + minBet
+                        + ") when coordinationEnabled is true");
+            }
         }
 
         if (!violations.isEmpty()) {

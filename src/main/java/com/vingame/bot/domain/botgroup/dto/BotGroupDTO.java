@@ -57,6 +57,20 @@ public class BotGroupDTO {
     private Integer maxBetsPerRound;
 
     /**
+     * Enable the group-scoped bet coordinator (BET_COORDINATION AD-1). Boxed —
+     * PATCH-null keeps the persisted value; a non-null value full-replaces it.
+     */
+    private Boolean coordinationEnabled;
+
+    /**
+     * Group/fleet-level aggregate per-round stake ceiling for the coordinator
+     * (BET_COORDINATION AD-1). Boxed — PATCH-null keeps the persisted value.
+     * <b>Not</b> the per-bot {@link #maxTotalBetPerRound}: this bounds the whole
+     * group's summed stake per round, not a single bot's.
+     */
+    private Long maxAggregateStakePerRound;
+
+    /**
      * Activation mode (TIMED_ACTIVATION AD-1). Null = legacy non-timed group.
      * PATCH is full-replace — a non-null value overwrites the persisted mode
      * (mirrors {@code slotStrategyId}).

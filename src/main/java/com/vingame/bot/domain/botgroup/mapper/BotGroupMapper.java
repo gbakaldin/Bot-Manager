@@ -34,6 +34,8 @@ public interface BotGroupMapper {
                 .maxTotalBetPerRound(entity.getMaxTotalBetPerRound())
                 .minBetsPerRound(entity.getMinBetsPerRound())
                 .maxBetsPerRound(entity.getMaxBetsPerRound())
+                .coordinationEnabled(entity.isCoordinationEnabled())
+                .maxAggregateStakePerRound(entity.getMaxAggregateStakePerRound())
                 .activationMode(entity.getActivationMode())
                 .activationWindow(entity.getActivationWindow())
                 .chatEnabled(entity.isChatEnabled())
@@ -71,6 +73,8 @@ public interface BotGroupMapper {
                 .maxTotalBetPerRound(Optional.ofNullable(dto.getMaxTotalBetPerRound()).orElse(0L))
                 .minBetsPerRound(Optional.ofNullable(dto.getMinBetsPerRound()).orElse(0))
                 .maxBetsPerRound(Optional.ofNullable(dto.getMaxBetsPerRound()).orElse(0))
+                .coordinationEnabled(Optional.ofNullable(dto.getCoordinationEnabled()).orElse(false))
+                .maxAggregateStakePerRound(Optional.ofNullable(dto.getMaxAggregateStakePerRound()).orElse(0L))
                 .activationMode(dto.getActivationMode())
                 .activationWindow(dto.getActivationWindow())
                 .chatEnabled(Optional.ofNullable(dto.getChatEnabled()).orElse(false))
@@ -106,6 +110,11 @@ public interface BotGroupMapper {
         entity.setMaxTotalBetPerRound(Optional.ofNullable(dto.getMaxTotalBetPerRound()).orElse(entity.getMaxTotalBetPerRound()));
         entity.setMinBetsPerRound(Optional.ofNullable(dto.getMinBetsPerRound()).orElse(entity.getMinBetsPerRound()));
         entity.setMaxBetsPerRound(Optional.ofNullable(dto.getMaxBetsPerRound()).orElse(entity.getMaxBetsPerRound()));
+        // coordinationEnabled / maxAggregateStakePerRound PATCH semantics:
+        // full-replace if the DTO supplies the field (non-null); a null DTO field
+        // keeps the existing value. Mirrors the other scalar fields.
+        entity.setCoordinationEnabled(Optional.ofNullable(dto.getCoordinationEnabled()).orElse(entity.isCoordinationEnabled()));
+        entity.setMaxAggregateStakePerRound(Optional.ofNullable(dto.getMaxAggregateStakePerRound()).orElse(entity.getMaxAggregateStakePerRound()));
         // activationMode / activationWindow PATCH semantics: full-replace if the
         // DTO supplies the field (non-null); a null DTO field keeps the existing
         // value. Mirrors slotStrategyId. To hand a scheduled group back to the

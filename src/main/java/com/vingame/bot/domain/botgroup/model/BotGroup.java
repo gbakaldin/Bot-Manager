@@ -43,6 +43,25 @@ public class BotGroup {
     private int maxBetsPerRound;
 
     /**
+     * Whether the group-scoped bet coordinator is active for this group
+     * (BET_COORDINATION AD-1). When true, {@code BotGroupBehaviorService.start}
+     * builds a {@code BetCoordinator} and injects it into every bot; when false,
+     * behavior is byte-for-byte the pre-coordination status quo (AD-9).
+     */
+    private boolean coordinationEnabled;
+
+    /**
+     * Group/fleet-level aggregate per-round stake ceiling enforced by the
+     * coordinator (BET_COORDINATION AD-1). This is <b>distinct</b> from the
+     * per-bot {@link #maxTotalBetPerRound}: this cap bounds the summed stake of
+     * the <i>whole group</i> across one round, whereas {@code maxTotalBetPerRound}
+     * bounds a single bot's total. Only meaningful when {@link #coordinationEnabled}
+     * is true. Validation requires it to be {@code >= minBet} (a cap below one
+     * min-bet can never approve anything).
+     */
+    private long maxAggregateStakePerRound;
+
+    /**
      * How this group's lifecycle is governed relative to {@link #activationWindow}
      * (TIMED_ACTIVATION AD-1). {@code null} = legacy non-timed group, governed
      * solely by {@link #targetStatus}. Only {@link ActivationMode#SCHEDULED} groups

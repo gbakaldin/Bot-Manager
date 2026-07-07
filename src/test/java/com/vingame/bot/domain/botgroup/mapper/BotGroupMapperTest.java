@@ -50,6 +50,8 @@ class BotGroupMapperTest {
                     .maxTotalBetPerRound(5000L)
                     .minBetsPerRound(1)
                     .maxBetsPerRound(5)
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(50000L)
                     .activationMode(ActivationMode.SCHEDULED)
                     .activationWindow(ActivationWindow.builder()
                             .from(LocalTime.of(18, 0))
@@ -80,6 +82,8 @@ class BotGroupMapperTest {
             assertThat(dto.getMaxTotalBetPerRound()).isEqualTo(5000L);
             assertThat(dto.getMinBetsPerRound()).isEqualTo(1);
             assertThat(dto.getMaxBetsPerRound()).isEqualTo(5);
+            assertThat(dto.getCoordinationEnabled()).isTrue();
+            assertThat(dto.getMaxAggregateStakePerRound()).isEqualTo(50000L);
             assertThat(dto.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
             assertThat(dto.getActivationWindow()).isEqualTo(ActivationWindow.builder()
                     .from(LocalTime.of(18, 0))
@@ -124,6 +128,8 @@ class BotGroupMapperTest {
                     .maxTotalBetPerRound(5000L)
                     .minBetsPerRound(1)
                     .maxBetsPerRound(5)
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(50000L)
                     .activationMode(ActivationMode.SCHEDULED)
                     .activationWindow(ActivationWindow.builder()
                             .from(LocalTime.of(22, 0))
@@ -154,6 +160,8 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxTotalBetPerRound()).isEqualTo(5000L);
             assertThat(entity.getMinBetsPerRound()).isEqualTo(1);
             assertThat(entity.getMaxBetsPerRound()).isEqualTo(5);
+            assertThat(entity.isCoordinationEnabled()).isTrue();
+            assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(50000L);
             assertThat(entity.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
             assertThat(entity.getActivationWindow()).isEqualTo(ActivationWindow.builder()
                     .from(LocalTime.of(22, 0))
@@ -190,6 +198,8 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxTotalBetPerRound()).isEqualTo(0L);
             assertThat(entity.getMinBetsPerRound()).isEqualTo(0);
             assertThat(entity.getMaxBetsPerRound()).isEqualTo(0);
+            assertThat(entity.isCoordinationEnabled()).isFalse();
+            assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(0L);
             assertThat(entity.getActivationMode()).isNull();
             assertThat(entity.getActivationWindow()).isNull();
             assertThat(entity.isChatEnabled()).isFalse();
@@ -218,6 +228,8 @@ class BotGroupMapperTest {
                     .maxTotalBetPerRound(5000L)
                     .minBetsPerRound(1)
                     .maxBetsPerRound(5)
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(50000L)
                     .activationMode(ActivationMode.SCHEDULED)
                     .activationWindow(ActivationWindow.builder()
                             .from(LocalTime.of(18, 0))
@@ -246,6 +258,8 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxTotalBetPerRound()).isEqualTo(5000L);
             assertThat(entity.getMinBetsPerRound()).isEqualTo(1);
             assertThat(entity.getMaxBetsPerRound()).isEqualTo(5);
+            assertThat(entity.isCoordinationEnabled()).isTrue();
+            assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(50000L);
             assertThat(entity.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
             assertThat(entity.getActivationWindow()).isEqualTo(ActivationWindow.builder()
                     .from(LocalTime.of(18, 0))
@@ -405,6 +419,44 @@ class BotGroupMapperTest {
             mapper.updateEntityFromDTO(patch, entity);
 
             assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM);
+        }
+    }
+
+    @Nested
+    @DisplayName("coordination fields mapping (BET_COORDINATION Phase 1)")
+    class CoordinationTests {
+
+        @Test
+        @DisplayName("PATCH full-replaces both coordination fields when the DTO supplies them")
+        void patchFullReplacesCoordinationFields() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .coordinationEnabled(false)
+                    .maxAggregateStakePerRound(10000L)
+                    .build();
+            BotGroupDTO patch = BotGroupDTO.builder()
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(50000L)
+                    .build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.isCoordinationEnabled()).isTrue();
+            assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(50000L);
+        }
+
+        @Test
+        @DisplayName("PATCH retains existing coordination fields when the DTO omits them (null)")
+        void patchKeepsExistingWhenDtoNull() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(50000L)
+                    .build();
+            BotGroupDTO patch = BotGroupDTO.builder().name("renamed").build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.isCoordinationEnabled()).isTrue();
+            assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(50000L);
         }
     }
 }

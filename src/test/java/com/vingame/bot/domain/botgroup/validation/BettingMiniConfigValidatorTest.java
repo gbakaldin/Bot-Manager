@@ -386,6 +386,71 @@ class BettingMiniConfigValidatorTest {
         }
     }
 
+    @Nested
+    @DisplayName("coordination cap (BET_COORDINATION AD-1)")
+    class CoordinationCap {
+
+        @Test
+        @DisplayName("coordination disabled: maxAggregateStakePerRound is unconstrained (even 0)")
+        void disabledImposesNoConstraint() {
+            // coordinationEnabled defaults to false; cap 0 (< minBet 100) must not bite.
+            BotGroup group = validConfig()
+                    .coordinationEnabled(false)
+                    .maxAggregateStakePerRound(0)
+                    .build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("enabled + cap below minBet rejected (400)")
+        void enabledCapBelowMinBetRejected() {
+            // minBet=100, cap=50 < 100 → violation.
+            BotGroup group = validConfig()
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(50)
+                    .build();
+            assertThatThrownBy(() -> validator.validate(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining(
+                            "maxAggregateStakePerRound (50) must be >= minBet (100) when coordinationEnabled is true");
+        }
+
+        @Test
+        @DisplayName("enabled + cap == minBet passes (>= boundary)")
+        void enabledCapEqualsMinBetPasses() {
+            // minBet=100, cap=100: the >= edge holds.
+            BotGroup group = validConfig()
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(100)
+                    .build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("enabled + cap above minBet passes")
+        void enabledCapAboveMinBetPasses() {
+            BotGroup group = validConfig()
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(500000)
+                    .build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("coordination cap is decoupled from the per-bot maxTotalBetPerRound")
+        void decoupledFromPerBotCap() {
+            // maxTotalBetPerRound stays a valid 1000; the aggregate cap (150) is well
+            // below it but still >= minBet (100), so no violation — the two caps are
+            // independent.
+            BotGroup group = validConfig()
+                    .maxTotalBetPerRound(1000)
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(150)
+                    .build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+    }
+
     @Test
     @DisplayName("multiple simultaneous violations are all reported in one exception")
     void multipleViolationsAggregated() {
