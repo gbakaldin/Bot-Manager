@@ -155,6 +155,53 @@ class BotGroupBehaviorServiceTest {
     }
 
     @Nested
+    @DisplayName("onStartup - startup ownership (TIMED_ACTIVATION AD-10)")
+    class OnStartupOwnershipTests {
+
+        @Test
+        @DisplayName("SCHEDULED groups are skipped — the reconciler owns them, so start() is never entered")
+        void scheduledGroupsSkipped() {
+            BotGroup scheduled = BotGroup.builder()
+                    .id("sched-1")
+                    .name("Scheduled")
+                    .environmentId("env-1")
+                    .activationMode(com.vingame.bot.domain.botgroup.model.ActivationMode.SCHEDULED)
+                    .targetStatus(BotGroupStatus.ACTIVE)
+                    .build();
+            when(botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE))
+                    .thenReturn(List.of(scheduled));
+
+            service.onStartup();
+
+            // start() resolves the group via findById first; a skipped group is
+            // never started, so findById is never called for it.
+            verify(botGroupService, never()).findById(anyString());
+            assertThat(runningGroups()).doesNotContainKey("sched-1");
+        }
+
+        @Test
+        @DisplayName("null-mode (legacy) groups still auto-start — start() is entered (findById called)")
+        void legacyGroupsStillAutoStart() {
+            // Legacy group with no environment: start() enters, resolves the group,
+            // and fails the environment guard — the failure is swallowed by
+            // onStartup's per-group try/catch. The point is that it was NOT skipped.
+            BotGroup legacy = BotGroup.builder()
+                    .id("legacy-1")
+                    .name("Legacy")
+                    .activationMode(null)
+                    .targetStatus(BotGroupStatus.ACTIVE)
+                    .build();
+            when(botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE))
+                    .thenReturn(List.of(legacy));
+            when(botGroupService.findById("legacy-1")).thenReturn(legacy);
+
+            service.onStartup();
+
+            verify(botGroupService).findById("legacy-1");
+        }
+    }
+
+    @Nested
     @DisplayName("start - validation guards")
     class StartValidationTests {
 

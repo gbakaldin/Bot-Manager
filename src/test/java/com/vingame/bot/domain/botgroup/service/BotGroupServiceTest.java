@@ -487,6 +487,48 @@ class BotGroupServiceTest {
     }
 
     @Nested
+    @DisplayName("setActivationMode (TIMED_ACTIVATION AD-4)")
+    class SetActivationModeTests {
+
+        @Test
+        @DisplayName("flips activationMode and persists, re-stamping updatedAt, without touching targetStatus")
+        void flipsModeAndPersists() {
+            BotGroup existing = BotGroup.builder()
+                    .id("123")
+                    .name("Scheduled")
+                    .activationMode(com.vingame.bot.domain.botgroup.model.ActivationMode.SCHEDULED)
+                    .targetStatus(BotGroupStatus.ACTIVE)
+                    .build();
+            when(repository.findById("123")).thenReturn(Optional.of(existing));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            service.setActivationMode("123",
+                    com.vingame.bot.domain.botgroup.model.ActivationMode.MANUAL_OFF);
+
+            ArgumentCaptor<BotGroup> captor = ArgumentCaptor.forClass(BotGroup.class);
+            verify(repository).save(captor.capture());
+            BotGroup saved = captor.getValue();
+            assertThat(saved.getActivationMode())
+                    .isEqualTo(com.vingame.bot.domain.botgroup.model.ActivationMode.MANUAL_OFF);
+            // targetStatus is driven by the explicit start/stop paths, not this flip.
+            assertThat(saved.getTargetStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+            assertThat(saved.getUpdatedAt()).isNotNull();
+        }
+
+        @Test
+        @DisplayName("throws ResourceNotFoundException when the group does not exist")
+        void throwsWhenMissing() {
+            when(repository.findById("missing")).thenReturn(Optional.empty());
+
+            assertThatThrownBy(() -> service.setActivationMode("missing",
+                    com.vingame.bot.domain.botgroup.model.ActivationMode.MANUAL_ON))
+                    .isInstanceOf(ResourceNotFoundException.class);
+
+            verify(repository, never()).save(any(BotGroup.class));
+        }
+    }
+
+    @Nested
     @DisplayName("delete")
     class DeleteTests {
 
