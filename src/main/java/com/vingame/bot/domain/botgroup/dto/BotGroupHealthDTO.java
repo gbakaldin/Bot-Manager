@@ -52,4 +52,12 @@ public class BotGroupHealthDTO {
      * jackpot-scale is off/ineligible or the group is not running.
      */
     private JackpotScaleStateDTO jackpotScale;
+
+    /**
+     * Late-window bet ramp state (JACKPOT_SCALE_AND_RAMP Phase R3, AD-R7). Nullable:
+     * present only when the group is running with {@code rampEnabled} set on the
+     * group entity; absent (null) when the ramp is off or the group is not running.
+     * Thin — the ramp is stateless per-bot, so this only mirrors the configured shape.
+     */
+    private RampStateDTO ramp;
 }

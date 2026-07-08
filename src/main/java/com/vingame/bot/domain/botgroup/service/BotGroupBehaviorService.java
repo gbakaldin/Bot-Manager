@@ -19,6 +19,7 @@ import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatsDTO;
 import com.vingame.bot.domain.botgroup.dto.CoordinationStateDTO;
 import com.vingame.bot.domain.botgroup.dto.JackpotScaleStateDTO;
+import com.vingame.bot.domain.botgroup.dto.RampStateDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
@@ -870,6 +871,27 @@ public class BotGroupBehaviorService {
                 .stats(computeStats(id))
                 .coordination(buildCoordinationState(runtime.getCoordinator()))
                 .jackpotScale(buildJackpotScaleState(runtime.getJackpotScaler()))
+                .ramp(buildRampState(group))
+                .build();
+    }
+
+    /**
+     * Read-side ramp view (JACKPOT_SCALE_AND_RAMP Phase R3, AD-R7). Returns
+     * {@code null} when the group has {@code rampEnabled=false}, so the {@code ramp}
+     * block is absent for off/legacy groups. When the group is not running,
+     * {@link #getHealth(String)} returns before this is ever called, so the block is
+     * likewise absent — matching how {@code coordination}/{@code jackpotScale} gate on
+     * a running runtime. The ramp is stateless per-bot (AD-R7), so this reads the
+     * group entity as the single source of the configured shape rather than any bot's
+     * {@code BotBehaviorConfig}; strictly read-only.
+     */
+    private RampStateDTO buildRampState(BotGroup group) {
+        if (!group.isRampEnabled()) {
+            return null;
+        }
+        return RampStateDTO.builder()
+                .enabled(true)
+                .rampShape(group.getRampShape())
                 .build();
     }
 

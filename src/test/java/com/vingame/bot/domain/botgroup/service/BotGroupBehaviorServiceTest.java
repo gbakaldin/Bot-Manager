@@ -14,6 +14,7 @@ import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.CoordinationStateDTO;
 import com.vingame.bot.domain.botgroup.dto.JackpotScaleStateDTO;
+import com.vingame.bot.domain.botgroup.dto.RampStateDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
@@ -543,6 +544,57 @@ class BotGroupBehaviorServiceTest {
                 BotGroupHealthDTO dto = service.getHealth("g-1");
 
                 assertThat(dto.getJackpotScale()).isNull();
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("getHealth() surfaces the ramp state from the group entity when rampEnabled (JACKPOT_SCALE_AND_RAMP Phase R3)")
+        void healthSurfacesRampState() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1").name("Group")
+                    .rampEnabled(true).rampShape(3.0)
+                    .build();
+            when(botGroupService.findById("g-1")).thenReturn(group);
+
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1");
+            runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+            try {
+                putBots(runtime, List.of());
+                runningGroups().put("g-1", runtime);
+
+                BotGroupHealthDTO dto = service.getHealth("g-1");
+
+                RampStateDTO ramp = dto.getRamp();
+                assertThat(ramp).isNotNull();
+                assertThat(ramp.isEnabled()).isTrue();
+                assertThat(ramp.getRampShape()).isEqualTo(3.0);
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("getHealth() leaves the ramp block null when rampEnabled=false (JACKPOT_SCALE_AND_RAMP Phase R3)")
+        void healthOmitsRampWhenDisabled() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1").name("Group")
+                    .rampEnabled(false).rampShape(3.0)
+                    .build();
+            when(botGroupService.findById("g-1")).thenReturn(group);
+
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1");
+            runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+            try {
+                putBots(runtime, List.of());
+                runningGroups().put("g-1", runtime);
+
+                BotGroupHealthDTO dto = service.getHealth("g-1");
+
+                assertThat(dto.getRamp()).isNull();
             } finally {
                 runtime.getExecutor().shutdownNow();
                 runningGroups().remove("g-1");
