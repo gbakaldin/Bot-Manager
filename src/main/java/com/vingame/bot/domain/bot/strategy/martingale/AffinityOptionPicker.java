@@ -1,8 +1,9 @@
 package com.vingame.bot.domain.bot.strategy.martingale;
 
-import lombok.extern.slf4j.Slf4j;
+import com.vingame.bot.domain.bot.strategy.WeightedOptionPicker;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -42,11 +43,18 @@ import java.util.Random;
  * seeded {@link Random#nextInt(int)} produces — pinning RNG ordering for the
  * unit tests.
  *
+ * <p><b>Delegation.</b> As of {@code docs/plans/AFFINITY_AWARE_PROPOSAL.md}
+ * (Open Decision D1 = EXTRACT), the cumulative-sum / uniform-draw core lives in
+ * the shared {@link WeightedOptionPicker}. This class computes its
+ * {@link RiskProfile}-transformed weights and delegates the draw, so the
+ * all-non-positive uniform fallback + one-shot WARN now come from the delegate.
+ * RNG consumption is byte-for-byte identical to the pre-extraction code (one
+ * {@code nextInt((int) Σw)} draw over the same insertion-order key view).
+ *
  * <p><b>Thread model.</b> The picker is owned by a single Martingale strategy
  * instance, which is itself per-bot. {@code pick(...)} is called from the
  * scenario thread (inside {@code MartingaleStrategySupport.decide}). No
- * cross-thread state — the {@code warned} flag is {@code volatile} for the
- * one-time WARN, but is otherwise idempotent and immaterial to correctness.
+ * cross-thread state.
  *
  * <p><b>RNG ownership.</b> The picker holds no {@link Random} of its own — the
  * RNG is threaded in on every {@code pick(...)} call from
@@ -54,11 +62,10 @@ import java.util.Random;
  * v1 strategy plumbing established by
  * {@link com.vingame.bot.domain.bot.strategy.RandomBehaviorStrategy}.
  */
-@Slf4j
 public final class AffinityOptionPicker {
 
     private final RiskProfile profile;
-    private volatile boolean warned;
+    private final WeightedOptionPicker delegate = new WeightedOptionPicker();
 
     public AffinityOptionPicker(RiskProfile profile) {
         if (profile == null) {
@@ -90,35 +97,19 @@ public final class AffinityOptionPicker {
             throw new IllegalArgumentException("affinities must be non-empty");
         }
 
-        // Deterministic insertion-order view — pinned by tests that depend on
-        // the cumulative-weight layout matching a specific RNG draw.
+        // Apply the RiskProfile transform, then delegate the cumulative-sum /
+        // single uniform draw to the shared WeightedOptionPicker. The
+        // transformed weights are built into a LinkedHashMap that preserves the
+        // affinities' insertion order, so the delegate walks the exact same
+        // key layout this class used before the extraction — the RNG draw
+        // (`nextInt((int) Σw)`, one draw) is byte-for-byte identical.
         List<Integer> options = new ArrayList<>(affinities.keySet());
         int[] weights = computeWeights(options, affinities);
-
-        long totalWeight = 0L;
-        for (int w : weights) totalWeight += w;
-
-        if (totalWeight <= 0L) {
-            warnOnce(affinities);
-            // Uniform fallback over the input keys — picks deterministically
-            // from the same insertion-order view we built above so seeded tests
-            // are reproducible.
-            return options.get(rng.nextInt(options.size()));
-        }
-
-        int draw = rng.nextInt((int) totalWeight);
-        int cumulative = 0;
+        Map<Integer, Integer> transformed = new LinkedHashMap<>();
         for (int i = 0; i < options.size(); i++) {
-            cumulative += weights[i];
-            if (draw < cumulative) {
-                return options.get(i);
-            }
+            transformed.put(options.get(i), weights[i]);
         }
-        // Numerically unreachable — the loop is exhaustive over the cumulative
-        // window. Defensive fallback to the last option keeps the contract
-        // (returns a key from affinities) intact even if a future refactor
-        // misaligns the weights array.
-        return options.get(options.size() - 1);
+        return delegate.pick(transformed, rng);
     }
 
     private int[] computeWeights(List<Integer> options, Map<Integer, Integer> affinities) {
@@ -145,13 +136,5 @@ public final class AffinityOptionPicker {
             }
         }
         return weights;
-    }
-
-    private void warnOnce(Map<Integer, Integer> affinities) {
-        if (!warned) {
-            warned = true;
-            log.warn("AffinityOptionPicker[{}]: all weights ≤ 0 for affinities={} — falling back to uniform pick",
-                    profile, affinities);
-        }
     }
 }
