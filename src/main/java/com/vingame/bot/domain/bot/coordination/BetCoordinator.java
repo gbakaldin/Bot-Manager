@@ -415,6 +415,7 @@ public final class BetCoordinator {
         long completedSid;
         long committedAggregate;
         List<String> histogram;
+        List<String> crowdHistogram = List.of();
         lock.lock();
         try {
             RoundBudget b = current;
@@ -428,12 +429,23 @@ public final class BetCoordinator {
                     .sorted()
                     .map(o -> "[opt=" + o + " target=" + b.budgetOf(o) + " realized=" + b.committedOf(o) + "]")
                     .collect(Collectors.toList());
+            // Crowd histogram segment (AD-C10): observed crowd v(o) vs the crowd-
+            // adjusted budget the fleet steers to. Same-line, crowd-tier only — the
+            // internal tier keeps the terse original line (no crowd segment).
+            if (crowdAware) {
+                crowdHistogram = optionAffinities.keySet().stream()
+                        .sorted()
+                        .map(o -> "[opt=" + o + " v=" + crowdStake.getOrDefault(o, 0L)
+                                + " adj=" + b.budgetOf(o) + "]")
+                        .collect(Collectors.toList());
+            }
         } finally {
             lock.unlock();
         }
-        log.debug("Coordination sid={} realized={}/{} target-histogram {} approve={} trim={} reject={}",
+        log.debug("Coordination sid={} realized={}/{} target-histogram {}{} approve={} trim={} reject={}",
                 completedSid, committedAggregate, maxAggregateStakePerRound,
                 String.join(" ", histogram),
+                crowdHistogram.isEmpty() ? "" : " crowd=[" + String.join(" ", crowdHistogram) + "]",
                 approveCount.get(), trimCount.get(), rejectCount.get());
     }
 
@@ -498,14 +510,25 @@ public final class BetCoordinator {
         try {
             RoundBudget b = current;
             List<OptionSnapshot> options = new ArrayList<>(optionAffinities.size());
+            // CRITICAL (CROWD_AWARE_COORDINATION Phase 2 caveat): iterate the ORDERED
+            // optionAffinities key set and look up the crowd stake by key. Do NOT
+            // iterate the crowd map's values() — the crowd/budget maps carry no
+            // ordering guarantee for the health list, and the affinity order is the
+            // authoritative, stable option order the rest of the block already uses.
             for (Map.Entry<Integer, Integer> e : optionAffinities.entrySet()) {
                 int optionId = e.getKey();
                 int weight = e.getValue() == null ? 0 : e.getValue();
+                // Pure crowd X(o) = max(0, v(o) − committed(o)) — the same fleet-
+                // subtracted crowd the recompute isolated (AD-C4/AD-C10). Absent /
+                // crowd-off ⇒ v(o)=0 ⇒ X(o)=0 (present-but-inert).
+                long v = crowdStake.getOrDefault(optionId, 0L);
+                long pureCrowd = Math.max(0L, v - b.committedOf(optionId));
                 options.add(new OptionSnapshot(
                         optionId,
                         weight,
                         targetBudget.getOrDefault(optionId, 0L),
-                        b.committedOf(optionId)));
+                        b.committedOf(optionId),
+                        pureCrowd));
             }
             return new Snapshot(
                     maxAggregateStakePerRound,
@@ -513,22 +536,37 @@ public final class BetCoordinator {
                     approveCount.get(),
                     trimCount.get(),
                     rejectCount.get(),
+                    crowdAware,
+                    crowdCountSemantic,
                     List.copyOf(options));
         } finally {
             lock.unlock();
         }
     }
 
-    /** Per-option view for the health DTO. */
-    public record OptionSnapshot(int optionId, int weight, long targetBudget, long committedStake) {
+    /**
+     * Per-option view for the health DTO. {@code crowdStake} is the pure crowd
+     * {@code X(o) = max(0, v(o) − committed(o))} the coordinator isolated
+     * (CROWD_AWARE_COORDINATION AD-C4/AD-C10) — {@code 0} for a non-crowd
+     * coordinator (present-but-inert).
+     */
+    public record OptionSnapshot(int optionId, int weight, long targetBudget, long committedStake,
+                                 long crowdStake) {
     }
 
-    /** Coherent whole-coordinator view for the health DTO. */
+    /**
+     * Coherent whole-coordinator view for the health DTO. {@code crowdAware} and
+     * {@code crowdCountSemantic} are the crowd-tier additions (AD-C10); a non-crowd
+     * coordinator serializes them as {@code false} / {@code "UNKNOWN"} with the
+     * per-option {@code crowdStake} at {@code 0}.
+     */
     public record Snapshot(long maxAggregateStakePerRound,
                            long currentAggregateStake,
                            long approveCount,
                            long trimCount,
                            long rejectCount,
+                           boolean crowdAware,
+                           String crowdCountSemantic,
                            List<OptionSnapshot> options) {
     }
 }

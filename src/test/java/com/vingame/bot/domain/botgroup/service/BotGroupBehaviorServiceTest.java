@@ -454,6 +454,12 @@ class BotGroupBehaviorServiceTest {
                 assertThat(coordination.getTrimCount()).isEqualTo(1L);
                 assertThat(coordination.getRejectCount()).isEqualTo(1L);
 
+                // Crowd-off (internal-tier) coordinator: crowd fields present-but-inert
+                // (CROWD_AWARE_COORDINATION AD-C10) — crowdAware=false, semantic echoed,
+                // per-option crowdStake=0.
+                assertThat(coordination.isCrowdAware()).isFalse();
+                assertThat(coordination.getCrowdCountSemantic()).isEqualTo("UNKNOWN");
+
                 assertThat(coordination.getOptions()).hasSize(2);
                 CoordinationStateDTO.OptionStateDTO opt1 = coordination.getOptions().get(0);
                 assertThat(opt1.getOptionId()).isEqualTo(1);
@@ -461,6 +467,7 @@ class BotGroupBehaviorServiceTest {
                 assertThat(opt1.getTargetBudget()).isEqualTo(750L);
                 assertThat(opt1.getCommittedStake()).isEqualTo(100L);
                 assertThat(opt1.getRealizedFraction()).isEqualTo(100.0 / 750.0);
+                assertThat(opt1.getCrowdStake()).isZero();
 
                 CoordinationStateDTO.OptionStateDTO opt2 = coordination.getOptions().get(1);
                 assertThat(opt2.getOptionId()).isEqualTo(2);
@@ -468,6 +475,60 @@ class BotGroupBehaviorServiceTest {
                 assertThat(opt2.getTargetBudget()).isEqualTo(250L);
                 assertThat(opt2.getCommittedStake()).isEqualTo(200L);
                 assertThat(opt2.getRealizedFraction()).isEqualTo(200.0 / 250.0);
+                assertThat(opt2.getCrowdStake()).isZero();
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("getHealth() surfaces the crowd view for a crowd-aware coordinator, per-option crowdStake in optionAffinities order (CROWD_AWARE_COORDINATION Phase 4, AD-C10)")
+        void healthSurfacesCrowdAwareCoordinationState() {
+            BotGroup group = BotGroup.builder().id("g-1").name("Group").build();
+            when(botGroupService.findById("g-1")).thenReturn(group);
+
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1");
+            runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+            try {
+                // Insertion order 2 then 1 to guard the Map-order caveat: the health
+                // option list must follow optionAffinities iteration order (2, 1), NOT
+                // the crowd/budget map values() order.
+                Map<Integer, Integer> affinities = new LinkedHashMap<>();
+                affinities.put(2, 1);
+                affinities.put(1, 3);
+                BetCoordinator coordinator = new BetCoordinator(
+                        affinities, 1000L, 100L, 100L, true, CrowdCountSemantic.BETS.name());
+                coordinator.onRound(42L);
+                // Observe a crowd concentrated on option 1: v=400 on opt1, v=50 on opt2.
+                // Pure crowd X(o) = max(0, v(o) − committed(o)); no fleet committed yet,
+                // so crowdStake surfaces as v(o): opt1=400, opt2=50.
+                coordinator.observeCrowd(42L, List.of(
+                        new com.vingame.bot.domain.bot.coordination.CrowdOption(1, 400L, 0L, 7),
+                        new com.vingame.bot.domain.bot.coordination.CrowdOption(2, 50L, 0L, 2)));
+                runtime.setCoordinator(coordinator);
+
+                putBots(runtime, List.of());
+                runningGroups().put("g-1", runtime);
+
+                BotGroupHealthDTO dto = service.getHealth("g-1");
+
+                CoordinationStateDTO coordination = dto.getCoordination();
+                assertThat(coordination).isNotNull();
+                assertThat(coordination.isEnabled()).isTrue();
+                assertThat(coordination.isCrowdAware()).isTrue();
+                assertThat(coordination.getCrowdCountSemantic()).isEqualTo("BETS");
+
+                // Per-option ordering follows optionAffinities (2, 1) — guards the
+                // Map-order caveat.
+                assertThat(coordination.getOptions()).hasSize(2);
+                CoordinationStateDTO.OptionStateDTO first = coordination.getOptions().get(0);
+                assertThat(first.getOptionId()).isEqualTo(2);
+                assertThat(first.getCrowdStake()).isEqualTo(50L);
+
+                CoordinationStateDTO.OptionStateDTO second = coordination.getOptions().get(1);
+                assertThat(second.getOptionId()).isEqualTo(1);
+                assertThat(second.getCrowdStake()).isEqualTo(400L);
             } finally {
                 runtime.getExecutor().shutdownNow();
                 runningGroups().remove("g-1");

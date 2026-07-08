@@ -41,6 +41,21 @@ public class CoordinationStateDTO {
     /** Cumulative REJECT decisions since the coordinator was created. */
     private long rejectCount;
 
+    /**
+     * True when the crowd tier is active on this coordinator
+     * (CROWD_AWARE_COORDINATION AD-C10). A coordination-only (crowd-off)
+     * coordinator serializes this as {@code false} with the per-option
+     * {@code crowdStake} at 0 — the crowd fields are present-but-inert.
+     */
+    private boolean crowdAware;
+
+    /**
+     * The game's crowd count semantic ({@code BETS}/{@code PLAYERS}/{@code UNKNOWN})
+     * (CROWD_AWARE_COORDINATION AD-C5/AD-C10). Observability-only — never
+     * load-bearing in the budget math; echoed even when {@code crowdAware} is false.
+     */
+    private String crowdCountSemantic;
+
     /** Per-option target/realized breakdown, one entry per game option. */
     private List<OptionStateDTO> options;
 
@@ -70,5 +85,13 @@ public class CoordinationStateDTO {
 
         /** {@code committedStake / targetBudget}, or 0.0 when the target budget is 0. */
         private double realizedFraction;
+
+        /**
+         * Pure crowd stake {@code X(o) = max(0, v(o) − committed(o))} the
+         * coordinator isolated for this option (CROWD_AWARE_COORDINATION
+         * AD-C4/AD-C10) — crowd vs fleet, per option. {@code 0} for a non-crowd
+         * coordinator (present-but-inert).
+         */
+        private long crowdStake;
     }
 }

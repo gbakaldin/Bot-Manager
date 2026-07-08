@@ -961,6 +961,7 @@ public class BotGroupBehaviorService {
                         .realizedFraction(o.targetBudget() > 0
                                 ? (double) o.committedStake() / o.targetBudget()
                                 : 0.0)
+                        .crowdStake(o.crowdStake())
                         .build())
                 .toList();
         return CoordinationStateDTO.builder()
@@ -970,6 +971,8 @@ public class BotGroupBehaviorService {
                 .approveCount(snapshot.approveCount())
                 .trimCount(snapshot.trimCount())
                 .rejectCount(snapshot.rejectCount())
+                .crowdAware(snapshot.crowdAware())
+                .crowdCountSemantic(snapshot.crowdCountSemantic())
                 .options(options)
                 .build();
     }
