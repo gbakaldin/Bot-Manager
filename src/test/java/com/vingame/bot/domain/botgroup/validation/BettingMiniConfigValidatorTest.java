@@ -451,6 +451,56 @@ class BettingMiniConfigValidatorTest {
         }
     }
 
+    @Nested
+    @DisplayName("ramp shape (JACKPOT_SCALE_AND_RAMP AD-R4)")
+    class RampShape {
+
+        @Test
+        @DisplayName("ramp disabled: rampShape is unconstrained (even 0 / negative)")
+        void disabledImposesNoConstraint() {
+            // rampEnabled defaults to false; a non-positive shape must not bite.
+            BotGroup group = validConfig()
+                    .rampEnabled(false)
+                    .rampShape(0.0)
+                    .build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("enabled + rampShape == 0 rejected (400)")
+        void enabledZeroShapeRejected() {
+            BotGroup group = validConfig()
+                    .rampEnabled(true)
+                    .rampShape(0.0)
+                    .build();
+            assertThatThrownBy(() -> validator.validate(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("rampShape (0.0) must be > 0 when rampEnabled is true");
+        }
+
+        @Test
+        @DisplayName("enabled + negative rampShape rejected (400)")
+        void enabledNegativeShapeRejected() {
+            BotGroup group = validConfig()
+                    .rampEnabled(true)
+                    .rampShape(-1.0)
+                    .build();
+            assertThatThrownBy(() -> validator.validate(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("rampShape (-1.0) must be > 0 when rampEnabled is true");
+        }
+
+        @Test
+        @DisplayName("enabled + positive rampShape passes")
+        void enabledPositiveShapePasses() {
+            BotGroup group = validConfig()
+                    .rampEnabled(true)
+                    .rampShape(3.0)
+                    .build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+    }
+
     @Test
     @DisplayName("multiple simultaneous violations are all reported in one exception")
     void multipleViolationsAggregated() {

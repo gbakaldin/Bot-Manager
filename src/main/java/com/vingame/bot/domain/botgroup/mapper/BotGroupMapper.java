@@ -36,6 +36,8 @@ public interface BotGroupMapper {
                 .maxBetsPerRound(entity.getMaxBetsPerRound())
                 .coordinationEnabled(entity.isCoordinationEnabled())
                 .maxAggregateStakePerRound(entity.getMaxAggregateStakePerRound())
+                .rampEnabled(entity.isRampEnabled())
+                .rampShape(entity.getRampShape())
                 .activationMode(entity.getActivationMode())
                 .activationWindow(entity.getActivationWindow())
                 .chatEnabled(entity.isChatEnabled())
@@ -75,6 +77,8 @@ public interface BotGroupMapper {
                 .maxBetsPerRound(Optional.ofNullable(dto.getMaxBetsPerRound()).orElse(0))
                 .coordinationEnabled(Optional.ofNullable(dto.getCoordinationEnabled()).orElse(false))
                 .maxAggregateStakePerRound(Optional.ofNullable(dto.getMaxAggregateStakePerRound()).orElse(0L))
+                .rampEnabled(Optional.ofNullable(dto.getRampEnabled()).orElse(false))
+                .rampShape(Optional.ofNullable(dto.getRampShape()).orElse(0.0))
                 .activationMode(dto.getActivationMode())
                 .activationWindow(dto.getActivationWindow())
                 .chatEnabled(Optional.ofNullable(dto.getChatEnabled()).orElse(false))
@@ -115,6 +119,11 @@ public interface BotGroupMapper {
         // keeps the existing value. Mirrors the other scalar fields.
         entity.setCoordinationEnabled(Optional.ofNullable(dto.getCoordinationEnabled()).orElse(entity.isCoordinationEnabled()));
         entity.setMaxAggregateStakePerRound(Optional.ofNullable(dto.getMaxAggregateStakePerRound()).orElse(entity.getMaxAggregateStakePerRound()));
+        // rampEnabled / rampShape PATCH semantics (JACKPOT_SCALE_AND_RAMP AD-R4):
+        // full-replace if the DTO supplies the field (non-null); a null DTO field
+        // keeps the existing value. Mirrors the coordination scalar pair.
+        entity.setRampEnabled(Optional.ofNullable(dto.getRampEnabled()).orElse(entity.isRampEnabled()));
+        entity.setRampShape(Optional.ofNullable(dto.getRampShape()).orElse(entity.getRampShape()));
         // activationMode / activationWindow PATCH semantics: full-replace if the
         // DTO supplies the field (non-null); a null DTO field keeps the existing
         // value. Mirrors slotStrategyId. To hand a scheduled group back to the

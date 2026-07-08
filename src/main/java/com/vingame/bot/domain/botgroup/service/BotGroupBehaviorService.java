@@ -559,6 +559,17 @@ public class BotGroupBehaviorService {
         if (group.isCoordinationEnabled()) {
             behaviorConfigBuilder.betSkipPercentage(0);
         }
+        // Bet ramp-up (JACKPOT_SCALE_AND_RAMP AD-R4/AD-R6): the ramp seam lives in
+        // BettingMiniGameBot.betCondition, shared only by BETTING_MINI and TAI_XIU
+        // (both extend BettingMiniGameBot). SLOT and other types have no bet-window
+        // model, so the ramp params are never set on them — they keep the builder
+        // defaults (rampEnabled=false / rampShape=0.0), mirroring the game-type
+        // gating the coordinator/jackpot-scaler use at start() (AD-S1).
+        if (game.getGameType() == GameType.BETTING_MINI || game.getGameType() == GameType.TAI_XIU) {
+            behaviorConfigBuilder
+                    .rampEnabled(group.isRampEnabled())
+                    .rampShape(group.getRampShape());
+        }
         BotBehaviorConfig behaviorConfig = behaviorConfigBuilder.build();
 
         // Resolve assigned strategy. Defensive fallback: if the username is

@@ -52,6 +52,8 @@ class BotGroupMapperTest {
                     .maxBetsPerRound(5)
                     .coordinationEnabled(true)
                     .maxAggregateStakePerRound(50000L)
+                    .rampEnabled(true)
+                    .rampShape(3.0)
                     .activationMode(ActivationMode.SCHEDULED)
                     .activationWindow(ActivationWindow.builder()
                             .from(LocalTime.of(18, 0))
@@ -84,6 +86,8 @@ class BotGroupMapperTest {
             assertThat(dto.getMaxBetsPerRound()).isEqualTo(5);
             assertThat(dto.getCoordinationEnabled()).isTrue();
             assertThat(dto.getMaxAggregateStakePerRound()).isEqualTo(50000L);
+            assertThat(dto.getRampEnabled()).isTrue();
+            assertThat(dto.getRampShape()).isEqualTo(3.0);
             assertThat(dto.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
             assertThat(dto.getActivationWindow()).isEqualTo(ActivationWindow.builder()
                     .from(LocalTime.of(18, 0))
@@ -130,6 +134,8 @@ class BotGroupMapperTest {
                     .maxBetsPerRound(5)
                     .coordinationEnabled(true)
                     .maxAggregateStakePerRound(50000L)
+                    .rampEnabled(true)
+                    .rampShape(3.0)
                     .activationMode(ActivationMode.SCHEDULED)
                     .activationWindow(ActivationWindow.builder()
                             .from(LocalTime.of(22, 0))
@@ -162,6 +168,8 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxBetsPerRound()).isEqualTo(5);
             assertThat(entity.isCoordinationEnabled()).isTrue();
             assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(50000L);
+            assertThat(entity.isRampEnabled()).isTrue();
+            assertThat(entity.getRampShape()).isEqualTo(3.0);
             assertThat(entity.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
             assertThat(entity.getActivationWindow()).isEqualTo(ActivationWindow.builder()
                     .from(LocalTime.of(22, 0))
@@ -200,6 +208,8 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxBetsPerRound()).isEqualTo(0);
             assertThat(entity.isCoordinationEnabled()).isFalse();
             assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(0L);
+            assertThat(entity.isRampEnabled()).isFalse();
+            assertThat(entity.getRampShape()).isEqualTo(0.0);
             assertThat(entity.getActivationMode()).isNull();
             assertThat(entity.getActivationWindow()).isNull();
             assertThat(entity.isChatEnabled()).isFalse();
@@ -230,6 +240,8 @@ class BotGroupMapperTest {
                     .maxBetsPerRound(5)
                     .coordinationEnabled(true)
                     .maxAggregateStakePerRound(50000L)
+                    .rampEnabled(true)
+                    .rampShape(3.0)
                     .activationMode(ActivationMode.SCHEDULED)
                     .activationWindow(ActivationWindow.builder()
                             .from(LocalTime.of(18, 0))
@@ -260,6 +272,8 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxBetsPerRound()).isEqualTo(5);
             assertThat(entity.isCoordinationEnabled()).isTrue();
             assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(50000L);
+            assertThat(entity.isRampEnabled()).isTrue();
+            assertThat(entity.getRampShape()).isEqualTo(3.0);
             assertThat(entity.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
             assertThat(entity.getActivationWindow()).isEqualTo(ActivationWindow.builder()
                     .from(LocalTime.of(18, 0))
@@ -457,6 +471,83 @@ class BotGroupMapperTest {
 
             assertThat(entity.isCoordinationEnabled()).isTrue();
             assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(50000L);
+        }
+    }
+
+    @Nested
+    @DisplayName("ramp fields mapping (JACKPOT_SCALE_AND_RAMP Phase R1)")
+    class RampTests {
+
+        @Test
+        @DisplayName("toDTO emits both ramp fields from the entity")
+        void toDtoEmitsRampFields() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .rampEnabled(true)
+                    .rampShape(2.5)
+                    .build();
+
+            BotGroupDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getRampEnabled()).isTrue();
+            assertThat(dto.getRampShape()).isEqualTo(2.5);
+        }
+
+        @Test
+        @DisplayName("toEntity persists both ramp fields from the DTO")
+        void toEntityPersistsRampFields() {
+            BotGroupDTO dto = BotGroupDTO.builder().name("g")
+                    .rampEnabled(true)
+                    .rampShape(2.5)
+                    .build();
+
+            BotGroup entity = mapper.toEntity(dto);
+
+            assertThat(entity.isRampEnabled()).isTrue();
+            assertThat(entity.getRampShape()).isEqualTo(2.5);
+        }
+
+        @Test
+        @DisplayName("toEntity defaults ramp fields when the DTO omits them (false / 0.0)")
+        void toEntityDefaultsRampFieldsWhenNull() {
+            BotGroupDTO dto = BotGroupDTO.builder().name("g").build();
+
+            BotGroup entity = mapper.toEntity(dto);
+
+            assertThat(entity.isRampEnabled()).isFalse();
+            assertThat(entity.getRampShape()).isEqualTo(0.0);
+        }
+
+        @Test
+        @DisplayName("PATCH full-replaces both ramp fields when the DTO supplies them")
+        void patchFullReplacesRampFields() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .rampEnabled(false)
+                    .rampShape(1.0)
+                    .build();
+            BotGroupDTO patch = BotGroupDTO.builder()
+                    .rampEnabled(true)
+                    .rampShape(3.0)
+                    .build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.isRampEnabled()).isTrue();
+            assertThat(entity.getRampShape()).isEqualTo(3.0);
+        }
+
+        @Test
+        @DisplayName("PATCH retains existing ramp fields when the DTO omits them (null)")
+        void patchKeepsExistingWhenDtoNull() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .rampEnabled(true)
+                    .rampShape(3.0)
+                    .build();
+            BotGroupDTO patch = BotGroupDTO.builder().name("renamed").build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.isRampEnabled()).isTrue();
+            assertThat(entity.getRampShape()).isEqualTo(3.0);
         }
     }
 }

@@ -71,6 +71,19 @@ public class BotGroupDTO {
     private Long maxAggregateStakePerRound;
 
     /**
+     * Enable per-round bet ramp-up (JACKPOT_SCALE_AND_RAMP AD-R4). Boxed —
+     * PATCH-null keeps the persisted value; a non-null value full-replaces it.
+     */
+    private Boolean rampEnabled;
+
+    /**
+     * Ramp curve exponent {@code k} (JACKPOT_SCALE_AND_RAMP AD-R3). Boxed —
+     * PATCH-null keeps the persisted value. Only meaningful when
+     * {@link #rampEnabled} is true; validation then requires {@code rampShape > 0}.
+     */
+    private Double rampShape;
+
+    /**
      * Activation mode (TIMED_ACTIVATION AD-1). Null = legacy non-timed group.
      * PATCH is full-replace — a non-null value overwrites the persisted mode
      * (mirrors {@code slotStrategyId}).

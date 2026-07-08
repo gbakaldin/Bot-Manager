@@ -1145,6 +1145,112 @@ class BotGroupBehaviorServiceTest {
         }
     }
 
+    @Nested
+    @DisplayName("ramp config propagation (JACKPOT_SCALE_AND_RAMP AD-R4/AD-R6)")
+    class RampConfigPropagationTests {
+
+        @Test
+        @DisplayName("start() of a BETTING_MINI group threads rampEnabled/rampShape onto each BotBehaviorConfig")
+        void startThreadsRampForBettingMini() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1").name("Betting Group").environmentId("env-1").gameId("game-1")
+                    .botCount(2).namePrefix("bot").password("pass")
+                    .rampEnabled(true).rampShape(3.0)
+                    .build();
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("BauCua").gameType(GameType.BETTING_MINI).build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> {
+                        assertThat(cfg.getBehaviorConfig().isRampEnabled())
+                                .as("BETTING_MINI bot carries the group's rampEnabled").isTrue();
+                        assertThat(cfg.getBehaviorConfig().getRampShape())
+                                .as("BETTING_MINI bot carries the group's rampShape").isEqualTo(3.0);
+                    });
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+
+        @Test
+        @DisplayName("start() of a TAI_XIU group threads rampEnabled/rampShape onto each BotBehaviorConfig")
+        void startThreadsRampForTaiXiu() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1").name("TaiXiu Group").environmentId("env-1").gameId("game-1")
+                    .botCount(2).namePrefix("bot").password("pass")
+                    .rampEnabled(true).rampShape(2.0)
+                    .build();
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("TaiXiu").gameType(GameType.TAI_XIU).build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> {
+                        assertThat(cfg.getBehaviorConfig().isRampEnabled()).isTrue();
+                        assertThat(cfg.getBehaviorConfig().getRampShape()).isEqualTo(2.0);
+                    });
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+
+        @Test
+        @DisplayName("start() of a SLOT group leaves ramp fields at defaults (false / 0.0) even when the group set them")
+        void startLeavesRampDefaultForSlot() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1").name("Slot Group").environmentId("env-1").gameId("game-1")
+                    .botCount(2).namePrefix("bot").password("pass")
+                    // ramp leaks onto a SLOT group — must NOT flow through (AD-R6)
+                    .rampEnabled(true).rampShape(3.0)
+                    .build();
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("Slot").gameType(GameType.SLOT).build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> {
+                        assertThat(cfg.getBehaviorConfig().isRampEnabled())
+                                .as("SLOT bots must never carry ramp").isFalse();
+                        assertThat(cfg.getBehaviorConfig().getRampShape())
+                                .as("SLOT bots keep the default rampShape").isEqualTo(0.0);
+                    });
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+    }
+
     // ---- helpers ----
 
     @Nested

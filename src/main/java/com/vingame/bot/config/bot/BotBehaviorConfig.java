@@ -55,4 +55,20 @@ public class BotBehaviorConfig {
      * Higher values mean fewer bets. Default should be around 60.
      */
     int betSkipPercentage;
+
+    /**
+     * Whether per-round bet ramp-up is active for this bot
+     * (JACKPOT_SCALE_AND_RAMP AD-R4). Only set for {@code BETTING_MINI}/{@code TAI_XIU}
+     * bots in {@code createSingleBot}; SLOT and other types leave it at the default
+     * {@code false} (AD-R6). When false, the bet path is byte-for-byte today's flat
+     * cadence (AD-R5).
+     */
+    boolean rampEnabled;
+
+    /**
+     * Ramp curve exponent {@code k} for the accept-probability power curve
+     * (JACKPOT_SCALE_AND_RAMP AD-R3). Only meaningful when {@link #rampEnabled} is
+     * true; defaults to {@code 0.0} for non-ramp / non-eligible bots.
+     */
+    double rampShape;
 }

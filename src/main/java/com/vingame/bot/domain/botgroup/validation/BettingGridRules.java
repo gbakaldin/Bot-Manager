@@ -36,6 +36,8 @@ import java.util.List;
  *       {@code coordinationEnabled} is true, {@code maxAggregateStakePerRound >= minBet}.
  *       Only enforced when coordination is on; decoupled from the per-bot
  *       {@code maxTotalBetPerRound}.</li>
+ *   <li><b>Ramp shape (JACKPOT_SCALE_AND_RAMP AD-R4):</b> when {@code rampEnabled}
+ *       is true, {@code rampShape > 0}. Only enforced when ramp is on.</li>
  * </ul>
  *
  * <p>The entity's numeric fields are primitives ({@code long}/{@code int}), so by
@@ -143,6 +145,20 @@ final class BettingGridRules {
                 violations.add("maxAggregateStakePerRound (" + maxAggregateStakePerRound
                         + ") must be >= minBet (" + minBet
                         + ") when coordinationEnabled is true");
+            }
+        }
+
+        // Ramp shape (JACKPOT_SCALE_AND_RAMP AD-R3/AD-R4). Only constrained when
+        // bet ramp-up is enabled: the power-curve exponent must be strictly
+        // positive (k <= 0 would be a flat/degenerate curve, i.e. today's cadence,
+        // which is expressed by rampEnabled=false — enabling it with a non-positive
+        // shape is a misconfiguration). Only meaningful for the betting-mini/Tai Xiu
+        // grid this rule body serves.
+        if (group.isRampEnabled()) {
+            double rampShape = group.getRampShape();
+            if (rampShape <= 0) {
+                violations.add("rampShape (" + rampShape
+                        + ") must be > 0 when rampEnabled is true");
             }
         }
 

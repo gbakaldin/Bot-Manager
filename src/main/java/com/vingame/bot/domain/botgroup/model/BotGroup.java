@@ -62,6 +62,27 @@ public class BotGroup {
     private long maxAggregateStakePerRound;
 
     /**
+     * Whether per-round bet ramp-up is active for this group (JACKPOT_SCALE_AND_RAMP
+     * AD-R4). When true and the group's game type is {@code BETTING_MINI}/{@code TAI_XIU},
+     * bots shape <i>when</i> within the bet window their ticks land — ramping acceptance
+     * from low at window-open toward high at window-close (AD-R1). When false, behavior
+     * is byte-for-byte today's flat every-second cadence (AD-R5). Ramp is a behavior
+     * preference of the fleet, so it lives on the BotGroup (not the Game — contrast
+     * jackpot-scale, which is game-intrinsic).
+     */
+    private boolean rampEnabled;
+
+    /**
+     * Ramp curve exponent {@code k} in the accept-probability power curve
+     * {@code pAccept = pMin + (1 - pMin) * elapsedFraction^k} (JACKPOT_SCALE_AND_RAMP
+     * AD-R3). {@code k = 1} is a linear ramp; {@code k > 1} back-loads bets toward
+     * window close (the real-player pile-in); {@code k <= 0} / ramp disabled degrades
+     * to today's flat cadence. Only meaningful when {@link #rampEnabled} is true;
+     * validation then requires {@code rampShape > 0}.
+     */
+    private double rampShape;
+
+    /**
      * How this group's lifecycle is governed relative to {@link #activationWindow}
      * (TIMED_ACTIVATION AD-1). {@code null} = legacy non-timed group, governed
      * solely by {@link #targetStatus}. Only {@link ActivationMode#SCHEDULED} groups
