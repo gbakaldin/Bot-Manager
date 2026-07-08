@@ -368,17 +368,214 @@ class BetCoordinatorCrowdTest {
         }
 
         @Test
-        @DisplayName("a new round clears the crowd — budget reverts to internal tier")
-        void newRoundClearsCrowd() {
+        @DisplayName("a new round with NO prior crowd ever observed reverts to internal tier")
+        void newRoundWithoutPriorCrowdRevertsToInternal() {
             Map<Integer, Integer> w = weights(1, 1, 2);
             long cap = 1000;
             BetCoordinator c = new BetCoordinator(w, cap, 10, 10, true);
-            c.onRound(1L);
-            c.observeCrowd(1L, List.of(crowd(0, 900), crowd(1, 0), crowd(2, 0)));
-            assertThat(c.currentBudget().get(0)).isEqualTo(0L); // crowd-skewed
-
-            c.onRound(2L); // fresh round, no crowd yet
+            c.onRound(1L); // never observed any crowd
+            c.onRound(2L); // fresh round, still no crowd ever seen
+            // No carry-forward seed exists → the internal tier (reduction identity).
             assertThat(c.currentBudget()).isEqualTo(internalBudget(w, cap));
+        }
+    }
+
+    @Nested
+    @DisplayName("one-round-lag carry-forward (AD-C3, BOM/B52/Nohu EndGame seed)")
+    class CarryForward {
+
+        @Test
+        @DisplayName("an EndGame crowd observation on round N seeds round N+1's opening budget")
+        void endGameObservationSeedsNextRound() {
+            // BOM/B52/Nohu have NO intra-round bs: their only crowd signal is the
+            // prior round's EndGame bs, which must seed the NEXT round's opening
+            // budget (one-round lag). Affinity 1:1:2 over cap 1000 → internal 250/250/500.
+            Map<Integer, Integer> w = weights(1, 1, 2);
+            long cap = 1000;
+            BetCoordinator c = new BetCoordinator(w, cap, 10, 10, true);
+
+            c.onRound(100L);
+            // Full-round crowd distribution reported at EndGame (fed against the still-
+            // current finished round's sid, as onEndGame does). Crowd piles 600 on the
+            // low-affinity option 0.
+            c.observeCrowd(100L, List.of(crowd(0, 600), crowd(1, 0), crowd(2, 0)));
+
+            // Round rolls over. The NEXT round must OPEN seeded from that distribution
+            // (committed=0 at open, so X(o)=v(o)):
+            //   X_total=600, pool=1600
+            //   opt0: floor(1*1600/4) - 600 = 400 - 600 = -200 → clamp 0
+            //   opt1: floor(1*1600/4) - 0   = 400
+            //   opt2: floor(2*1600/4) - 0   = 800
+            c.onRound(101L);
+            Map<Integer, Long> opening = c.currentBudget();
+            assertThat(opening.get(0)).isEqualTo(0L);
+            assertThat(opening.get(1)).isEqualTo(400L);
+            assertThat(opening.get(2)).isEqualTo(800L);
+            // It must NOT be the internal tier — the lag actually steered the open.
+            assertThat(opening).isNotEqualTo(internalBudget(w, cap));
+        }
+
+        @Test
+        @DisplayName("a fresh intra-round observation overwrites the carried-forward seed (Tip path)")
+        void freshIntraRoundOverwritesSeed() {
+            Map<Integer, Integer> w = weights(1, 1, 2);
+            long cap = 1000;
+            BetCoordinator c = new BetCoordinator(w, cap, 10, 10, true);
+
+            c.onRound(200L);
+            c.observeCrowd(200L, List.of(crowd(0, 600), crowd(1, 0), crowd(2, 0)));
+            c.onRound(201L); // seeded from the 600-on-opt0 prior
+            assertThat(c.currentBudget().get(0)).isEqualTo(0L);
+
+            // A fresh intra-round frame for the new round (Tip's UpdateBet) must win —
+            // the seed is only a lagged prior. Now the crowd is on opt2 instead.
+            //   X(2)=600, pool=1600 → opt0: 400, opt1: 400, opt2: floor(2*1600/4)-600=200
+            c.observeCrowd(201L, List.of(crowd(0, 0), crowd(1, 0), crowd(2, 600)));
+            assertThat(c.currentBudget().get(0)).isEqualTo(400L);
+            assertThat(c.currentBudget().get(1)).isEqualTo(400L);
+            assertThat(c.currentBudget().get(2)).isEqualTo(200L);
+        }
+
+        @Test
+        @DisplayName("crowd-off rollover always yields the internal-tier budget (reduction identity)")
+        void crowdOffRolloverStaysInternal() {
+            // A crowd-DISABLED coordinator never seeds a carry-forward, even if
+            // observeCrowd is called — every round opens at the internal tier.
+            Map<Integer, Integer> w = weights(1, 1, 2);
+            long cap = 1000;
+            BetCoordinator off = new BetCoordinator(w, cap, 10, 10); // crowdAware=false
+
+            off.onRound(300L);
+            off.observeCrowd(300L, List.of(crowd(0, 900), crowd(1, 0), crowd(2, 0)));
+            off.onRound(301L);
+            off.onRound(302L);
+            assertThat(off.currentBudget()).isEqualTo(internalBudget(w, cap));
+        }
+    }
+
+    @Nested
+    @DisplayName("monotonic-by-arrival (AD-C3)")
+    class MonotonicByArrival {
+
+        @Test
+        @DisplayName("a straggler frame with a smaller aggregate does not overwrite a newer/larger one")
+        void olderSmallerFrameIgnored() {
+            Map<Integer, Integer> w = weights(1, 1);
+            long cap = 1000;
+            BetCoordinator c = new BetCoordinator(w, cap, 10, 10, true);
+            c.onRound(1L);
+
+            // Newer/larger frame lands first: Σv = 800.
+            //   X(0)=800, pool=1800 → opt0: floor(1*1800/2)-800=100, opt1: 900
+            c.observeCrowd(1L, List.of(crowd(0, 800), crowd(1, 0)));
+            Map<Integer, Long> afterLarge = c.currentBudget();
+            assertThat(afterLarge.get(0)).isEqualTo(100L);
+            assertThat(afterLarge.get(1)).isEqualTo(900L);
+
+            // A reordered straggler with a SMALLER aggregate (Σv=200) must be ignored.
+            c.observeCrowd(1L, List.of(crowd(0, 200), crowd(1, 0)));
+            assertThat(c.currentBudget()).isEqualTo(afterLarge);
+
+            // An equal-aggregate frame is likewise ignored (strictly-greater gate).
+            c.observeCrowd(1L, List.of(crowd(0, 500), crowd(1, 300)));
+            assertThat(c.currentBudget()).isEqualTo(afterLarge);
+
+            // A genuinely larger frame does apply — Σv=2000 all on opt0.
+            //   X(0)=2000, pool=3000 → opt0: floor(1*3000/2)-2000=-500→0, opt1: 1500→clamp cap 1000
+            c.observeCrowd(1L, List.of(crowd(0, 2000), crowd(1, 0)));
+            assertThat(c.currentBudget()).isNotEqualTo(afterLarge);
+            assertThat(c.currentBudget().get(0)).isEqualTo(0L);
+            assertThat(c.currentBudget().get(1)).isEqualTo(cap);
+        }
+
+        @Test
+        @DisplayName("the high-water mark resets each round so the first frame always applies")
+        void highWaterResetsPerRound() {
+            Map<Integer, Integer> w = weights(1, 1);
+            long cap = 1000;
+            BetCoordinator c = new BetCoordinator(w, cap, 10, 10, true);
+
+            c.onRound(1L);
+            c.observeCrowd(1L, List.of(crowd(0, 5000), crowd(1, 0))); // large Σv=5000
+
+            // New round: the mark resets, so a fresh SMALL frame (Σv=100) must apply
+            // (it is the first frame of the new round, overwriting the lagged seed).
+            c.onRound(2L);
+            c.observeCrowd(2L, List.of(crowd(0, 100), crowd(1, 0)));
+            //   X(0)=100, pool=1100 → opt0: floor(1*1100/2)-100=450, opt1: 550
+            assertThat(c.currentBudget().get(0)).isEqualTo(450L);
+            assertThat(c.currentBudget().get(1)).isEqualTo(550L);
+        }
+    }
+
+    @Nested
+    @DisplayName("AD-C10 per-option health fields")
+    class HealthFields {
+
+        @Test
+        @DisplayName("crowd-aware snapshot surfaces observedCrowdStake, crowdAdjustedBudget, observedCrowdCount")
+        void crowdAwareSurfacesAllThree() {
+            Map<Integer, Integer> w = weights(1, 1, 2);
+            long cap = 1000;
+            // Semantic BETS → the count IS surfaced.
+            BetCoordinator c = new BetCoordinator(w, cap, 10, 10, true, "BETS");
+            c.onRound(1L);
+            // Crowd on opt0: v=600 count=7; opt1: v=0 count=0; opt2: v=0 count=0.
+            //   X(0)=600, pool=1600 → adj: opt0=0, opt1=400, opt2=800
+            c.observeCrowd(1L, List.of(crowd(0, 600, 7), crowd(1, 0, 0), crowd(2, 0, 0)));
+
+            BetCoordinator.Snapshot snap = c.snapshot();
+            // Ordered by optionAffinities key set (0,1,2).
+            assertThat(snap.options()).extracting(BetCoordinator.OptionSnapshot::optionId)
+                    .containsExactly(0, 1, 2);
+
+            BetCoordinator.OptionSnapshot o0 = snap.options().get(0);
+            assertThat(o0.observedCrowdStake()).isEqualTo(600L);   // raw v(o)
+            assertThat(o0.crowdAdjustedBudget()).isEqualTo(0L);    // B_crowd(o0)
+            assertThat(o0.observedCrowdCount()).isEqualTo(7L);     // bc(o), semantic known
+
+            assertThat(snap.options().get(1).crowdAdjustedBudget()).isEqualTo(400L);
+            assertThat(snap.options().get(2).crowdAdjustedBudget()).isEqualTo(800L);
+            assertThat(snap.options().get(1).observedCrowdStake()).isEqualTo(0L);
+        }
+
+        @Test
+        @DisplayName("count is suppressed (0) when the semantic is UNKNOWN")
+        void countSuppressedWhenUnknown() {
+            Map<Integer, Integer> w = weights(1, 1);
+            long cap = 1000;
+            BetCoordinator c = new BetCoordinator(w, cap, 10, 10, true); // UNKNOWN
+            c.onRound(1L);
+            c.observeCrowd(1L, List.of(crowd(0, 300, 42), crowd(1, 0, 9)));
+
+            BetCoordinator.Snapshot snap = c.snapshot();
+            // observedCrowdCount is obs-only and semantic-gated → 0 under UNKNOWN,
+            // even though bc was reported.
+            assertThat(snap.options().get(0).observedCrowdCount()).isEqualTo(0L);
+            // The stake fields are still surfaced.
+            assertThat(snap.options().get(0).observedCrowdStake()).isEqualTo(300L);
+        }
+
+        @Test
+        @DisplayName("a crowd-off coordinator surfaces zero crowd fields and the internal-tier adjusted budget")
+        void crowdOffFieldsInert() {
+            Map<Integer, Integer> w = weights(1, 1, 2);
+            long cap = 1000;
+            BetCoordinator off = new BetCoordinator(w, cap, 10, 10); // crowdAware=false
+            off.onRound(1L);
+            off.observeCrowd(1L, List.of(crowd(0, 900, 5))); // inert (gated)
+
+            BetCoordinator.Snapshot snap = off.snapshot();
+            assertThat(snap.crowdAware()).isFalse();
+            for (BetCoordinator.OptionSnapshot o : snap.options()) {
+                assertThat(o.observedCrowdStake()).isZero();
+                assertThat(o.observedCrowdCount()).isZero();
+                assertThat(o.crowdStake()).isZero();
+            }
+            // crowdAdjustedBudget reduces to the internal tier B(o) = 250/250/500.
+            assertThat(snap.options().get(0).crowdAdjustedBudget()).isEqualTo(250L);
+            assertThat(snap.options().get(1).crowdAdjustedBudget()).isEqualTo(250L);
+            assertThat(snap.options().get(2).crowdAdjustedBudget()).isEqualTo(500L);
         }
     }
 

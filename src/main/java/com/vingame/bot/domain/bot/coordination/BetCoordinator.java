@@ -66,10 +66,31 @@ public final class BetCoordinator {
     // option id (eid). observeCrowd REPLACES this (bs is the running aggregate,
     // not a delta), then recomputes the round's budget. Mutated only under the
     // lock. crowdStake = v(o); crowdCount = bc(o) (observability only, AD-C5).
-    // Cleared on onRound so a new round starts with no crowd (X(o)=0 → internal
-    // tier) until it is observed.
+    // At round rollover (onRound) this is SEEDED from the last observed
+    // distribution (the one-round-lagged prior, AD-C3) rather than cleared, so the
+    // BOM/B52/Nohu EndGame `bs` steers the opening budget of the next round; fresh
+    // intra-round observeCrowd calls (Tip) then overwrite it. When no crowd was
+    // ever observed (or crowd-off) the seed is empty ⇒ X(o)=0 → internal tier.
     private final Map<Integer, Long> crowdStake = new LinkedHashMap<>();
     private final Map<Integer, Integer> crowdCount = new LinkedHashMap<>();
+
+    // The last crowd distribution observed on ANY round (AD-C3 one-round-lag). Kept
+    // across the onRound boundary so the next round's opening budget is seeded from
+    // it — the BOM/B52/Nohu EndGame `bs` is their only crowd signal (no intra-round
+    // `bs`), so it must survive rollover instead of being discarded. Empty until the
+    // first observation; empty ⇒ the seed reduces to the internal tier. Mutated only
+    // under the lock.
+    private final Map<Integer, Long> lastObservedCrowdStake = new LinkedHashMap<>();
+    private final Map<Integer, Integer> lastObservedCrowdCount = new LinkedHashMap<>();
+
+    // Monotonic-by-arrival high-water mark (AD-C3): the largest Σv(o) accepted for
+    // the in-flight round. A straggler frame whose aggregate is not greater than the
+    // stored mark is ignored so a slow bot's older/smaller snapshot cannot overwrite
+    // a newer/larger one (all N bots replay the same running-aggregate frames on
+    // their own IO threads, possibly reordered). Reset per round in onRound. -1 = no
+    // frame accepted yet for the current round (so the first frame always applies,
+    // including an all-zero opening snapshot).
+    private long currentCrowdSum = -1L;
 
     // First-seen guard for onRoundComplete (AD-6). onRoundComplete does not swap
     // current, so its N per-bot calls for one round would otherwise each emit the
@@ -201,12 +222,13 @@ public final class BetCoordinator {
      * @param cap         the fleet aggregate cap {@code C}.
      * @param crowdStake  pure crowd stake {@code X(o)} per option; empty ⇒ all
      *                    zero ⇒ internal tier. Options absent from the map are
-     *                    treated as {@code X=0}. Entries whose key is not an
-     *                    affinity option are ignored for the budget but still
-     *                    counted into {@code X_total} only if present in the map
-     *                    keyed by an affinity option — see below; unknown-eid
-     *                    crowd is filtered by the caller (defensive, AD-C: eid
-     *                    not in the option set is ignored).
+     *                    treated as {@code X=0}. Both loops iterate the affinity
+     *                    key/entry set and look {@code crowdStake} up by key, so
+     *                    any entry whose key is not an affinity option is inert
+     *                    here (it enters neither {@code X_total} nor a per-option
+     *                    budget) regardless of the caller. The caller
+     *                    ({@link #observeCrowd}) also filters unknown eids, so the
+     *                    defense is doubled.
      */
     private static Map<Integer, Long> computeCrowdBudget(Map<Integer, Integer> affinities,
                                                          long cap,
@@ -252,13 +274,30 @@ public final class BetCoordinator {
         lock.lock();
         try {
             if (sessionId != current.sessionId()) {
-                // A new round starts with no crowd observed → X(o)=0 → internal
-                // tier until observeCrowd fires (AD-C2 special case).
+                // AD-C3 one-round-lag: seed the new round's crowd snapshot from the
+                // LAST observed distribution rather than clearing it, so the prior
+                // round's EndGame `bs` (the only crowd signal for BOM/B52/Nohu, which
+                // have no intra-round `bs`) steers the opening budget. Fresh
+                // intra-round observeCrowd calls (Tip) then overwrite this seed.
+                // When nothing was ever observed (or crowd-off), the seed is empty ⇒
+                // X(o)=0 → the internal-tier budget, byte-for-byte (reduction
+                // identity preserved). The monotonic high-water mark resets per round.
                 crowdStake.clear();
                 crowdCount.clear();
-                current = new RoundBudget(sessionId, maxAggregateStakePerRound, targetBudget);
-                log.trace("BetCoordinator.onRound: new round sid={}, cap={}, options={}",
-                        sessionId, maxAggregateStakePerRound, targetBudget);
+                currentCrowdSum = -1L;
+                Map<Integer, Long> seededBudget;
+                if (crowdAware && !lastObservedCrowdStake.isEmpty()) {
+                    crowdStake.putAll(lastObservedCrowdStake);
+                    crowdCount.putAll(lastObservedCrowdCount);
+                    // At round open committed(o)=0, so pure crowd X(o)=v(o) directly.
+                    seededBudget = computeCrowdBudget(
+                            optionAffinities, maxAggregateStakePerRound, crowdStake);
+                } else {
+                    seededBudget = targetBudget;
+                }
+                current = new RoundBudget(sessionId, maxAggregateStakePerRound, seededBudget);
+                log.trace("BetCoordinator.onRound: new round sid={}, cap={}, options={}, crowdSeed={}",
+                        sessionId, maxAggregateStakePerRound, seededBudget, crowdStake);
             }
         } finally {
             lock.unlock();
@@ -366,16 +405,44 @@ public final class BetCoordinator {
                 return; // stale / straddling frame — mirror reserve's sid guard
             }
 
-            // Replace the crowd snapshot for this round (bs is a running aggregate).
-            crowdStake.clear();
-            crowdCount.clear();
+            // Build the incoming snapshot from bs (running aggregate, not a delta),
+            // filtering unknown eids defensively (AD-C notes).
+            Map<Integer, Long> incomingStake = new LinkedHashMap<>();
+            Map<Integer, Integer> incomingCount = new LinkedHashMap<>();
+            long incomingSum = 0L;
             for (CrowdOption o : options) {
                 if (o == null || !optionAffinities.containsKey(o.optionId())) {
-                    continue; // ignore unknown eids defensively (AD-C notes)
+                    continue;
                 }
-                crowdStake.put(o.optionId(), Math.max(0L, o.value()));
-                crowdCount.put(o.optionId(), o.count());
+                long v = Math.max(0L, o.value());
+                incomingStake.put(o.optionId(), v);
+                incomingCount.put(o.optionId(), o.count());
+                incomingSum += v;
             }
+
+            // Monotonic-by-arrival (AD-C3): all N bots replay the same running-
+            // aggregate frames on their own IO threads and may reorder; a straggler
+            // frame whose aggregate is not greater than the high-water mark must not
+            // overwrite a newer/larger snapshot. currentCrowdSum starts at -1 so the
+            // first frame (even an all-zero opening snapshot, sum 0) always applies.
+            if (incomingSum <= currentCrowdSum) {
+                return;
+            }
+            currentCrowdSum = incomingSum;
+
+            // Replace the crowd snapshot for this round with the newer frame.
+            crowdStake.clear();
+            crowdCount.clear();
+            crowdStake.putAll(incomingStake);
+            crowdCount.putAll(incomingCount);
+
+            // Carry this distribution forward as the one-round-lagged prior (AD-C3):
+            // the next onRound seeds its opening budget from it (the BOM/B52/Nohu
+            // EndGame-lag path — their only crowd signal).
+            lastObservedCrowdStake.clear();
+            lastObservedCrowdCount.clear();
+            lastObservedCrowdStake.putAll(incomingStake);
+            lastObservedCrowdCount.putAll(incomingCount);
 
             // Isolate pure crowd X(o) = max(0, v(o) − committed(o)) (AD-C4).
             Map<Integer, Long> pureCrowd = new LinkedHashMap<>(crowdStake.size());
@@ -515,20 +582,38 @@ public final class BetCoordinator {
             // iterate the crowd map's values() — the crowd/budget maps carry no
             // ordering guarantee for the health list, and the affinity order is the
             // authoritative, stable option order the rest of the block already uses.
+            // bc(o) is observability-only (AD-C5): surfaced only when the game's
+            // count semantic is known (BETS/PLAYERS), 0 when UNKNOWN — it never
+            // enters the budget math either way.
+            boolean countKnown = crowdAware && !"UNKNOWN".equals(crowdCountSemantic);
             for (Map.Entry<Integer, Integer> e : optionAffinities.entrySet()) {
                 int optionId = e.getKey();
                 int weight = e.getValue() == null ? 0 : e.getValue();
-                // Pure crowd X(o) = max(0, v(o) − committed(o)) — the same fleet-
-                // subtracted crowd the recompute isolated (AD-C4/AD-C10). Absent /
-                // crowd-off ⇒ v(o)=0 ⇒ X(o)=0 (present-but-inert).
-                long v = crowdStake.getOrDefault(optionId, 0L);
-                long pureCrowd = Math.max(0L, v - b.committedOf(optionId));
+                // AD-C10 per-option crowd view. All read by key from the ordered
+                // affinity set — never from the crowd/budget map values (unordered).
+                //   observedCrowdStake = raw v(o) (the latest observed crowd stake).
+                //   crowdStake         = pure X(o) = max(0, v(o) − committed(o)),
+                //                        the fleet-subtracted crowd the recompute
+                //                        isolated (AD-C4) — kept alongside the raw
+                //                        v(o) so no information is lost.
+                //   crowdAdjustedBudget= B_crowd(o), the in-flight round's crowd-
+                //                        adjusted per-option budget (from current
+                //                        RoundBudget) — the internal-tier B(o) when
+                //                        no crowd is observed / crowd-off.
+                //   observedCrowdCount = bc(o) (obs-only, semantic-gated).
+                // Absent / crowd-off ⇒ v(o)=0 ⇒ X(o)=0 (present-but-inert).
+                long observedCrowdStake = crowdStake.getOrDefault(optionId, 0L);
+                long pureCrowd = Math.max(0L, observedCrowdStake - b.committedOf(optionId));
+                long observedCrowdCount = countKnown ? crowdCount.getOrDefault(optionId, 0) : 0L;
                 options.add(new OptionSnapshot(
                         optionId,
                         weight,
                         targetBudget.getOrDefault(optionId, 0L),
                         b.committedOf(optionId),
-                        pureCrowd));
+                        pureCrowd,
+                        observedCrowdStake,
+                        b.budgetOf(optionId),
+                        observedCrowdCount));
             }
             return new Snapshot(
                     maxAggregateStakePerRound,
@@ -545,13 +630,23 @@ public final class BetCoordinator {
     }
 
     /**
-     * Per-option view for the health DTO. {@code crowdStake} is the pure crowd
-     * {@code X(o) = max(0, v(o) − committed(o))} the coordinator isolated
-     * (CROWD_AWARE_COORDINATION AD-C4/AD-C10) — {@code 0} for a non-crowd
-     * coordinator (present-but-inert).
+     * Per-option view for the health DTO (CROWD_AWARE_COORDINATION AD-C10). The
+     * crowd fields are all {@code 0} for a non-crowd coordinator (present-but-inert):
+     * <ul>
+     *   <li>{@code crowdStake} — pure crowd {@code X(o) = max(0, v(o) − committed(o))}
+     *       the coordinator isolated (AD-C4); the fleet-subtracted crowd.</li>
+     *   <li>{@code observedCrowdStake} — raw {@code v(o)}, the latest observed crowd
+     *       stake (AD-C10) before fleet subtraction.</li>
+     *   <li>{@code crowdAdjustedBudget} — {@code B_crowd(o)}, the in-flight round's
+     *       crowd-adjusted per-option budget (AD-C2/AD-C10); the internal-tier
+     *       {@code B(o)} when no crowd is observed.</li>
+     *   <li>{@code observedCrowdCount} — {@code bc(o)}, surfaced only when the count
+     *       semantic is known (AD-C5); observability-only, never load-bearing.</li>
+     * </ul>
      */
     public record OptionSnapshot(int optionId, int weight, long targetBudget, long committedStake,
-                                 long crowdStake) {
+                                 long crowdStake, long observedCrowdStake, long crowdAdjustedBudget,
+                                 long observedCrowdCount) {
     }
 
     /**

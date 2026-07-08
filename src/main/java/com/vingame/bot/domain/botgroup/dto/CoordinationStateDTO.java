@@ -93,5 +93,28 @@ public class CoordinationStateDTO {
          * coordinator (present-but-inert).
          */
         private long crowdStake;
+
+        /**
+         * Raw observed crowd stake {@code v(o)} — the latest crowd aggregate on this
+         * option before the fleet's own {@code committed(o)} is subtracted
+         * (CROWD_AWARE_COORDINATION AD-C10). {@code 0} for a non-crowd coordinator.
+         */
+        private long observedCrowdStake;
+
+        /**
+         * Crowd-adjusted per-option budget {@code B_crowd(o)} the fleet steers to
+         * this round (CROWD_AWARE_COORDINATION AD-C2/AD-C10) — the internal-tier
+         * {@code B(o)} when no crowd is observed / crowd-off. This is the WP's
+         * headline read: the option the crowd over-fills shows a lower value.
+         */
+        private long crowdAdjustedBudget;
+
+        /**
+         * Observed crowd count {@code bc(o)} (CROWD_AWARE_COORDINATION AD-C5/AD-C10):
+         * surfaced only when the game's count semantic is known ({@code BETS}/
+         * {@code PLAYERS}); {@code 0} when {@code UNKNOWN} or crowd-off.
+         * Observability-only — never enters the budget math.
+         */
+        private long observedCrowdCount;
     }
 }

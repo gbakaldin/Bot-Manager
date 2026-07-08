@@ -209,6 +209,63 @@ class BettingMiniGameBotCrowdSeamTest {
                 .isEqualTo(ReservationOutcome.Decision.APPROVE);
     }
 
+    @Test
+    @DisplayName("crowd-aware ON: an EndGame crowd read on round N seeds round N+1's opening budget (BOM/B52/Nohu one-round-lag, AD-C3)")
+    void endGameSeedsNextRoundOpeningBudget() throws Exception {
+        BetCoordinator coordinator = new BetCoordinator(affinities(), 1000L, 100L, 100L, true, "UNKNOWN");
+        bot.setCoordinator(coordinator);
+        long sidN = 8201L;
+        openRound(sidN, coordinator);
+
+        // Round N EndGame: full-round crowd heavily over-fills option 0. For BOM/B52/
+        // Nohu this is the ONLY crowd signal (no intra-round bs) and must carry forward.
+        TipEndGameMessage endN = tipEndGame(sidN,
+                new TipSubscribeMessage.BetInfoWithTotal(0, 0, 0L, 10_000L),
+                new TipSubscribeMessage.BetInfoWithTotal(1, 0, 0L, 0L));
+        invokeOnEndGame(endN);
+
+        // Round N+1 opens with NO fresh intra-round crowd (BOM/B52/Nohu case). The
+        // opening budget must be SEEDED from round N's EndGame distribution, not reset
+        // to the internal 500/500 tier.
+        long sidNext = 8202L;
+        invokeOnStartGame(sidNext);
+        setField("gameState", BettingMiniGameState.BET);
+        ((SessionIdStore) readField("sidStore")).set(sidNext);
+
+        // Option 0 (crowd-over-filled last round) opens at budget 0 → REJECT.
+        assertThat(coordinator.reserve(sidNext, 0, 100L).decision())
+                .as("N+1 opens seeded from N's EndGame crowd → option 0 budget 0 → REJECT")
+                .isEqualTo(ReservationOutcome.Decision.REJECT);
+        // Option 1 (under-filled) opens grown to the cap → APPROVE the full cap.
+        assertThat(coordinator.reserve(sidNext, 1, 1000L).decision())
+                .as("N+1 option 1 opens grown to the cap from the lagged prior → APPROVE")
+                .isEqualTo(ReservationOutcome.Decision.APPROVE);
+    }
+
+    @Test
+    @DisplayName("crowd-aware OFF: an EndGame crowd read never seeds the next round (internal tier verbatim, AD-C6)")
+    void endGameDoesNotSeedNextRoundWhenOff() throws Exception {
+        BetCoordinator coordinator = new BetCoordinator(affinities(), 1000L, 100L, 100L, false, "UNKNOWN");
+        bot.setCoordinator(coordinator);
+        long sidN = 9201L;
+        openRound(sidN, coordinator);
+
+        TipEndGameMessage endN = tipEndGame(sidN,
+                new TipSubscribeMessage.BetInfoWithTotal(0, 0, 0L, 10_000L),
+                new TipSubscribeMessage.BetInfoWithTotal(1, 0, 0L, 0L));
+        invokeOnEndGame(endN);
+
+        long sidNext = 9202L;
+        invokeOnStartGame(sidNext);
+        setField("gameState", BettingMiniGameState.BET);
+        ((SessionIdStore) readField("sidStore")).set(sidNext);
+
+        // Crowd-off: no carry-forward seed, N+1 opens at the internal 500 tier.
+        assertThat(coordinator.reserve(sidNext, 0, 500L).decision())
+                .as("crowd-off → N+1 opens at the internal 500 budget → APPROVE, byte-for-byte")
+                .isEqualTo(ReservationOutcome.Decision.APPROVE);
+    }
+
     /* ---- helpers ---- */
 
     private Map<Integer, Integer> affinities() {

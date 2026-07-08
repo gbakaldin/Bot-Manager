@@ -962,6 +962,9 @@ public class BotGroupBehaviorService {
                                 ? (double) o.committedStake() / o.targetBudget()
                                 : 0.0)
                         .crowdStake(o.crowdStake())
+                        .observedCrowdStake(o.observedCrowdStake())
+                        .crowdAdjustedBudget(o.crowdAdjustedBudget())
+                        .observedCrowdCount(o.observedCrowdCount())
                         .build())
                 .toList();
         return CoordinationStateDTO.builder()
