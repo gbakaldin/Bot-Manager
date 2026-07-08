@@ -5,8 +5,10 @@ import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.bot.coordination.ReservationOutcome;
+import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
+import com.vingame.bot.domain.bot.message.g3.tip.TipEndGameMessage;
 import com.vingame.bot.domain.bot.message.g3.tip.TipSubscribeMessage;
 import com.vingame.bot.domain.bot.message.g3.tip.TipUpdateBetMessage;
 import com.vingame.bot.domain.bot.strategy.BetContext;
@@ -93,8 +95,19 @@ class BettingMiniGameBotCrowdSeamTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setStrategyFactory(factory);
-        bot.setRandom(new Random(0xC0FFEEL));
         bot.initializeSubclass();
+        // onEndGame → onNewSession → checkBalance() reads getClient().getAuthToken();
+        // inject a mocked WS client so the EndGame seam path does not NPE. The mocked
+        // ApiGatewayClient.getBalance returns 0, so no real network occurs.
+        setField("client", mock(com.vingame.websocketparser.VingameWebSocketClient.class));
+        // Install the deterministic RNG AFTER initializeSubclass — the latter
+        // overwrites this.rng with a nanoTime-seeded Random (BettingMiniGameBot:170),
+        // so setting it earlier would be clobbered. Mirrors the de-flaked ramp/jackpot
+        // seam harnesses. (This test's NoopStrategy never consults the RNG and the
+        // only scheduler in play is a 120s one-shot watchdog torn down in tearDown, so
+        // the harness is deterministic regardless — but keep the ordering correct so a
+        // future rng-dependent edit cannot silently reintroduce a flake.)
+        bot.setRandom(new Random(0xC0FFEEL));
     }
 
     @AfterEach
@@ -151,6 +164,51 @@ class BettingMiniGameBotCrowdSeamTest {
                 .isEqualTo(ReservationOutcome.Decision.APPROVE);
     }
 
+    @Test
+    @DisplayName("crowd-aware ON: a bs-bearing EndGame feeds observeCrowd against the finished sid (the one-round-lag path, AD-C3)")
+    void crowdEndGameShiftsBudget() throws Exception {
+        BetCoordinator coordinator = new BetCoordinator(affinities(), 1000L, 100L, 100L, true, "UNKNOWN");
+        bot.setCoordinator(coordinator);
+        long sid = 8101L;
+        openRound(sid, coordinator);
+
+        // The EndGame `bs` is the full-round crowd distribution — the degradation
+        // path for products without an intra-round frame (BOM/B52/Nohu). It is fed
+        // against the finished round's sid (endGameSessionId), which is still the
+        // coordinator's current round until the next onRound. Heavy crowd on option 0.
+        TipEndGameMessage frame = tipEndGame(sid,
+                new TipSubscribeMessage.BetInfoWithTotal(0, 0, 0L, 10_000L),
+                new TipSubscribeMessage.BetInfoWithTotal(1, 0, 0L, 0L));
+        invokeOnEndGame(frame);
+
+        // Same shift as the UpdateBet seam: option 0 → 0 (REJECT), option 1 → cap (APPROVE).
+        assertThat(coordinator.reserve(sid, 0, 100L).decision())
+                .as("EndGame crowd over-fills option 0 → fleet budget 0 → REJECT")
+                .isEqualTo(ReservationOutcome.Decision.REJECT);
+        assertThat(coordinator.reserve(sid, 1, 1000L).decision())
+                .as("EndGame crowd under-fills option 1 → fleet budget grew to the cap → APPROVE")
+                .isEqualTo(ReservationOutcome.Decision.APPROVE);
+    }
+
+    @Test
+    @DisplayName("crowd-aware OFF: a bs-bearing EndGame does NOT alter the budget (observeCrowd inert, AD-C6)")
+    void crowdEndGameOffLeavesBudgetUnchanged() throws Exception {
+        BetCoordinator coordinator = new BetCoordinator(affinities(), 1000L, 100L, 100L, false, "UNKNOWN");
+        bot.setCoordinator(coordinator);
+        long sid = 9101L;
+        openRound(sid, coordinator);
+
+        TipEndGameMessage frame = tipEndGame(sid,
+                new TipSubscribeMessage.BetInfoWithTotal(0, 0, 0L, 10_000L),
+                new TipSubscribeMessage.BetInfoWithTotal(1, 0, 0L, 0L));
+        invokeOnEndGame(frame);
+
+        // Internal 500 budget untouched → reserve(0, 500) still APPROVEs byte-for-byte.
+        assertThat(coordinator.reserve(sid, 0, 500L).decision())
+                .as("crowd-aware off → EndGame budget is the internal 500 → APPROVE")
+                .isEqualTo(ReservationOutcome.Decision.APPROVE);
+    }
+
     /* ---- helpers ---- */
 
     private Map<Integer, Integer> affinities() {
@@ -162,6 +220,20 @@ class BettingMiniGameBotCrowdSeamTest {
 
     private TipUpdateBetMessage tipUpdate(TipSubscribeMessage.BetInfoWithTotal... entries) {
         return new TipUpdateBetMessage(11002, List.of(entries), 42);
+    }
+
+    private TipEndGameMessage tipEndGame(long sid, TipSubscribeMessage.BetInfoWithTotal... entries) {
+        // cmd, iJ, gid, ps, tJpV, eIn, d1, d2, d3, iJp, sid, bs, jpV, tJpv2, jPTp, jpCD, wm, sDi
+        return new TipEndGameMessage(11004, false, 42, List.of(), 0L, null,
+                0, 0, 0, false, sid, List.of(entries), 0L, 0L, 0, null, 0L, null);
+    }
+
+    private void invokeOnEndGame(EndGameMessage msg) throws Exception {
+        ActionResponseMessage<EndGameMessage> resp =
+                new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+        Method m = BettingMiniGameBot.class.getDeclaredMethod("onEndGame", ActionResponseMessage.class);
+        m.setAccessible(true);
+        m.invoke(bot, resp);
     }
 
     private void openRound(long sid, BetCoordinator coordinator) throws Exception {
