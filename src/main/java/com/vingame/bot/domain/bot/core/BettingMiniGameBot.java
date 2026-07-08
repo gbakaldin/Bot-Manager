@@ -63,6 +63,11 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
 @Slf4j
 public class BettingMiniGameBot extends Bot {
 
+    // JACKPOT_SCALE_AND_RAMP (AD-R3): accept probability at window-open. A small
+    // non-zero floor so the early window is not dead (some early bettors are
+    // realistic). Held as a class constant, not a per-group field (AD-R3).
+    private static final double RAMP_P_MIN = 0.15;
+
     // Game configuration
     @Setter
     private GameMessageTypes messageTypes;
@@ -743,6 +748,41 @@ public class BettingMiniGameBot extends Bot {
     }
 
     /**
+     * JACKPOT_SCALE_AND_RAMP Phase R2 (AD-R1/AD-R2/AD-R5): the per-tick
+     * probabilistic ramp accept gate. Shapes <em>which</em> ticks emit a bet
+     * (not the interval, which is immutable — Findings) so aggregate fleet
+     * volume builds toward round close like a real-player pile-in.
+     *
+     * <p>Accept probability follows the power curve
+     * {@code pAccept(x) = pMin + (1 - pMin)·x^k} where {@code x} is the window
+     * elapsed-fraction ({@code 1 - remainingTime/timeForBetting}) and
+     * {@code k = rampShape}. A deferred tick is a <em>deferral</em>, not a lost
+     * bet: the strategy's {@code maxBetsPerRound} allotment is untouched, the
+     * bot's bets simply concentrate later in the window.
+     *
+     * <p><strong>Off = today, no RNG drawn (AD-R5).</strong> When ramp is
+     * disabled (or {@code rampShape <= 0}) this returns {@code true} without
+     * touching {@code rng}, so the strategy's RNG-consumption order (pinned by
+     * {@code RandomBehaviorStrategyTest}) is unchanged. The ramp draw happens
+     * only when ramp is on, and always before/outside the strategy.
+     */
+    private boolean rampAccepts() {
+        BotBehaviorConfig b = configuration.getBehaviorConfig();
+        if (!b.isRampEnabled() || b.getRampShape() <= 0) {
+            return true; // AD-R5: off = today, and DRAW NO RNG on this path
+        }
+        long window = timeForBetting;
+        if (window <= 0) {
+            return true; // fail-safe: no window → cannot compute elapsed fraction
+        }
+        double x = 1.0 - Math.max(0L, remainingTime.get()) / (double) window; // elapsed fraction
+        x = Math.max(0.0, Math.min(1.0, x)); // clamp01
+        double pMin = RAMP_P_MIN;
+        double pAccept = pMin + (1 - pMin) * Math.pow(x, b.getRampShape());
+        return rng.nextDouble() < pAccept; // draw ONLY when ramp is on
+    }
+
+    /**
      * Phase 5: the {@code sendAsync} condition. Gates on the phase-level
      * {@link #canBet()} predicate (session live, BET phase, time remaining),
      * then asks the strategy for a {@link BetDecision} and parks the result
@@ -760,6 +800,13 @@ public class BettingMiniGameBot extends Bot {
                 return false;
             }
             if (strategy == null) {
+                return false;
+            }
+            // JACKPOT_SCALE_AND_RAMP Phase R2 (AD-R1): the ramp gate runs BEFORE
+            // decideBet/applyCoordination so a deferred tick touches neither the
+            // strategy's per-round counter nor a coordinator reservation.
+            if (!rampAccepts()) {
+                log.trace("Bot {}: ramp deferred tick", getUserName());
                 return false;
             }
             BetContext ctx = buildBetContext();
