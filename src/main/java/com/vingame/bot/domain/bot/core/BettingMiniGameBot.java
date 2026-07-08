@@ -25,6 +25,7 @@ import com.vingame.bot.domain.bot.message.GameMessageTypes;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.HasJackpot;
+import com.vingame.bot.domain.bot.message.HasCrowdBets;
 import com.vingame.bot.domain.bot.message.HasJackpotPool;
 import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
@@ -440,6 +441,17 @@ public class BettingMiniGameBot extends Bot {
         if (gameStateId > 0) {
             gameState = BettingMiniGameState.from(gameStateId);
         }
+
+        // CROWD_AWARE_COORDINATION (AD-C3): the LIVE, intra-round crowd signal.
+        // Tip's UpdateBet re-broadcasts the `bs` crowd array each tick through the
+        // bet window (the only product with intra-round `bs`); fold it into the
+        // coordinator's per-round budget against the current sid. observeCrowd is a
+        // no-op when crowd-aware is off (AD-C6) or the sid is stale, and coordinator
+        // is null when coordination is off (AD-9). Tai Xiu's UpdateBet is not a
+        // HasCrowdBets (no `bs`), so this branch never fires there (AD-C7).
+        if (coordinator != null && msg instanceof HasCrowdBets cb) {
+            coordinator.observeCrowd(sidStore.get(), cb.crowdBets());
+        }
     }
 
     private void onEndGame(ActionResponseMessage<? extends EndGameMessage> data) {
@@ -525,6 +537,17 @@ public class BettingMiniGameBot extends Bot {
         // pool=0, which the scaler treats as "not observed" → neutral (AD-J5).
         if (jackpotScaler != null && msg instanceof HasJackpotPool hp) {
             jackpotScaler.observePool(endGameSessionId(msg), hp.jackpotPool());
+        }
+        // CROWD_AWARE_COORDINATION (AD-C3): the EndGame `bs` is the full-round crowd
+        // distribution — the one-round-lagged prior for products without an
+        // intra-round signal (BOM/B52/Nohu carry `bs` only on Subscribe+EndGame).
+        // Fed against the finished round's sid (still current in the coordinator
+        // until the next onRound). observeCrowd is a no-op when crowd-aware is off
+        // (AD-C6) or the sid is stale, and coordinator is null when off (AD-9).
+        // Tai Xiu's EndGame is not a HasCrowdBets (no `bs`), so this never fires
+        // there (AD-C7).
+        if (coordinator != null && msg instanceof HasCrowdBets cb) {
+            coordinator.observeCrowd(endGameSessionId(msg), cb.crowdBets());
         }
 
         gameState = BettingMiniGameState.PAYOUT;

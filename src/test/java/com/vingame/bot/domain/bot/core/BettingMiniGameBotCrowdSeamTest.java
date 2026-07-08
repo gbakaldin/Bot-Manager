@@ -1,0 +1,226 @@
+package com.vingame.bot.domain.bot.core;
+
+import com.vingame.bot.config.bot.BotBehaviorConfig;
+import com.vingame.bot.config.bot.BotConfiguration;
+import com.vingame.bot.config.bot.BotCredentials;
+import com.vingame.bot.domain.bot.coordination.BetCoordinator;
+import com.vingame.bot.domain.bot.coordination.ReservationOutcome;
+import com.vingame.bot.domain.bot.message.StartGameMessage;
+import com.vingame.bot.domain.bot.message.UpdateBetMessage;
+import com.vingame.bot.domain.bot.message.g3.tip.TipSubscribeMessage;
+import com.vingame.bot.domain.bot.message.g3.tip.TipUpdateBetMessage;
+import com.vingame.bot.domain.bot.strategy.BetContext;
+import com.vingame.bot.domain.bot.strategy.BetDecision;
+import com.vingame.bot.domain.bot.strategy.BettingStrategy;
+import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
+import com.vingame.bot.domain.bot.strategy.RoundResult;
+import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.util.BettingMiniGameState;
+import com.vingame.bot.domain.bot.util.SessionIdStore;
+import com.vingame.bot.domain.game.model.Game;
+import com.vingame.bot.infrastructure.client.ApiGatewayClient;
+import com.vingame.bot.infrastructure.client.ClientFactory;
+import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.websocketparser.message.properties.MessageCategory;
+import com.vingame.websocketparser.message.response.ActionResponseMessage;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Random;
+import java.util.concurrent.ScheduledExecutorService;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+/**
+ * CROWD_AWARE_COORDINATION Phase 3 bot seam: {@code onUpdate} reads a
+ * {@code bs}-bearing UpdateBet frame (Tip's {@link TipUpdateBetMessage}) and feeds
+ * {@code coordinator.observeCrowd(sid, crowdBets())}.
+ *
+ * <p>Two cases, both observed through the public {@code reserve} API (a shifted
+ * per-round budget is what {@code reserve} clamps against):
+ * <ul>
+ *   <li><b>crowd-aware ON</b> — an UpdateBet whose crowd heavily over-fills option 0
+ *       drives that option's fleet budget to 0 (a subsequent {@code reserve} on it
+ *       REJECTs) while the under-filled option 1's budget grows (a {@code reserve}
+ *       up to the full cap APPROVEs). Without the crowd, both were 500.</li>
+ *   <li><b>crowd-aware OFF</b> — the same frame does NOT alter the budget:
+ *       {@code observeCrowd} is inert (AD-C6), so option 0 still holds the internal
+ *       500 budget and a {@code reserve(0, 500)} APPROVEs byte-for-byte.</li>
+ * </ul>
+ */
+@DisplayName("BettingMiniGameBot crowd seam (CROWD_AWARE_COORDINATION Phase 3)")
+class BettingMiniGameBotCrowdSeamTest {
+
+    private BettingMiniGameBot bot;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        // 2 equal-weight options; minBet=100, betIncrement=100.
+        Map<Integer, Integer> affinities = new LinkedHashMap<>();
+        affinities.put(0, 1);
+        affinities.put(1, 1);
+        Game game = Game.builder()
+                .id("g-crowd").name("BauCua").pluginName("BauCua")
+                .offset(2000).optionAffinities(affinities).build();
+        BotBehaviorConfig behavior = BotBehaviorConfig.builder()
+                .minBet(100).maxBet(1000).betIncrement(100)
+                .maxTotalBetPerRound(10_000).minBetsPerRound(1).maxBetsPerRound(5)
+                .chatEnabled(false).autoDepositEnabled(false).betSkipPercentage(0)
+                .build();
+        BotConfiguration cfg = BotConfiguration.builder()
+                .credentials(BotCredentials.builder().username("crowdbot").password("pw").fingerprint("fp").build())
+                .environmentId("env-1").botGroupId("group-1").botIndex(1)
+                .game(game).behaviorConfig(behavior)
+                .zoneName("MiniGame3").timeoutMillis(60_000L)
+                .watchdogTimeoutSeconds(120L)
+                .strategyId(StrategyId.RANDOM)
+                .build();
+
+        BettingStrategyFactory factory = mock(BettingStrategyFactory.class);
+        when(factory.create(StrategyId.RANDOM)).thenReturn(new NoopStrategy());
+
+        bot = new BettingMiniGameBot();
+        bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
+        bot.setConfiguration(cfg);
+        bot.setStrategyFactory(factory);
+        bot.setRandom(new Random(0xC0FFEEL));
+        bot.initializeSubclass();
+    }
+
+    @AfterEach
+    void tearDown() throws Exception {
+        ScheduledExecutorService w = (ScheduledExecutorService) readField("watchdogScheduler");
+        if (w != null) w.shutdownNow();
+        ScheduledExecutorService s = (ScheduledExecutorService) readField("scheduler");
+        if (s != null) s.shutdownNow();
+    }
+
+    @Test
+    @DisplayName("crowd-aware ON: a bs-bearing UpdateBet shifts the budget (option 0 → 0, option 1 → cap)")
+    void crowdUpdateShiftsBudget() throws Exception {
+        BetCoordinator coordinator = new BetCoordinator(affinities(), 1000L, 100L, 100L, true, "UNKNOWN");
+        bot.setCoordinator(coordinator);
+        long sid = 8001L;
+        openRound(sid, coordinator);
+
+        // Baseline internal-tier budget (no crowd yet): each option 500.
+        // Heavy crowd on option 0 (v=10000), none on option 1.
+        TipUpdateBetMessage frame = tipUpdate(
+                new TipSubscribeMessage.BetInfoWithTotal(0, 0, 0L, 10_000L),
+                new TipSubscribeMessage.BetInfoWithTotal(1, 0, 0L, 0L));
+        invokeOnUpdate(frame);
+
+        // Option 0's fleet budget collapsed to 0 → reserve rejects even minBet.
+        assertThat(coordinator.reserve(sid, 0, 100L).decision())
+                .as("crowd over-fills option 0 → fleet budget 0 → REJECT")
+                .isEqualTo(ReservationOutcome.Decision.REJECT);
+        // Option 1's budget grew (5500 clamped to cap 1000) → the full cap approves.
+        assertThat(coordinator.reserve(sid, 1, 1000L).decision())
+                .as("crowd under-fills option 1 → fleet budget grew to the cap → APPROVE")
+                .isEqualTo(ReservationOutcome.Decision.APPROVE);
+    }
+
+    @Test
+    @DisplayName("crowd-aware OFF: the same UpdateBet does NOT alter the budget (internal tier verbatim)")
+    void crowdOffLeavesBudgetUnchanged() throws Exception {
+        BetCoordinator coordinator = new BetCoordinator(affinities(), 1000L, 100L, 100L, false, "UNKNOWN");
+        bot.setCoordinator(coordinator);
+        long sid = 9001L;
+        openRound(sid, coordinator);
+
+        // Same heavy-crowd frame — but crowd-aware is OFF, so observeCrowd is inert.
+        TipUpdateBetMessage frame = tipUpdate(
+                new TipSubscribeMessage.BetInfoWithTotal(0, 0, 0L, 10_000L),
+                new TipSubscribeMessage.BetInfoWithTotal(1, 0, 0L, 0L));
+        invokeOnUpdate(frame);
+
+        // Budget is the untouched internal split: option 0 still holds 500.
+        // reserve(0, 500) approves the full amount (would REJECT if crowd had applied).
+        assertThat(coordinator.reserve(sid, 0, 500L).decision())
+                .as("crowd-aware off → budget is the internal 500 → APPROVE, byte-for-byte")
+                .isEqualTo(ReservationOutcome.Decision.APPROVE);
+    }
+
+    /* ---- helpers ---- */
+
+    private Map<Integer, Integer> affinities() {
+        Map<Integer, Integer> a = new LinkedHashMap<>();
+        a.put(0, 1);
+        a.put(1, 1);
+        return a;
+    }
+
+    private TipUpdateBetMessage tipUpdate(TipSubscribeMessage.BetInfoWithTotal... entries) {
+        return new TipUpdateBetMessage(11002, List.of(entries), 42);
+    }
+
+    private void openRound(long sid, BetCoordinator coordinator) throws Exception {
+        invokeOnStartGame(sid);
+        setField("gameState", BettingMiniGameState.BET);
+        ((SessionIdStore) readField("sidStore")).set(sid);
+        // onStartGame already called coordinator.onRound(sid); re-affirm for safety.
+        coordinator.onRound(sid);
+    }
+
+    private void invokeOnStartGame(long sid) throws Exception {
+        StartGameMessage msg = mock(StartGameMessage.class);
+        when(msg.getSessionId()).thenReturn(sid);
+        ActionResponseMessage<StartGameMessage> resp =
+                new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+        Method m = BettingMiniGameBot.class.getDeclaredMethod("onStartGame", ActionResponseMessage.class);
+        m.setAccessible(true);
+        m.invoke(bot, resp);
+    }
+
+    private void invokeOnUpdate(UpdateBetMessage msg) throws Exception {
+        ActionResponseMessage<UpdateBetMessage> resp =
+                new ActionResponseMessage<>(MessageCategory.ACTION_RESPONSE, msg);
+        Method m = BettingMiniGameBot.class.getDeclaredMethod("onUpdate", ActionResponseMessage.class);
+        m.setAccessible(true);
+        m.invoke(bot, resp);
+    }
+
+    private Object readField(String name) throws Exception {
+        Field f;
+        try {
+            f = BettingMiniGameBot.class.getDeclaredField(name);
+        } catch (NoSuchFieldException e) {
+            f = Bot.class.getDeclaredField(name);
+        }
+        f.setAccessible(true);
+        return f.get(bot);
+    }
+
+    private void setField(String name, Object value) throws Exception {
+        Field f;
+        try {
+            f = BettingMiniGameBot.class.getDeclaredField(name);
+        } catch (NoSuchFieldException e) {
+            f = Bot.class.getDeclaredField(name);
+        }
+        f.setAccessible(true);
+        f.set(bot, value);
+    }
+
+    /** Strategy that never proposes — this test drives the coordinator directly. */
+    private static final class NoopStrategy implements BettingStrategy {
+        @Override
+        public Optional<BetDecision> decide(BetContext ctx) {
+            return Optional.empty();
+        }
+
+        @Override
+        public void onRoundEnd(RoundResult result) {
+        }
+    }
+}

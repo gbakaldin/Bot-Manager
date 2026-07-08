@@ -285,15 +285,28 @@ public class BotGroupBehaviorService {
             // every bot's ref stays null, the bet path is byte-for-byte today's.
             if (group.isCoordinationEnabled()
                     && (game.getGameType() == GameType.BETTING_MINI || game.getGameType() == GameType.TAI_XIU)) {
+                // CROWD_AWARE_COORDINATION (AD-C6): crowd-awareness is a sub-mode of
+                // coordination — only a coordinationEnabled group gets a coordinator
+                // at all, and the crowdAware bit is an added flag on top. When
+                // crowdAwareCoordination=false the coordinator is byte-for-byte the
+                // internal tier (observeCrowd is inert, AD-C6). The count semantic is
+                // carried for the Phase 4 health snapshot only (AD-C5/AD-C10).
+                boolean crowdAware = group.isCrowdAwareCoordination();
                 BetCoordinator coordinator = new BetCoordinator(
                         game.getEffectiveOptionAffinities(),
                         group.getMaxAggregateStakePerRound(),
                         group.getMinBet(),
-                        group.getBetIncrement());
+                        group.getBetIncrement(),
+                        crowdAware,
+                        game.getEffectiveCrowdCountSemantic().name());
                 runtime.setCoordinator(coordinator);
                 log.info("Bet coordinator created for group {} ({} options, aggregate cap {})",
                         group.getName(), game.getEffectiveOptionAffinities().size(),
                         group.getMaxAggregateStakePerRound());
+                if (crowdAware) {
+                    log.info("Crowd-aware coordination enabled for group {} (countSemantic={})",
+                            group.getName(), game.getEffectiveCrowdCountSemantic());
+                }
             }
 
             // JACKPOT_SCALE_AND_RAMP (AD-J3/AD-S1): build a group-scoped jackpot

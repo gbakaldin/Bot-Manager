@@ -20,6 +20,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
+import com.vingame.bot.domain.game.model.CrowdCountSemantic;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
@@ -1491,6 +1492,101 @@ class BotGroupBehaviorServiceTest {
                 assertThat(rt).isNotNull();
                 assertThat(rt.getJackpotScaler())
                         .as("SLOT shares no betting-mini round model ⇒ no scaler (AD-S1)")
+                        .isNull();
+            } finally {
+                if (rt != null) rt.stopAllBots();
+            }
+        }
+    }
+
+    @Nested
+    @DisplayName("crowd-aware coordinator build gating on start (CROWD_AWARE_COORDINATION AD-C6/AD-C10)")
+    class CrowdAwareCoordinatorBuildTests {
+
+        /**
+         * A coordination-enabled group on an eligible game, short-circuiting bot
+         * creation so the coordinator (built on the runtime before the bot loop) is
+         * observable even when every createBot fails.
+         */
+        private void group(boolean coordinationEnabled, boolean crowdAware, CrowdCountSemantic semantic) {
+            BotGroup g = BotGroup.builder()
+                    .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                    .botCount(2).namePrefix("bot").password("pass")
+                    .coordinationEnabled(coordinationEnabled)
+                    .crowdAwareCoordination(crowdAware)
+                    .maxAggregateStakePerRound(1000L).minBet(100L).betIncrement(100L)
+                    .build();
+            Map<Integer, Integer> affinities = new LinkedHashMap<>();
+            affinities.put(0, 1);
+            affinities.put(1, 1);
+            Game gg = Game.builder().id("game-1").name("BauCua").gameType(GameType.BETTING_MINI)
+                    .optionAffinities(affinities)
+                    .crowdCountSemantic(semantic)
+                    .build();
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            when(botGroupService.findById("g-1")).thenReturn(g);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(gg);
+            when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+        }
+
+        @Test
+        @DisplayName("coordinationEnabled + crowdAwareCoordination builds a crowd-aware coordinator carrying the game semantic")
+        void buildsCrowdAwareCoordinator() {
+            group(true, true, CrowdCountSemantic.BETS);
+
+            service.start("g-1");
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            try {
+                assertThat(rt).isNotNull();
+                BetCoordinator coordinator = rt.getCoordinator();
+                assertThat(coordinator).as("coordination on ⇒ coordinator present").isNotNull();
+                assertThat(coordinator.isCrowdAware())
+                        .as("both flags set ⇒ crowd tier enabled (AD-C6)").isTrue();
+                assertThat(coordinator.getCrowdCountSemantic())
+                        .as("game's crowdCountSemantic threaded through (AD-C5/AD-C10)")
+                        .isEqualTo("BETS");
+            } finally {
+                if (rt != null) rt.stopAllBots();
+            }
+        }
+
+        @Test
+        @DisplayName("coordinationEnabled + crowdAwareCoordination=false builds a NON-crowd coordinator (internal tier verbatim)")
+        void buildsNonCrowdCoordinatorWhenFlagOff() {
+            group(true, false, CrowdCountSemantic.PLAYERS);
+
+            service.start("g-1");
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            try {
+                assertThat(rt).isNotNull();
+                BetCoordinator coordinator = rt.getCoordinator();
+                assertThat(coordinator).as("coordination on ⇒ coordinator present").isNotNull();
+                assertThat(coordinator.isCrowdAware())
+                        .as("crowdAwareCoordination off ⇒ internal tier, no crowd (AD-C6)")
+                        .isFalse();
+                // The semantic is still carried for the health block regardless of the bit.
+                assertThat(coordinator.getCrowdCountSemantic()).isEqualTo("PLAYERS");
+            } finally {
+                if (rt != null) rt.stopAllBots();
+            }
+        }
+
+        @Test
+        @DisplayName("coordinationEnabled=false builds NO coordinator (crowd bit is moot — AD-C6)")
+        void noCoordinatorWhenCoordinationOff() {
+            group(false, true, CrowdCountSemantic.UNKNOWN);
+
+            service.start("g-1");
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            try {
+                assertThat(rt).isNotNull();
+                assertThat(rt.getCoordinator())
+                        .as("no coordination ⇒ no coordinator, crowd-aware cannot run (AD-C6)")
                         .isNull();
             } finally {
                 if (rt != null) rt.stopAllBots();
