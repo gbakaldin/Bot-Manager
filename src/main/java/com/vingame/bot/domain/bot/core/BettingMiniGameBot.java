@@ -585,7 +585,8 @@ public class BettingMiniGameBot extends Bot {
                 expectedCurrentBalance.get(),
                 memory.getCurrentRound(),
                 rng,
-                effectiveMaxBetsPerRound(behavior));
+                effectiveMaxBetsPerRound(behavior),
+                behavior.isAffinityWeightedProposal());
     }
 
     /**

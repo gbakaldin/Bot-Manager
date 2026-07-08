@@ -61,6 +61,22 @@ class RandomBehaviorStrategyTest {
                 mem.getCurrentRound(), rng);
     }
 
+    /** Context with the affinity-weighted-proposal flag explicitly set. */
+    private static BetContext ctx(BotMemory mem, BotBehaviorConfig beh, Game g, Random rng,
+                                  boolean affinityWeighted) {
+        return new BetContext(mem, beh, g, mem.getCurrentBalance(),
+                mem.getCurrentRound(), rng, beh.getMaxBetsPerRound(), affinityWeighted);
+    }
+
+    /** Game whose option 0 carries weight {@code w0} and every other option weight 1. */
+    private static Game gameWithSkew(int n, int w0) {
+        Map<Integer, Integer> affinities = new LinkedHashMap<>();
+        for (int i = 0; i < n; i++) affinities.put(i, i == 0 ? w0 : 1);
+        return Game.builder()
+                .id("g1").name("BauCua").pluginName("BauCua")
+                .offset(2000).optionAffinities(affinities).build();
+    }
+
     @Nested
     @DisplayName("RNG-consumption equivalence with legacy BettingMiniGameBot")
     class Equivalence {
@@ -215,7 +231,8 @@ class RandomBehaviorStrategyTest {
             for (int t = 0; t < 50; t++) {
                 // effectiveMaxBetsPerRound = 2 (< configured 8): the volume lever
                 BetContext scaled = new BetContext(mem, beh, game, mem.getCurrentBalance(),
-                        mem.getCurrentRound(), rng, /*effectiveMaxBetsPerRound*/ 2);
+                        mem.getCurrentRound(), rng, /*effectiveMaxBetsPerRound*/ 2,
+                        /*affinityWeightedProposal*/ false);
                 if (strategy.decide(scaled).isPresent()) decisions++;
             }
             assertThat(decisions)
@@ -324,6 +341,101 @@ class RandomBehaviorStrategyTest {
             }
 
             assertThat(outA).isEqualTo(outB);
+        }
+    }
+
+    /**
+     * AFFINITY_AWARE_PROPOSAL Phase 3 (AD-3). The opt-in weighted option pick and
+     * its RNG-preservation invariant on the off / equal-weight paths.
+     */
+    @Nested
+    @DisplayName("affinity-weighted proposal (AFFINITY_AWARE_PROPOSAL AD-3)")
+    class AffinityWeighted {
+
+        @Test
+        @DisplayName("Toggle on + equal weights == toggle off: byte-identical output at the same seed (short-circuit preserves RNG)")
+        void toggleOnEqualWeightsIsUniform() {
+            // Default {i:1} equal-weight game — weightsAreEqual short-circuits the
+            // weighted branch, so the flag-on run must consume RNG identically to
+            // the flag-off run and produce the same decisions. This is the
+            // load-bearing regression assertion.
+            Game game = gameWithOptions(6);
+            BotBehaviorConfig beh = behavior(100L, 1000L, 100L, 100, 0);
+
+            long seed = 0xABCDEFL;
+            int ticks = 40;
+
+            BotMemory memOff = new BotMemory(game);
+            memOff.beginRound(7L, 1_000_000L);
+            RandomBehaviorStrategy off = new RandomBehaviorStrategy();
+            Random rngOff = new Random(seed);
+            List<BetDecision> outOff = new ArrayList<>();
+            for (int t = 0; t < ticks; t++) {
+                off.decide(ctx(memOff, beh, game, rngOff, false)).ifPresent(outOff::add);
+            }
+
+            BotMemory memOn = new BotMemory(game);
+            memOn.beginRound(7L, 1_000_000L);
+            RandomBehaviorStrategy on = new RandomBehaviorStrategy();
+            Random rngOn = new Random(seed);
+            List<BetDecision> outOn = new ArrayList<>();
+            for (int t = 0; t < ticks; t++) {
+                on.decide(ctx(memOn, beh, game, rngOn, true)).ifPresent(outOn::add);
+            }
+
+            assertThat(outOn)
+                    .as("toggle-on equal-weight run is byte-identical to toggle-off at the same seed")
+                    .isEqualTo(outOff);
+        }
+
+        @Test
+        @DisplayName("Skewed weights bias option 0's share toward w0/(w0+n-1) and differ from uniform")
+        void skewedWeightsBias() {
+            int n = 6;
+            int w0 = 5;
+            Game skewed = gameWithSkew(n, w0);      // {0:5, 1..5:1}
+            Game uniform = gameWithOptions(n);       // {0..5:1}
+            BotBehaviorConfig beh = behavior(100L, 100L, 100L, 1_000_000, 0);
+
+            long seed = 2024L;
+            int picks = 60_000;
+
+            // Weighted run on the skewed game.
+            BotMemory memW = new BotMemory(skewed);
+            memW.beginRound(1L, 1_000_000_000L);
+            RandomBehaviorStrategy weighted = new RandomBehaviorStrategy();
+            Random rngW = new Random(seed);
+            int weightedZeroCount = 0;
+            for (int i = 0; i < picks; i++) {
+                BetDecision d = weighted.decide(ctx(memW, beh, skewed, rngW, true)).orElseThrow();
+                if (d.optionId() == 0) weightedZeroCount++;
+            }
+            double weightedZeroShare = weightedZeroCount / (double) picks;
+
+            // Contrast: uniform run (flag off, equal weights).
+            BotMemory memU = new BotMemory(uniform);
+            memU.beginRound(1L, 1_000_000_000L);
+            RandomBehaviorStrategy flat = new RandomBehaviorStrategy();
+            Random rngU = new Random(seed);
+            int uniformZeroCount = 0;
+            for (int i = 0; i < picks; i++) {
+                BetDecision d = flat.decide(ctx(memU, beh, uniform, rngU, false)).orElseThrow();
+                if (d.optionId() == 0) uniformZeroCount++;
+            }
+            double uniformZeroShare = uniformZeroCount / (double) picks;
+
+            double expectedWeightedShare = w0 / (double) (w0 + (n - 1)); // 5/10 = 0.5
+            double expectedUniformShare = 1.0 / n;                        // 1/6 ≈ 0.167
+
+            assertThat(weightedZeroShare)
+                    .as("weighted option-0 share ≈ w0/(w0+n-1)")
+                    .isCloseTo(expectedWeightedShare, org.assertj.core.data.Offset.offset(0.02));
+            assertThat(uniformZeroShare)
+                    .as("uniform option-0 share ≈ 1/n")
+                    .isCloseTo(expectedUniformShare, org.assertj.core.data.Offset.offset(0.02));
+            assertThat(weightedZeroShare)
+                    .as("weighted pick materially biases toward the high-affinity option")
+                    .isGreaterThan(uniformZeroShare + 0.1);
         }
     }
 }

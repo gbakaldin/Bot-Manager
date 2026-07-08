@@ -47,6 +47,15 @@ import java.util.Random;
  *                        so the volume lever applies uniformly; with the feature off
  *                        (factor 1.0) it equals {@code behavior.getMaxBetsPerRound()}
  *                        exactly (byte-for-byte today).
+ * @param affinityWeightedProposal when {@code true}, an option-picking strategy
+ *                        ({@code RandomBehaviorStrategy}) biases its option choice by
+ *                        the game's affinity weights instead of picking uniformly
+ *                        (AFFINITY_AWARE_PROPOSAL AD-3/AD-4). Sourced from the bot's
+ *                        {@code BotBehaviorConfig.affinityWeightedProposal}. With the
+ *                        flag off — or on but the weights are equal — the strategy takes
+ *                        today's exact uniform {@code nextInt(n)} draw (byte-for-byte),
+ *                        so this defaults to {@code false} in the terse convenience
+ *                        constructor to keep existing/test callers on the off path.
  */
 public record BetContext(
         BotMemory memory,
@@ -55,14 +64,17 @@ public record BetContext(
         long currentBalance,
         RoundState currentRound,
         Random rng,
-        int effectiveMaxBetsPerRound) {
+        int effectiveMaxBetsPerRound,
+        boolean affinityWeightedProposal) {
 
     /**
-     * Convenience constructor for the default (jackpot-scale off / factor 1.0) path:
-     * {@code effectiveMaxBetsPerRound} defaults to {@code behavior.getMaxBetsPerRound()},
-     * i.e. byte-for-byte today's cap. The bot's hot path uses the full canonical
-     * constructor with the jackpot-scaled cap; this overload keeps neutral-path
-     * callers (and tests) terse and explicit about the default.
+     * Convenience constructor for the default (jackpot-scale off / factor 1.0,
+     * affinity-weighting off) path: {@code effectiveMaxBetsPerRound} defaults to
+     * {@code behavior.getMaxBetsPerRound()}, i.e. byte-for-byte today's cap, and
+     * {@code affinityWeightedProposal} defaults to {@code false} (today's exact
+     * uniform option pick). The bot's hot path uses the full canonical constructor
+     * with the jackpot-scaled cap and the resolved affinity flag; this overload keeps
+     * neutral-path callers (and tests) terse and explicit about the defaults.
      */
     public BetContext(BotMemory memory,
                       BotBehaviorConfig behavior,
@@ -71,6 +83,6 @@ public record BetContext(
                       RoundState currentRound,
                       Random rng) {
         this(memory, behavior, game, currentBalance, currentRound, rng,
-                behavior.getMaxBetsPerRound());
+                behavior.getMaxBetsPerRound(), false);
     }
 }

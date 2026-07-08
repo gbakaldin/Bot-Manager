@@ -7,6 +7,7 @@ import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 
@@ -21,10 +22,16 @@ import java.util.Random;
  * {@code RandomBehaviorStrategyTest} pins this contract — Phase 5 reuses the
  * same harness against a deterministic StartGame/EndGame stream.
  *
- * <p>Ignores affinity values: option selection is uniform over
- * {@code game.optionAffinities.keySet()}. Affinity-aware strategies are a
- * future-strategy concern (see {@code docs/plans/BETTING_STRATEGIES.md},
- * Architecture Decision 5).
+ * <p>Option selection is uniform by default — a flat pick over
+ * {@code game.getEffectiveOptionAffinities().keySet()} that throws the weight
+ * values away. When the bot group opts in via {@code affinityWeightedProposal}
+ * ({@link BetContext#affinityWeightedProposal()}) <b>and</b> the game's affinity
+ * weights are not all equal, the option is instead drawn <i>proportional</i> to
+ * those weights via {@link WeightedOptionPicker} — biasing proposals toward
+ * high-affinity options (see {@code docs/plans/AFFINITY_AWARE_PROPOSAL.md} AD-3).
+ * With the flag off, or on but weights equal (e.g. default TaiXiu {@code {1:1,2:1}}),
+ * the pick short-circuits back to today's exact uniform {@code nextInt(n)} draw —
+ * byte-for-byte identical RNG consumption, no behavior change.
  *
  * <p>Ignores rolling history: {@link BotMemory#snapshotLastResults()} and
  * {@link BotMemory#snapshotGlobalRecentWins()} are never read. Future
@@ -51,6 +58,12 @@ public final class RandomBehaviorStrategy implements BettingStrategy {
 
     private int numberOfBetsInCurrentSession;
     private long currentRoundSessionId;
+
+    // Stateless weighted-categorical picker for the opt-in affinity-weighted
+    // path (AFFINITY_AWARE_PROPOSAL AD-3). Holds no RNG of its own — the per-tick
+    // rng is threaded in via ctx.rng(). Mirrors how MartingaleStrategySupport
+    // holds its AffinityOptionPicker.
+    private final WeightedOptionPicker picker = new WeightedOptionPicker();
 
     public RandomBehaviorStrategy() {
         this.numberOfBetsInCurrentSession = 0;
@@ -98,11 +111,25 @@ public final class RandomBehaviorStrategy implements BettingStrategy {
         long steps = ctx.rng().nextInt(maxSteps + 1);
         long amount = minBet + (steps * betStep);
 
-        // Option pick: uniform over the affinity-map keys (affinity values
-        // ignored in v1). List.copyOf produces a deterministic insertion-order
-        // view matching the legacy resolveNextEntryToBet call site.
-        List<Integer> options = List.copyOf(ctx.game().getEffectiveOptionAffinities().keySet());
-        int option = options.get(ctx.rng().nextInt(options.size()));
+        // Option pick (AFFINITY_AWARE_PROPOSAL AD-3). Default/off = today's exact
+        // uniform draw over the affinity-map keys; the weighted branch only runs
+        // when the group opted in AND the weights are actually skewed. On the off
+        // path AND the toggle-on-but-equal-weights path the RNG consumption is
+        // byte-for-byte identical to today: exactly one nextInt(n) draw (the
+        // weightsAreEqual short-circuit keeps the equal-weight case out of the
+        // picker entirely, so no int-cast/edge risk and no extra draw).
+        Map<Integer, Integer> affinities = ctx.game().getEffectiveOptionAffinities();
+        int option;
+        if (ctx.affinityWeightedProposal() && !WeightedOptionPicker.weightsAreEqual(affinities)) {
+            // Weighted branch: one nextInt(Σw) draw, Σw ≠ n in general.
+            option = picker.pick(affinities, ctx.rng());
+        } else {
+            // Off / equal-weight path — today's exact code, unchanged. List.copyOf
+            // produces a deterministic insertion-order view matching the legacy
+            // resolveNextEntryToBet call site. One nextInt(n) draw.
+            List<Integer> options = List.copyOf(affinities.keySet());
+            option = options.get(ctx.rng().nextInt(options.size()));
+        }
 
         log.trace("RandomBehaviorStrategy.decide: bet option={}, amount={}", option, amount);
         return Optional.of(new BetDecision(option, amount));
