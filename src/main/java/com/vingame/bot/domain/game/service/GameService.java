@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.game.service;
 
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.brand.model.ProductCode;
@@ -103,7 +104,15 @@ public class GameService {
         return query;
     }
 
+    /**
+     * Seed floor of the jackpot pool (JACKPOT_SCALE_AND_RAMP AD-J6) — the known
+     * ~500k reset. A configured {@code jackpotCeiling} at or below this makes the
+     * scale transfer function degenerate (AD-J5), so we reject it as a clean 400.
+     */
+    private static final long JACKPOT_SEED_FLOOR = 500_000L;
+
     public Game save(Game game) {
+        validateJackpotScale(game);
         if (game.getId() == null || game.getId().isEmpty()) {
             game.setId(UUID.randomUUID().toString());
         }
@@ -113,6 +122,19 @@ public class GameService {
         }
         game.setUpdatedAt(now);
         return repository.save(game);
+    }
+
+    /**
+     * When jackpot-scale is enabled the ceiling must exceed the ~500k seed floor
+     * (JACKPOT_SCALE_AND_RAMP AD-J1/AD-J5) — otherwise the linear seed→ceiling
+     * transfer function is degenerate. Disabled games ignore the ceiling.
+     */
+    private void validateJackpotScale(Game game) {
+        if (game.isJackpotScaleEnabled() && game.getJackpotCeiling() <= JACKPOT_SEED_FLOOR) {
+            throw new BadRequestException(
+                    "jackpotCeiling must be greater than " + JACKPOT_SEED_FLOOR
+                            + " when jackpotScaleEnabled is true");
+        }
     }
 
     public Game update(String id, GameDTO updateDTO) {

@@ -94,6 +94,26 @@ public class Game {
     private Map<Integer, Integer> optionAffinities;
 
     /**
+     * Whether the jackpot-based volume scale lever is enabled for this game
+     * (JACKPOT_SCALE_AND_RAMP AD-J1). When true, a group of a jackpot-bearing
+     * game type ({@link GameType#BETTING_MINI}/{@link GameType#TAI_XIU}) reads the
+     * live jackpot pool meter ({@code tJpV}) at round end and derives a per-round
+     * volume scale factor. Jackpot presence is a game-intrinsic trait, so this
+     * lives on the Game (not the BotGroup). Off = today's flat volume (AD-S3).
+     */
+    private boolean jackpotScaleEnabled;
+
+    /**
+     * Operator-configured upper bound of the jackpot pool at which bots bet at
+     * full intensity (JACKPOT_SCALE_AND_RAMP AD-J1). The transfer function ramps
+     * the volume factor linearly from the ~500k seed floor to this ceiling
+     * (AD-J5). Only meaningful when {@link #jackpotScaleEnabled} is true;
+     * validated to exceed the seed floor (must be {@code > 500000}) so the
+     * transfer function is non-degenerate.
+     */
+    private long jackpotCeiling;
+
+    /**
      * Legacy field — pre-BETTING_STRATEGIES Phase 1 docs persisted
      * {@code numberOfOptions} as a primitive int and {@code bettingOptions} as
      * an array of allowed option ids. Read-side fallback only: kept so old

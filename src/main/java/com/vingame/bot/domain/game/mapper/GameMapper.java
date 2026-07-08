@@ -48,6 +48,8 @@ public interface GameMapper {
                 .pluginName(entity.getPluginName())
                 .gameId(entity.getGameId())
                 .optionAffinities(affinities)
+                .jackpotScaleEnabled(entity.isJackpotScaleEnabled())
+                .jackpotCeiling(entity.getJackpotCeiling())
                 .offset(entity.getOffset())
                 .md5(entity.isMd5())
                 .build();
@@ -84,6 +86,8 @@ public interface GameMapper {
                 .pluginName(dto.getPluginName())
                 .gameId(dto.getGameId())
                 .optionAffinities(affinities)
+                .jackpotScaleEnabled(Optional.ofNullable(dto.getJackpotScaleEnabled()).orElse(false))
+                .jackpotCeiling(Optional.ofNullable(dto.getJackpotCeiling()).orElse(0L))
                 .offset(dto.getOffset())
                 .md5(Optional.ofNullable(dto.getMd5()).orElse(false))
                 .build();
@@ -119,6 +123,12 @@ public interface GameMapper {
         if (dto.getOptionAffinities() != null) {
             entity.setOptionAffinities(dto.getOptionAffinities());
         }
+        // JACKPOT_SCALE_AND_RAMP AD-J1: replace-if-present (boxed → PATCH-null keeps
+        // the existing value), mirroring the scalar handling above.
+        entity.setJackpotScaleEnabled(
+                Optional.ofNullable(dto.getJackpotScaleEnabled()).orElse(entity.isJackpotScaleEnabled()));
+        entity.setJackpotCeiling(
+                Optional.ofNullable(dto.getJackpotCeiling()).orElse(entity.getJackpotCeiling()));
         entity.setOffset(Optional.ofNullable(dto.getOffset()).orElse(entity.getOffset()));
         entity.setMd5(Optional.ofNullable(dto.getMd5()).orElse(entity.isMd5()));
     }

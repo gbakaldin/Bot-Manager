@@ -308,6 +308,51 @@ class GameServiceTest {
         }
 
         @Test
+        @DisplayName("Rejects jackpotScaleEnabled with ceiling at/below the 500k seed floor (Phase J2)")
+        void shouldRejectJackpotCeilingAtOrBelowSeedFloor() {
+            Game atFloor = Game.builder().id("g").name("Bom")
+                    .jackpotScaleEnabled(true).jackpotCeiling(500_000L).build();
+            Game belowFloor = Game.builder().id("g").name("Bom")
+                    .jackpotScaleEnabled(true).jackpotCeiling(100_000L).build();
+
+            assertThatThrownBy(() -> service.save(atFloor))
+                    .isInstanceOf(com.vingame.bot.common.exception.BadRequestException.class)
+                    .hasMessageContaining("jackpotCeiling");
+            assertThatThrownBy(() -> service.save(belowFloor))
+                    .isInstanceOf(com.vingame.bot.common.exception.BadRequestException.class)
+                    .hasMessageContaining("500000");
+            // Rejected before persistence.
+            verify(repository, org.mockito.Mockito.never()).save(any(Game.class));
+        }
+
+        @Test
+        @DisplayName("Accepts jackpotScaleEnabled with ceiling above the 500k seed floor (Phase J2)")
+        void shouldAcceptJackpotCeilingAboveSeedFloor() {
+            Game game = Game.builder().id("g").name("Bom")
+                    .jackpotScaleEnabled(true).jackpotCeiling(500_001L).build();
+            when(repository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Game result = service.save(game);
+
+            assertThat(result.isJackpotScaleEnabled()).isTrue();
+            assertThat(result.getJackpotCeiling()).isEqualTo(500_001L);
+        }
+
+        @Test
+        @DisplayName("Ignores jackpotCeiling when jackpotScaleEnabled is false (disabled → no validation)")
+        void shouldIgnoreCeilingWhenJackpotScaleDisabled() {
+            // A low (even zero) ceiling is fine as long as the lever is off — the
+            // ceiling is only meaningful when enabled.
+            Game game = Game.builder().id("g").name("Plain")
+                    .jackpotScaleEnabled(false).jackpotCeiling(0L).build();
+            when(repository.save(any(Game.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            Game result = service.save(game);
+
+            assertThat(result.getId()).isEqualTo("g");
+        }
+
+        @Test
         @DisplayName("Should preserve existing createdAt and re-stamp updatedAt on re-save")
         void shouldPreserveCreatedAtAndRestampUpdatedAt() {
             java.time.Instant created = java.time.Instant.parse("2020-01-01T00:00:00Z");

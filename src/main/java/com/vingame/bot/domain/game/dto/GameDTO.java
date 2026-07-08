@@ -53,6 +53,20 @@ public class GameDTO {
     private Map<Integer, Integer> optionAffinities;
 
     /**
+     * Jackpot-based volume scale toggle (JACKPOT_SCALE_AND_RAMP AD-J1). Boxed so
+     * a PATCH that omits it keeps the existing entity value (PATCH-null = keep).
+     */
+    private Boolean jackpotScaleEnabled;
+
+    /**
+     * Jackpot pool ceiling at which bots bet at full intensity
+     * (JACKPOT_SCALE_AND_RAMP AD-J1). Boxed for the same PATCH-null = keep
+     * semantics. Validated to exceed the seed floor ({@code > 500000}) when
+     * {@code jackpotScaleEnabled} is true.
+     */
+    private Long jackpotCeiling;
+
+    /**
      * Write-only convenience shorthand. If {@code optionAffinities} is omitted
      * on create, the mapper expands {@code numberOfOptions=n} into
      * {@code {0:1, 1:1, ..., n-1:1}}. Ignored on PATCH (use

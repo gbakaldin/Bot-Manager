@@ -59,6 +59,33 @@ class GameMapperTest {
         }
 
         @Test
+        @DisplayName("Maps jackpotScaleEnabled and jackpotCeiling onto the read DTO (Phase J2)")
+        void shouldMapJackpotScaleFields() {
+            Game entity = Game.builder()
+                    .id("game-jp")
+                    .name("BomJackpot")
+                    .jackpotScaleEnabled(true)
+                    .jackpotCeiling(20_000_000L)
+                    .build();
+
+            GameDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getJackpotScaleEnabled()).isTrue();
+            assertThat(dto.getJackpotCeiling()).isEqualTo(20_000_000L);
+        }
+
+        @Test
+        @DisplayName("Emits jackpot defaults (false/0) for a game that never set them")
+        void shouldEmitJackpotDefaults() {
+            Game entity = Game.builder().id("game-plain").name("Plain").numberOfOptions(2).build();
+
+            GameDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getJackpotScaleEnabled()).isFalse();
+            assertThat(dto.getJackpotCeiling()).isEqualTo(0L);
+        }
+
+        @Test
         @DisplayName("Synthesizes optionAffinities from legacy numberOfOptions on read for unmigrated docs")
         void shouldSynthesizeAffinitiesFromLegacyOnRead() {
             // Simulates a Mongo doc that pre-dates Phase 1 — only numberOfOptions.
@@ -164,6 +191,32 @@ class GameMapperTest {
             assertThat(entity.getOptionAffinities()).isEqualTo(affinities);
             assertThat(entity.getOffset()).isEqualTo(2000);
             assertThat(entity.isMd5()).isTrue();
+        }
+
+        @Test
+        @DisplayName("Maps jackpotScaleEnabled and jackpotCeiling from DTO onto the entity")
+        void shouldMapJackpotScaleFields() {
+            GameDTO dto = GameDTO.builder()
+                    .name("BomJackpot")
+                    .jackpotScaleEnabled(true)
+                    .jackpotCeiling(20_000_000L)
+                    .build();
+
+            Game entity = mapper.toEntity(dto);
+
+            assertThat(entity.isJackpotScaleEnabled()).isTrue();
+            assertThat(entity.getJackpotCeiling()).isEqualTo(20_000_000L);
+        }
+
+        @Test
+        @DisplayName("Defaults jackpotScaleEnabled to false and jackpotCeiling to 0 when DTO omits them")
+        void shouldDefaultJackpotScaleFields() {
+            GameDTO dto = GameDTO.builder().name("Plain").build();
+
+            Game entity = mapper.toEntity(dto);
+
+            assertThat(entity.isJackpotScaleEnabled()).isFalse();
+            assertThat(entity.getJackpotCeiling()).isEqualTo(0L);
         }
 
         @Test
@@ -299,6 +352,48 @@ class GameMapperTest {
             mapper.updateEntityFromDTO(dto, entity);
 
             assertThat(entity.getOptionAffinities()).isEqualTo(existing);
+        }
+
+        @Test
+        @DisplayName("Replaces jackpotScaleEnabled and jackpotCeiling when present on PATCH")
+        void shouldReplaceJackpotScaleFieldsWhenPresent() {
+            Game entity = Game.builder()
+                    .id("game-1")
+                    .name("BomJackpot")
+                    .jackpotScaleEnabled(false)
+                    .jackpotCeiling(0L)
+                    .build();
+
+            GameDTO dto = GameDTO.builder()
+                    .jackpotScaleEnabled(true)
+                    .jackpotCeiling(15_000_000L)
+                    .build();
+
+            mapper.updateEntityFromDTO(dto, entity);
+
+            assertThat(entity.isJackpotScaleEnabled()).isTrue();
+            assertThat(entity.getJackpotCeiling()).isEqualTo(15_000_000L);
+        }
+
+        @Test
+        @DisplayName("Keeps existing jackpotScaleEnabled and jackpotCeiling when the DTO omits them (PATCH-null = keep)")
+        void shouldKeepJackpotScaleFieldsWhenDtoNull() {
+            Game entity = Game.builder()
+                    .id("game-1")
+                    .name("BomJackpot")
+                    .jackpotScaleEnabled(true)
+                    .jackpotCeiling(20_000_000L)
+                    .build();
+
+            // A PATCH touching only the name must not reset the boxed jackpot fields
+            // to their primitive defaults.
+            GameDTO dto = GameDTO.builder().name("Renamed").build();
+
+            mapper.updateEntityFromDTO(dto, entity);
+
+            assertThat(entity.getName()).isEqualTo("Renamed");
+            assertThat(entity.isJackpotScaleEnabled()).isTrue();
+            assertThat(entity.getJackpotCeiling()).isEqualTo(20_000_000L);
         }
 
         @Test
