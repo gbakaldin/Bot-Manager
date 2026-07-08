@@ -6,6 +6,7 @@ import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.HasJackpot;
+import com.vingame.bot.domain.bot.message.HasJackpotPool;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -59,7 +60,7 @@ import lombok.Setter;
 @Getter
 @Setter
 public class TaiXiuEndGameMessage extends EndGameMessage
-        implements HasBotWinnings, HasJackpot, HasBetTotals {
+        implements HasBotWinnings, HasJackpot, HasBetTotals, HasJackpotPool {
 
     // Dice (1..6 each); sum determines Tai (>=11) vs Xiu (<=10).
     private int d1;
@@ -82,6 +83,15 @@ public class TaiXiuEndGameMessage extends EndGameMessage
     private boolean iJp;
     private long jpV;
 
+    /**
+     * Live running jackpot pool meter (the total winnable jackpot displayed in the
+     * game UI). Present on the P_114 {@code taixiuJackpotPlugin} EndGame (cmd 1104);
+     * absent on the plain P_116 {@code taixiuPlugin} EndGame (cmd 1004), where Jackson
+     * defaults it to {@code 0} (neutral downstream — AD-J3/AD-J5). DISTINCT from
+     * {@code jpV}/{@code iJp} (the per-bot payout driving {@link HasJackpot}).
+     */
+    private long tJpV;
+
     @JsonCreator
     public TaiXiuEndGameMessage(
             @JsonProperty("cmd") int cmd,
@@ -97,7 +107,8 @@ public class TaiXiuEndGameMessage extends EndGameMessage
             @JsonProperty("cR") long cR,
             @JsonProperty("CX") long CX,
             @JsonProperty("iJp") boolean iJp,
-            @JsonProperty("jpV") long jpV) {
+            @JsonProperty("jpV") long jpV,
+            @JsonProperty("tJpV") long tJpV) {
         super(cmd);
         this.d1 = d1;
         this.d2 = d2;
@@ -112,6 +123,7 @@ public class TaiXiuEndGameMessage extends EndGameMessage
         this.CX = CX;
         this.iJp = iJp;
         this.jpV = jpV;
+        this.tJpV = tJpV;
     }
 
     /**
@@ -178,5 +190,16 @@ public class TaiXiuEndGameMessage extends EndGameMessage
     @Override
     public long jackpotFor(String userName) {
         return iJp ? jpV : 0L;
+    }
+
+    /**
+     * Live running jackpot pool meter — {@code tJpV}. Non-zero on the P_114
+     * {@code taixiuJackpotPlugin} EndGame (cmd 1104); {@code 0} on the plain P_116
+     * {@code taixiuPlugin} EndGame (no meter on the wire → neutral downstream).
+     * DISTINCT from {@link #jackpotFor(String)} — see {@link HasJackpotPool}.
+     */
+    @Override
+    public long jackpotPool() {
+        return tJpV;
     }
 }

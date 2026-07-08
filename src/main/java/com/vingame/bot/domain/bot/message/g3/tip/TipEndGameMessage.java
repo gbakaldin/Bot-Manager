@@ -6,6 +6,7 @@ import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.HasJackpot;
+import com.vingame.bot.domain.bot.message.HasJackpotPool;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -14,7 +15,7 @@ import java.util.List;
 @Getter
 @Setter
 public class TipEndGameMessage extends EndGameMessage
-        implements HasBotWinnings, HasJackpot, HasBetTotals {
+        implements HasBotWinnings, HasJackpot, HasBetTotals, HasJackpotPool {
 
     /**
      * This bot's gross winnings for the just-completed round. Source: root {@code wm}
@@ -54,6 +55,18 @@ public class TipEndGameMessage extends EndGameMessage
     @Override
     public long jackpotFor(String userName) {
         return iJp ? jpV : 0L;
+    }
+
+    /**
+     * Live running jackpot pool meter — Tip's {@code tJpV}
+     * ({@code totalJackpotValue}, "the total winnable jackpot displayed in the game
+     * UI"). DISTINCT from {@link #jackpotFor(String)}: that reads {@code jpV} (this
+     * bot's per-round payout), this reads {@code tJpV} (the group-wide meter). See
+     * {@link HasJackpotPool}.
+     */
+    @Override
+    public long jackpotPool() {
+        return tJpV;
     }
 
     /**

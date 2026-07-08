@@ -204,7 +204,7 @@ class TaiXiuMessageDeserializationTest {
         TaiXiuEndGameMessage loss = new TaiXiuEndGameMessage(
                 1004, 1, 2, 3,
                 /*gB*/ 500000L, /*gR*/ 300000L, /*G*/ 0L, /*GX*/ 100000L,
-                0L, 0L, 0L, 0L, false, 0L);
+                0L, 0L, 0L, 0L, false, 0L, /*tJpV*/ 0L);
         assertThat(((HasBotWinnings) loss).winningsFor("x")).isZero(); // max(0, 100000 - 300000)
         // Effective stake = gB - gR.
         assertThat(((HasBetTotals) loss).betAmountFor("x")).isEqualTo(200000L);
@@ -219,7 +219,7 @@ class TaiXiuMessageDeserializationTest {
         TaiXiuEndGameMessage win = new TaiXiuEndGameMessage(
                 1104, 4, 6, 3,
                 /*gB*/ 56320000L, /*gR*/ 0L, /*G*/ 0L, /*GX*/ 91443200L,
-                0L, 0L, 0L, 0L, false, 0L);
+                0L, 0L, 0L, 0L, false, 0L, /*tJpV*/ 0L);
         assertThat(((HasBotWinnings) win).winningsFor("x")).isEqualTo(91443200L);
         assertThat(((HasBetTotals) win).betAmountFor("x")).isEqualTo(56320000L);
     }
@@ -230,13 +230,13 @@ class TaiXiuMessageDeserializationTest {
         TaiXiuEndGameMessage withJp = new TaiXiuEndGameMessage(
                 1004, 1, 2, 3,
                 500000L, 0L, 0L, 500000L,
-                0L, 0L, 0L, 0L, /*iJp*/ true, /*jpV*/ 123456L);
+                0L, 0L, 0L, 0L, /*iJp*/ true, /*jpV*/ 123456L, /*tJpV*/ 0L);
         assertThat(((HasJackpot) withJp).jackpotFor("x")).isEqualTo(123456L);
 
         TaiXiuEndGameMessage noJp = new TaiXiuEndGameMessage(
                 1004, 1, 2, 3,
                 500000L, 0L, 0L, 500000L,
-                0L, 0L, 0L, 0L, /*iJp*/ false, /*jpV*/ 123456L);
+                0L, 0L, 0L, 0L, /*iJp*/ false, /*jpV*/ 123456L, /*tJpV*/ 0L);
         assertThat(((HasJackpot) noJp).jackpotFor("x")).isZero();
     }
 }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.HasJackpot;
+import com.vingame.bot.domain.bot.message.HasJackpotPool;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -11,11 +12,20 @@ import java.util.List;
 
 @Getter
 @Setter
-public class NohuEndGameMessage extends EndGameMessage implements HasJackpot {
+public class NohuEndGameMessage extends EndGameMessage implements HasJackpot, HasJackpotPool {
 
     @Override
     public long jackpotFor(String userName) {
         return iJp ? tJpV : 0L;
+    }
+
+    /**
+     * Live running jackpot pool meter ({@code tJpV}). DISTINCT from
+     * {@link #jackpotFor(String)} — see {@link HasJackpotPool}.
+     */
+    @Override
+    public long jackpotPool() {
+        return tJpV;
     }
 
     @Override
