@@ -41,8 +41,39 @@ final class RoundBudget {
         this.committedAggregate = 0L;
     }
 
+    /**
+     * Private copy constructor for {@link #withBudget(Map)}: same {@code sessionId}
+     * and {@code cap}, a fresh immutable {@code budget}, but the committed running
+     * totals carried over from {@code src} (a defensive copy so the source stays
+     * independent).
+     */
+    private RoundBudget(RoundBudget src, Map<Integer, Long> newBudget) {
+        this.sessionId = src.sessionId;
+        this.cap = src.cap;
+        this.budget = Map.copyOf(newBudget);
+        this.committed = new HashMap<>(src.committed);
+        this.committedAggregate = src.committedAggregate;
+    }
+
     long sessionId() {
         return sessionId;
+    }
+
+    /** @return the immutable per-option target budget map. */
+    Map<Integer, Long> budget() {
+        return budget;
+    }
+
+    /**
+     * Return a new {@link RoundBudget} for the same round with {@code newBudget}
+     * replacing the per-option targets while <em>preserving</em> the committed
+     * running totals ({@code committed}/{@code committedAggregate}). Used by the
+     * coordinator's intra-round crowd recompute (AD-C9): the fleet's spend so far
+     * this round is real and must survive a mid-round budget swap. Caller holds
+     * the coordinator lock.
+     */
+    RoundBudget withBudget(Map<Integer, Long> newBudget) {
+        return new RoundBudget(this, newBudget);
     }
 
     /** @return this option's target budget, or {@code 0} if the option is unknown. */
