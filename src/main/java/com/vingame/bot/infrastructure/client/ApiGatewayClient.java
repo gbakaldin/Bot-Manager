@@ -49,6 +49,7 @@ public class ApiGatewayClient {
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private static final String VERIFY_TOKEN_ENDPOINT = "/gwms/v1/verifytoken.aspx";
+    private static final String BOT_DEPOSIT_ENDPOINT = "/gwms/v1/bot/deposit.aspx";
     private static final String USER_AGENT = "PostmanRuntime/7.15.2";
     private static final String SESSION_TOKEN_HEADER = "X-TOKEN";
 
@@ -406,6 +407,53 @@ public class ApiGatewayClient {
 
         log.error("Failed to set display name after {} attempts", maxRetries);
         return null;
+    }
+
+    /**
+     * Deposit funds into a bot's game wallet via the gwms bot-deposit endpoint.
+     * <p>
+     * This credits the game-spendable wallet partition — unlike the legacy
+     * {@code GameMsClient} agency-transfer path, which credits the agency
+     * partition that {@code verifytoken.aspx} reports but the game engine does
+     * not debit (the P_097/BOM "balance visible but bets rejected" symptom).
+     * Uses the same per-env admin {@code X-TOKEN} + username-in-body pattern as
+     * register / update-fullname.
+     *
+     * @param username Bot username to credit
+     * @param amount   Amount to deposit
+     * @return true if the deposit succeeded (HTTP 200)
+     */
+    public boolean deposit(String username, long amount) {
+        checkInitialized();
+        try {
+            Object body = java.util.Map.of("username", username, "amount", amount);
+            String requestBody = mapper.writeValueAsString(body);
+            String url = apiGateway + BOT_DEPOSIT_ENDPOINT;
+            log.debug("[BotDeposit] POST {} | X-TOKEN: {} | body: {}", url, xToken, requestBody);
+
+            HttpRequest httpRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", USER_AGENT)
+                    .header(SESSION_TOKEN_HEADER, xToken)
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                    .timeout(Duration.ofSeconds(10))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            String responseBody = response.body();
+            boolean success = response.statusCode() == 200;
+            if (success) {
+                log.debug("[BotDeposit] response HTTP {} | body: {}", response.statusCode(), responseBody);
+            } else {
+                log.warn("[BotDeposit] non-200 response for user {} — status: {} | body: {}",
+                        username, response.statusCode(), responseBody);
+            }
+            return success;
+        } catch (IOException | InterruptedException e) {
+            log.error("Bot deposit failed for user: {}", username, e);
+            return false;
+        }
     }
 
     /**
