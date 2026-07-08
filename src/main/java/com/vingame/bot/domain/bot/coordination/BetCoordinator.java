@@ -46,6 +46,16 @@ public final class BetCoordinator {
      */
     private final boolean crowdAware;
 
+    /**
+     * The game's per-game crowd count semantic (CROWD_AWARE_COORDINATION AD-C5),
+     * carried as a {@code String} so the core stays Spring-/domain-free (it is a
+     * game-intrinsic {@code CrowdCountSemantic} enum name at the wiring layer). It
+     * is <b>never load-bearing</b> in the v1 budget math (steering is on {@code v}
+     * alone, AD-C5); it is stored purely for the Phase 4 health snapshot (AD-C10).
+     * {@code "UNKNOWN"} when unset.
+     */
+    private final String crowdCountSemantic;
+
     /** Round-independent per-option target budgets: {@code floor(w(o)/W * cap)}. */
     private final Map<Integer, Long> targetBudget;
 
@@ -109,6 +119,26 @@ public final class BetCoordinator {
                           long minBet,
                           long betIncrement,
                           boolean crowdAware) {
+        this(optionAffinities, maxAggregateStakePerRound, minBet, betIncrement, crowdAware, "UNKNOWN");
+    }
+
+    /**
+     * Full crowd-aware overload (CROWD_AWARE_COORDINATION Phase 3) carrying the
+     * game's crowd count semantic for the Phase 4 health snapshot (AD-C10). The
+     * semantic is observability-only and never enters the budget math (AD-C5) — a
+     * wrong value cannot corrupt steering. The 5-arg overload delegates here with
+     * {@code "UNKNOWN"}.
+     *
+     * @param crowdCountSemantic the {@code CrowdCountSemantic} enum name
+     *                           ({@code BETS}/{@code PLAYERS}/{@code UNKNOWN});
+     *                           {@code null} resolves to {@code "UNKNOWN"}.
+     */
+    public BetCoordinator(Map<Integer, Integer> optionAffinities,
+                          long maxAggregateStakePerRound,
+                          long minBet,
+                          long betIncrement,
+                          boolean crowdAware,
+                          String crowdCountSemantic) {
         // Preserve the affinity iteration order (insertion order of the source
         // map) so the health DTO's option list is stable; Map.copyOf would not.
         this.optionAffinities = java.util.Collections.unmodifiableMap(new LinkedHashMap<>(optionAffinities));
@@ -116,6 +146,7 @@ public final class BetCoordinator {
         this.minBet = minBet;
         this.betIncrement = betIncrement;
         this.crowdAware = crowdAware;
+        this.crowdCountSemantic = crowdCountSemantic != null ? crowdCountSemantic : "UNKNOWN";
         this.targetBudget = computeTargetBudget(this.optionAffinities, maxAggregateStakePerRound);
         // Sentinel budget for "no active round" — sessionId 0, empty targets.
         this.current = new RoundBudget(0L, maxAggregateStakePerRound, Map.of());
@@ -124,6 +155,15 @@ public final class BetCoordinator {
     /** @return whether the crowd tier is enabled on this coordinator (AD-C6). */
     public boolean isCrowdAware() {
         return crowdAware;
+    }
+
+    /**
+     * @return the game's crowd count semantic ({@code BETS}/{@code PLAYERS}/
+     *         {@code UNKNOWN}) for the health snapshot (AD-C10); never load-bearing
+     *         in the budget math (AD-C5).
+     */
+    public String getCrowdCountSemantic() {
+        return crowdCountSemantic;
     }
 
     /**
