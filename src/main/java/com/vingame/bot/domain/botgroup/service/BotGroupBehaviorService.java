@@ -18,6 +18,7 @@ import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotGroupStatsDTO;
 import com.vingame.bot.domain.botgroup.dto.CoordinationStateDTO;
+import com.vingame.bot.domain.botgroup.dto.JackpotScaleStateDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
@@ -857,6 +858,31 @@ public class BotGroupBehaviorService {
                 .bots(botDtos)
                 .stats(computeStats(id))
                 .coordination(buildCoordinationState(runtime.getCoordinator()))
+                .jackpotScale(buildJackpotScaleState(runtime.getJackpotScaler()))
+                .build();
+    }
+
+    /**
+     * Read-side jackpot-scaler view (JACKPOT_SCALE_AND_RAMP Phase J4, AD-J10).
+     * Returns {@code null} when the group has no scaler (jackpot-scale off /
+     * ineligible / not running), so the {@code jackpotScale} block is absent for
+     * those groups. Otherwise reads the scaler's coherent {@code snapshot()} — a
+     * single lock acquisition so the view is never torn against a concurrent
+     * {@code observePool} — and maps it into the DTO. Strictly read-only: nothing
+     * here mutates scaler state.
+     */
+    private JackpotScaleStateDTO buildJackpotScaleState(JackpotScaler scaler) {
+        if (scaler == null) {
+            return null;
+        }
+        JackpotScaler.Snapshot snapshot = scaler.snapshot();
+        return JackpotScaleStateDTO.builder()
+                .enabled(true)
+                .jackpotCeiling(snapshot.ceiling())
+                .seedFloor(snapshot.seedFloor())
+                .lastObservedPool(snapshot.lastObservedPool())
+                .currentFactor(snapshot.currentFactor())
+                .minMultiplier(snapshot.minMultiplier())
                 .build();
     }
 

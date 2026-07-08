@@ -2,6 +2,7 @@ package com.vingame.bot.domain.botgroup.service;
 
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.domain.bot.coordination.BetCoordinator;
+import com.vingame.bot.domain.bot.coordination.JackpotScaler;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.bot.service.BotFactory;
@@ -12,6 +13,7 @@ import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.CoordinationStateDTO;
+import com.vingame.bot.domain.botgroup.dto.JackpotScaleStateDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
@@ -485,6 +487,62 @@ class BotGroupBehaviorServiceTest {
                 BotGroupHealthDTO dto = service.getHealth("g-1");
 
                 assertThat(dto.getCoordination()).isNull();
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("getHealth() surfaces the jackpot-scale state when a scaler is present on the runtime (JACKPOT_SCALE_AND_RAMP Phase J4)")
+        void healthSurfacesJackpotScaleState() {
+            BotGroup group = BotGroup.builder().id("g-1").name("Group").build();
+            when(botGroupService.findById("g-1")).thenReturn(group);
+
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1");
+            runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+            try {
+                // ceiling 2_000_000, seedFloor 500_000, minMultiplier 0.25.
+                // Observe pool 1_250_000 → t = (1_250_000 - 500_000)/(2_000_000 - 500_000) = 0.5
+                // → factor = 0.25 + 0.75 * 0.5 = 0.625.
+                JackpotScaler scaler = new JackpotScaler(2_000_000L, 500_000L, 0.25);
+                scaler.observePool(42L, 1_250_000L);
+                runtime.setJackpotScaler(scaler);
+
+                putBots(runtime, List.of());
+                runningGroups().put("g-1", runtime);
+
+                BotGroupHealthDTO dto = service.getHealth("g-1");
+
+                JackpotScaleStateDTO jackpotScale = dto.getJackpotScale();
+                assertThat(jackpotScale).isNotNull();
+                assertThat(jackpotScale.isEnabled()).isTrue();
+                assertThat(jackpotScale.getJackpotCeiling()).isEqualTo(2_000_000L);
+                assertThat(jackpotScale.getSeedFloor()).isEqualTo(500_000L);
+                assertThat(jackpotScale.getLastObservedPool()).isEqualTo(1_250_000L);
+                assertThat(jackpotScale.getCurrentFactor()).isEqualTo(0.625);
+                assertThat(jackpotScale.getMinMultiplier()).isEqualTo(0.25);
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("getHealth() leaves the jackpotScale block null when no scaler is present (JACKPOT_SCALE_AND_RAMP Phase J4)")
+        void healthOmitsJackpotScaleWhenAbsent() {
+            BotGroup group = BotGroup.builder().id("g-1").name("Group").build();
+            when(botGroupService.findById("g-1")).thenReturn(group);
+
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1");
+            runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+            try {
+                putBots(runtime, List.of());
+                runningGroups().put("g-1", runtime);
+
+                BotGroupHealthDTO dto = service.getHealth("g-1");
+
+                assertThat(dto.getJackpotScale()).isNull();
             } finally {
                 runtime.getExecutor().shutdownNow();
                 runningGroups().remove("g-1");

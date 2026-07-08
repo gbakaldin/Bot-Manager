@@ -44,4 +44,12 @@ public class BotGroupHealthDTO {
      * when coordination is off or the group is not running.
      */
     private CoordinationStateDTO coordination;
+
+    /**
+     * Jackpot volume scaler state (JACKPOT_SCALE_AND_RAMP Phase J4, AD-J10).
+     * Nullable: present only when the group is running with a jackpot scaler
+     * active (jackpot-scale enabled and eligible); absent (null) when
+     * jackpot-scale is off/ineligible or the group is not running.
+     */
+    private JackpotScaleStateDTO jackpotScale;
 }
