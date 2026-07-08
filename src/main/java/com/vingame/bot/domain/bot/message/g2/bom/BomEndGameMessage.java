@@ -2,7 +2,9 @@ package com.vingame.bot.domain.bot.message.g2.bom;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.vingame.bot.domain.bot.coordination.CrowdOption;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
+import com.vingame.bot.domain.bot.message.HasCrowdBets;
 import com.vingame.bot.domain.bot.message.HasJackpot;
 import com.vingame.bot.domain.bot.message.HasJackpotPool;
 import lombok.Getter;
@@ -12,7 +14,7 @@ import java.util.List;
 
 @Getter
 @Setter
-public class BomEndGameMessage extends EndGameMessage implements HasJackpot, HasJackpotPool {
+public class BomEndGameMessage extends EndGameMessage implements HasJackpot, HasJackpotPool, HasCrowdBets {
 
     @Override
     public long jackpotFor(String userName) {
@@ -31,6 +33,22 @@ public class BomEndGameMessage extends EndGameMessage implements HasJackpot, Has
     @Override
     public long getSessionId() {
         return sid;
+    }
+
+    /**
+     * Per-option crowd distribution from the EndGame {@code bs} array (AD-C1).
+     * The {@code BetInfo} entry shape has no {@code b} field, so own-bet is 0
+     * (the coordinator does not use it in v1 anyway — AD-C4). A missing {@code bs}
+     * yields an empty list.
+     */
+    @Override
+    public List<CrowdOption> crowdBets() {
+        if (bs == null) {
+            return List.of();
+        }
+        return bs.stream()
+                .map(e -> new CrowdOption(e.getEid(), e.getV(), 0L, e.getBc()))
+                .toList();
     }
 
     private int d1;

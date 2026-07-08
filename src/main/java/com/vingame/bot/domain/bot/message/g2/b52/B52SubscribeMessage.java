@@ -2,6 +2,8 @@ package com.vingame.bot.domain.bot.message.g2.b52;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.vingame.bot.domain.bot.coordination.CrowdOption;
+import com.vingame.bot.domain.bot.message.HasCrowdBets;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import lombok.Getter;
 import lombok.Setter;
@@ -10,7 +12,7 @@ import java.util.List;
 
 @Getter
 @Setter
-public class B52SubscribeMessage extends SubscribeMessage {
+public class B52SubscribeMessage extends SubscribeMessage implements HasCrowdBets {
 
     private long mnB;
     private long tJpV;
@@ -81,6 +83,21 @@ public class B52SubscribeMessage extends SubscribeMessage {
         this.pR = pR;
         this.cH = cH;
         this.htr = htr;
+    }
+
+    /**
+     * Per-option crowd distribution from the Subscribe {@code bs} array (AD-C1).
+     * {@code b} is carried into {@link CrowdOption#ownBet()} (D3, unused by v1).
+     * Empty when no {@code bs}.
+     */
+    @Override
+    public List<CrowdOption> crowdBets() {
+        if (bs == null) {
+            return List.of();
+        }
+        return bs.stream()
+                .map(e -> new CrowdOption(e.getEid(), e.getV(), e.getB(), e.getBc()))
+                .toList();
     }
 
     @Override

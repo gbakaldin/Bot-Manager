@@ -2,9 +2,11 @@ package com.vingame.bot.domain.bot.message.g3.tip;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.vingame.bot.domain.bot.coordination.CrowdOption;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
+import com.vingame.bot.domain.bot.message.HasCrowdBets;
 import com.vingame.bot.domain.bot.message.HasJackpot;
 import com.vingame.bot.domain.bot.message.HasJackpotPool;
 import lombok.Getter;
@@ -15,7 +17,7 @@ import java.util.List;
 @Getter
 @Setter
 public class TipEndGameMessage extends EndGameMessage
-        implements HasBotWinnings, HasJackpot, HasBetTotals, HasJackpotPool {
+        implements HasBotWinnings, HasJackpot, HasBetTotals, HasJackpotPool, HasCrowdBets {
 
     /**
      * This bot's gross winnings for the just-completed round. Source: root {@code wm}
@@ -108,6 +110,22 @@ public class TipEndGameMessage extends EndGameMessage
     @Override
     public long getSessionId() {
         return sid;
+    }
+
+    /**
+     * Per-option crowd distribution from the EndGame {@code bs} array (AD-C1) —
+     * the full-round crowd distribution, used as a one-round-lagged prior for the
+     * next round (AD-C3). {@code BetInfoWithTotal} carries own {@code b} (D3,
+     * unused by v1). Empty when no {@code bs}.
+     */
+    @Override
+    public List<CrowdOption> crowdBets() {
+        if (bs == null) {
+            return List.of();
+        }
+        return bs.stream()
+                .map(e -> new CrowdOption(e.getEid(), e.getV(), e.getB(), e.getBc()))
+                .toList();
     }
 
     private boolean iJ;
