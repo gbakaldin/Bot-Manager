@@ -25,6 +25,7 @@ import com.vingame.bot.domain.bot.message.GameMessageTypes;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.HasJackpot;
+import com.vingame.bot.domain.bot.message.HasJackpotPool;
 import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
@@ -93,6 +94,13 @@ public class BettingMiniGameBot extends Bot {
     // on every tick. The strategy never holds its own RNG (see Decision 13 and
     // BettingStrategyFactory javadoc); the bot owns lifecycle and seeding.
     private Random rng = new Random();
+
+    // JACKPOT_SCALE_AND_RAMP (AD-J4): the volume scale factor for the current round,
+    // snapshotted once at onStartGame from the group-scoped jackpotScaler. Read on
+    // the scenario thread when building the BetContext's effectiveMaxBetsPerRound;
+    // written on the netty thread at StartGame. Volatile so the scenario thread sees
+    // the round's factor. 1.0 (neutral) when jackpotScaler is null (feature off).
+    private volatile double currentJackpotFactor = 1.0;
 
     // Factual rolling history (Phase 2 of BETTING_STRATEGIES). Populated from
     // incoming WS messages in onStartGame/onEndGame and from outbound bets in
@@ -402,6 +410,12 @@ public class BettingMiniGameBot extends Bot {
         if (coordinator != null) {
             coordinator.onRound(msg.getSessionId());
         }
+        // JACKPOT_SCALE_AND_RAMP (AD-J4): snapshot the group's current volume factor
+        // for this upcoming round (one-round lag — AD-J7 — the factor reflects the
+        // previous round's observed pool). Read once per round here; the strategy
+        // consults the derived effectiveMaxBetsPerRound via BetContext. 1.0 (neutral)
+        // when jackpot-scale is off.
+        currentJackpotFactor = jackpotScaler != null ? jackpotScaler.getCurrentFactor() : 1.0;
         // pendingDecision is intentionally NOT cleared here. Clearing on the
         // netty thread mid-tick raced with the scenario thread between
         // betCondition() (parks decision) and bet() (consumes decision) —
@@ -499,6 +513,14 @@ public class BettingMiniGameBot extends Bot {
         if (coordinator != null) {
             coordinator.onRoundComplete(endGameSessionId(msg));
         }
+        // JACKPOT_SCALE_AND_RAMP (AD-J2): read the live pool meter (tJpV via the
+        // HasJackpotPool marker — DISTINCT from HasJackpot's per-bot payout) and fold
+        // it into the group-scoped scaler. First-seen idempotent across the group's
+        // bots. Null when jackpot-scale is off (AD-S3). A meterless frame carries
+        // pool=0, which the scaler treats as "not observed" → neutral (AD-J5).
+        if (jackpotScaler != null && msg instanceof HasJackpotPool hp) {
+            jackpotScaler.observePool(endGameSessionId(msg), hp.jackpotPool());
+        }
 
         gameState = BettingMiniGameState.PAYOUT;
         if (scheduler != null) {
@@ -550,13 +572,31 @@ public class BettingMiniGameBot extends Bot {
      * stale by the next tick.
      */
     private BetContext buildBetContext() {
+        BotBehaviorConfig behavior = configuration.getBehaviorConfig();
         return new BetContext(
                 memory,
-                configuration.getBehaviorConfig(),
+                behavior,
                 configuration.getGame(),
                 expectedCurrentBalance.get(),
                 memory.getCurrentRound(),
-                rng);
+                rng,
+                effectiveMaxBetsPerRound(behavior));
+    }
+
+    /**
+     * The per-round bet ceiling for the current round (JACKPOT_SCALE_AND_RAMP AD-J4).
+     * With jackpot-scale off ({@code currentJackpotFactor == 1.0}) this returns
+     * {@code behavior.getMaxBetsPerRound()} unchanged (byte-for-byte today); when on,
+     * it is {@code max(1, round(maxBetsPerRound × factor))} so a bot never drops below
+     * one bet per round while betting is enabled.
+     */
+    private int effectiveMaxBetsPerRound(BotBehaviorConfig behavior) {
+        int configured = behavior.getMaxBetsPerRound();
+        double factor = currentJackpotFactor;
+        if (factor == 1.0) {
+            return configured;
+        }
+        return (int) Math.max(1, Math.round(configured * factor));
     }
 
     /**

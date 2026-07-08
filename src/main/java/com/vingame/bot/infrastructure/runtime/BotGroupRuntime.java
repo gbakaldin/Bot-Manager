@@ -4,6 +4,7 @@ import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.coordination.BetCoordinator;
+import com.vingame.bot.domain.bot.coordination.JackpotScaler;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
@@ -79,6 +80,13 @@ public class BotGroupRuntime {
     // BotGroupBehaviorService.start() for BETTING_MINI/TAI_XIU groups (AD-10) and
     // injected into each bot before startBot.
     private BetCoordinator coordinator;
+
+    // Group-scoped jackpot scaler (JACKPOT_SCALE_AND_RAMP). Nullable: null when the
+    // game's jackpotScaleEnabled is false or the type is ineligible — every bot's
+    // jackpotScaler ref is then null and the bet path is byte-for-byte today's
+    // (AD-S3). Built in BotGroupBehaviorService.start() for BETTING_MINI/TAI_XIU
+    // groups (AD-J3) and injected into each bot before startBot.
+    private JackpotScaler jackpotScaler;
 
     // Timestamp of the most recent transition INTO DEAD at the group level.
     // Cleared at stopAllBots() after the dead-window is credited. Volatile because

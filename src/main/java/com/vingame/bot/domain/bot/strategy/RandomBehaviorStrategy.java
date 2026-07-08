@@ -71,9 +71,13 @@ public final class RandomBehaviorStrategy implements BettingStrategy {
                 currentRoundSessionId = sid;
                 numberOfBetsInCurrentSession = 0;
             }
-            if (numberOfBetsInCurrentSession >= behavior.getMaxBetsPerRound()) {
+            // JACKPOT_SCALE_AND_RAMP (AD-J4): read the jackpot-scaled per-round cap
+            // from the context, not behavior.getMaxBetsPerRound() directly. With the
+            // feature off (factor 1.0) it equals behavior.getMaxBetsPerRound() exactly.
+            int maxBetsPerRound = ctx.effectiveMaxBetsPerRound();
+            if (numberOfBetsInCurrentSession >= maxBetsPerRound) {
                 log.trace("RandomBehaviorStrategy.decide: skip — already placed {} bets this round (max {})",
-                        numberOfBetsInCurrentSession, behavior.getMaxBetsPerRound());
+                        numberOfBetsInCurrentSession, maxBetsPerRound);
                 return Optional.empty();
             }
 

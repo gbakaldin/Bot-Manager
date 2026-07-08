@@ -2,6 +2,7 @@ package com.vingame.bot.domain.bot.core;
 
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.coordination.BetCoordinator;
+import com.vingame.bot.domain.bot.coordination.JackpotScaler;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
@@ -59,6 +60,12 @@ public abstract class Bot {
     // wired in BotFactory). Null-tolerant exactly like {@code sessionAggregator}:
     // null means coordination is off and the bot proposes/sends as it does today.
     protected BetCoordinator coordinator;
+
+    // Group-scoped jackpot scaler (JACKPOT_SCALE_AND_RAMP) — set via builder-style
+    // setter by the runtime startBot loop, mirroring {@code coordinator}. Null-tolerant:
+    // null means jackpot-scale is off (or the type is ineligible) and the bot's
+    // effective per-round bet cap is the configured maxBetsPerRound (factor 1.0).
+    protected JackpotScaler jackpotScaler;
 
     // Bot runtime configuration (set via builder-style setters)
     @Getter
@@ -187,6 +194,19 @@ public abstract class Bot {
      */
     public Bot setCoordinator(BetCoordinator coordinator) {
         this.coordinator = coordinator;
+        return this;
+    }
+
+    /**
+     * Wire the group-scoped {@link JackpotScaler}. Null-tolerant and fluent,
+     * mirroring {@link #setCoordinator}. A {@code null} argument (jackpot-scale off
+     * or type ineligible) leaves the bot on today's byte-for-byte path — the
+     * effective per-round bet cap stays the configured {@code maxBetsPerRound}
+     * (factor 1.0). Injected by the runtime startBot loop before {@code start()},
+     * so the scenario never sees a half-wired bot.
+     */
+    public Bot setJackpotScaler(JackpotScaler jackpotScaler) {
+        this.jackpotScaler = jackpotScaler;
         return this;
     }
 

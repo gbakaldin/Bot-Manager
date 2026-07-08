@@ -38,6 +38,15 @@ import java.util.Random;
  * @param rng             per-bot {@link Random} owned by the strategy instance.
  *                        Passed in the context so the strategy never needs to
  *                        thread its own RNG through {@code decide(...)}.
+ * @param effectiveMaxBetsPerRound the per-round bet ceiling the strategy must
+ *                        enforce this round. Normally
+ *                        {@code behavior.getMaxBetsPerRound()}; when JACKPOT_SCALE
+ *                        is on (AD-J4) it is the jackpot-scaled cap
+ *                        {@code max(1, round(maxBetsPerRound × factor))}. Strategies
+ *                        read this instead of {@code behavior.getMaxBetsPerRound()}
+ *                        so the volume lever applies uniformly; with the feature off
+ *                        (factor 1.0) it equals {@code behavior.getMaxBetsPerRound()}
+ *                        exactly (byte-for-byte today).
  */
 public record BetContext(
         BotMemory memory,
@@ -45,5 +54,23 @@ public record BetContext(
         Game game,
         long currentBalance,
         RoundState currentRound,
-        Random rng) {
+        Random rng,
+        int effectiveMaxBetsPerRound) {
+
+    /**
+     * Convenience constructor for the default (jackpot-scale off / factor 1.0) path:
+     * {@code effectiveMaxBetsPerRound} defaults to {@code behavior.getMaxBetsPerRound()},
+     * i.e. byte-for-byte today's cap. The bot's hot path uses the full canonical
+     * constructor with the jackpot-scaled cap; this overload keeps neutral-path
+     * callers (and tests) terse and explicit about the default.
+     */
+    public BetContext(BotMemory memory,
+                      BotBehaviorConfig behavior,
+                      Game game,
+                      long currentBalance,
+                      RoundState currentRound,
+                      Random rng) {
+        this(memory, behavior, game, currentBalance, currentRound, rng,
+                behavior.getMaxBetsPerRound());
+    }
 }

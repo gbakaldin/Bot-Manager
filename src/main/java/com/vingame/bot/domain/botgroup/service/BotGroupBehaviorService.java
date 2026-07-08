@@ -4,6 +4,7 @@ import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.coordination.BetCoordinator;
+import com.vingame.bot.domain.bot.coordination.JackpotScaler;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyAssignment;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
@@ -293,6 +294,24 @@ public class BotGroupBehaviorService {
                         group.getMaxAggregateStakePerRound());
             }
 
+            // JACKPOT_SCALE_AND_RAMP (AD-J3/AD-S1): build a group-scoped jackpot
+            // scaler only when the game's jackpotScaleEnabled AND the type shares the
+            // betting-mini/TaiXiu round model. No per-type branch or skip-log — a Tai
+            // Xiu game with no live tJpV on the wire simply never observes a non-zero
+            // pool and stays neutral (AD-J3/AD-J5). Off ⇒ no scaler, every bot's ref
+            // stays null, the bet path is byte-for-byte today's (AD-S3).
+            if (game.isJackpotScaleEnabled()
+                    && (game.getGameType() == GameType.BETTING_MINI || game.getGameType() == GameType.TAI_XIU)) {
+                JackpotScaler jackpotScaler = new JackpotScaler(
+                        game.getJackpotCeiling(),
+                        JackpotScaler.DEFAULT_SEED_FLOOR,
+                        0.25);
+                runtime.setJackpotScaler(jackpotScaler);
+                log.info("Jackpot scaler created for group {} (ceiling {})",
+                        group.getName(), game.getJackpotCeiling());
+                // AD-J9: optional coordinator-cap composition deferred
+            }
+
             log.info("Creating {} bots for group {} with parallel execution (parallelism={})",
                     group.getBotCount(), group.getName(), botCreationParallelism);
 
@@ -305,6 +324,10 @@ public class BotGroupBehaviorService {
                 // BEFORE startBot so the scenario never sees a half-wired bot.
                 // Null when coordination is off ⇒ the bot bypasses coordination.
                 bot.setCoordinator(runtime.getCoordinator());
+                // JACKPOT_SCALE_AND_RAMP (AD-J8): inject the group-scoped jackpot
+                // scaler BEFORE startBot, exactly like the coordinator. Null when
+                // jackpot-scale is off ⇒ the bot's effective cap stays maxBetsPerRound.
+                bot.setJackpotScaler(runtime.getJackpotScaler());
                 runtime.startBot(bot);
                 log.debug("Started bot {}", bot.getUserName());
             }
