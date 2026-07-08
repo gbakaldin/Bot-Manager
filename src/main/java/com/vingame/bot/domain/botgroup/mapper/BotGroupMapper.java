@@ -38,6 +38,7 @@ public interface BotGroupMapper {
                 .maxAggregateStakePerRound(entity.getMaxAggregateStakePerRound())
                 .rampEnabled(entity.isRampEnabled())
                 .rampShape(entity.getRampShape())
+                .affinityWeightedProposal(entity.isAffinityWeightedProposal())
                 .activationMode(entity.getActivationMode())
                 .activationWindow(entity.getActivationWindow())
                 .chatEnabled(entity.isChatEnabled())
@@ -79,6 +80,7 @@ public interface BotGroupMapper {
                 .maxAggregateStakePerRound(Optional.ofNullable(dto.getMaxAggregateStakePerRound()).orElse(0L))
                 .rampEnabled(Optional.ofNullable(dto.getRampEnabled()).orElse(false))
                 .rampShape(Optional.ofNullable(dto.getRampShape()).orElse(0.0))
+                .affinityWeightedProposal(Optional.ofNullable(dto.getAffinityWeightedProposal()).orElse(false))
                 .activationMode(dto.getActivationMode())
                 .activationWindow(dto.getActivationWindow())
                 .chatEnabled(Optional.ofNullable(dto.getChatEnabled()).orElse(false))
@@ -124,6 +126,10 @@ public interface BotGroupMapper {
         // keeps the existing value. Mirrors the coordination scalar pair.
         entity.setRampEnabled(Optional.ofNullable(dto.getRampEnabled()).orElse(entity.isRampEnabled()));
         entity.setRampShape(Optional.ofNullable(dto.getRampShape()).orElse(entity.getRampShape()));
+        // affinityWeightedProposal PATCH semantics (AFFINITY_AWARE_PROPOSAL AD-7):
+        // full-replace if the DTO supplies the field (non-null); a null DTO field
+        // keeps the existing value. Mirrors the ramp/coordination scalar flags.
+        entity.setAffinityWeightedProposal(Optional.ofNullable(dto.getAffinityWeightedProposal()).orElse(entity.isAffinityWeightedProposal()));
         // activationMode / activationWindow PATCH semantics: full-replace if the
         // DTO supplies the field (non-null); a null DTO field keeps the existing
         // value. Mirrors slotStrategyId. To hand a scheduled group back to the

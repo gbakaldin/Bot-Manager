@@ -54,6 +54,7 @@ class BotGroupMapperTest {
                     .maxAggregateStakePerRound(50000L)
                     .rampEnabled(true)
                     .rampShape(3.0)
+                    .affinityWeightedProposal(true)
                     .activationMode(ActivationMode.SCHEDULED)
                     .activationWindow(ActivationWindow.builder()
                             .from(LocalTime.of(18, 0))
@@ -88,6 +89,7 @@ class BotGroupMapperTest {
             assertThat(dto.getMaxAggregateStakePerRound()).isEqualTo(50000L);
             assertThat(dto.getRampEnabled()).isTrue();
             assertThat(dto.getRampShape()).isEqualTo(3.0);
+            assertThat(dto.getAffinityWeightedProposal()).isTrue();
             assertThat(dto.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
             assertThat(dto.getActivationWindow()).isEqualTo(ActivationWindow.builder()
                     .from(LocalTime.of(18, 0))
@@ -136,6 +138,7 @@ class BotGroupMapperTest {
                     .maxAggregateStakePerRound(50000L)
                     .rampEnabled(true)
                     .rampShape(3.0)
+                    .affinityWeightedProposal(true)
                     .activationMode(ActivationMode.SCHEDULED)
                     .activationWindow(ActivationWindow.builder()
                             .from(LocalTime.of(22, 0))
@@ -170,6 +173,7 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(50000L);
             assertThat(entity.isRampEnabled()).isTrue();
             assertThat(entity.getRampShape()).isEqualTo(3.0);
+            assertThat(entity.isAffinityWeightedProposal()).isTrue();
             assertThat(entity.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
             assertThat(entity.getActivationWindow()).isEqualTo(ActivationWindow.builder()
                     .from(LocalTime.of(22, 0))
@@ -210,6 +214,7 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(0L);
             assertThat(entity.isRampEnabled()).isFalse();
             assertThat(entity.getRampShape()).isEqualTo(0.0);
+            assertThat(entity.isAffinityWeightedProposal()).isFalse();
             assertThat(entity.getActivationMode()).isNull();
             assertThat(entity.getActivationWindow()).isNull();
             assertThat(entity.isChatEnabled()).isFalse();
@@ -242,6 +247,7 @@ class BotGroupMapperTest {
                     .maxAggregateStakePerRound(50000L)
                     .rampEnabled(true)
                     .rampShape(3.0)
+                    .affinityWeightedProposal(true)
                     .activationMode(ActivationMode.SCHEDULED)
                     .activationWindow(ActivationWindow.builder()
                             .from(LocalTime.of(18, 0))
@@ -274,6 +280,7 @@ class BotGroupMapperTest {
             assertThat(entity.getMaxAggregateStakePerRound()).isEqualTo(50000L);
             assertThat(entity.isRampEnabled()).isTrue();
             assertThat(entity.getRampShape()).isEqualTo(3.0);
+            assertThat(entity.isAffinityWeightedProposal()).isTrue();
             assertThat(entity.getActivationMode()).isEqualTo(ActivationMode.SCHEDULED);
             assertThat(entity.getActivationWindow()).isEqualTo(ActivationWindow.builder()
                     .from(LocalTime.of(18, 0))
@@ -548,6 +555,73 @@ class BotGroupMapperTest {
 
             assertThat(entity.isRampEnabled()).isTrue();
             assertThat(entity.getRampShape()).isEqualTo(3.0);
+        }
+    }
+
+    @Nested
+    @DisplayName("affinityWeightedProposal mapping (AFFINITY_AWARE_PROPOSAL Phase 2)")
+    class AffinityWeightedProposalTests {
+
+        @Test
+        @DisplayName("toDTO emits the flag from the entity")
+        void toDtoEmitsFlag() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .affinityWeightedProposal(true)
+                    .build();
+
+            BotGroupDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getAffinityWeightedProposal()).isTrue();
+        }
+
+        @Test
+        @DisplayName("toEntity persists the flag from the DTO")
+        void toEntityPersistsFlag() {
+            BotGroupDTO dto = BotGroupDTO.builder().name("g")
+                    .affinityWeightedProposal(true)
+                    .build();
+
+            BotGroup entity = mapper.toEntity(dto);
+
+            assertThat(entity.isAffinityWeightedProposal()).isTrue();
+        }
+
+        @Test
+        @DisplayName("toEntity defaults the flag to false when the DTO omits it")
+        void toEntityDefaultsFlagWhenNull() {
+            BotGroupDTO dto = BotGroupDTO.builder().name("g").build();
+
+            BotGroup entity = mapper.toEntity(dto);
+
+            assertThat(entity.isAffinityWeightedProposal()).isFalse();
+        }
+
+        @Test
+        @DisplayName("PATCH full-replaces the flag when the DTO supplies it")
+        void patchFullReplacesFlag() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .affinityWeightedProposal(false)
+                    .build();
+            BotGroupDTO patch = BotGroupDTO.builder()
+                    .affinityWeightedProposal(true)
+                    .build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.isAffinityWeightedProposal()).isTrue();
+        }
+
+        @Test
+        @DisplayName("PATCH retains the existing flag when the DTO omits it (null)")
+        void patchKeepsExistingWhenDtoNull() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .affinityWeightedProposal(true)
+                    .build();
+            BotGroupDTO patch = BotGroupDTO.builder().name("renamed").build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.isAffinityWeightedProposal()).isTrue();
         }
     }
 }

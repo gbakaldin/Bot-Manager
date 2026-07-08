@@ -84,6 +84,13 @@ public class BotGroupDTO {
     private Double rampShape;
 
     /**
+     * Enable affinity-weighted per-bot option proposal (AFFINITY_AWARE_PROPOSAL AD-7).
+     * Boxed — PATCH-null keeps the persisted value; a non-null value full-replaces it.
+     * Independent of {@link #coordinationEnabled} (Open Decision D3).
+     */
+    private Boolean affinityWeightedProposal;
+
+    /**
      * Activation mode (TIMED_ACTIVATION AD-1). Null = legacy non-timed group.
      * PATCH is full-replace — a non-null value overwrites the persisted mode
      * (mirrors {@code slotStrategyId}).

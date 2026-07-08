@@ -71,4 +71,13 @@ public class BotBehaviorConfig {
      * true; defaults to {@code 0.0} for non-ramp / non-eligible bots.
      */
     double rampShape;
+
+    /**
+     * Whether this bot biases its per-bet option choice by the game's affinity weights
+     * instead of a flat uniform pick (AFFINITY_AWARE_PROPOSAL AD-7). Only set for
+     * {@code BETTING_MINI}/{@code TAI_XIU} bots in {@code createSingleBot}; SLOT and
+     * other types leave it at the default {@code false}. When false (or on equal
+     * weights) the option pick is byte-for-byte today's uniform draw (AD-3).
+     */
+    boolean affinityWeightedProposal;
 }

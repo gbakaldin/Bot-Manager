@@ -83,6 +83,20 @@ public class BotGroup {
     private double rampShape;
 
     /**
+     * Whether bots in this group bias their per-bet <i>option</i> choice by the game's
+     * affinity weights instead of a flat uniform pick (AFFINITY_AWARE_PROPOSAL AD-7).
+     * When true and the group's game type is {@code BETTING_MINI}/{@code TAI_XIU}, the
+     * RANDOM strategy weights each option by {@code Game.getEffectiveOptionAffinities()}
+     * so bots propose more on high-affinity options; when false (or on equal weights),
+     * behavior is byte-for-byte today's uniform pick (AD-3). Independent of
+     * {@link #coordinationEnabled} — a group may want biased proposals with or without
+     * the coordinator (Open Decision D3). Like {@link #rampEnabled}, this is a
+     * betting-behavior preference of the fleet, so it lives on the BotGroup (the
+     * affinity <i>weights</i> stay on the Game).
+     */
+    private boolean affinityWeightedProposal;
+
+    /**
      * How this group's lifecycle is governed relative to {@link #activationWindow}
      * (TIMED_ACTIVATION AD-1). {@code null} = legacy non-timed group, governed
      * solely by {@link #targetStatus}. Only {@link ActivationMode#SCHEDULED} groups

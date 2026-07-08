@@ -566,10 +566,17 @@ public class BotGroupBehaviorService {
         // model, so the ramp params are never set on them — they keep the builder
         // defaults (rampEnabled=false / rampShape=0.0), mirroring the game-type
         // gating the coordinator/jackpot-scaler use at start() (AD-S1).
+        // Affinity-weighted option proposal (AFFINITY_AWARE_PROPOSAL AD-7): the
+        // weighted-pick seam lives in RandomBehaviorStrategy.decide, reached only
+        // by BETTING_MINI/TAI_XIU bots (both extend BettingMiniGameBot). SLOT and
+        // other types have no option id, so the flag is never set on them — they
+        // keep the builder default (affinityWeightedProposal=false), mirroring the
+        // ramp gating above.
         if (game.getGameType() == GameType.BETTING_MINI || game.getGameType() == GameType.TAI_XIU) {
             behaviorConfigBuilder
                     .rampEnabled(group.isRampEnabled())
-                    .rampShape(group.getRampShape());
+                    .rampShape(group.getRampShape())
+                    .affinityWeightedProposal(group.isAffinityWeightedProposal());
         }
         BotBehaviorConfig behaviorConfig = behaviorConfigBuilder.build();
 

@@ -1304,6 +1304,101 @@ class BotGroupBehaviorServiceTest {
     }
 
     @Nested
+    @DisplayName("affinityWeightedProposal config propagation (AFFINITY_AWARE_PROPOSAL AD-7)")
+    class AffinityWeightedProposalPropagationTests {
+
+        @Test
+        @DisplayName("start() of a BETTING_MINI group threads affinityWeightedProposal onto each BotBehaviorConfig")
+        void startThreadsAffinityForBettingMini() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1").name("Betting Group").environmentId("env-1").gameId("game-1")
+                    .botCount(2).namePrefix("bot").password("pass")
+                    .affinityWeightedProposal(true)
+                    .build();
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("BauCua").gameType(GameType.BETTING_MINI).build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> assertThat(cfg.getBehaviorConfig().isAffinityWeightedProposal())
+                            .as("BETTING_MINI bot carries the group's affinityWeightedProposal").isTrue());
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+
+        @Test
+        @DisplayName("start() of a TAI_XIU group threads affinityWeightedProposal onto each BotBehaviorConfig")
+        void startThreadsAffinityForTaiXiu() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1").name("TaiXiu Group").environmentId("env-1").gameId("game-1")
+                    .botCount(2).namePrefix("bot").password("pass")
+                    .affinityWeightedProposal(true)
+                    .build();
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("TaiXiu").gameType(GameType.TAI_XIU).build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> assertThat(cfg.getBehaviorConfig().isAffinityWeightedProposal()).isTrue());
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+
+        @Test
+        @DisplayName("start() of a SLOT group leaves affinityWeightedProposal at default false even when the group set it")
+        void startLeavesAffinityDefaultForSlot() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-1").name("Slot Group").environmentId("env-1").gameId("game-1")
+                    .botCount(2).namePrefix("bot").password("pass")
+                    // affinity leaks onto a SLOT group — must NOT flow through (AD-7)
+                    .affinityWeightedProposal(true)
+                    .build();
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("Slot").gameType(GameType.SLOT).build();
+
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> assertThat(cfg.getBehaviorConfig().isAffinityWeightedProposal())
+                            .as("SLOT bots must never carry affinity-weighted proposal").isFalse());
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+    }
+
+    @Nested
     @DisplayName("jackpot-scaler build gating on start (JACKPOT_SCALE_AND_RAMP AD-J3/AD-S1)")
     class JackpotScalerBuildTests {
 
