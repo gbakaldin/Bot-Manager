@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -79,10 +80,7 @@ class BettingMiniGameBotJackpotScaleSeamTest {
 
     @AfterEach
     void tearDown() throws Exception {
-        ScheduledExecutorService w = (ScheduledExecutorService) readField("watchdogScheduler");
-        if (w != null) w.shutdownNow();
-        ScheduledExecutorService s = (ScheduledExecutorService) readField("scheduler");
-        if (s != null) s.shutdownNow();
+        freezeSchedulers();
     }
 
     @Test
@@ -177,6 +175,30 @@ class BettingMiniGameBotJackpotScaleSeamTest {
         Method m = BettingMiniGameBot.class.getDeclaredMethod("onStartGame", ActionResponseMessage.class);
         m.setAccessible(true);
         m.invoke(bot, resp);
+        // Freeze the live countdown scheduler onStartGame spins up so no
+        // background virtual thread mutates bot state (remainingTime / sidStore
+        // via reconnect paths) between here and the buildBetContext() assertion.
+        // The effective-cap seam reads the onStartGame-snapshotted
+        // currentJackpotFactor (not remainingTime), so these assertions are not
+        // racy today, but the freeze keeps the harness uniform with the ramp
+        // seam and removes the latent async surface.
+        freezeSchedulers();
+    }
+
+    private void freezeSchedulers() throws Exception {
+        ScheduledExecutorService countdown = (ScheduledExecutorService) readField("scheduler");
+        if (countdown != null) {
+            countdown.shutdownNow();
+            countdown.awaitTermination(2, TimeUnit.SECONDS);
+            Field f = BettingMiniGameBot.class.getDeclaredField("scheduler");
+            f.setAccessible(true);
+            f.set(bot, null);
+        }
+        ScheduledExecutorService watchdog = (ScheduledExecutorService) readField("watchdogScheduler");
+        if (watchdog != null) {
+            watchdog.shutdownNow();
+            watchdog.awaitTermination(2, TimeUnit.SECONDS);
+        }
     }
 
     private BetContext buildBetContext() throws Exception {

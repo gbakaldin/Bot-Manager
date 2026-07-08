@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -252,8 +253,16 @@ class BettingMiniGameBotRampSeamTest {
             bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
             bot.setConfiguration(cfg);
             bot.setStrategyFactory(factory);
-            bot.setRandom(rng);
             bot.initializeSubclass();
+            // CRITICAL (de-flake root cause): initializeSubclass() re-seeds
+            // this.rng with a fresh nondeterministic Random
+            // (`new Random(userName.hashCode() ^ nanoTime())`), silently
+            // discarding any rng set before it. So the injected rng — the
+            // CountingRandom that pins the off-path no-draw invariant and the
+            // always-defer Random that forces the deferral-ordering assertion —
+            // MUST be installed AFTER initializeSubclass(), or betCondition()
+            // draws from a real RNG and the forced-defer test flips ~1-in-4.
+            bot.setRandom(rng);
 
             seedLong("lastFetchedBalance", 50_000_000L);
             seedAtomic("expectedCurrentBalance", 50_000_000L);
@@ -269,6 +278,18 @@ class BettingMiniGameBotRampSeamTest {
             m.setAccessible(true);
             m.invoke(bot, resp);
 
+            // De-flake: onStartGame spins up a live countdown scheduler that
+            // decrements remainingTime every 1000ms on a background virtual
+            // thread. That thread races betCondition() and mutates remainingTime
+            // (hence elapsedFraction / pAccept) between our set() below and the
+            // condition.get() the test asserts on — the confirmed intermittent
+            // failure. Freeze the async state by stopping BOTH schedulers here,
+            // right after construction/onStartGame, so the gate is driven against
+            // exactly the fields the test seeds and nothing mutates them
+            // out-of-band. The watchdog (120s) would not fire in a test window,
+            // but is stopped for the same isolation guarantee.
+            freezeSchedulers();
+
             setField("gameState", BettingMiniGameState.BET);
             setField("timeForBetting", timeForBetting);
             // Disable the late-bet cutoff so canBet() reflects only session +
@@ -278,6 +299,25 @@ class BettingMiniGameBotRampSeamTest {
             setField("blockBetTime", 0L);
             remainingTime().set(remaining);
             ((SessionIdStore) readField("sidStore")).set(sid);
+        }
+
+        /**
+         * Stop the countdown + watchdog schedulers and null the countdown
+         * reference so nothing re-drives remainingTime while the test asserts on
+         * betCondition(). Idempotent — safe to call again from tearDown.
+         */
+        void freezeSchedulers() throws Exception {
+            ScheduledExecutorService countdown = (ScheduledExecutorService) readField("scheduler");
+            if (countdown != null) {
+                countdown.shutdownNow();
+                countdown.awaitTermination(2, TimeUnit.SECONDS);
+                setField("scheduler", null);
+            }
+            ScheduledExecutorService watchdog = (ScheduledExecutorService) readField("watchdogScheduler");
+            if (watchdog != null) {
+                watchdog.shutdownNow();
+                watchdog.awaitTermination(2, TimeUnit.SECONDS);
+            }
         }
 
         @SuppressWarnings("unchecked")
@@ -333,10 +373,7 @@ class BettingMiniGameBotRampSeamTest {
         }
 
         void shutdown() throws Exception {
-            ScheduledExecutorService w = (ScheduledExecutorService) readField("watchdogScheduler");
-            if (w != null) w.shutdownNow();
-            ScheduledExecutorService s = (ScheduledExecutorService) readField("scheduler");
-            if (s != null) s.shutdownNow();
+            freezeSchedulers();
         }
     }
 

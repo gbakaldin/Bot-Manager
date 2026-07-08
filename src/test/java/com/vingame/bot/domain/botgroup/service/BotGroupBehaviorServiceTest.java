@@ -1303,6 +1303,106 @@ class BotGroupBehaviorServiceTest {
         }
     }
 
+    @Nested
+    @DisplayName("jackpot-scaler build gating on start (JACKPOT_SCALE_AND_RAMP AD-J3/AD-S1)")
+    class JackpotScalerBuildTests {
+
+        private BotGroup group(GameType type, boolean jackpotEnabled, long ceiling) {
+            BotGroup g = BotGroup.builder()
+                    .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                    .botCount(2).namePrefix("bot").password("pass")
+                    .build();
+            when(botGroupService.findById("g-1")).thenReturn(g);
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game gg = Game.builder().id("game-1").name("G").gameType(type)
+                    .jackpotScaleEnabled(jackpotEnabled).jackpotCeiling(ceiling).build();
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(gg);
+            // Short-circuit bot creation — the scaler is built on the runtime BEFORE the
+            // bot loop, so its presence is observable even when every createBot fails.
+            when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+            return g;
+        }
+
+        @Test
+        @DisplayName("BETTING_MINI + jackpotScaleEnabled builds a scaler with the game's ceiling (AD-J3)")
+        void buildsForBettingMini() {
+            group(GameType.BETTING_MINI, true, 20_000_000L);
+
+            service.start("g-1");
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            try {
+                assertThat(rt).isNotNull();
+                JackpotScaler scaler = rt.getJackpotScaler();
+                assertThat(scaler).as("eligible + enabled ⇒ scaler present").isNotNull();
+                // Seed floor is the constant; below-seed pool ⇒ minMultiplier 0.25 floor.
+                scaler.observePool(1L, JackpotScaler.DEFAULT_SEED_FLOOR);
+                assertThat(scaler.getCurrentFactor()).isEqualTo(0.25);
+                // Ceiling is the configured value: pool at ceiling ⇒ factor 1.0.
+                scaler.observePool(2L, 20_000_000L);
+                assertThat(scaler.getCurrentFactor()).isEqualTo(1.0);
+            } finally {
+                if (rt != null) rt.stopAllBots();
+            }
+        }
+
+        @Test
+        @DisplayName("TAI_XIU + jackpotScaleEnabled builds a scaler (AD-J3 — not gated out)")
+        void buildsForTaiXiu() {
+            group(GameType.TAI_XIU, true, 10_000_000L);
+
+            service.start("g-1");
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            try {
+                assertThat(rt).isNotNull();
+                assertThat(rt.getJackpotScaler())
+                        .as("Tai Xiu is supported for jackpot-scale (AD-J3)")
+                        .isNotNull();
+            } finally {
+                if (rt != null) rt.stopAllBots();
+            }
+        }
+
+        @Test
+        @DisplayName("jackpotScaleEnabled=false builds NO scaler even for an eligible type (AD-S3)")
+        void noScalerWhenDisabled() {
+            group(GameType.BETTING_MINI, false, 20_000_000L);
+
+            service.start("g-1");
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            try {
+                assertThat(rt).isNotNull();
+                assertThat(rt.getJackpotScaler())
+                        .as("flag off ⇒ no scaler, bet path is today's (AD-S3)")
+                        .isNull();
+            } finally {
+                if (rt != null) rt.stopAllBots();
+            }
+        }
+
+        @Test
+        @DisplayName("ineligible type (SLOT) builds NO scaler even when the flag is on (AD-S1)")
+        void noScalerForIneligibleType() {
+            group(GameType.SLOT, true, 20_000_000L);
+
+            service.start("g-1");
+
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            try {
+                assertThat(rt).isNotNull();
+                assertThat(rt.getJackpotScaler())
+                        .as("SLOT shares no betting-mini round model ⇒ no scaler (AD-S1)")
+                        .isNull();
+            } finally {
+                if (rt != null) rt.stopAllBots();
+            }
+        }
+    }
+
     // ---- helpers ----
 
     @Nested

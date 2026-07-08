@@ -199,6 +199,31 @@ class RandomBehaviorStrategyTest {
         }
 
         @Test
+        @DisplayName("effectiveMaxBetsPerRound (jackpot-scaled cap) governs the count, not behavior.maxBetsPerRound (JACKPOT_SCALE_AND_RAMP AD-J4)")
+        void effectiveCapGovernsWhenScaledDown() {
+            Game game = gameWithOptions(4);
+            // Configured cap is 8; the jackpot-scaled effective cap is 2. The strategy
+            // must honour the CONTEXT's effective cap (the lever), not the raw config.
+            BotBehaviorConfig beh = behavior(100L, 200L, 100L, 8, 0);
+            BotMemory mem = new BotMemory(game);
+            mem.beginRound(1L, 1_000_000L);
+
+            RandomBehaviorStrategy strategy = new RandomBehaviorStrategy();
+            Random rng = new Random(7L);
+
+            int decisions = 0;
+            for (int t = 0; t < 50; t++) {
+                // effectiveMaxBetsPerRound = 2 (< configured 8): the volume lever
+                BetContext scaled = new BetContext(mem, beh, game, mem.getCurrentBalance(),
+                        mem.getCurrentRound(), rng, /*effectiveMaxBetsPerRound*/ 2);
+                if (strategy.decide(scaled).isPresent()) decisions++;
+            }
+            assertThat(decisions)
+                    .as("scaled-down effective cap (2) caps the round below the configured max (8)")
+                    .isEqualTo(2);
+        }
+
+        @Test
         @DisplayName("Per-round counter resets when sessionId changes")
         void counterResetsOnNewRound() {
             Game game = gameWithOptions(4);
