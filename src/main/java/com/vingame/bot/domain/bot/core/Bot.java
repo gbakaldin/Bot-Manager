@@ -317,22 +317,25 @@ public abstract class Bot {
             return;
         }
 
-        gameMsClient.deposit(client.getAgencyToken(), 1_000_000_000L, mdcConsumer(success -> {
-            if (success) {
-                log.debug("Bot {}: Deposit successful, fetching new balance...", userName);
-                if (metrics != null) metrics.incBotAutoDeposit(true);
-                recordFetchedBalance(apiGatewayClient.getBalance(
-                    getClient().getAuthToken(),
-                    credentials.getFingerprint(),
-                    userName
-                ));
-                expectedCurrentBalance.set(lastFetchedBalance);
-                log.debug("Bot {}: New balance: {}", userName, expectedCurrentBalance);
-            } else {
-                log.warn("Bot {}: Deposit failed", userName);
-                if (metrics != null) metrics.incBotAutoDeposit(false);
-            }
-        }));
+        // Deposit via the gwms bot-deposit endpoint (credits the game-spendable
+        // wallet partition). Replaces the legacy GameMsClient agency-transfer path,
+        // which credited the agency partition the game engine never debits — the
+        // P_097/BOM "balance visible but every bet rejected" symptom.
+        boolean success = apiGatewayClient.deposit(userName, 1_000_000_000L);
+        if (success) {
+            log.debug("Bot {}: Deposit successful, fetching new balance...", userName);
+            if (metrics != null) metrics.incBotAutoDeposit(true);
+            recordFetchedBalance(apiGatewayClient.getBalance(
+                getClient().getAuthToken(),
+                credentials.getFingerprint(),
+                userName
+            ));
+            expectedCurrentBalance.set(lastFetchedBalance);
+            log.debug("Bot {}: New balance: {}", userName, expectedCurrentBalance);
+        } else {
+            log.warn("Bot {}: Deposit failed", userName);
+            if (metrics != null) metrics.incBotAutoDeposit(false);
+        }
     }
 
     protected long checkBalance() {

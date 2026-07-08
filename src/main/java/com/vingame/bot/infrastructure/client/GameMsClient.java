@@ -71,7 +71,7 @@ public class GameMsClient {
      */
     public void deposit(String agencyToken, long amount, Consumer<Boolean> onComplete) {
         TokenDetails tokenDetails = fetchTokenDetails(agencyToken);
-        int agencyId = Integer.parseInt(agencyToken.substring(0, 1));
+        int agencyId = Integer.parseInt(agencyToken.substring(0, agencyToken.indexOf('-')));
 
         Thread t = new Thread(() -> {
             try {

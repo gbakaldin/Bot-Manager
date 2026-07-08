@@ -199,31 +199,24 @@ class BotTest {
     class DepositTests {
 
         @Test
-        @DisplayName("Early-returns when lastFetchedBalance < 0 — does not invoke gameMsClient")
+        @DisplayName("Early-returns when lastFetchedBalance < 0 — does not invoke deposit")
         void shouldEarlyReturnWhenNotFetched() {
             // default lastFetchedBalance = -1
             bot.deposit();
 
-            verify(gameMsClient, never()).deposit(anyString(), anyLong(), any());
+            verify(apiGatewayClient, never()).deposit(anyString(), anyLong());
         }
 
         @Test
-        @SuppressWarnings("unchecked")
-        @DisplayName("On success callback, refetches balance and updates expectedCurrentBalance")
-        void shouldUpdateBalanceOnSuccessCallback() throws Exception {
+        @DisplayName("On success, refetches balance and updates expectedCurrentBalance")
+        void shouldUpdateBalanceOnSuccess() throws Exception {
             setLong(bot, "lastFetchedBalance", 1_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
 
             bot.client = wsClient;
-            when(wsClient.getAgencyToken()).thenReturn("agency-tok");
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
+            when(apiGatewayClient.deposit("botuser1", 1_000_000_000L)).thenReturn(true);
             when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(999_999_999L);
-
-            doAnswer(inv -> {
-                Consumer<Boolean> cb = inv.getArgument(2);
-                cb.accept(true);
-                return null;
-            }).when(gameMsClient).deposit(eq("agency-tok"), eq(1_000_000_000L), any(Consumer.class));
 
             bot.deposit();
 
@@ -233,20 +226,12 @@ class BotTest {
         }
 
         @Test
-        @SuppressWarnings("unchecked")
-        @DisplayName("On failure callback, balance is NOT updated")
-        void shouldNotUpdateBalanceOnFailureCallback() throws Exception {
+        @DisplayName("On failure, balance is NOT updated")
+        void shouldNotUpdateBalanceOnFailure() throws Exception {
             setLong(bot, "lastFetchedBalance", 1_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
 
-            bot.client = wsClient;
-            when(wsClient.getAgencyToken()).thenReturn("agency-tok");
-
-            doAnswer(inv -> {
-                Consumer<Boolean> cb = inv.getArgument(2);
-                cb.accept(false);
-                return null;
-            }).when(gameMsClient).deposit(eq("agency-tok"), eq(1_000_000_000L), any(Consumer.class));
+            when(apiGatewayClient.deposit("botuser1", 1_000_000_000L)).thenReturn(false);
 
             bot.deposit();
 
@@ -395,22 +380,15 @@ class BotTest {
         }
 
         @Test
-        @SuppressWarnings("unchecked")
         @DisplayName("Deposit top-up jump (large upward re-fetch) floors drain to 0 — no counter")
         void noDrainOnDepositTopUpJump() throws Exception {
             setLong(bot, "lastFetchedBalance", 5_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(5_000_000L);
 
             bot.client = wsClient;
-            when(wsClient.getAgencyToken()).thenReturn("agency-tok");
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
+            when(apiGatewayClient.deposit("botuser1", 1_000_000_000L)).thenReturn(true);
             when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(1_005_000_000L);
-
-            doAnswer(inv -> {
-                Consumer<Boolean> cb = inv.getArgument(2);
-                cb.accept(true);
-                return null;
-            }).when(gameMsClient).deposit(eq("agency-tok"), eq(1_000_000_000L), any(Consumer.class));
 
             bot.deposit();
 
