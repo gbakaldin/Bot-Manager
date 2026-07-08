@@ -1,8 +1,10 @@
 package com.vingame.bot.domain.game.mapper;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.dto.GameDTO;
+import com.vingame.bot.domain.game.model.CrowdCountSemantic;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import org.junit.jupiter.api.DisplayName;
@@ -479,6 +481,115 @@ class GameMapperTest {
             assertThat(out.getProductCode()).isEqualTo(ProductCode.P_116);
             assertThat(out.getPluginName()).isEqualTo("Tip");
             assertThat(out.getName()).isEqualTo("SlotTipTest");
+        }
+    }
+
+    @Nested
+    @DisplayName("crowdCountSemantic mapping (CROWD_AWARE_COORDINATION Phase 1)")
+    class CrowdCountSemanticTests {
+
+        @Test
+        @DisplayName("toDTO emits the semantic from the entity")
+        void toDtoEmitsSemantic() {
+            Game entity = Game.builder()
+                    .id("game-1")
+                    .name("BomBauCua")
+                    .crowdCountSemantic(CrowdCountSemantic.BETS)
+                    .build();
+
+            GameDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getCrowdCountSemantic()).isEqualTo(CrowdCountSemantic.BETS);
+        }
+
+        @Test
+        @DisplayName("toDTO emits UNKNOWN when the entity value is null (legacy Mongo doc)")
+        void toDtoEmitsUnknownForNullEntity() {
+            // A legacy doc hydrated from Mongo has no crowdCountSemantic — the
+            // @Builder.Default does not apply, so the field is null. The read path
+            // must surface the UNKNOWN fail-safe, not a null.
+            Game entity = new Game();
+            entity.setId("game-legacy");
+            entity.setName("LegacyGame");
+            entity.setCrowdCountSemantic(null);
+
+            GameDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getCrowdCountSemantic()).isEqualTo(CrowdCountSemantic.UNKNOWN);
+        }
+
+        @Test
+        @DisplayName("toEntity persists the semantic from the DTO")
+        void toEntityPersistsSemantic() {
+            GameDTO dto = GameDTO.builder()
+                    .name("BomBauCua")
+                    .crowdCountSemantic(CrowdCountSemantic.PLAYERS)
+                    .build();
+
+            Game entity = mapper.toEntity(dto);
+
+            assertThat(entity.getCrowdCountSemantic()).isEqualTo(CrowdCountSemantic.PLAYERS);
+        }
+
+        @Test
+        @DisplayName("toEntity defaults the semantic to UNKNOWN when the DTO omits it")
+        void toEntityDefaultsSemanticWhenNull() {
+            GameDTO dto = GameDTO.builder().name("BomBauCua").build();
+
+            Game entity = mapper.toEntity(dto);
+
+            assertThat(entity.getCrowdCountSemantic()).isEqualTo(CrowdCountSemantic.UNKNOWN);
+        }
+
+        @Test
+        @DisplayName("PATCH full-replaces the semantic when the DTO supplies it")
+        void patchFullReplacesSemantic() {
+            Game entity = Game.builder()
+                    .id("game-1")
+                    .name("BomBauCua")
+                    .crowdCountSemantic(CrowdCountSemantic.UNKNOWN)
+                    .build();
+            GameDTO patch = GameDTO.builder()
+                    .crowdCountSemantic(CrowdCountSemantic.BETS)
+                    .build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.getCrowdCountSemantic()).isEqualTo(CrowdCountSemantic.BETS);
+        }
+
+        @Test
+        @DisplayName("PATCH retains the existing semantic when the DTO omits it (PATCH-null = keep)")
+        void patchKeepsExistingWhenDtoNull() {
+            Game entity = Game.builder()
+                    .id("game-1")
+                    .name("BomBauCua")
+                    .crowdCountSemantic(CrowdCountSemantic.PLAYERS)
+                    .build();
+            GameDTO patch = GameDTO.builder().name("Renamed").build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.getName()).isEqualTo("Renamed");
+            assertThat(entity.getCrowdCountSemantic()).isEqualTo(CrowdCountSemantic.PLAYERS);
+        }
+
+        @Test
+        @DisplayName("Jackson (de)serializes the enum by name on the DTO (mirrors GameType)")
+        void jacksonRoundTripsEnumByName() throws Exception {
+            ObjectMapper json = new ObjectMapper();
+
+            GameDTO dto = GameDTO.builder()
+                    .name("BomBauCua")
+                    .crowdCountSemantic(CrowdCountSemantic.BETS)
+                    .build();
+
+            String serialized = json.writeValueAsString(dto);
+            assertThat(serialized).contains("\"crowdCountSemantic\":\"BETS\"");
+
+            GameDTO parsed = json.readValue(
+                    "{\"name\":\"BomBauCua\",\"crowdCountSemantic\":\"PLAYERS\"}", GameDTO.class);
+            assertThat(parsed.getCrowdCountSemantic()).isEqualTo(CrowdCountSemantic.PLAYERS);
         }
     }
 }

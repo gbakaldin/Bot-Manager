@@ -62,6 +62,18 @@ public class BotGroup {
     private long maxAggregateStakePerRound;
 
     /**
+     * Whether the crowd-aware coordination tier is active for this group
+     * (CROWD_AWARE_COORDINATION AD-C6). It is a <b>sub-mode of the coordinator</b>:
+     * when true the coordinator steers its per-round budget by the observed live
+     * crowd distribution (the {@code bs} feed) instead of the internal affinity
+     * split alone. It cannot run without the internal coordinator, so validation
+     * requires {@link #coordinationEnabled} to also be true. When false, behavior
+     * is byte-for-byte BET_COORDINATION (internal tier), and existing groups are
+     * unchanged.
+     */
+    private boolean crowdAwareCoordination;
+
+    /**
      * Whether per-round bet ramp-up is active for this group (JACKPOT_SCALE_AND_RAMP
      * AD-R4). When true and the group's game type is {@code BETTING_MINI}/{@code TAI_XIU},
      * bots shape <i>when</i> within the bet window their ticks land — ramping acceptance

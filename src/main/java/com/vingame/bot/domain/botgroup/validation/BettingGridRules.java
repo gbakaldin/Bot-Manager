@@ -38,6 +38,9 @@ import java.util.List;
  *       {@code maxTotalBetPerRound}.</li>
  *   <li><b>Ramp shape (JACKPOT_SCALE_AND_RAMP AD-R4):</b> when {@code rampEnabled}
  *       is true, {@code rampShape > 0}. Only enforced when ramp is on.</li>
+ *   <li><b>Crowd-aware coordination (CROWD_AWARE_COORDINATION AD-C6):</b> when
+ *       {@code crowdAwareCoordination} is true, {@code coordinationEnabled} must
+ *       also be true — the crowd tier is a sub-mode of the coordinator.</li>
  * </ul>
  *
  * <p>The entity's numeric fields are primitives ({@code long}/{@code int}), so by
@@ -146,6 +149,14 @@ final class BettingGridRules {
                         + ") must be >= minBet (" + minBet
                         + ") when coordinationEnabled is true");
             }
+        }
+
+        // Crowd-aware coordination (CROWD_AWARE_COORDINATION AD-C6). The crowd tier
+        // is a sub-mode of the coordinator — it steers the coordinator's per-round
+        // budget by the live crowd feed and cannot run without the internal
+        // coordinator existing. So crowdAwareCoordination requires coordinationEnabled.
+        if (group.isCrowdAwareCoordination() && !group.isCoordinationEnabled()) {
+            violations.add("crowdAwareCoordination requires coordinationEnabled to be true");
         }
 
         // Ramp shape (JACKPOT_SCALE_AND_RAMP AD-R3/AD-R4). Only constrained when

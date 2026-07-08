@@ -114,6 +114,20 @@ public class Game {
     private long jackpotCeiling;
 
     /**
+     * Per-game interpretation of the crowd feed's {@code bs[].bc} count field
+     * (CROWD_AWARE_COORDINATION AD-C5). The bets-vs-players meaning is a
+     * game-intrinsic protocol trait, so it lives on the Game (not the BotGroup).
+     * Default {@link CrowdCountSemantic#UNKNOWN} — a null in a legacy Mongo doc
+     * resolves to {@code UNKNOWN} via {@link #getEffectiveCrowdCountSemantic()}.
+     *
+     * <p><b>Observability-only in v1:</b> the crowd steering math is stake-based
+     * ({@code v}), never count-based, so this field never drives the per-round
+     * budget — a mis-set value cannot corrupt steering.
+     */
+    @Builder.Default
+    private CrowdCountSemantic crowdCountSemantic = CrowdCountSemantic.UNKNOWN;
+
+    /**
      * Legacy field — pre-BETTING_STRATEGIES Phase 1 docs persisted
      * {@code numberOfOptions} as a primitive int and {@code bettingOptions} as
      * an array of allowed option ids. Read-side fallback only: kept so old
@@ -218,6 +232,18 @@ public class Game {
         if (!hasOptionConfig) {
             optionAffinities = defaultTaiXiuOptionAffinities();
         }
+    }
+
+    /**
+     * Null-safe resolution of {@link #crowdCountSemantic} (CROWD_AWARE_COORDINATION
+     * AD-C5). Legacy Mongo docs persisted before this field existed deserialize
+     * with a {@code null} value (the {@code @Builder.Default} only applies to
+     * builder-constructed instances, not Mongo hydration), so read-side callers
+     * must go through this accessor to get the {@link CrowdCountSemantic#UNKNOWN}
+     * fail-safe default.
+     */
+    public CrowdCountSemantic getEffectiveCrowdCountSemantic() {
+        return crowdCountSemantic != null ? crowdCountSemantic : CrowdCountSemantic.UNKNOWN;
     }
 
     public Map<Integer, Integer> getEffectiveOptionAffinities() {

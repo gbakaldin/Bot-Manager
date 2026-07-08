@@ -501,6 +501,47 @@ class BettingMiniConfigValidatorTest {
         }
     }
 
+    @Nested
+    @DisplayName("crowd-aware coordination (CROWD_AWARE_COORDINATION AD-C6)")
+    class CrowdAwareCoordination {
+
+        @Test
+        @DisplayName("crowdAware=false: coordination flag is irrelevant (off passes with coordination off)")
+        void crowdAwareOffPassesRegardlessOfCoordination() {
+            // crowdAwareCoordination defaults to false; coordination off must not bite.
+            BotGroup group = validConfig()
+                    .crowdAwareCoordination(false)
+                    .coordinationEnabled(false)
+                    .build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+
+        @Test
+        @DisplayName("crowdAware=true + coordination=false rejected (400)")
+        void crowdAwareRequiresCoordination() {
+            BotGroup group = validConfig()
+                    .crowdAwareCoordination(true)
+                    .coordinationEnabled(false)
+                    .build();
+            assertThatThrownBy(() -> validator.validate(group))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining(
+                            "crowdAwareCoordination requires coordinationEnabled to be true");
+        }
+
+        @Test
+        @DisplayName("crowdAware=true + coordination=true passes")
+        void crowdAwareWithCoordinationPasses() {
+            // A valid coordination cap (>= minBet) so the coordination rule also holds.
+            BotGroup group = validConfig()
+                    .crowdAwareCoordination(true)
+                    .coordinationEnabled(true)
+                    .maxAggregateStakePerRound(500000)
+                    .build();
+            assertThatCode(() -> validator.validate(group)).doesNotThrowAnyException();
+        }
+    }
+
     @Test
     @DisplayName("multiple simultaneous violations are all reported in one exception")
     void multipleViolationsAggregated() {

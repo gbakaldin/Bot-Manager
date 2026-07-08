@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.game.mapper;
 
 import com.vingame.bot.domain.game.dto.GameDTO;
+import com.vingame.bot.domain.game.model.CrowdCountSemantic;
 import com.vingame.bot.domain.game.model.Game;
 import org.mapstruct.Mapper;
 import org.mapstruct.MappingTarget;
@@ -50,6 +51,7 @@ public interface GameMapper {
                 .optionAffinities(affinities)
                 .jackpotScaleEnabled(entity.isJackpotScaleEnabled())
                 .jackpotCeiling(entity.getJackpotCeiling())
+                .crowdCountSemantic(entity.getEffectiveCrowdCountSemantic())
                 .offset(entity.getOffset())
                 .md5(entity.isMd5())
                 .build();
@@ -88,6 +90,7 @@ public interface GameMapper {
                 .optionAffinities(affinities)
                 .jackpotScaleEnabled(Optional.ofNullable(dto.getJackpotScaleEnabled()).orElse(false))
                 .jackpotCeiling(Optional.ofNullable(dto.getJackpotCeiling()).orElse(0L))
+                .crowdCountSemantic(Optional.ofNullable(dto.getCrowdCountSemantic()).orElse(CrowdCountSemantic.UNKNOWN))
                 .offset(dto.getOffset())
                 .md5(Optional.ofNullable(dto.getMd5()).orElse(false))
                 .build();
@@ -129,6 +132,12 @@ public interface GameMapper {
                 Optional.ofNullable(dto.getJackpotScaleEnabled()).orElse(entity.isJackpotScaleEnabled()));
         entity.setJackpotCeiling(
                 Optional.ofNullable(dto.getJackpotCeiling()).orElse(entity.getJackpotCeiling()));
+        // crowdCountSemantic PATCH semantics (CROWD_AWARE_COORDINATION AD-C5):
+        // replace-if-present; a null DTO field keeps the existing value. Resolved
+        // through getEffectiveCrowdCountSemantic() so a legacy null entity value
+        // is treated as UNKNOWN rather than re-persisted as null.
+        entity.setCrowdCountSemantic(
+                Optional.ofNullable(dto.getCrowdCountSemantic()).orElse(entity.getEffectiveCrowdCountSemantic()));
         entity.setOffset(Optional.ofNullable(dto.getOffset()).orElse(entity.getOffset()));
         entity.setMd5(Optional.ofNullable(dto.getMd5()).orElse(entity.isMd5()));
     }

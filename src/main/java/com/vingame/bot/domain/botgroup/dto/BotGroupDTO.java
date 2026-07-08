@@ -71,6 +71,14 @@ public class BotGroupDTO {
     private Long maxAggregateStakePerRound;
 
     /**
+     * Enable the crowd-aware coordination tier (CROWD_AWARE_COORDINATION AD-C6).
+     * Boxed — PATCH-null keeps the persisted value; a non-null value full-replaces
+     * it. A sub-mode of coordination: validation requires {@link #coordinationEnabled}
+     * to also be true when this is set.
+     */
+    private Boolean crowdAwareCoordination;
+
+    /**
      * Enable per-round bet ramp-up (JACKPOT_SCALE_AND_RAMP AD-R4). Boxed —
      * PATCH-null keeps the persisted value; a non-null value full-replaces it.
      */

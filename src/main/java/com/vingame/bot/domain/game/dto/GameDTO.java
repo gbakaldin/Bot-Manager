@@ -3,6 +3,7 @@ package com.vingame.bot.domain.game.dto;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.brand.model.ProductCode;
+import com.vingame.bot.domain.game.model.CrowdCountSemantic;
 import com.vingame.bot.domain.game.model.GameType;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -65,6 +66,14 @@ public class GameDTO {
      * {@code jackpotScaleEnabled} is true.
      */
     private Long jackpotCeiling;
+
+    /**
+     * Per-game crowd count semantic (CROWD_AWARE_COORDINATION AD-C5). PATCH-null =
+     * keep the persisted value; a non-null value full-replaces it. Any enum value
+     * is valid ({@code UNKNOWN} is the safe default) — no validation rule, since it
+     * is observability-only in v1.
+     */
+    private CrowdCountSemantic crowdCountSemantic;
 
     /**
      * Write-only convenience shorthand. If {@code optionAffinities} is omitted

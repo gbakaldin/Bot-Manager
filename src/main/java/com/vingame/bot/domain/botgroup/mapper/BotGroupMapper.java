@@ -36,6 +36,7 @@ public interface BotGroupMapper {
                 .maxBetsPerRound(entity.getMaxBetsPerRound())
                 .coordinationEnabled(entity.isCoordinationEnabled())
                 .maxAggregateStakePerRound(entity.getMaxAggregateStakePerRound())
+                .crowdAwareCoordination(entity.isCrowdAwareCoordination())
                 .rampEnabled(entity.isRampEnabled())
                 .rampShape(entity.getRampShape())
                 .affinityWeightedProposal(entity.isAffinityWeightedProposal())
@@ -78,6 +79,7 @@ public interface BotGroupMapper {
                 .maxBetsPerRound(Optional.ofNullable(dto.getMaxBetsPerRound()).orElse(0))
                 .coordinationEnabled(Optional.ofNullable(dto.getCoordinationEnabled()).orElse(false))
                 .maxAggregateStakePerRound(Optional.ofNullable(dto.getMaxAggregateStakePerRound()).orElse(0L))
+                .crowdAwareCoordination(Optional.ofNullable(dto.getCrowdAwareCoordination()).orElse(false))
                 .rampEnabled(Optional.ofNullable(dto.getRampEnabled()).orElse(false))
                 .rampShape(Optional.ofNullable(dto.getRampShape()).orElse(0.0))
                 .affinityWeightedProposal(Optional.ofNullable(dto.getAffinityWeightedProposal()).orElse(false))
@@ -121,6 +123,10 @@ public interface BotGroupMapper {
         // keeps the existing value. Mirrors the other scalar fields.
         entity.setCoordinationEnabled(Optional.ofNullable(dto.getCoordinationEnabled()).orElse(entity.isCoordinationEnabled()));
         entity.setMaxAggregateStakePerRound(Optional.ofNullable(dto.getMaxAggregateStakePerRound()).orElse(entity.getMaxAggregateStakePerRound()));
+        // crowdAwareCoordination PATCH semantics (CROWD_AWARE_COORDINATION AD-C6):
+        // full-replace if the DTO supplies the field (non-null); a null DTO field
+        // keeps the existing value. Mirrors the coordination scalar pair.
+        entity.setCrowdAwareCoordination(Optional.ofNullable(dto.getCrowdAwareCoordination()).orElse(entity.isCrowdAwareCoordination()));
         // rampEnabled / rampShape PATCH semantics (JACKPOT_SCALE_AND_RAMP AD-R4):
         // full-replace if the DTO supplies the field (non-null); a null DTO field
         // keeps the existing value. Mirrors the coordination scalar pair.

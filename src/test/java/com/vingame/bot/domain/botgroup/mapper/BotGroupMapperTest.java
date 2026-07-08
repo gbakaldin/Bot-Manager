@@ -624,4 +624,71 @@ class BotGroupMapperTest {
             assertThat(entity.isAffinityWeightedProposal()).isTrue();
         }
     }
+
+    @Nested
+    @DisplayName("crowdAwareCoordination mapping (CROWD_AWARE_COORDINATION Phase 1)")
+    class CrowdAwareCoordinationTests {
+
+        @Test
+        @DisplayName("toDTO emits the flag from the entity")
+        void toDtoEmitsFlag() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .crowdAwareCoordination(true)
+                    .build();
+
+            BotGroupDTO dto = mapper.toDTO(entity);
+
+            assertThat(dto.getCrowdAwareCoordination()).isTrue();
+        }
+
+        @Test
+        @DisplayName("toEntity persists the flag from the DTO")
+        void toEntityPersistsFlag() {
+            BotGroupDTO dto = BotGroupDTO.builder().name("g")
+                    .crowdAwareCoordination(true)
+                    .build();
+
+            BotGroup entity = mapper.toEntity(dto);
+
+            assertThat(entity.isCrowdAwareCoordination()).isTrue();
+        }
+
+        @Test
+        @DisplayName("toEntity defaults the flag to false when the DTO omits it")
+        void toEntityDefaultsFlagWhenNull() {
+            BotGroupDTO dto = BotGroupDTO.builder().name("g").build();
+
+            BotGroup entity = mapper.toEntity(dto);
+
+            assertThat(entity.isCrowdAwareCoordination()).isFalse();
+        }
+
+        @Test
+        @DisplayName("PATCH full-replaces the flag when the DTO supplies it")
+        void patchFullReplacesFlag() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .crowdAwareCoordination(false)
+                    .build();
+            BotGroupDTO patch = BotGroupDTO.builder()
+                    .crowdAwareCoordination(true)
+                    .build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.isCrowdAwareCoordination()).isTrue();
+        }
+
+        @Test
+        @DisplayName("PATCH retains the existing flag when the DTO omits it (null)")
+        void patchKeepsExistingWhenDtoNull() {
+            BotGroup entity = BotGroup.builder().id("g").name("g")
+                    .crowdAwareCoordination(true)
+                    .build();
+            BotGroupDTO patch = BotGroupDTO.builder().name("renamed").build();
+
+            mapper.updateEntityFromDTO(patch, entity);
+
+            assertThat(entity.isCrowdAwareCoordination()).isTrue();
+        }
+    }
 }
