@@ -38,6 +38,9 @@ public interface EnvironmentMapper {
                 .encryptionKey(entity.getEncryptionKey())
                 .encryptionIv(entity.getEncryptionIv())
                 .alertOnLowBalance(entity.isAlertOnLowBalance())
+                .useJwtAuth(entity.isUseJwtAuth())
+                .periodicLogoutEnabled(entity.getPeriodicLogoutEnabled())
+                .periodicLogoutIntervalMinutes(entity.getPeriodicLogoutIntervalMinutes())
                 .build();
     }
 
@@ -69,6 +72,9 @@ public interface EnvironmentMapper {
                 .encryptionKey(dto.getEncryptionKey())
                 .encryptionIv(dto.getEncryptionIv())
                 .alertOnLowBalance(Optional.ofNullable(dto.getAlertOnLowBalance()).orElse(false))
+                .useJwtAuth(Optional.ofNullable(dto.getUseJwtAuth()).orElse(false))
+                .periodicLogoutEnabled(dto.getPeriodicLogoutEnabled())
+                .periodicLogoutIntervalMinutes(dto.getPeriodicLogoutIntervalMinutes())
                 .build();
     }
 
@@ -98,5 +104,8 @@ public interface EnvironmentMapper {
         entity.setEncryptionKey(Optional.ofNullable(dto.getEncryptionKey()).orElse(entity.getEncryptionKey()));
         entity.setEncryptionIv(Optional.ofNullable(dto.getEncryptionIv()).orElse(entity.getEncryptionIv()));
         entity.setAlertOnLowBalance(Optional.ofNullable(dto.getAlertOnLowBalance()).orElse(entity.isAlertOnLowBalance()));
+        entity.setUseJwtAuth(Optional.ofNullable(dto.getUseJwtAuth()).orElse(entity.isUseJwtAuth()));
+        entity.setPeriodicLogoutEnabled(Optional.ofNullable(dto.getPeriodicLogoutEnabled()).orElse(entity.getPeriodicLogoutEnabled()));
+        entity.setPeriodicLogoutIntervalMinutes(Optional.ofNullable(dto.getPeriodicLogoutIntervalMinutes()).orElse(entity.getPeriodicLogoutIntervalMinutes()));
     }
 }
