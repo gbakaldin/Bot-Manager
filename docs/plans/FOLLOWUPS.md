@@ -14,6 +14,8 @@ This is a running list of production bugs and code seams identified while expand
 - **Surfaced by:** `EnvironmentMapperTest` (Phase 2). QA held off on asserting the missing fields since fixing the bug is a production-code change.
 - **Action:** Add the three mappings in the MapStruct interface. After the fix, extend `EnvironmentMapperTest` to assert all 20 fields (currently 17).
 
+**RESOLVED:** TECH_DEBT_CLEANUP_2026_07 (branch `chore/tech-debt-cleanup-2026-07`), item 1 — added `useJwtAuth`, `periodicLogoutEnabled`, and `periodicLogoutIntervalMinutes` mappings across `toDTO`/`toEntity`/`updateEntityFromDTO` following the established boxed/primitive idiom (`Optional.ofNullable(...).orElse(...)` on write, primitive getter on read; the two boxed periodic-logout fields carry `null` through to preserve the "null = use global default" contract). `EnvironmentMapperTest` extended to assert all three fields including the partial-update "keep untouched" case.
+
 ### P2 — Controllers map `IllegalArgumentException` to 404, not 400
 - **Files:**
   - `src/main/java/com/vingame/bot/domain/botgroup/controller/BotGroupController.java` (`delete`, `filter`, `save`, `start`, `stop`, `restart`, `scheduleRestart`)
@@ -32,6 +34,8 @@ This is a running list of production bugs and code seams identified while expand
 - **Impact:** Clients see opaque 500s. Combined with P2, validation failures and genuine bugs are indistinguishable.
 - **Action:** Replace with a `@RestControllerAdvice` exception handler that emits RFC 7807 problem details and logs the underlying exception. Lower priority than P2 but worth bundling with the same change.
 
+**RESOLVED (already):** A `@RestControllerAdvice` exception handler already exists at `src/main/java/com/vingame/bot/common/exception/RestExceptionHandler.java`, which centralizes exception-to-response mapping (typed exceptions, logged causes) — superseding the per-endpoint bare-500 `catch (Exception)` this item flagged. No further action needed in TECH_DEBT_CLEANUP_2026_07; noted here for the audit trail.
+
 ### P4 — Dead scratch code in `BotGroupBehaviorService.java`
 - **File:** `src/main/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorService.java` lines 700–729
 - **What:** Three classes — `Trade`, `TradingProcessor`, `ExternalClient` — sit at the bottom of the file with no usages, no `public` modifiers, and no relation to the bot domain. The comment block above them describes a generic trading-processor problem.
@@ -49,6 +53,8 @@ This is a running list of production bugs and code seams identified while expand
 - **Surfaced by:** Phase 1 filter strengthening (`GameServiceTest`/`EnvironmentServiceTest`/`BotGroupServiceTest`).
 - **Action:** Pick one semantic (probably "contains" everywhere — matches what a user types in a filter box) and align. After the change, update the strengthened filter tests to assert the new shape.
 
+**RESOLVED:** TECH_DEBT_CLEANUP_2026_07 (branch `chore/tech-debt-cleanup-2026-07`), item 2 — aligned `EnvironmentService` and `BotGroupService` to the unanchored contains-match already used by `GameService` by dropping the `^`/`$` anchors. Both call sites keep `Pattern.quote(...)`, so the user input stays a regex literal (no injection surface). Strengthened filter tests updated to assert the contains shape.
+
 ### P6 — `SessionHistoryService.save()` does not generate UUIDs (inconsistent with siblings)
 - **File:** `src/main/java/com/vingame/bot/domain/session/service/SessionHistoryService.java`
 - **Behavior:** `save(SessionHistory)` is a thin delegate to `repository.save(session)`. It does not auto-generate a UUID when the entity's id is null/empty.
@@ -57,6 +63,8 @@ This is a running list of production bugs and code seams identified while expand
 - **Surfaced by:** Phase 4 `SessionHistoryServiceTest.SaveTests.shouldNotGenerateId`, which pins the current behavior so a future change is visible in the test diff.
 - **Action:** Decide whether to align with the other services (generate UUID for null/empty ids) or document the divergence. If aligning, also remove `shouldNotGenerateId` and add UUID-generation assertions.
 
+**RESOLVED:** TECH_DEBT_CLEANUP_2026_07 (branch `chore/tech-debt-cleanup-2026-07`), item 6 — aligned `SessionHistoryService.save()` with `GameService`/`BotGroupService` by generating `UUID.randomUUID().toString()` for null/empty ids (guard `id == null || id.isEmpty()`, matching the sibling shape). Test updated to assert UUID generation for new entities.
+
 ### P7 — `BotGroupBehaviorService.start()` reports success with zero bots
 - **File:** `src/main/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorService.java`
 - **Behavior:** `createBotsInParallel` catches exceptions per-bot and just logs them. If every single `botFactory.createBot(...)` call throws (e.g. auth server down), `bots` is empty and `start()` completes without throwing. The runtime is registered as ACTIVE, `targetStatus` is persisted as ACTIVE, and the group looks healthy from the database side even though zero bots are running.
@@ -64,6 +72,8 @@ This is a running list of production bugs and code seams identified while expand
 - **Impact:** A misconfigured/unreachable environment leads to a "healthy" bot group with no bots actually playing. No alert is raised.
 - **Surfaced by:** Phase 4 `BotGroupBehaviorServiceTest.StartCreateBotFailureTests.shouldCompleteWithZeroBotsWhenAllCreateBotsFail`, which locks in the current (questionable) behavior.
 - **Action:** Either (a) propagate the failure when zero bots were successfully created, OR (b) mark the group as DEAD immediately in that case, OR (c) raise the `monitorHealth` empty-list case to a DEAD transition after some grace period. After fixing, update the test to assert the new behavior.
+
+**RESOLVED:** TECH_DEBT_CLEANUP_2026_07 (branch `chore/tech-debt-cleanup-2026-07`), item 4 — took option (b): when `start()` produces zero bots for a `botCount > 0` group, it calls `runtime.markAsDead()`, persists `targetStatus=DEAD` with an operator-visible `0/N` failure reason, and leaves the runtime registered so `getHealth`/`getStatus`/`stop` surface DEAD. It does NOT throw (unlike `restart()`), preserving `onStartup` per-group isolation. Review fix-up pass then (i) moved the health-monitor/periodic-logout scheduler startup to AFTER the zero-bot check so no scheduler leaks against the DEAD idle runtime, and (ii) credits + closes the group-dead-seconds window immediately on the DEAD branch via `stopAllBots(botMetrics)` so `group_dead_seconds_total` isn't inflated by the idle-DEAD interval (and the later `/stop` finds `groupDeadSince` already cleared → no double-credit). `BotGroupBehaviorServiceTest` asserts the DEAD-path behavior and the `botCount==0 stays ACTIVE` boundary.
 
 ## Code seams needed for future test phases
 
