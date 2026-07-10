@@ -194,6 +194,31 @@ class BotGroupServiceTest {
         }
 
         @Test
+        @DisplayName("Should build a contains regex that matches a partial substring (unanchored) — item 5")
+        void shouldBuildContainsRegexMatchingPartialSubstring() {
+            when(mongoTemplate.find(any(Query.class), eq(BotGroup.class)))
+                    .thenReturn(List.of(BotGroup.builder().id("2").name("Nightly Test Group A").build()));
+
+            BotGroupFilter filter = new BotGroupFilter();
+            filter.setName("test group");
+
+            service.filter("env-a", filter);
+
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
+            Pattern namePattern = (Pattern) queryCaptor.getValue().getQueryObject().get("name");
+
+            // Applied client-side, the regex must match a name where the filter term
+            // is only a substring, case-insensitively — the behavior the old anchored
+            // "^...$" form broke. The env scope stays an exact-match string alongside.
+            assertThat(namePattern.matcher("Nightly Test Group A").find())
+                    .as("contains match on a partial, differently-cased substring")
+                    .isTrue();
+            assertThat(namePattern.matcher("Prod Group").find())
+                    .as("non-matching name must not match")
+                    .isFalse();
+        }
+
+        @Test
         @DisplayName("Should filter by game ID within the env scope")
         void shouldFilterByGameId() {
             List<BotGroup> expected = List.of(BotGroup.builder().id("1").gameId("game-1").build());

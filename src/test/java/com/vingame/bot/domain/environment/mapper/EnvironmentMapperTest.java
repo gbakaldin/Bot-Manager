@@ -237,6 +237,32 @@ class EnvironmentMapperTest {
         }
 
         @Test
+        @DisplayName("Should overwrite periodic-logout fields when the DTO provides them (incl. boxed false)")
+        void shouldOverwritePeriodicLogoutWhenDtoProvidesThem() {
+            Environment entity = Environment.builder()
+                    .id("env-1")
+                    .name("Old")
+                    .useJwtAuth(true)
+                    .periodicLogoutEnabled(true)
+                    .periodicLogoutIntervalMinutes(30)
+                    .build();
+
+            // Flip enabled true -> false: Optional.ofNullable(Boolean.FALSE).orElse(...)
+            // must yield FALSE, not fall through to the entity's TRUE.
+            EnvironmentDTO dto = EnvironmentDTO.builder()
+                    .periodicLogoutEnabled(false)
+                    .periodicLogoutIntervalMinutes(90)
+                    .build();
+
+            mapper.updateEntityFromDTO(dto, entity);
+
+            assertThat(entity.getPeriodicLogoutEnabled()).isFalse();
+            assertThat(entity.getPeriodicLogoutIntervalMinutes()).isEqualTo(90);
+            // useJwtAuth absent from the DTO — preserved.
+            assertThat(entity.isUseJwtAuth()).isTrue();
+        }
+
+        @Test
         @DisplayName("Should be a no-op when DTO is null")
         void shouldBeNoOpWhenDtoNull() {
             Environment entity = Environment.builder().id("id").name("Old").build();

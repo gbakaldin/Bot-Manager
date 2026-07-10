@@ -9,12 +9,14 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -188,11 +190,18 @@ class SessionHistoryServiceTest {
         @DisplayName("Should generate UUID when ID is null")
         void shouldGenerateIdWhenNull() {
             SessionHistory input = SessionHistory.builder().sessionId("sid-only").build();
+            ArgumentCaptor<SessionHistory> savedCaptor = ArgumentCaptor.forClass(SessionHistory.class);
             when(repository.save(any(SessionHistory.class))).thenAnswer(inv -> inv.getArgument(0));
 
             SessionHistory result = service.save(input);
 
             assertThat(result.getId()).isNotNull().isNotEmpty();
+            // The generated id must be a real UUID (matches sibling GameService/BotGroupService).
+            assertThat(UUID.fromString(result.getId())).isNotNull();
+            // And it must be stamped BEFORE the repository call, not after — the
+            // persisted entity carries the id, not just the returned reference.
+            verify(repository).save(savedCaptor.capture());
+            assertThat(savedCaptor.getValue().getId()).isEqualTo(result.getId());
         }
 
         @Test
@@ -204,6 +213,7 @@ class SessionHistoryServiceTest {
             SessionHistory result = service.save(input);
 
             assertThat(result.getId()).isNotEmpty();
+            assertThat(UUID.fromString(result.getId())).isNotNull();
         }
 
         @Test

@@ -51,6 +51,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -310,20 +311,68 @@ class BotGroupBehaviorServiceTest {
                     .thenThrow(new RuntimeException("auth failed"));
 
             // Per-bot failures are caught inside createBotsInParallel; start does NOT throw.
-            service.start("g-1");
+            assertThatCode(() -> service.start("g-1")).doesNotThrowAnyException();
 
-            // Runtime remains registered (zero bots).
+            // Runtime remains registered (zero bots) and is flipped to the DEAD
+            // in-memory state — the same terminal state monitorHealth uses, so
+            // getHealth/getStatus surface DEAD rather than ACTIVE+0-bots.
             assertThat(runningGroups()).containsKey("g-1");
             BotGroupRuntime runtime = runningGroups().get("g-1");
             assertThat(runtime.getBotInstances()).isEmpty();
+            assertThat(runtime.isGroupDead()).isTrue();
+            assertThat(runtime.getActualStatus()).isEqualTo(BotGroupStatus.DEAD);
 
-            // Group was persisted as DEAD (not ACTIVE) with lastStartedAt set.
+            // Group was persisted as DEAD (not ACTIVE) with lastStartedAt set,
+            // lastStoppedAt cleared, and an operator-visible failure reason.
             verify(botGroupService).save(botGroupCaptor.capture());
             BotGroup saved = botGroupCaptor.getValue();
             assertThat(saved.getTargetStatus()).isEqualTo(BotGroupStatus.DEAD);
             assertThat(saved.getLastStartedAt()).isNotNull();
+            assertThat(saved.getLastStoppedAt()).isNull();
+            assertThat(saved.getLastFailureReason())
+                    .as("operator-visible reason for the DEAD transition")
+                    .contains("0/3");
 
             // Cleanup the side-effect runtime
+            runtime.stopAllBots();
+        }
+
+        // Boundary for AD-2's guard `bots.isEmpty() && group.getBotCount() > 0`:
+        // a group legitimately configured with botCount == 0 produces zero bots
+        // but is NOT a failure — it must stay ACTIVE, never DEAD. This pins the
+        // `botCount > 0` half of the guard so a future refactor that drops it
+        // (marking every empty group DEAD) is caught.
+        @Test
+        @DisplayName("Should keep a zero-botCount group ACTIVE (not DEAD) — the DEAD path only fires when botCount > 0")
+        void shouldKeepZeroBotCountGroupActive() {
+            BotGroup group = BotGroup.builder()
+                    .id("g-zero")
+                    .name("ZeroCount")
+                    .environmentId("env-1")
+                    .gameId("game-1")
+                    .botCount(0)
+                    .namePrefix("bot")
+                    .password("pass")
+                    .build();
+
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("BauCua").build();
+
+            when(botGroupService.findById("g-zero")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+            // botFactory.createBot is never called for botCount == 0.
+
+            assertThatCode(() -> service.start("g-zero")).doesNotThrowAnyException();
+
+            BotGroupRuntime runtime = runningGroups().get("g-zero");
+            assertThat(runtime).isNotNull();
+            assertThat(runtime.getBotInstances()).isEmpty();
+            assertThat(runtime.isGroupDead()).isFalse();
+
+            verify(botGroupService).save(botGroupCaptor.capture());
+            assertThat(botGroupCaptor.getValue().getTargetStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+
             runtime.stopAllBots();
         }
     }
