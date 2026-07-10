@@ -275,16 +275,21 @@ class BotGroupBehaviorServiceTest {
     class StartCreateBotFailureTests {
 
         // NOTE: This test exercises the direct {@code start} path only.
+        // When direct {@code start} produces zero live bots (botCount > 0 but
+        // every createBot failed and was swallowed by createBotsInParallel),
+        // it marks the group DEAD and persists targetStatus=DEAD — the same
+        // terminal state monitorHealth uses — instead of lying with ACTIVE +
+        // 0 bots (TECH_DEBT_CLEANUP_2026_07 Architecture Decision 2). It does
+        // NOT throw: direct start runs from onStartup (per-group isolated) and
+        // the controller /start, where DEAD is the operator-visible signal.
         // {@code restart} (RESTART_LIFECYCLE_FIX Architecture Decision 6) is
-        // stricter — it throws IllegalStateException when start produces zero
-        // bots, because a restart begins with a healthy running group and
-        // "zero bots with targetStatus=ACTIVE" is the exact symptom that hid
-        // the 2026-06-09 outage. See BotGroupBehaviorServiceRestartTest.
-        // Direct {@code start} remains tolerant (e.g. first-time start of a
-        // freshly-configured group where some bot rows may legitimately fail).
+        // stricter — it throws IllegalStateException on zero bots, because a
+        // restart begins with a healthy running group and that is the exact
+        // symptom that hid the 2026-06-09 outage. The two paths intentionally
+        // differ. See BotGroupBehaviorServiceRestartTest.
         @Test
-        @DisplayName("Should still complete start with zero bots when every createBot throws (per-bot failures are swallowed by createBotsInParallel)")
-        void shouldCompleteWithZeroBotsWhenAllCreateBotsFail() {
+        @DisplayName("Should mark the group DEAD (targetStatus=DEAD, no throw) when every createBot fails and zero bots start")
+        void shouldMarkGroupDeadWhenAllCreateBotsFail() {
             BotGroup group = BotGroup.builder()
                     .id("g-1")
                     .name("Group")
@@ -307,15 +312,15 @@ class BotGroupBehaviorServiceTest {
             // Per-bot failures are caught inside createBotsInParallel; start does NOT throw.
             service.start("g-1");
 
-            // Runtime remains (zero bots, but the group is registered as running).
+            // Runtime remains registered (zero bots).
             assertThat(runningGroups()).containsKey("g-1");
             BotGroupRuntime runtime = runningGroups().get("g-1");
             assertThat(runtime.getBotInstances()).isEmpty();
 
-            // Group was persisted as ACTIVE with lastStartedAt set
+            // Group was persisted as DEAD (not ACTIVE) with lastStartedAt set.
             verify(botGroupService).save(botGroupCaptor.capture());
             BotGroup saved = botGroupCaptor.getValue();
-            assertThat(saved.getTargetStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+            assertThat(saved.getTargetStatus()).isEqualTo(BotGroupStatus.DEAD);
             assertThat(saved.getLastStartedAt()).isNotNull();
 
             // Cleanup the side-effect runtime

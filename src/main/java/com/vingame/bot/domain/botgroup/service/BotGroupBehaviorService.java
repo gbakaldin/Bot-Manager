@@ -353,6 +353,29 @@ public class BotGroupBehaviorService {
             // Start periodic logout scheduler
             startPeriodicLogoutScheduler(runtime, environment);
 
+            // Zero-bot start: createBotsInParallel swallows per-bot failures (logging
+            // ERROR + incrementing bot_creation_failures_total), so start() can reach
+            // here with an empty bot list when every bot failed to authenticate. A group
+            // that came up with 0/N live bots is not viable — mark it DEAD (the same
+            // terminal state monitorHealth uses via markAsDead) and persist
+            // targetStatus=DEAD, rather than lying to the operator with ACTIVE + 0 bots.
+            // We do NOT throw here (unlike restart()): direct start() is called from
+            // onStartup (per-group isolated) and the controller /start; DEAD is the
+            // existing operator-visible state getHealth/getStatus surface. See
+            // TECH_DEBT_CLEANUP_2026_07 AD-2. restart() keeps its stricter throw.
+            if (bots.isEmpty() && group.getBotCount() > 0) {
+                runtime.markAsDead();
+                group.setTargetStatus(BotGroupStatus.DEAD);
+                group.setLastFailureReason("Started 0/" + group.getBotCount() + " bots — all bot creations failed");
+                group.setLastStartedAt(LocalDateTime.now());
+                group.setLastStoppedAt(null);
+                botGroupService.save(group);
+
+                log.error("Group {} started 0/{} bots — marking DEAD", group.getName(), group.getBotCount());
+                started = true;
+                return;
+            }
+
             // Update entity
             group.setTargetStatus(BotGroupStatus.ACTIVE);
             group.setLastStartedAt(LocalDateTime.now());
