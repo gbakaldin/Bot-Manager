@@ -180,12 +180,12 @@ class EnvironmentServiceTest {
             Query capturedQuery = queryCaptor.getValue();
             String queryString = capturedQuery.toString();
             assertThat(queryString).contains("name");
-            // Strengthened: assert the value is a case-insensitive anchored Pattern
+            // Strengthened: assert the value is a case-insensitive contains (unanchored) Pattern
             Object nameCriterion = capturedQuery.getQueryObject().get("name");
             assertThat(nameCriterion).isInstanceOf(Pattern.class);
             Pattern namePattern = (Pattern) nameCriterion;
             assertThat(namePattern.flags() & Pattern.CASE_INSENSITIVE).isEqualTo(Pattern.CASE_INSENSITIVE);
-            assertThat(namePattern.pattern()).isEqualTo("^" + Pattern.quote("staging env") + "$");
+            assertThat(namePattern.pattern()).isEqualTo(Pattern.quote("staging env"));
         }
 
         @Test

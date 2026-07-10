@@ -66,7 +66,7 @@ public class EnvironmentService {
             query.addCriteria(Criteria.where("type").is(filter.getType()));
         }
         if (filter.getName() != null) {
-            query.addCriteria(Criteria.where("name").regex("^" + Pattern.quote(filter.getName()) + "$", "i"));
+            query.addCriteria(Criteria.where("name").regex(Pattern.quote(filter.getName()), "i"));
         }
         if (filter.getBrandCode() != null) {
             query.addCriteria(Criteria.where("brandCode").is(filter.getBrandCode()));

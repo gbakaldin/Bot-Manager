@@ -97,7 +97,7 @@ public class BotGroupService {
         Query query = new Query();
         query.addCriteria(Criteria.where("environmentId").is(environmentId));
         if (filter.getName() != null) {
-            query.addCriteria(Criteria.where("name").regex("^" + Pattern.quote(filter.getName()) + "$", "i"));
+            query.addCriteria(Criteria.where("name").regex(Pattern.quote(filter.getName()), "i"));
         }
         if (filter.getGameId() != null) {
             query.addCriteria(Criteria.where("gameId").is(filter.getGameId()));
