@@ -18,6 +18,7 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -184,16 +185,36 @@ class SessionHistoryServiceTest {
         }
 
         @Test
-        @DisplayName("Should not generate id (passes entity through as-is — service does not synthesize ids)")
-        void shouldNotGenerateId() {
-            // Production contract: SessionHistoryService.save() is a thin delegate; unlike GameService/BotGroupService
-            // it does NOT auto-generate UUIDs for null/empty ids. This test pins that behavior.
+        @DisplayName("Should generate UUID when ID is null")
+        void shouldGenerateIdWhenNull() {
             SessionHistory input = SessionHistory.builder().sessionId("sid-only").build();
-            when(repository.save(input)).thenAnswer(inv -> inv.getArgument(0));
+            when(repository.save(any(SessionHistory.class))).thenAnswer(inv -> inv.getArgument(0));
 
             SessionHistory result = service.save(input);
 
-            assertThat(result.getId()).isNull();
+            assertThat(result.getId()).isNotNull().isNotEmpty();
+        }
+
+        @Test
+        @DisplayName("Should generate UUID when ID is empty")
+        void shouldGenerateIdWhenBlank() {
+            SessionHistory input = SessionHistory.builder().id("").sessionId("sid-only").build();
+            when(repository.save(any(SessionHistory.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            SessionHistory result = service.save(input);
+
+            assertThat(result.getId()).isNotEmpty();
+        }
+
+        @Test
+        @DisplayName("Should keep existing ID when set")
+        void shouldPreserveExistingId() {
+            SessionHistory input = SessionHistory.builder().id("existing-id").sessionId("sid-only").build();
+            when(repository.save(input)).thenReturn(input);
+
+            SessionHistory result = service.save(input);
+
+            assertThat(result.getId()).isEqualTo("existing-id");
         }
     }
 

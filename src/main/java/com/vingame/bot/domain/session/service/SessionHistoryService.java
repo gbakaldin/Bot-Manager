@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -53,6 +54,9 @@ public class SessionHistoryService {
     }
 
     public SessionHistory save(SessionHistory session) {
+        if (session.getId() == null || session.getId().isEmpty()) {
+            session.setId(UUID.randomUUID().toString());
+        }
         return repository.save(session);
     }
 
