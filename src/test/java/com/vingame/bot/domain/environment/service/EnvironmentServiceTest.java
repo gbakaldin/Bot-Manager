@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.environment.service;
 
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.environment.dto.EnvironmentDTO;
 import com.vingame.bot.domain.environment.mapper.EnvironmentMapper;
@@ -316,7 +317,7 @@ class EnvironmentServiceTest {
             Environment env = Environment.builder().name("Bad Env").build();
 
             assertThatThrownBy(() -> service.save(env))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(BadRequestException.class)
                     .hasMessageContaining("Host")
                     .hasMessageContaining("Origin");
             verify(repository, never()).save(any(Environment.class));
@@ -330,7 +331,7 @@ class EnvironmentServiceTest {
             Environment env = Environment.builder().name("Bad Env").headers(h).build();
 
             assertThatThrownBy(() -> service.save(env))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(BadRequestException.class)
                     .hasMessageContaining("Host");
             verify(repository, never()).save(any(Environment.class));
         }
@@ -343,7 +344,7 @@ class EnvironmentServiceTest {
             Environment env = Environment.builder().name("Bad Env").headers(h).build();
 
             assertThatThrownBy(() -> service.save(env))
-                    .isInstanceOf(IllegalArgumentException.class)
+                    .isInstanceOf(BadRequestException.class)
                     .hasMessageContaining("Origin");
             verify(repository, never()).save(any(Environment.class));
         }

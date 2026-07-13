@@ -9,7 +9,7 @@ package com.vingame.bot.common.exception;
  * the request and retry (e.g. missing required fields, malformed identifiers,
  * pre-flight constraint violations).
  */
-public class BadRequestException extends RuntimeException {
+public class BadRequestException extends BotManagerException {
 
     public BadRequestException(String message) {
         super(message);
