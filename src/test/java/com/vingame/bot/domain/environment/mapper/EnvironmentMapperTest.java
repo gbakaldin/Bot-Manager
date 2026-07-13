@@ -45,6 +45,9 @@ class EnvironmentMapperTest {
                     .encryptionKey("key")
                     .encryptionIv("iv")
                     .alertOnLowBalance(true)
+                    .useJwtAuth(true)
+                    .periodicLogoutEnabled(true)
+                    .periodicLogoutIntervalMinutes(45)
                     .build();
 
             EnvironmentDTO dto = mapper.toDTO(entity);
@@ -67,6 +70,9 @@ class EnvironmentMapperTest {
             assertThat(dto.getEncryptionKey()).isEqualTo("key");
             assertThat(dto.getEncryptionIv()).isEqualTo("iv");
             assertThat(dto.getAlertOnLowBalance()).isTrue();
+            assertThat(dto.getUseJwtAuth()).isTrue();
+            assertThat(dto.getPeriodicLogoutEnabled()).isTrue();
+            assertThat(dto.getPeriodicLogoutIntervalMinutes()).isEqualTo(45);
         }
 
         @Test
@@ -102,6 +108,9 @@ class EnvironmentMapperTest {
                     .encryptionKey("key")
                     .encryptionIv("iv")
                     .alertOnLowBalance(true)
+                    .useJwtAuth(true)
+                    .periodicLogoutEnabled(true)
+                    .periodicLogoutIntervalMinutes(45)
                     .build();
 
             Environment entity = mapper.toEntity(dto);
@@ -124,6 +133,9 @@ class EnvironmentMapperTest {
             assertThat(entity.getEncryptionKey()).isEqualTo("key");
             assertThat(entity.getEncryptionIv()).isEqualTo("iv");
             assertThat(entity.isAlertOnLowBalance()).isTrue();
+            assertThat(entity.isUseJwtAuth()).isTrue();
+            assertThat(entity.getPeriodicLogoutEnabled()).isTrue();
+            assertThat(entity.getPeriodicLogoutIntervalMinutes()).isEqualTo(45);
         }
 
         @Test
@@ -137,6 +149,10 @@ class EnvironmentMapperTest {
             assertThat(entity.isCustomZone()).isFalse();
             assertThat(entity.isBinaryFrame()).isFalse();
             assertThat(entity.isAlertOnLowBalance()).isFalse();
+            assertThat(entity.isUseJwtAuth()).isFalse();
+            // Periodic-logout fields carry null through (null = use global default)
+            assertThat(entity.getPeriodicLogoutEnabled()).isNull();
+            assertThat(entity.getPeriodicLogoutIntervalMinutes()).isNull();
         }
 
         @Test
@@ -169,6 +185,9 @@ class EnvironmentMapperTest {
                     .encryptionKey("key")
                     .encryptionIv("iv")
                     .alertOnLowBalance(true)
+                    .useJwtAuth(true)
+                    .periodicLogoutEnabled(true)
+                    .periodicLogoutIntervalMinutes(45)
                     .build();
 
             EnvironmentDTO dto = EnvironmentDTO.builder().name("New").build();
@@ -191,6 +210,56 @@ class EnvironmentMapperTest {
             assertThat(entity.getEncryptionKey()).isEqualTo("key");
             assertThat(entity.getEncryptionIv()).isEqualTo("iv");
             assertThat(entity.isAlertOnLowBalance()).isTrue();
+            assertThat(entity.isUseJwtAuth()).isTrue();
+            assertThat(entity.getPeriodicLogoutEnabled()).isTrue();
+            assertThat(entity.getPeriodicLogoutIntervalMinutes()).isEqualTo(45);
+        }
+
+        @Test
+        @DisplayName("Should flip useJwtAuth while leaving periodic-logout fields untouched when absent")
+        void shouldUpdateUseJwtAuthAndKeepPeriodicLogout() {
+            Environment entity = Environment.builder()
+                    .id("env-1")
+                    .name("Old")
+                    .useJwtAuth(false)
+                    .periodicLogoutEnabled(true)
+                    .periodicLogoutIntervalMinutes(30)
+                    .build();
+
+            EnvironmentDTO dto = EnvironmentDTO.builder().useJwtAuth(true).build();
+
+            mapper.updateEntityFromDTO(dto, entity);
+
+            assertThat(entity.isUseJwtAuth()).isTrue();
+            // Periodic-logout fields left untouched when absent from the DTO
+            assertThat(entity.getPeriodicLogoutEnabled()).isTrue();
+            assertThat(entity.getPeriodicLogoutIntervalMinutes()).isEqualTo(30);
+        }
+
+        @Test
+        @DisplayName("Should overwrite periodic-logout fields when the DTO provides them (incl. boxed false)")
+        void shouldOverwritePeriodicLogoutWhenDtoProvidesThem() {
+            Environment entity = Environment.builder()
+                    .id("env-1")
+                    .name("Old")
+                    .useJwtAuth(true)
+                    .periodicLogoutEnabled(true)
+                    .periodicLogoutIntervalMinutes(30)
+                    .build();
+
+            // Flip enabled true -> false: Optional.ofNullable(Boolean.FALSE).orElse(...)
+            // must yield FALSE, not fall through to the entity's TRUE.
+            EnvironmentDTO dto = EnvironmentDTO.builder()
+                    .periodicLogoutEnabled(false)
+                    .periodicLogoutIntervalMinutes(90)
+                    .build();
+
+            mapper.updateEntityFromDTO(dto, entity);
+
+            assertThat(entity.getPeriodicLogoutEnabled()).isFalse();
+            assertThat(entity.getPeriodicLogoutIntervalMinutes()).isEqualTo(90);
+            // useJwtAuth absent from the DTO — preserved.
+            assertThat(entity.isUseJwtAuth()).isTrue();
         }
 
         @Test

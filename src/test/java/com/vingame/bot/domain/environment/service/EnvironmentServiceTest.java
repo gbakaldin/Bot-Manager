@@ -180,12 +180,37 @@ class EnvironmentServiceTest {
             Query capturedQuery = queryCaptor.getValue();
             String queryString = capturedQuery.toString();
             assertThat(queryString).contains("name");
-            // Strengthened: assert the value is a case-insensitive anchored Pattern
+            // Strengthened: assert the value is a case-insensitive contains (unanchored) Pattern
             Object nameCriterion = capturedQuery.getQueryObject().get("name");
             assertThat(nameCriterion).isInstanceOf(Pattern.class);
             Pattern namePattern = (Pattern) nameCriterion;
             assertThat(namePattern.flags() & Pattern.CASE_INSENSITIVE).isEqualTo(Pattern.CASE_INSENSITIVE);
-            assertThat(namePattern.pattern()).isEqualTo("^" + Pattern.quote("staging env") + "$");
+            assertThat(namePattern.pattern()).isEqualTo(Pattern.quote("staging env"));
+        }
+
+        @Test
+        @DisplayName("Should build a contains regex that matches a partial substring (unanchored) — item 5")
+        void shouldBuildContainsRegexMatchingPartialSubstring() {
+            when(mongoTemplate.find(any(Query.class), eq(Environment.class)))
+                    .thenReturn(List.of(Environment.builder().id("1").name("EU Staging Env 01").build()));
+
+            EnvironmentFilter filter = new EnvironmentFilter();
+            filter.setName("staging");
+
+            service.filter(filter);
+
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(Environment.class));
+            Pattern namePattern = (Pattern) queryCaptor.getValue().getQueryObject().get("name");
+
+            // The regex Mongo receives, applied client-side, must match a name where
+            // the filter term is only a substring (not the whole value) and must be
+            // case-insensitive. This is the behavior the anchored "^...$" form broke.
+            assertThat(namePattern.matcher("EU Staging Env 01").find())
+                    .as("contains match on a partial, differently-cased substring")
+                    .isTrue();
+            assertThat(namePattern.matcher("Production").find())
+                    .as("non-matching name must not match")
+                    .isFalse();
         }
 
         @Test

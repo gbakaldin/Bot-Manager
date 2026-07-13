@@ -347,6 +347,57 @@ public class BotGroupBehaviorService {
                 log.debug("Started bot {}", bot.getUserName());
             }
 
+            // Zero-bot start: createBotsInParallel swallows per-bot failures (logging
+            // ERROR + incrementing bot_creation_failures_total), so start() can reach
+            // here with an empty bot list when every bot failed to authenticate. A group
+            // that came up with 0/N live bots is not viable — mark it DEAD (the same
+            // terminal state monitorHealth uses via markAsDead) and persist
+            // targetStatus=DEAD, rather than lying to the operator with ACTIVE + 0 bots.
+            // We do NOT throw here (unlike restart()): direct start() is called from
+            // onStartup (per-group isolated) and the controller /start; DEAD is the
+            // existing operator-visible state getHealth/getStatus surface. See
+            // TECH_DEBT_CLEANUP_2026_07 AD-2. restart() keeps its stricter throw.
+            //
+            // This check runs BEFORE the schedulers are started so the zero-bot DEAD
+            // path never creates them: unlike startPeriodicLogoutScheduler (which
+            // early-returns on an empty bot list), startHealthMonitoring would
+            // otherwise unconditionally spin up a ScheduledExecutorService that leaks
+            // against a DEAD idle runtime until an operator /stop reaps it. See the
+            // TECH_DEBT_CLEANUP_2026_07 review, "Health-monitor scheduler is left
+            // running on the zero-bot DEAD path".
+            if (bots.isEmpty() && group.getBotCount() > 0) {
+                runtime.markAsDead();
+                // markAsDead() stamped groupDeadSince, opening a group-dead-seconds
+                // window. This path never reaches the finally-block stopAllBots, so
+                // credit + close that (~0s) window NOW via stopAllBots(botMetrics),
+                // rather than leaving it open to be credited in one shot at a much
+                // later /stop — which would inflate group_dead_seconds_total by the
+                // whole idle-DEAD interval the group sat with nothing to recover.
+                // stopAllBots clears groupDeadSince, so the later /stop finds it null
+                // and creditGroupDeadSeconds is a no-op there → no double-credit. The
+                // runtime is intentionally NOT removed from runningGroups, so
+                // getHealth/getStatus/stop still surface the DEAD group. actualStatus
+                // stays DEAD (stopAllBots does not touch it). No schedulers were
+                // started on this branch, so stopAllBots only closes the empty executor
+                // and credits the window. Set the group MDC so the dead-seconds
+                // increment is tagged with botGroupId/environmentId, mirroring stop().
+                BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
+                try {
+                    runtime.stopAllBots(botMetrics);
+                } finally {
+                    BotMdc.clear();
+                }
+                group.setTargetStatus(BotGroupStatus.DEAD);
+                group.setLastFailureReason("Started 0/" + group.getBotCount() + " bots — all bot creations failed");
+                group.setLastStartedAt(LocalDateTime.now());
+                group.setLastStoppedAt(null);
+                botGroupService.save(group);
+
+                log.error("Group {} started 0/{} bots — marking DEAD", group.getName(), group.getBotCount());
+                started = true;
+                return;
+            }
+
             // Start health monitoring
             startHealthMonitoring(runtime);
 

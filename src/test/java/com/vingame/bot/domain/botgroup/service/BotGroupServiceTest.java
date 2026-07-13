@@ -185,12 +185,37 @@ class BotGroupServiceTest {
             assertThat(queryString).contains("name");
             // Env scope is always present
             assertThat(capturedQuery.getQueryObject().get("environmentId")).isEqualTo("env-a");
-            // Strengthened: assert the value is a case-insensitive anchored Pattern
+            // Strengthened: assert the value is a case-insensitive contains (unanchored) Pattern
             Object nameCriterion = capturedQuery.getQueryObject().get("name");
             assertThat(nameCriterion).isInstanceOf(Pattern.class);
             Pattern namePattern = (Pattern) nameCriterion;
             assertThat(namePattern.flags() & Pattern.CASE_INSENSITIVE).isEqualTo(Pattern.CASE_INSENSITIVE);
-            assertThat(namePattern.pattern()).isEqualTo("^" + Pattern.quote("test group") + "$");
+            assertThat(namePattern.pattern()).isEqualTo(Pattern.quote("test group"));
+        }
+
+        @Test
+        @DisplayName("Should build a contains regex that matches a partial substring (unanchored) — item 5")
+        void shouldBuildContainsRegexMatchingPartialSubstring() {
+            when(mongoTemplate.find(any(Query.class), eq(BotGroup.class)))
+                    .thenReturn(List.of(BotGroup.builder().id("2").name("Nightly Test Group A").build()));
+
+            BotGroupFilter filter = new BotGroupFilter();
+            filter.setName("test group");
+
+            service.filter("env-a", filter);
+
+            verify(mongoTemplate).find(queryCaptor.capture(), eq(BotGroup.class));
+            Pattern namePattern = (Pattern) queryCaptor.getValue().getQueryObject().get("name");
+
+            // Applied client-side, the regex must match a name where the filter term
+            // is only a substring, case-insensitively — the behavior the old anchored
+            // "^...$" form broke. The env scope stays an exact-match string alongside.
+            assertThat(namePattern.matcher("Nightly Test Group A").find())
+                    .as("contains match on a partial, differently-cased substring")
+                    .isTrue();
+            assertThat(namePattern.matcher("Prod Group").find())
+                    .as("non-matching name must not match")
+                    .isFalse();
         }
 
         @Test
