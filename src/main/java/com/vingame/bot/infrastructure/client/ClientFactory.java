@@ -22,7 +22,6 @@ public class ClientFactory {
     private String encryptionKey;
     private String encryptionIv;
     private EventLoopGroup eventLoopGroup;
-    private TokensProvider tokens;
     private boolean ignoreJwtToken;
 
     /**
