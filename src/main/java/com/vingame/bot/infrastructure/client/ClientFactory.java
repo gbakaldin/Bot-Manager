@@ -45,29 +45,8 @@ public class ClientFactory {
     }
 
     /**
-     * Create a new WebSocket client with authentication configured.
-     *
-     * DEPRECATED: Use newClient(TokensProvider) instead to avoid race conditions.
-     * This method uses shared mutable state (setTokens) which is unsafe when
-     * multiple bots share the same ClientFactory instance.
-     *
-     * @return Configured WebSocket client ready to connect
-     * @deprecated Use {@link #newClient(TokensProvider)} to pass tokens directly
-     */
-    @Deprecated
-    public VingameWebSocketClient newClient() {
-        if (tokens == null) {
-            throw new IllegalStateException("TokensProvider must be set before creating client.");
-        }
-
-        log.warn("DEPRECATED: Using newClient() without parameters. This is unsafe for shared factories. Use newClient(tokens, name) instead.");
-
-        return buildClient(tokens, "unknown");
-    }
-
-    /**
      * Build the actual WebSocket client with the given tokens.
-     * Shared implementation for both newClient() methods.
+     * Shared implementation for the newClient methods.
      */
     private VingameWebSocketClient buildClient(TokensProvider tokens, String name) {
         return VingameWebSocketClient.builder()
