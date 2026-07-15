@@ -83,7 +83,8 @@ public class EnvironmentController {
             description = "Returns a list of all environments containing the provided brand and type values")
     @PostMapping("/filter/")
     public ResponseEntity<List<EnvironmentDTO>> filter(
-            @Parameter(description = "The filter to query the environments by", example = "N/A") //TODO: pending example
+            @Parameter(description = "The filter to query the environments by",
+                    example = "{\"type\":\"STAGING\",\"brandCode\":\"G2\",\"productCode\":\"097\"}")
             @RequestBody EnvironmentFilter filter) {
         List<Environment> environments = service.filter(filter);
         Map<String, List<BotGroup>> groupsByEnv = botGroupService.findAll().stream()
@@ -104,7 +105,8 @@ public class EnvironmentController {
             description = "Returns the freshly created environment complete with the actual id")
     @PostMapping("/")
     public ResponseEntity<EnvironmentDTO> save(
-            @Parameter(description = "Environment body to save in the database", example = "N/A") //TODO: pending example
+            @Parameter(description = "Environment body to save in the database",
+                    example = "{\"name\":\"BOM Staging\",\"type\":\"STAGING\",\"brandCode\":\"G2\",\"productCode\":\"097\",\"webSocketMiniUrl\":\"wss://bom-sock.stgame.win/mini\",\"hostUrl\":\"https://bom.stgame.win\",\"apiGatewayUrl\":\"https://bomgw.stgame.win\",\"headers\":{\"Origin\":\"https://bom.stgame.win\"},\"customZone\":false,\"binaryFrame\":false,\"miniZoneName\":\"MiniGame3\",\"alertOnLowBalance\":true,\"useJwtAuth\":false,\"periodicLogoutEnabled\":true,\"periodicLogoutIntervalMinutes\":60}")
             @RequestBody EnvironmentDTO environmentDTO) {
         Environment environment = mapper.toEntity(environmentDTO);
         Environment saved = service.save(environment);
@@ -117,7 +119,8 @@ public class EnvironmentController {
     @PatchMapping("/{id}")
     public ResponseEntity<EnvironmentDTO> update(
             @PathVariable @Parameter(description = "ID of the environment to update", example = "123") String id,
-            @Parameter(description = "Environment DTO containing the fields that need updating (only non-empty Optional fields will be updated)", example = "N/A") //TODO: pending example
+            @Parameter(description = "Environment DTO containing the fields that need updating (only non-empty Optional fields will be updated)",
+                    example = "{\"periodicLogoutEnabled\":true,\"periodicLogoutIntervalMinutes\":30,\"alertOnLowBalance\":true}")
             @RequestBody EnvironmentDTO environmentDTO) {
         Environment updated = service.update(id, environmentDTO);
         return ResponseEntity.ok(mapper.toDTO(updated));

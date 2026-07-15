@@ -17,7 +17,7 @@ package com.vingame.bot.common.exception;
  * Abstract — callers must pick a leaf subclass that names the specific upstream
  * interaction (registration / login / etc.).
  */
-public abstract class UpstreamGatewayException extends RuntimeException {
+public abstract class UpstreamGatewayException extends BotManagerException {
 
     private final String type;
 

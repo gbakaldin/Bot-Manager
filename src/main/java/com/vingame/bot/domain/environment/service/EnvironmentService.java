@@ -3,6 +3,7 @@ package com.vingame.bot.domain.environment.service;
 import com.vingame.bot.domain.brand.model.BrandCode;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.dto.EnvironmentDTO;
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.environment.mapper.EnvironmentMapper;
 import com.vingame.bot.domain.environment.model.Environment;
@@ -124,7 +125,7 @@ public class EnvironmentService {
 
     private Map<String, String> validateAndMergeWsHeaders(Map<String, String> provided) {
         if (provided == null || !provided.containsKey("Host") || !provided.containsKey("Origin")) {
-            throw new IllegalArgumentException(
+            throw new BadRequestException(
                     "WebSocket headers must include both 'Host' and 'Origin' (case-sensitive).");
         }
         Map<String, String> merged = new LinkedHashMap<>(DEFAULT_WS_HEADERS);

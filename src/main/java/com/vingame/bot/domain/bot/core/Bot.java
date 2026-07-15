@@ -290,19 +290,6 @@ public abstract class Bot {
         client.close();
     }
 
-    protected void connectToSocket() {
-        client.connect();
-    }
-
-    public void authenticate() {
-        try {
-            this.tokens = apiGatewayClient.authenticate(credentials);
-            log.debug("Bot {}: authentication succeeded", userName);
-        } catch (Exception e) {
-            log.error("Bot {}: Authentication failed: {}", userName, e.getMessage());
-        }
-    }
-
     public void logout() {
         try {
             stop();

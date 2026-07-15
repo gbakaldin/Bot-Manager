@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.environment.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
@@ -349,6 +350,38 @@ class EnvironmentControllerTest {
                     .andExpect(jsonPath("$.brandCode").value("G2"))
                     .andExpect(jsonPath("$.productCode.code").value("103"));
         }
+
+        @Test
+        @DisplayName("Should return 400 Bad Request with body when save throws BadRequestException (WS-header validation)")
+        void shouldReturnBadRequestWhenSaveThrowsBadRequestException() throws Exception {
+            // Item 4 regression: EnvironmentService.validateAndMergeWsHeaders now
+            // throws BadRequestException (was IllegalArgumentException) when WS
+            // headers lack Host/Origin. End-to-end through the controller +
+            // RestExceptionHandler this must still surface as HTTP 400 with the
+            // structured {type:'Bad request', msg} body — the typed arm, not the
+            // IllegalArgumentException fallback. Ties the migrated exception type
+            // to the HTTP contract, complementing the unit-level type assertions
+            // in EnvironmentServiceTest.
+            EnvironmentDTO inputDto = EnvironmentDTO.builder()
+                    .name("Bad Env")
+                    .build();
+
+            Environment entity = Environment.builder().name("Bad Env").build();
+
+            when(mapper.toEntity(any(EnvironmentDTO.class))).thenReturn(entity);
+            when(service.save(entity)).thenThrow(new BadRequestException(
+                    "WebSocket headers must include both 'Host' and 'Origin' (case-sensitive)."));
+
+            mockMvc.perform(post("/api/v1/environment/")
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(inputDto)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value(
+                            org.hamcrest.Matchers.containsString("Host")))
+                    .andExpect(jsonPath("$.msg").value(
+                            org.hamcrest.Matchers.containsString("Origin")));
+        }
     }
 
     @Nested
@@ -405,6 +438,30 @@ class EnvironmentControllerTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(updateDto)))
                     .andExpect(status().isNotFound());
+        }
+
+        @Test
+        @DisplayName("Should return 400 Bad Request with body when update throws BadRequestException (WS-header validation)")
+        void shouldReturnBadRequestWhenUpdateThrowsBadRequestException() throws Exception {
+            // Mirrors the save-path regression on the PATCH endpoint: the WS-header
+            // validation also runs on update, and the migrated BadRequestException
+            // must map to HTTP 400 with body end-to-end.
+            String envId = "env-123";
+            EnvironmentDTO updateDto = EnvironmentDTO.builder()
+                    .name("Bad Env")
+                    .build();
+
+            when(service.update(eq(envId), any(EnvironmentDTO.class)))
+                    .thenThrow(new BadRequestException(
+                            "WebSocket headers must include both 'Host' and 'Origin' (case-sensitive)."));
+
+            mockMvc.perform(patch("/api/v1/environment/{id}", envId)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(updateDto)))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value(
+                            org.hamcrest.Matchers.containsString("Host")));
         }
     }
 
