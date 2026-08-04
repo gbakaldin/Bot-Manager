@@ -4,6 +4,6 @@ logs
 *.tar
 *.md
 seed.js
-src/main/resources/namechangeref.js
-src/main/resources/application-loadtest.properties
+bot-app/src/main/resources/namechangeref.js
+bot-app/src/main/resources/application-loadtest.properties
 startup.sh
