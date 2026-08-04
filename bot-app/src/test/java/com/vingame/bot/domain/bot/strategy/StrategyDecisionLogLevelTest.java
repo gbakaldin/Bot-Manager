@@ -152,13 +152,44 @@ class StrategyDecisionLogLevelTest {
      * phrase is missing (source drift) or on the wrong level.
      */
     private static void assertPhrasesUse(String relativePath, String expectedCall, String... phrases) {
-        Path file = Path.of(System.getProperty("user.dir"), "src/main/java/com/vingame/bot", relativePath);
+        Path file = resolveSource(relativePath);
         String source;
         try {
             source = Files.readString(file);
         } catch (Exception e) {
             throw new AssertionError("cannot read source " + file, e);
         }
+        assertPhrasesInSource(source, relativePath, expectedCall, phrases);
+    }
+
+    /**
+     * Resolve a production source file that, after the MODULE_DECOUPLING split, may
+     * live in a sibling module (strategy sources moved to {@code bot-strategies};
+     * core-bot sources stay in {@code bot-app}). Walk up from the module CWD to the
+     * repo root, then probe each module's main source root. Falls back to the
+     * legacy single-module layout for robustness. Test-only path resolution.
+     */
+    private static Path resolveSource(String relativePath) {
+        Path cwd = Path.of(System.getProperty("user.dir")).toAbsolutePath();
+        Path repoRoot = cwd;
+        while (repoRoot != null && !Files.exists(repoRoot.resolve("bot-app/pom.xml"))) {
+            repoRoot = repoRoot.getParent();
+        }
+        if (repoRoot != null) {
+            for (String module : List.of("bot-app", "bot-strategies", "bot-engine", "bot-messages", "bot-api")) {
+                Path candidate = repoRoot.resolve(module)
+                        .resolve("src/main/java/com/vingame/bot").resolve(relativePath);
+                if (Files.exists(candidate)) {
+                    return candidate;
+                }
+            }
+        }
+        // Legacy single-module fallback.
+        return cwd.resolve("src/main/java/com/vingame/bot").resolve(relativePath);
+    }
+
+    private static void assertPhrasesInSource(String source, String relativePath,
+                                              String expectedCall, String... phrases) {
         for (String phrase : phrases) {
             List<String> matches = source.lines()
                     .filter(l -> l.contains(phrase))
