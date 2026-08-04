@@ -20,6 +20,7 @@
     <module>bot-api</module>
     <module>bot-strategies</module>
     <module>bot-messages</module>
+    <module>bot-engine</module>
     <module>bot-app</module>
   </modules>
 

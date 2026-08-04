@@ -28,6 +28,11 @@
       <artifactId>bot-messages</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <dependency>
+      <groupId>com.mercury</groupId>
+      <artifactId>bot-engine</artifactId>
+      <version>${project.version}</version>
+    </dependency>
 
     <dependency>
       <groupId>org.springframework.boot</groupId>

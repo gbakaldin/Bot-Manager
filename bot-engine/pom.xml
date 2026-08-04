@@ -1,0 +1,126 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.mercury</groupId>
+    <artifactId>Bot</artifactId>
+    <version>1.0</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>bot-engine</artifactId>
+  <name>Bot - Engine</name>
+  <description>
+    The bot engine: lifecycle/core bots (Bot, BettingMiniGameBot, SlotMachineBot,
+    TaiXiuGameBot, BotStatus), the HTTP/WS client plumbing (ApiGatewayClient,
+    GameMsClient, ClientFactory, DisplayNameService + dto), the AuthProfile record
+    and per-brand login requests, the coordination services (BetCoordinator,
+    JackpotScaler + value objects), and the engine-facing observability classes the
+    bots pull down (BotMetrics, SessionAggregationService, the *SessionStrategy
+    interfaces + accumulator/context). Depends on bot-strategies, bot-messages and
+    bot-api (+ framework). The Spring-wiring observability classes that reach back up
+    into the app (ObservabilityConfig, InfoGaugeRefresher, BotMdcTagsMeterFilter) and
+    the AuthStrategyFactory (which imports the app-owned Environment) stay in bot-app.
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.mercury</groupId>
+      <artifactId>bot-api</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.mercury</groupId>
+      <artifactId>bot-strategies</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.mercury</groupId>
+      <artifactId>bot-messages</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- @Component / @Service / @Configuration / ObjectProvider wiring in the engine. -->
+    <dependency>
+      <groupId>org.springframework</groupId>
+      <artifactId>spring-context</artifactId>
+    </dependency>
+    <!-- @PostConstruct / @PreDestroy on engine components. -->
+    <dependency>
+      <groupId>jakarta.annotation</groupId>
+      <artifactId>jakarta.annotation-api</artifactId>
+    </dependency>
+
+    <!-- BotMetrics + session strategies register Counters/Gauges on the MeterRegistry. -->
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-core</artifactId>
+    </dependency>
+
+    <!-- Netty channel handle on the WS client path. -->
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-all</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>com.vingame</groupId>
+      <artifactId>websocket-parser-core</artifactId>
+      <scope>compile</scope>
+    </dependency>
+
+    <!-- Testing -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-starter-logging</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- Several engine tests (MDC / metrics) attach a log4j2 appender; log4j2 must be
+         the active SLF4J binding on the test classpath (mirrors bot-app runtime). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-log4j2</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-layout-template-json</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
