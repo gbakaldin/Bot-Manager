@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test-only log4j2 config for bot-strategies. bot-strategies has no runtime
+  log4j2 config of its own (bot-app owns the production one). Without a config
+  log4j2 defaults the root threshold to ERROR, which would suppress the WARN /
+  DEBUG lines that WeightedOptionPickerTest asserts via an attached appender.
+  Mirror bot-app's levels: root=info, com.vingame.bot=debug.
+-->
+<Configuration status="WARN">
+  <Appenders>
+    <Console name="Console" target="SYSTEM_OUT">
+      <PatternLayout pattern="%d{HH:mm:ss.SSS} [%t] %-5level %c{1} - %msg%n"/>
+    </Console>
+  </Appenders>
+  <Loggers>
+    <Logger name="com.vingame.bot" level="debug" additivity="true"/>
+    <Root level="info">
+      <AppenderRef ref="Console"/>
+    </Root>
+  </Loggers>
+</Configuration>
