@@ -17,6 +17,7 @@
   <url>https://maven.apache.org</url>
 
   <modules>
+    <module>bot-api</module>
     <module>bot-app</module>
   </modules>
 
