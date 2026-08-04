@@ -1,0 +1,62 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.mercury</groupId>
+    <artifactId>Bot</artifactId>
+    <version>1.0</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>bot-messages</artifactId>
+  <name>Bot - Messages</name>
+  <description>
+    Concrete per-brand message implementations (g2/{bom,b52}, g3/tip, g4/nohu,
+    slot, taixiu), the request builders (Request / SlotRequest / TaiXiuRequest and
+    friends), and the GameMessageTypesResolver that maps a ProductCode / game type
+    onto the correct concrete *GameMessageTypes provider. The message interfaces and
+    abstract base messages live in bot-api (Phase 2); this module holds only the
+    concrete Jackson-polymorphic subtypes referenced by that contract. Depends only
+    on bot-api and Jackson/Lombok. One module for all brands (Architecture
+    Decision #4).
+  </description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.mercury</groupId>
+      <artifactId>bot-api</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.projectlombok</groupId>
+      <artifactId>lombok</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <!-- Jackson polymorphism annotations on the concrete message classes.
+         jackson-databind (used by the resolver round-trip tests) is inherited
+         transitively from bot-api. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+    </dependency>
+
+    <!-- Testing -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+      </plugin>
+    </plugins>
+  </build>
+</project>
