@@ -1,6 +1,18 @@
+# Shared json-file log-rotation policy. Applied to every service so a container's
+# stdout/stderr log can never grow unbounded on the host filesystem — the missing
+# guard that let container logs (alongside the Loki volume) fill Bot-1's disk on
+# 2026-06-30. 50 MB × 5 files = 250 MB hard cap per container.
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   mongo:
     image: mongo:8.0
+    restart: unless-stopped
+    logging: *default-logging
     ports:
       - "27017:27017"
     volumes:
@@ -17,6 +29,7 @@ services:
     image: vingame-bot:latest
     user: "${HOST_UID}:${HOST_GID}"
     restart: unless-stopped
+    logging: *default-logging
     ports:
       - "8080:8085"
     environment:
@@ -37,6 +50,8 @@ services:
 
   loki:
     image: grafana/loki:3.3.2
+    restart: unless-stopped
+    logging: *default-logging
     ports:
       - "3100:3100"
     command: -config.file=/etc/loki/loki-config.yaml
@@ -46,6 +61,8 @@ services:
 
   promtail:
     image: grafana/promtail:3.3.2
+    restart: unless-stopped
+    logging: *default-logging
     volumes:
       - ./logs:/logs:ro
       - ./promtail-config.yml:/etc/promtail/config.yml:ro
@@ -55,11 +72,15 @@ services:
 
   grafana:
     image: grafana/grafana:11.4.0
+    restart: unless-stopped
+    logging: *default-logging
     ports:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      # Overridable via .env / host env; falls back to the legacy default so
+      # staging login is unchanged. Set GRAFANA_ADMIN_PASSWORD before a prod deploy.
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
     volumes:
       - grafana-data:/var/lib/grafana
@@ -70,6 +91,8 @@ services:
 
   prometheus:
     image: prom/prometheus:v2.55.0
+    restart: unless-stopped
+    logging: *default-logging
     ports:
       - "9090:9090"
     # Specifying `command:` overrides the image's default command entirely, so

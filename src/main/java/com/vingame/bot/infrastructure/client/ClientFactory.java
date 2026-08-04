@@ -57,6 +57,14 @@ public class ClientFactory {
                 .tokensProvider(() -> tokens)
                 .pingMessage(new PingMessageImpl(zoneName))
                 .pingFrequencyMillis(5000L)
+                // ws-parser 3.0.x defaults awaitServerReady=true, which blocks connect()
+                // for up to 30s waiting on a hardcoded AUTH-ACK ([1,true...]) + cmd:100
+                // ready-push. Our game servers don't emit that exact handshake, so every
+                // bot times out. We send AUTH via the scenario and don't need the library's
+                // blocking readiness gate — opt out to restore the 2.3.10 connect semantics.
+                // (The 3.0.5 thread-leak fix — virtualized executors + self-sufficient
+                // close() — is independent of this flag and stays in effect.)
+                .awaitServerReady(false)
                 .then(builder -> {
                     if (ignoreJwtToken) {
                         builder.ignoreJwtToken();
