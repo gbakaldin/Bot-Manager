@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 
 RUN mkdir -p /app/logs && chown -R botmanager:botmanager /app
 
-COPY --chown=botmanager:botmanager target/Bot-1.0.jar Bot.jar
+COPY --chown=botmanager:botmanager bot-app/target/Bot-1.0.jar Bot.jar
 
 USER botmanager
 
