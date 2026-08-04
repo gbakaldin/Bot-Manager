@@ -27,9 +27,27 @@ class MetricKeyDashboardParityTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Path PER_GAME =
-            Path.of("grafana/provisioning/dashboards/per-game.json");
+            repoRootRelative("grafana/provisioning/dashboards/per-game.json");
     private static final Path PER_ENV =
-            Path.of("grafana/provisioning/dashboards/per-environment.json");
+            repoRootRelative("grafana/provisioning/dashboards/per-environment.json");
+
+    /**
+     * Resolve a repo-root-relative path independent of the module the test runs
+     * from. Since the multi-module split, Surefire's working directory is the
+     * {@code bot-app} module, but the Grafana dashboards live at the repo root;
+     * walk parents until the target exists.
+     */
+    private static Path repoRootRelative(String relative) {
+        Path dir = Path.of("").toAbsolutePath();
+        while (dir != null) {
+            Path candidate = dir.resolve(relative);
+            if (java.nio.file.Files.exists(candidate)) {
+                return candidate;
+            }
+            dir = dir.getParent();
+        }
+        return Path.of(relative);
+    }
 
     @Test
     void everyGameKeyMatchesPerGameDashboard() throws IOException {
