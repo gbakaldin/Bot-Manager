@@ -61,8 +61,13 @@ public class BotGroupRuntime {
     private final List<Future<?>> botFutures;
     private final ExecutorService executor;
 
-    // Actual runtime status (source of truth while group is managed)
-    private BotGroupStatus actualStatus;           // ACTIVE, STOPPED, DEAD
+    // Actual runtime status (source of truth while group is managed).
+    // Volatile for the same reason as groupDeadSince below: markAsDead() writes it
+    // on the health-monitor thread, and BotGroupBehaviorService.startLocked() reads
+    // it on the admin/caller thread (the DEAD-reclaim discriminator) without sharing
+    // a lock with the monitor — so a stale ACTIVE read would silently no-op Start on
+    // a DEAD group, resurfacing the very bug the reclaim path fixes.
+    private volatile BotGroupStatus actualStatus;  // ACTIVE, STOPPED, DEAD
     private BotGroupPlayingStatus playingStatus;   // PLAYING, IDLE, PENDING
 
     // Runtime metadata
