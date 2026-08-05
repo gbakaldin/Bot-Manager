@@ -4,6 +4,7 @@ import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
+import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.game.model.Game;
@@ -12,6 +13,7 @@ import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.infrastructure.observability.BotMdcTagsMeterFilter;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
+import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -27,14 +29,20 @@ import org.apache.logging.log4j.core.appender.AbstractAppender;
 import org.apache.logging.log4j.core.config.LoggerConfig;
 import org.apache.logging.log4j.core.layout.PatternLayout;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.lang.reflect.Field;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -45,6 +53,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -110,6 +119,17 @@ class BotGroupBehaviorServiceRestartTest {
         lenient().when(b.getTotalBetsPlaced()).thenReturn(new AtomicLong(0));
         lenient().when(b.getTotalBetAmount()).thenReturn(new AtomicLong(0));
         return b;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, BotGroupRuntime> runningGroups(BotGroupBehaviorService svc) {
+        try {
+            Field f = BotGroupBehaviorService.class.getDeclaredField("runningGroups");
+            f.setAccessible(true);
+            return (Map<String, BotGroupRuntime>) f.get(svc);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Test
@@ -506,6 +526,267 @@ class BotGroupBehaviorServiceRestartTest {
         assertThat(failureLog.getThrown())
                 .as("failure log must attach the throwable so SLF4J can render the stacktrace")
                 .isSameAs(upstreamFailure);
+    }
+
+    /* ----- DEAD_GROUP_RESTART: reclaim-on-DEAD in start() (AD-1..AD-5) ----- */
+
+    @Test
+    @DisplayName("start() on a group whose runtime is DEAD reclaims the old runtime and rebuilds — " +
+            "NOT a no-op (primary regression: fails on pre-fix code)")
+    void start_reclaimsAndRebuildsWhenRuntimeIsDead() {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> stubBot("bot" + System.nanoTime()));
+
+        // Seed a lingering DEAD runtime, exactly as the health-monitor death path
+        // or the zero-bot start path leaves it in runningGroups.
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 3, "env-1");
+        dead.markAsDead();
+        runningGroups(service).put("g-1", dead);
+
+        try {
+            service.start("g-1");
+
+            // Rebuild happened: the factory was invoked 3 times (a no-op would be 0).
+            verify(botFactory, times(3)).createBot(anyString(), any(BotConfiguration.class));
+
+            // The map now holds a NEW runtime (the DEAD one was reclaimed/replaced),
+            // and it is ACTIVE.
+            BotGroupRuntime rebuilt = runningGroups(service).get("g-1");
+            assertThat(rebuilt).as("rebuilt runtime is a fresh instance").isNotSameAs(dead);
+            assertThat(rebuilt.getActualStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+
+            // targetStatus flipped DEAD → ACTIVE and persisted.
+            ArgumentCaptor<BotGroup> saved = ArgumentCaptor.forClass(BotGroup.class);
+            verify(botGroupService).save(saved.capture());
+            assertThat(saved.getValue().getTargetStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+        } finally {
+            service.stop("g-1");
+        }
+    }
+
+    @Test
+    @DisplayName("start() is a no-op when the existing runtime is ACTIVE — mirrors shouldNoOpWhenAlreadyRunning (AD-2)")
+    void start_isNoOpWhenRuntimeIsActive() {
+        // Default-constructed runtime is ACTIVE (BotGroupRuntime constructor).
+        BotGroupRuntime active = new BotGroupRuntime("g-1", 0, "env-1");
+        runningGroups(service).put("g-1", active);
+        try {
+            service.start("g-1");
+
+            // Early no-op: findById never reached, factory never invoked, same instance retained.
+            verify(botGroupService, never()).findById(anyString());
+            verify(botFactory, never()).createBot(anyString(), any(BotConfiguration.class));
+            assertThat(runningGroups(service).get("g-1")).isSameAs(active);
+        } finally {
+            active.getExecutor().shutdownNow();
+            runningGroups(service).remove("g-1");
+        }
+    }
+
+    @Test
+    @DisplayName("reclaim credits the open group-DEAD window exactly once and clears the stamp (AD-4)")
+    void start_reclaimCreditsGroupDeadSecondsExactlyOnce() {
+        MeterRegistry registry = new SimpleMeterRegistry();
+        registry.config().meterFilter(new BotMdcTagsMeterFilter());
+        BotMetrics realMetrics = new BotMetrics(registry);
+
+        BotGroupBehaviorService svc = new BotGroupBehaviorService(
+                botGroupService, environmentService, gameService, botFactory, realMetrics,
+                sessionAggregationService);
+        ReflectionTestUtils.setField(svc, "deadBotGroupThreshold", 0.80);
+        ReflectionTestUtils.setField(svc, "botCreationParallelism", 10);
+        ReflectionTestUtils.setField(svc, "watchdogTimeoutSeconds", 180L);
+        ReflectionTestUtils.setField(svc, "periodicLogoutEnabled", false);
+        ReflectionTestUtils.setField(svc, "periodicLogoutIntervalMinutes", 60);
+        ReflectionTestUtils.setField(svc, "reconnectDelaySeconds", 5);
+
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> stubBot("bot" + System.nanoTime()));
+
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 3, "env-1");
+        dead.markAsDead();
+        // Backdate the DEAD window so the credited elapsed seconds are > 0.
+        ReflectionTestUtils.setField(dead, "groupDeadSince", Instant.now().minusSeconds(30));
+        runningGroups(svc).put("g-1", dead);
+
+        try {
+            svc.start("g-1");
+
+            // The open DEAD window was credited exactly once (a single positive series).
+            double total = registry.find(BotMetrics.GROUP_DEAD_SECONDS_TOTAL).counters()
+                    .stream().mapToDouble(io.micrometer.core.instrument.Counter::count).sum();
+            assertThat(total)
+                    .as("group_dead_seconds_total credited once for the reclaimed window")
+                    .isGreaterThan(0.0);
+
+            // The old runtime's stamp was cleared — no window left open to be
+            // credited again (no double-credit, no leak).
+            assertThat(dead.getGroupDeadSince())
+                    .as("reclaim cleared groupDeadSince on the old runtime")
+                    .isNull();
+            // The rebuilt runtime starts with a fresh (null) window.
+            assertThat(runningGroups(svc).get("g-1").getGroupDeadSince()).isNull();
+        } finally {
+            svc.stop("g-1");
+            try {
+                svc.shutdown();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("reclaim shuts the old runtime's health monitor + logout scheduler — no orphaned threads (AD-6 / thread-leak trap)")
+    void start_reclaimShutsOldMonitorAndLogoutScheduler() {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> stubBot("bot" + System.nanoTime()));
+
+        // Seed a DEAD runtime that still owns live schedulers — the exact
+        // thread-leak the reclaim must recover.
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 3, "env-1");
+        dead.markAsDead();
+        ScheduledExecutorService oldMonitor = Executors.newSingleThreadScheduledExecutor();
+        ScheduledExecutorService oldLogout = Executors.newSingleThreadScheduledExecutor();
+        dead.setHealthMonitor(oldMonitor);
+        dead.setLogoutScheduler(oldLogout);
+        runningGroups(service).put("g-1", dead);
+
+        try {
+            service.start("g-1");
+
+            assertThat(oldMonitor.isShutdown())
+                    .as("old health monitor shut by reclaim").isTrue();
+            assertThat(oldLogout.isShutdown())
+                    .as("old logout scheduler shut by reclaim").isTrue();
+        } finally {
+            oldMonitor.shutdownNow();
+            oldLogout.shutdownNow();
+            service.stop("g-1");
+        }
+    }
+
+    @Test
+    @DisplayName("reclaim rebuilds by re-authenticating existing accounts — NO registration / deposit (AD-8)")
+    void start_reclaimDoesNotRegisterOrDeposit() {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> stubBot("bot" + System.nanoTime()));
+
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 3, "env-1");
+        dead.markAsDead();
+        runningGroups(service).put("g-1", dead);
+
+        // Capture the rebuild's logs so we can assert NO registration/deposit line
+        // is emitted on the start path (belt-and-suspenders for AD-8).
+        CapturingAppender appender = new CapturingAppender("CapturingAppender-noregister");
+        appender.start();
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        String loggerName = BotGroupBehaviorService.class.getName();
+        LoggerConfig loggerConfig = ctx.getConfiguration().getLoggerConfig(loggerName);
+        Level prev = loggerConfig.getLevel();
+        loggerConfig.addAppender(appender, Level.ALL, null);
+        loggerConfig.setLevel(Level.ALL);
+        ctx.updateLoggers();
+        try {
+            service.start("g-1");
+
+            // The only account-facing collaborator invoked is botFactory.createBot
+            // (the re-authentication path) — once per existing account.
+            verify(botFactory, times(3)).createBot(anyString(), any(BotConfiguration.class));
+
+            // No registration/deposit log line on the start path.
+            boolean sawRegistrationOrDeposit = appender.events().stream()
+                    .map(e -> e.getMessage().getFormattedMessage().toLowerCase())
+                    .anyMatch(m -> m.contains("registr") || m.contains("deposit"));
+            assertThat(sawRegistrationOrDeposit)
+                    .as("start()/reclaim must not register or deposit — re-auth only")
+                    .isFalse();
+        } finally {
+            loggerConfig.removeAppender(appender.getName());
+            loggerConfig.setLevel(prev);
+            ctx.updateLoggers();
+            appender.stop();
+            service.stop("g-1");
+        }
+    }
+
+    @Test
+    @DisplayName("two rapid start() calls on a DEAD group do not double-build — the per-group lock serializes reclaim + build (AD-5)")
+    void start_concurrentStartsDoNotDoubleBuild() throws Exception {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        lenient().when(botGroupService.findById("g-1")).thenReturn(group);
+        lenient().when(environmentService.findById("env-1")).thenReturn(env);
+        lenient().when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> stubBot("bot" + System.nanoTime()));
+
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 3, "env-1");
+        dead.markAsDead();
+        runningGroups(service).put("g-1", dead);
+
+        try {
+            Runnable startTask = () -> service.start("g-1");
+            Thread t1 = new Thread(startTask);
+            Thread t2 = new Thread(startTask);
+            t1.start();
+            t2.start();
+            t1.join();
+            t2.join();
+
+            // Exactly one rebuild: the winning start reclaimed + built 3 bots; the
+            // loser observed the fresh ACTIVE runtime and no-opped. If the lock were
+            // missing, both could build → 6 createBot calls and a leaked runtime.
+            verify(botFactory, times(3)).createBot(anyString(), any(BotConfiguration.class));
+            assertThat(runningGroups(service).get("g-1").getActualStatus())
+                    .isEqualTo(BotGroupStatus.ACTIVE);
+        } finally {
+            service.stop("g-1");
+        }
     }
 
     /**
