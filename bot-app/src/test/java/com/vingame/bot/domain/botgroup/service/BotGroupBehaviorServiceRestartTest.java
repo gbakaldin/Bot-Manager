@@ -789,6 +789,40 @@ class BotGroupBehaviorServiceRestartTest {
         }
     }
 
+    @Test
+    @DisplayName("stop() still tears down the runtime and persists STOPPED after the teardownRuntimeMemory refactor (AD-3 behavior-preservation)")
+    void stop_tearsDownRuntimeAndPersistsStopped() {
+        // AD-3 extracted stop()'s inline stopAllBots+evictGroup+remove into the
+        // shared teardownRuntimeMemory helper and wrapped the method in the
+        // per-group lock. This pins that the observable stop() contract is
+        // unchanged: the runtime leaves runningGroups, session state is evicted,
+        // and the entity is saved with targetStatus=STOPPED + a lastStoppedAt
+        // stamp. No direct stop() unit test existed before this fix.
+        BotGroup group = BotGroup.builder()
+                .id("g-stop").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(0).namePrefix("bot").password("pass").build();
+        when(botGroupService.findById("g-stop")).thenReturn(group);
+
+        BotGroupRuntime active = new BotGroupRuntime("g-stop", 0, "env-1");
+        runningGroups(service).put("g-stop", active);
+
+        service.stop("g-stop");
+
+        // Runtime dropped from the map and its executor shut down.
+        assertThat(runningGroups(service).get("g-stop"))
+                .as("stop() removes the runtime from runningGroups").isNull();
+        assertThat(active.getExecutor().isShutdown())
+                .as("stop() shuts the runtime's executor via teardownRuntimeMemory").isTrue();
+        // Aggregated session state evicted for the group.
+        verify(sessionAggregationService).evictGroup("g-stop");
+        // Entity persisted STOPPED with a lastStoppedAt stamp.
+        ArgumentCaptor<BotGroup> saved = ArgumentCaptor.forClass(BotGroup.class);
+        verify(botGroupService).save(saved.capture());
+        assertThat(saved.getValue().getTargetStatus()).isEqualTo(BotGroupStatus.STOPPED);
+        assertThat(saved.getValue().getLastStoppedAt())
+                .as("stop() stamps lastStoppedAt").isNotNull();
+    }
+
     /**
      * Minimal in-memory log4j2 appender so we can assert on emitted log events.
      * Lives as a static nested class to keep the test file self-contained.
