@@ -67,6 +67,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Service for managing bot group lifecycle: start, stop, restart, scheduling.
@@ -142,6 +143,15 @@ public class BotGroupBehaviorService {
 
     // Runtime state map: groupId -> BotGroupRuntime
     private final ConcurrentHashMap<String, BotGroupRuntime> runningGroups = new ConcurrentHashMap<>();
+
+    // Per-group lock serializing the reclaim-decision + build in start() and the
+    // teardown in stop() (DEAD_GROUP_RESTART AD-5). Makes the
+    // containsKey/reclaim/put sequence atomic so a double-click or a
+    // health-monitor race cannot double-build or leak a runtime's executor +
+    // monitor + logout threads. Bounded by the number of groups (tens); never
+    // cleaned (negligible). restart() takes no lock of its own — its stop()/
+    // start() each acquire/release sequentially (non-nested, no reentrancy).
+    private final ConcurrentHashMap<String, ReentrantLock> groupLocks = new ConcurrentHashMap<>();
 
     @Autowired
     public BotGroupBehaviorService(
@@ -223,10 +233,43 @@ public class BotGroupBehaviorService {
      * - Parallel (new): 100 bots / 10 parallelism × ~5s = ~50s
      */
     public void start(String id) {
-        // Check if already running
-        if (runningGroups.containsKey(id)) {
-            log.warn("Bot group {} is already running", id);
-            return;
+        // Per-group lock (AD-5): serialize the reclaim-decision + build so a
+        // double-click or a health-monitor race cannot double-build or leak the
+        // first runtime's executor + monitor + logout threads. A second
+        // concurrent Start blocks here, then observes the fresh ACTIVE runtime
+        // and no-ops below. Held across the whole (I/O-bound, internally
+        // parallel) build — acceptable for an infrequent admin action.
+        ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            startLocked(id);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void startLocked(String id) {
+        // Reclaim guard (AD-1, AD-2). A genuinely running group has
+        // actualStatus=ACTIVE (set in the BotGroupRuntime constructor); the only
+        // non-ACTIVE state a runtime can hold while still in runningGroups is
+        // DEAD — left there by EITHER the health-monitor death path
+        // (handleBotGroupDeath) OR the zero-bot start path. ACTIVE ⇒ keep today's
+        // no-op; non-ACTIVE ⇒ reclaim (full teardown) and fall through to rebuild
+        // from the persisted group + existing accounts (re-auth only — no
+        // register, no deposit, no DB-group recreation). See DEAD_GROUP_RESTART.
+        BotGroupRuntime existing = runningGroups.get(id);
+        if (existing != null) {
+            if (existing.getActualStatus() == BotGroupStatus.ACTIVE) {
+                log.warn("Bot group {} is already running", id);
+                return;
+            }
+            // Lingering non-viable (DEAD) runtime. Reclaim: full teardown credits
+            // the open dead-window exactly once, shuts monitor + logout scheduler
+            // + executor, and cleans up bots (recovering the threads it was
+            // leaking while DEAD), then fall through to rebuild.
+            log.info("Bot group {} has a non-viable ({}) runtime — reclaiming before restart",
+                    id, existing.getActualStatus());
+            teardownRuntimeMemory(id, existing);
         }
 
         BotGroup group = botGroupService.findById(id);
@@ -713,21 +756,55 @@ public class BotGroupBehaviorService {
      * Stop a bot group - stops all bots, cleans up resources, removes from runtime map
      */
     public void stop(String id) {
-        BotGroupRuntime runtime = runningGroups.get(id);
-        if (runtime == null) {
-            log.warn("Bot group {} is not running", id);
-            return;
-        }
+        // Same per-group lock as start() (AD-5) so an operator Stop cannot race a
+        // Start's reclaim. restart() calls stop() then start() sequentially
+        // (non-nested), so there is no reentrancy/deadlock concern.
+        ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            BotGroupRuntime runtime = runningGroups.get(id);
+            if (runtime == null) {
+                log.warn("Bot group {} is not running", id);
+                return;
+            }
 
-        // No outer try/catch — let the original exception propagate to
-        // RestExceptionHandler. Wrapping in RuntimeException would lose the
-        // exception type and erase the structured response body.
+            // No outer try/catch — let the original exception propagate to
+            // RestExceptionHandler. Wrapping in RuntimeException would lose the
+            // exception type and erase the structured response body.
+            // teardownRuntimeMemory credits the open DEAD window (once) under
+            // group MDC, cleans up bots, shuts executor + monitor + logout
+            // scheduler, evicts session state, and drops from runningGroups.
+            teardownRuntimeMemory(id, runtime);
+
+            // Update entity
+            BotGroup group = botGroupService.findById(id);
+            group.setTargetStatus(BotGroupStatus.STOPPED);
+            group.setLastStoppedAt(LocalDateTime.now());
+            botGroupService.save(group);
+
+            log.info("Bot group {} stopped successfully", id);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Tear down a runtime's in-memory footprint: credit the open group-DEAD
+     * window (exactly once, clearing the stamp), cleanup bots (graceful WS close),
+     * shut executor + health monitor + logout scheduler, evict aggregated-session
+     * state, and drop from {@code runningGroups}. Shared by {@link #stop(String)}
+     * and the {@code start()} reclaim path (DEAD_GROUP_RESTART AD-3) so the two
+     * teardowns cannot drift. Group MDC is set around {@code stopAllBots} so the
+     * dead-seconds increment is tagged with botGroupId/environmentId, mirroring
+     * the old inline {@code stop()} body.
+     */
+    private void teardownRuntimeMemory(String id, BotGroupRuntime runtime) {
         // Set group MDC so the group-level dead-seconds increment (if a DEAD
-        // window is open) is tagged with botGroupId/environmentId. Cleared in
-        // the finally so we don't leak MDC into the caller thread.
+        // window is open) is tagged with botGroupId/environmentId. Cleared in the
+        // finally so we don't leak MDC into the caller thread.
         BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
         try {
-            // Stop all bots and shutdown executor
+            // Stop all bots and shutdown executor + monitor + logout scheduler
             runtime.stopAllBots(botMetrics);
         } finally {
             BotMdc.clear();
@@ -739,14 +816,6 @@ public class BotGroupBehaviorService {
 
         // Remove from runtime map
         runningGroups.remove(id);
-
-        // Update entity
-        BotGroup group = botGroupService.findById(id);
-        group.setTargetStatus(BotGroupStatus.STOPPED);
-        group.setLastStoppedAt(LocalDateTime.now());
-        botGroupService.save(group);
-
-        log.info("Bot group {} stopped successfully", id);
     }
 
     /**
