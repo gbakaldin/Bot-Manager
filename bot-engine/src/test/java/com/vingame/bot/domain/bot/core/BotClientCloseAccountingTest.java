@@ -22,6 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -33,25 +34,30 @@ import static org.mockito.Mockito.when;
 /**
  * QA companion to {@link BotOrphanClientCloseTest} (BOT_LIVENESS_SEMANTICS Phase 1, AD-6).
  * <p>
- * Dev's suite pins that a dead-channel client <em>is</em> closed at the four migrated sites.
- * This suite covers the three things that survey left open:
+ * Dev's suite pins that a dead-channel client <em>is</em> closed at every close site. This
+ * suite covers what that survey left open:
  * <ol>
  *   <li><b>Error tolerance.</b> Dropping the {@code isOpen()} guard means {@code close()} now
  *       runs on clients that were previously skipped, so it is newly reachable with a channel
  *       in an arbitrary state. {@code restart()} used to call a bare {@code client.close()}
  *       whose exception would propagate and abort the restart; it now routes through
- *       {@code closeQuietly}, which swallows. That is a behavior change and is pinned here.</li>
+ *       {@code closeQuietly}, which logs at WARN with the throwable and continues. That is a
+ *       behavior change and is pinned here.</li>
+ *   <li><b>Redundant closes are harmless, missed closes are the bug.</b> With no per-instance
+ *       accounting, a single instance reachable from two close sites in a row is simply closed
+ *       twice; the library's {@code close()} is one-shot ({@code isClosing.getAndSet(true)}),
+ *       so the second call is a no-op. The tests below assert reachability of the close, not a
+ *       call count — the property with runtime meaning.</li>
  *   <li><b>The periodic-logout path</b> ({@code BotGroupBehaviorService.performPeriodicLogout}:
  *       {@code logout()} → sleep → {@code restart()}), the one production sequence in which a
- *       single client instance is genuinely reachable from two close sites in a row. This is
- *       what {@code lastClosedClient} exists for.</li>
+ *       single client instance is genuinely reachable from two close sites in a row.</li>
  *   <li><b>The fifth, un-migrated {@code isOpen()}-guarded close</b> in
  *       {@code triggerFullReconnect}, which Phase 1 deliberately left in place. Both halves of
  *       its behavior are pinned so the scope decision is visible and any later migration has
  *       to update these assertions on purpose.</li>
  * </ol>
  */
-@DisplayName("Bot WS-client close accounting (Phase 1 follow-up)")
+@DisplayName("Bot WS-client close behavior (Phase 1 follow-up)")
 class BotClientCloseAccountingTest {
 
     private ApiGatewayClient apiGatewayClient;
@@ -103,8 +109,8 @@ class BotClientCloseAccountingTest {
          * Pre-Phase-1 {@code restart()} was {@code if (client != null && client.isOpen())
          * client.close();} — an unguarded call whose exception propagated out of
          * {@code restart()} and left the bot with no fresh client at all. Now the close goes
-         * through {@code closeQuietly}, which logs at DEBUG and continues, so a client that
-         * fails to tear down cannot cost the bot its restart.
+         * through {@code closeQuietly}, which logs and continues, so a client that fails to
+         * tear down cannot cost the bot its restart.
          */
         @Test
         @DisplayName("restart survives a close() that throws and still builds, connects and starts a fresh client")
@@ -138,25 +144,24 @@ class BotClientCloseAccountingTest {
         }
 
         /**
-         * {@code stop()} stamps {@code lastClosedClient} <em>before</em> calling
-         * {@code close()}, so an instance whose teardown threw is treated as closed and is
-         * never retried. That is correct against the real library rather than merely
-         * convenient: {@code VingameWebSocketClient.close()} flips its one-shot guard
-         * ({@code isClosing.getAndSet(true)}) as its very first statement, so any later throw
-         * leaves nothing a second call could still do. Pinned because the reasoning is not
-         * local to this file.
+         * A client whose teardown threw stays reachable as {@code this.client}, so a later
+         * close site calls {@code close()} on it again — and that second throw is swallowed
+         * too. Retrying is dead weight rather than a repair ({@code close()} flips its
+         * one-shot guard as its very first statement, so a throw after that leaves nothing a
+         * second call could still do), but it must never escape: {@code closeClientQuietly}
+         * is on the terminal DEAD path and {@code cleanup} is on the group-teardown loop.
          */
         @Test
-        @DisplayName("A client whose close() threw is not re-closed by a later terminal close")
-        void clientThatFailedToCloseIsNotRetried() throws Exception {
+        @DisplayName("A client whose close() threw is re-closed harmlessly by a later terminal close")
+        void clientThatFailedToCloseIsRetriedHarmlessly() throws Exception {
             VingameWebSocketClient bad = deadChannelClient();
             doThrow(new RuntimeException("teardown blew up")).when(bad).close();
             bot.client = bad;
 
             bot.cleanup();
-            invokeNoArg("closeClientQuietly");
+            assertThatCode(() -> invokeNoArg("closeClientQuietly")).doesNotThrowAnyException();
 
-            verify(bad, times(1)).close();
+            verify(bad, times(2)).close();
         }
     }
 
@@ -166,13 +171,14 @@ class BotClientCloseAccountingTest {
 
         /**
          * {@code performPeriodicLogout} is the one production caller that reaches a single
-         * client instance from two close sites in sequence. Pre-Phase-1 the second site was a
-         * no-op by accident (the client had just been closed, so {@code isOpen()} was false);
-         * now it is a no-op on purpose, via {@code lastClosedClient}.
+         * client instance from two close sites in sequence ({@code logout()} → {@code stop()},
+         * then {@code restart()} → {@code closeQuietly}). The load-bearing assertions are that
+         * the old client is closed at all, that the reconnect's client is untouched, and that
+         * the bot is not left stopped — not how many times the redundant close ran.
          */
         @Test
-        @DisplayName("The logged-out client is closed exactly once, and the reconnect's client is not closed at all")
-        void logoutThenRestartClosesOldClientExactlyOnce() {
+        @DisplayName("The logged-out client is closed, the reconnect's client is not, and the bot stays runnable")
+        void logoutThenRestartClosesOldClient() {
             VingameWebSocketClient old = openClient();
             bot.client = old;
 
@@ -182,7 +188,7 @@ class BotClientCloseAccountingTest {
             bot.logout();
             bot.restart();
 
-            verify(old, times(1)).close();
+            verify(old, atLeastOnce()).close();
             assertThat(bot.getClient()).isSameAs(fresh);
             verify(fresh, never()).close();
             // logout() must NOT mark the bot stopped — the restart that follows depends on it.
@@ -191,33 +197,39 @@ class BotClientCloseAccountingTest {
     }
 
     @Nested
-    @DisplayName("lastClosedClient is a single slot, so it can never skip a live reference")
-    class SingleSlotDedup {
+    @DisplayName("closeQuietly is unconditional: no isOpen() guard, no per-instance memo")
+    class CloseQuietlyIsUnconditional {
 
         /**
-         * The safety argument for {@code lastClosedClient} is that it is a one-entry memo:
-         * it can only ever suppress a close for the instance it is currently holding — an
-         * instance that was, by construction, just closed. Closing a different client
-         * overwrites the slot, so the older instance loses its suppression and would be
-         * closed <em>again</em> rather than skipped. Double-close is harmless (library
-         * one-shot); a missed close is the bug Phase 1 exists to prevent. This pins that the
-         * failure mode falls on the harmless side.
+         * The helper deliberately carries no state beyond the null check. An earlier revision
+         * memoised the last-closed instance to keep a "one close() per instance" count; the
+         * review removed it — it re-introduced a conditional close (the same shape as the
+         * {@code isOpen()} guard that caused the incident, differing only in the predicate),
+         * it was a non-atomic read-modify-write on a field touched by the Netty I/O loop, the
+         * watchdog, the countdown scheduler and the reconnect virtual threads, and it retained
+         * a hard reference to the very client being orphan-proofed. Since the library's
+         * {@code close()} is one-shot, the memo bought nothing at runtime. This pins that the
+         * helper now always attempts the close.
          */
         @Test
-        @DisplayName("Re-closing an evicted instance closes it again rather than skipping it")
-        void evictedInstanceIsClosedAgainNotSkipped() throws Exception {
+        @DisplayName("Closing the same instance twice calls close() twice — redundant, never skipped")
+        void repeatedCloseIsNotSuppressed() throws Exception {
             VingameWebSocketClient a = deadChannelClient();
             VingameWebSocketClient b = deadChannelClient();
 
             invokeCloseQuietly(a);
-            invokeCloseQuietly(a); // suppressed — a still occupies the slot
-            verify(a, times(1)).close();
+            invokeCloseQuietly(a);
+            invokeCloseQuietly(b);
+            invokeCloseQuietly(a);
 
-            invokeCloseQuietly(b); // evicts a from the slot
-            invokeCloseQuietly(a); // no longer suppressed: closed again, never skipped
-
-            verify(a, times(2)).close();
+            verify(a, times(3)).close();
             verify(b, times(1)).close();
+        }
+
+        @Test
+        @DisplayName("A null client is a no-op, not an NPE")
+        void nullClientIsANoOp() {
+            assertThatCode(() -> invokeCloseQuietly(null)).doesNotThrowAnyException();
         }
     }
 
@@ -233,7 +245,7 @@ class BotClientCloseAccountingTest {
          * here via {@code performReauth}'s failure path, which calls
          * {@code closeClientQuietly()}. (The other route, {@code tryReconnectWs}, is covered
          * by {@code BotOrphanClientCloseTest#reconnectClosesDeadChannelClient}.) So no
-         * reference is dropped un-closed; only the accounting is inconsistent.
+         * reference is dropped un-closed; the close is merely deferred.
          */
         @Test
         @Timeout(value = 10, unit = TimeUnit.SECONDS)
@@ -249,24 +261,19 @@ class BotClientCloseAccountingTest {
 
             bot.triggerFullReconnect("watchdog: no messages");
 
-            verify(dead, timeout(5000).times(1)).close();
+            verify(dead, timeout(5000).atLeastOnce()).close();
         }
 
         /**
          * The other half of leaving the fifth site alone: when the channel <em>is</em> open,
-         * the site closes the client with a bare {@code client.close()} that does not stamp
-         * {@code lastClosedClient}, so the very next close site sees an unrecorded instance
-         * and closes it a second time. Harmless — the library's {@code close()} is one-shot —
-         * but it means the "exactly one close() per instance" invariant the new field was
-         * added to keep does not actually hold on the watchdog path.
-         * <p>
-         * <b>If the fifth site is later migrated to {@code closeQuietly}, this expectation
-         * becomes {@code times(1)} and this test must be updated deliberately.</b>
+         * the site closes it with a bare {@code client.close()} and the downstream terminal
+         * path closes it again. Harmless — the library's {@code close()} is one-shot — but it
+         * shows the site is not on the shared helper.
          */
         @Test
         @Timeout(value = 10, unit = TimeUnit.SECONDS)
-        @DisplayName("An open client is closed twice: the site's bare close() bypasses the accounting")
-        void openClientIsClosedTwiceBecauseSiteBypassesAccounting() {
+        @DisplayName("An open client is closed by the site and again by the worker")
+        void openClientIsClosedBySiteAndWorker() {
             VingameWebSocketClient open = openClient();
             bot.client = open;
 

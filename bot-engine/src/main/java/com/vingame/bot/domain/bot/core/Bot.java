@@ -75,27 +75,6 @@ public abstract class Bot {
     @Getter
     protected VingameWebSocketClient client;
 
-    /**
-     * The most recent WS client instance this bot has already closed.
-     * <p>
-     * Every close site in {@link Bot} now runs unconditionally instead of behind a
-     * {@code client.isOpen()} guard (BOT_LIVENESS_SEMANTICS AD-6): a client whose channel
-     * has died reports {@code isOpen() == false}, so the old guard skipped the very
-     * {@code close()} that reclaims its scenario / ping / message-processor resources. The
-     * dropped reference became an orphan whose {@code sendAsync} pipeline still closed over
-     * this live bot's fields and kept firing, producing the sustained
-     * {@code "Cannot send message, not connected"} flood.
-     * <p>
-     * With the guard gone a single instance can be reached by more than one close site in
-     * sequence (a reconnect closes the outgoing client; a failed attempt closes the client it
-     * just built; the next attempt sees that same reference again). This field keeps the
-     * invariant <em>exactly one {@code close()} call per client instance</em>. The library's
-     * {@code close()} is itself one-shot ({@code isClosing.getAndSet(true)}), so a repeat call
-     * would be harmless — this keeps our own call accounting honest and assertable. At most
-     * one already-closed client is retained per bot.
-     */
-    private volatile VingameWebSocketClient lastClosedClient;
-
     @Getter
     protected String userName;
 
@@ -313,11 +292,6 @@ public abstract class Bot {
     public void stop() {
         log.debug("Bot {} stopping. Closing client instance: {}",
                  userName, System.identityHashCode(client));
-        // Record the instance so the per-instance close accounting in closeQuietly stays
-        // honest for clients torn down through this path (cleanup / logout). Assignment
-        // before the call: close() is one-shot in the library, so a throw here does not
-        // leave a re-closable client behind.
-        lastClosedClient = client;
         client.close();
     }
 
@@ -651,25 +625,31 @@ public abstract class Bot {
     }
 
     /**
-     * Close {@code c} unconditionally — no {@code isOpen()} guard — swallowing any error at
-     * DEBUG, and at most once per instance (see {@link #lastClosedClient}).
+     * Close {@code c} unconditionally — no {@code isOpen()} guard — swallowing any error.
      * <p>
      * The library's {@code close()} is one-shot, idempotent and self-sufficient in 3.0.5: it
      * shuts scenarios (and with them every {@code SendAsync} scheduler), the ping scheduler,
      * the channel and the message-processor pool, and it runs even for a client that never
      * connected. Calling it on a dead-channel or never-connected client is therefore both
-     * safe and necessary — skipping it is what produced orphan clients.
+     * safe and necessary — skipping it is what produced orphan clients. Because the library
+     * guards re-entry with {@code isClosing.getAndSet(true)}, a redundant close from a second
+     * site is a no-op and needs no accounting on our side.
+     * <p>
+     * A throw out of {@code close()} means the scenario / ping / processor resources were NOT
+     * reclaimed — i.e. exactly the leak this phase exists to prevent — so it is logged at WARN
+     * with the throwable, matching the level {@code cleanup()} already uses for the same
+     * failure reached through {@link #stop()}. The library catches almost everything inside
+     * {@code close()}, so an escape is genuinely exceptional and will not be noisy.
      */
     private void closeQuietly(VingameWebSocketClient c) {
-        if (c == null || c == lastClosedClient) {
+        if (c == null) {
             return;
         }
-        lastClosedClient = c;
         try {
             c.close();
         } catch (Exception e) {
-            log.debug("Bot {}: error closing WS client {}: {}",
-                    userName, System.identityHashCode(c), e.getMessage());
+            log.warn("Bot {}: error closing WS client {}",
+                    userName, System.identityHashCode(c), e);
         }
     }
 
