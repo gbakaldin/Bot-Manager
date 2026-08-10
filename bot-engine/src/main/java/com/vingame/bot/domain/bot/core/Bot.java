@@ -75,6 +75,27 @@ public abstract class Bot {
     @Getter
     protected VingameWebSocketClient client;
 
+    /**
+     * The most recent WS client instance this bot has already closed.
+     * <p>
+     * Every close site in {@link Bot} now runs unconditionally instead of behind a
+     * {@code client.isOpen()} guard (BOT_LIVENESS_SEMANTICS AD-6): a client whose channel
+     * has died reports {@code isOpen() == false}, so the old guard skipped the very
+     * {@code close()} that reclaims its scenario / ping / message-processor resources. The
+     * dropped reference became an orphan whose {@code sendAsync} pipeline still closed over
+     * this live bot's fields and kept firing, producing the sustained
+     * {@code "Cannot send message, not connected"} flood.
+     * <p>
+     * With the guard gone a single instance can be reached by more than one close site in
+     * sequence (a reconnect closes the outgoing client; a failed attempt closes the client it
+     * just built; the next attempt sees that same reference again). This field keeps the
+     * invariant <em>exactly one {@code close()} call per client instance</em>. The library's
+     * {@code close()} is itself one-shot ({@code isClosing.getAndSet(true)}), so a repeat call
+     * would be harmless — this keeps our own call accounting honest and assertable. At most
+     * one already-closed client is retained per bot.
+     */
+    private volatile VingameWebSocketClient lastClosedClient;
+
     @Getter
     protected String userName;
 
@@ -257,7 +278,10 @@ public abstract class Bot {
     public void cleanup() {
         stopped = true;
         log.debug("Cleaning up bot {}", userName);
-        if (client != null && client.isOpen()) {
+        // Unconditional (BOT_LIVENESS_SEMANTICS AD-6): a bot torn down while its channel
+        // is already dead still owns the client's scenario / ping / processor resources,
+        // and the old isOpen() guard skipped exactly that teardown.
+        if (client != null) {
             try {
                 stop();
             } catch (Exception e) {
@@ -274,9 +298,11 @@ public abstract class Bot {
 
     public void restart() {
         log.info("Bot {}: restart requested", userName);
-        if (client != null && client.isOpen()) {
-            client.close();
-        }
+        // Close the outgoing client unconditionally BEFORE its reference is overwritten
+        // (BOT_LIVENESS_SEMANTICS AD-6). Previously guarded on isOpen(), so a restart on a
+        // dead channel — the common case, since restart is what a dead channel provokes —
+        // leaked the client and its sendAsync pipeline.
+        closeQuietly(this.client);
         this.client = clientFactory.newClient(tokens, userName);
         configureClient(client);
         transitionStatus(BotStatus.CONNECTING);
@@ -287,6 +313,11 @@ public abstract class Bot {
     public void stop() {
         log.debug("Bot {} stopping. Closing client instance: {}",
                  userName, System.identityHashCode(client));
+        // Record the instance so the per-instance close accounting in closeQuietly stays
+        // honest for clients torn down through this path (cleanup / logout). Assignment
+        // before the call: close() is one-shot in the library, so a throw here does not
+        // leave a re-closable client behind.
+        lastClosedClient = client;
         client.close();
     }
 
@@ -606,38 +637,67 @@ public abstract class Bot {
     }
 
     /**
-     * Close the current WS {@code client} if open, swallowing any error. Used on terminal
+     * Close the current WS {@code client}, swallowing any error. Used on terminal
      * DEAD paths so the client's wired {@code onDisconnect} handler cannot fire afterwards
-     * and revive the bot. Null- and double-close-safe: reads {@code client} once and guards
-     * on {@code isOpen()}; the DEAD status guard in {@link #onWsDisconnected()} makes any
-     * onDisconnect that does fire a no-op regardless.
+     * and revive the bot. Null-safe; the DEAD status guard in {@link #onWsDisconnected()}
+     * makes any onDisconnect that does fire a no-op regardless.
+     * <p>
+     * No longer guarded on {@code isOpen()} (BOT_LIVENESS_SEMANTICS AD-6) — that guard meant
+     * the terminal path skipped the close for precisely the clients that needed it, since a
+     * bot reaching a terminal state normally has a dead channel.
      */
     private void closeClientQuietly() {
-        VingameWebSocketClient c = this.client;
-        if (c != null && c.isOpen()) {
-            try {
-                c.close();
-            } catch (Exception e) {
-                log.debug("Bot {}: error closing WS client on terminal DEAD path: {}",
-                        userName, e.getMessage());
-            }
+        closeQuietly(this.client);
+    }
+
+    /**
+     * Close {@code c} unconditionally — no {@code isOpen()} guard — swallowing any error at
+     * DEBUG, and at most once per instance (see {@link #lastClosedClient}).
+     * <p>
+     * The library's {@code close()} is one-shot, idempotent and self-sufficient in 3.0.5: it
+     * shuts scenarios (and with them every {@code SendAsync} scheduler), the ping scheduler,
+     * the channel and the message-processor pool, and it runs even for a client that never
+     * connected. Calling it on a dead-channel or never-connected client is therefore both
+     * safe and necessary — skipping it is what produced orphan clients.
+     */
+    private void closeQuietly(VingameWebSocketClient c) {
+        if (c == null || c == lastClosedClient) {
+            return;
+        }
+        lastClosedClient = c;
+        try {
+            c.close();
+        } catch (Exception e) {
+            log.debug("Bot {}: error closing WS client {}: {}",
+                    userName, System.identityHashCode(c), e.getMessage());
         }
     }
 
     private boolean tryReconnectWs() {
+        // Close the outgoing client BEFORE this.client is overwritten below. The pre-Phase-1
+        // code closed it only when isOpen(), i.e. never for the dead channel that caused the
+        // reconnect in the first place — the reference was then dropped while the client's
+        // sendAsync pipeline was still scheduled and still closing over this live bot's
+        // fields, so it kept evaluating canBet() and logging "Cannot send message, not
+        // connected" for the life of the process (BOT_LIVENESS_SEMANTICS AD-6).
+        closeQuietly(this.client);
+        VingameWebSocketClient fresh = null;
         try {
-            if (client != null && client.isOpen()) {
-                client.close();
-            }
-            this.client = clientFactory.newClient(tokens, userName);
-            configureClient(client);
+            fresh = clientFactory.newClient(tokens, userName);
+            this.client = fresh;
+            configureClient(fresh);
             transitionStatus(BotStatus.CONNECTING);
-            client.connect();
+            fresh.connect();
             beforeReconnect();
             start();
             return true;
         } catch (Exception e) {
             log.debug("Bot {}: WS reconnect attempt failed: {}", userName, e.getMessage());
+            // The half-built client already owns its message-processor workers (started in
+            // the library constructor) and may have picked up scenarios from a partial
+            // start(). Close it here rather than leaving it to the next attempt, which may
+            // never come — the bot can be stopped, or the loop can give up, before then.
+            closeQuietly(fresh);
             return false;
         }
     }
