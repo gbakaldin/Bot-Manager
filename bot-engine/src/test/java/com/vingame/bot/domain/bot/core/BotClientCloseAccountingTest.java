@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Timeout;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -51,10 +52,11 @@ import static org.mockito.Mockito.when;
  *   <li><b>The periodic-logout path</b> ({@code BotGroupBehaviorService.performPeriodicLogout}:
  *       {@code logout()} → sleep → {@code restart()}), the one production sequence in which a
  *       single client instance is genuinely reachable from two close sites in a row.</li>
- *   <li><b>The fifth, un-migrated {@code isOpen()}-guarded close</b> in
- *       {@code triggerFullReconnect}, which Phase 1 deliberately left in place. Both halves of
- *       its behavior are pinned so the scope decision is visible and any later migration has
- *       to update these assertions on purpose.</li>
+ *   <li><b>{@code triggerFullReconnect}</b>, the fifth close site, migrated to
+ *       {@code closeQuietly} in the review follow-up. The point of migrating it was promptness:
+ *       the old guard deferred the close of a dead-channel client until {@code performReauth()}
+ *       returned — an auth-gateway round trip that is the slow or hanging one in the failure
+ *       mode this plan targets — while the orphan kept flooding. That timing is pinned.</li>
  * </ol>
  */
 @DisplayName("Bot WS-client close behavior (Phase 1 follow-up)")
@@ -234,46 +236,53 @@ class BotClientCloseAccountingTest {
     }
 
     @Nested
-    @DisplayName("the fifth isOpen()-guarded close, left un-migrated in triggerFullReconnect")
-    class UnmigratedTriggerFullReconnectSite {
+    @DisplayName("triggerFullReconnect closes promptly, not after performReauth")
+    class TriggerFullReconnectSite {
 
         /**
-         * Phase 1 migrated four close sites and left {@code Bot.triggerFullReconnect}'s
-         * {@code if (client != null && client.isOpen()) client.close();} alone. This pins why
-         * that is safe rather than merely untouched: the site itself skips the dead-channel
-         * client, but the worker it spawns closes it unconditionally on every route out —
-         * here via {@code performReauth}'s failure path, which calls
-         * {@code closeClientQuietly()}. (The other route, {@code tryReconnectWs}, is covered
-         * by {@code BotOrphanClientCloseTest#reconnectClosesDeadChannelClient}.) So no
-         * reference is dropped un-closed; the close is merely deferred.
+         * The fifth close site used to be {@code if (client != null && client.isOpen())
+         * client.close();}, so a dead-channel client — the state that provokes a reconnect in
+         * the first place — was skipped there and only closed downstream, after
+         * {@code performReauth()} had returned. For that whole window the orphan's
+         * {@code sendAsync} pipeline stayed scheduled and kept emitting
+         * {@code "Cannot send message, not connected"}, which is precisely what Phase 1 exists
+         * to stop. Now the site closes it directly.
+         * <p>
+         * The latch makes the ordering assertable rather than assumed: {@code authenticate}
+         * blocks, and the close must already have happened while it is still in flight.
          */
         @Test
         @Timeout(value = 10, unit = TimeUnit.SECONDS)
-        @DisplayName("A dead-channel client the site skips is still closed by the worker it spawns")
-        void deadChannelClientSkippedBySiteIsClosedByTheSpawnedWorker() {
+        @DisplayName("The client is closed before performReauth's gateway call returns")
+        void closesBeforeReauthCompletes() throws Exception {
             VingameWebSocketClient dead = deadChannelClient();
             bot.client = dead;
 
-            // Terminate the spawned runAuthThenWsLoop immediately and deterministically:
-            // performReauth throws, marks DEAD, and closes the client on its way out.
-            when(apiGatewayClient.authenticate(any()))
-                    .thenThrow(new RuntimeException("auth gateway down"));
+            CountDownLatch reauthEntered = new CountDownLatch(1);
+            CountDownLatch releaseReauth = new CountDownLatch(1);
+            when(apiGatewayClient.authenticate(any())).thenAnswer(inv -> {
+                reauthEntered.countDown();
+                releaseReauth.await(10, TimeUnit.SECONDS);
+                throw new RuntimeException("auth gateway down");
+            });
 
             bot.triggerFullReconnect("watchdog: no messages");
 
+            assertThat(reauthEntered.await(5, TimeUnit.SECONDS)).isTrue();
+            // Still inside the (hanging) gateway call — the close must already have happened.
             verify(dead, timeout(5000).atLeastOnce()).close();
+
+            releaseReauth.countDown();
         }
 
         /**
-         * The other half of leaving the fifth site alone: when the channel <em>is</em> open,
-         * the site closes it with a bare {@code client.close()} and the downstream terminal
-         * path closes it again. Harmless — the library's {@code close()} is one-shot — but it
-         * shows the site is not on the shared helper.
+         * An open channel takes the same path: the site no longer inspects {@code isOpen()} at
+         * all, so both the open and the dead-channel case are closed by the site itself.
          */
         @Test
         @Timeout(value = 10, unit = TimeUnit.SECONDS)
-        @DisplayName("An open client is closed by the site and again by the worker")
-        void openClientIsClosedBySiteAndWorker() {
+        @DisplayName("An open client is closed by the site too, without waiting for the worker")
+        void openClientIsAlsoClosedBySite() {
             VingameWebSocketClient open = openClient();
             bot.client = open;
 
@@ -282,7 +291,7 @@ class BotClientCloseAccountingTest {
 
             bot.triggerFullReconnect("watchdog: no messages");
 
-            verify(open, timeout(5000).times(2)).close();
+            verify(open, atLeastOnce()).close();
         }
     }
 

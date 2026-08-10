@@ -494,9 +494,13 @@ public abstract class Bot {
         if (metrics != null) {
             metrics.incBotReconnect(normalizeReconnectReason(reason));
         }
-        if (client != null && client.isOpen()) {
-            client.close();
-        }
+        // Unconditional (BOT_LIVENESS_SEMANTICS AD-6), like every other close site. The old
+        // isOpen() guard skipped the dead-channel case and left the close to happen only
+        // after performReauth() returned — an auth-gateway round trip that, in the failure
+        // mode this plan is written against, is the slow or hanging one. For that whole
+        // window the orphan's sendAsync pipeline stayed scheduled and kept emitting
+        // "Cannot send message, not connected". Closing here kills the emitter promptly.
+        closeQuietly(this.client);
         Thread.ofVirtual().name("reconnect-" + userName).start(mdcWrap(this::runAuthThenWsLoop));
     }
 
