@@ -440,7 +440,8 @@ public class BotGroupBehaviorService {
                 // started on this branch, so stopAllBots only closes the empty executor
                 // and credits the window. Set the group MDC so the dead-seconds
                 // increment is tagged with botGroupId/environmentId, mirroring stop().
-                BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
+                BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId(),
+                        runtime.getProduct());
                 try {
                     runtime.stopAllBots(botMetrics);
                 } finally {
@@ -490,7 +491,8 @@ public class BotGroupBehaviorService {
                         // the same caller thread but may have lost the MDC if
                         // set earlier in start().
                         BotMdc.setGroupContext(failedRuntime.getGroupId(),
-                                               failedRuntime.getEnvironmentId());
+                                               failedRuntime.getEnvironmentId(),
+                                               failedRuntime.getProduct());
                         try {
                             failedRuntime.stopAllBots(botMetrics);
                             // Drop any session entries a partially-started group registered
@@ -532,6 +534,11 @@ public class BotGroupBehaviorService {
                                            Map<String, StrategyId> strategyAssignment) {
         int botCount = group.getBotCount();
         Semaphore semaphore = new Semaphore(botCreationParallelism);
+        // The group's product, for the MDC that tags bot_creation_failures_total below.
+        // A failure here means no Bot object exists to carry it, so this is the only
+        // place the counter can pick the label up (VIPTALK_ALERTING_V2 AD-V1) — and
+        // without it, `audience: product` rules cannot be built on that counter at all.
+        String product = product(environment, game);
 
         List<CompletableFuture<Bot>> futures = new ArrayList<>(botCount);
 
@@ -539,7 +546,7 @@ public class BotGroupBehaviorService {
             final int botIndex = i;
 
             CompletableFuture<Bot> future = CompletableFuture.supplyAsync(() -> {
-                BotMdc.setGroupContext(group.getId(), group.getEnvironmentId());
+                BotMdc.setGroupContext(group.getId(), group.getEnvironmentId(), product);
                 try {
                     semaphore.acquire();
                     try {
@@ -566,10 +573,11 @@ public class BotGroupBehaviorService {
         // the per-bot virtual thread (where MDC was set inside the supplyAsync
         // lambda and cleared in its finally). Without an explicit group MDC here,
         // bot_creation_failures_total would register without botGroupId/
-        // environmentId tags — defeating Decision 5's per-group cardinality goal.
+        // environmentId/product tags — defeating Decision 5's per-group cardinality
+        // goal and leaving the counter unroutable to a product room.
         // Mirror the same try/finally pattern used by start()'s outer catch
         // (lines 251-256) and stop() (lines 422-427).
-        BotMdc.setGroupContext(group.getId(), group.getEnvironmentId());
+        BotMdc.setGroupContext(group.getId(), group.getEnvironmentId(), product);
         try {
             for (int i = 0; i < futures.size(); i++) {
                 try {
@@ -821,7 +829,8 @@ public class BotGroupBehaviorService {
         // Set group MDC so the group-level dead-seconds increment (if a DEAD
         // window is open) is tagged with botGroupId/environmentId. Cleared in the
         // finally so we don't leak MDC into the caller thread.
-        BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
+        BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId(),
+                runtime.getProduct());
         try {
             // Stop all bots and shutdown executor + monitor + logout scheduler
             runtime.stopAllBots(botMetrics);
@@ -881,7 +890,8 @@ public class BotGroupBehaviorService {
 
         // Group MDC so the per-bot teardown lines and the dead-window credit inside
         // stopAllBots carry botGroupId/environmentId. Cleared in finally.
-        BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
+        BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId(),
+                runtime.getProduct());
         try {
             // Stop teardown: per-bot cleanup() sets stopped=true THEN closes the WS
             // (the logout) — the stopped-first order is what suppresses onDisconnect's
@@ -1589,7 +1599,8 @@ public class BotGroupBehaviorService {
         runtime.setHealthMonitor(monitor);
 
         monitor.scheduleAtFixedRate(() -> {
-            BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
+            BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId(),
+                    runtime.getProduct());
             try {
                 monitorHealth(runtime);
             } catch (Exception e) {
@@ -1675,7 +1686,8 @@ public class BotGroupBehaviorService {
         runtime.setLogoutScheduler(logoutScheduler);
 
         logoutScheduler.scheduleAtFixedRate(() -> {
-            BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId());
+            BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId(),
+                    runtime.getProduct());
             try {
                 performPeriodicLogout(runtime);
             } catch (Exception e) {
