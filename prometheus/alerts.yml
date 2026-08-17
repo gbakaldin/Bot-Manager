@@ -38,9 +38,17 @@
 # bots_managed, ws_connections_open), which carry no product and so could only
 # ever reach the ops room — precisely the product-level noise the ops room is
 # meant to be free of. Their per-environment, product-labelled equivalents are
-# `EnvironmentSocketDown` / `EnvironmentSocketDegraded` and
-# `EnvironmentDeadBotRatioHigh` below. The aggregate gauges themselves stay
-# (AD-V2): they are dashboard facts, not alert sources.
+# `EnvironmentSocketDown` / `EnvironmentSocketDegraded`,
+# `EnvironmentDeadBotRatioHigh` and `EnvironmentGroupDead` below. The aggregate
+# gauges themselves stay (AD-V2): they are dashboard facts, not alert sources.
+#
+# What retiring `BotGroupDead` cost, and how Phase 4 pays it back: for one phase,
+# a DEAD *group* was visible only indirectly, through its bots' DEAD status inside
+# `EnvironmentDeadBotRatioHigh`. A small group inside a large environment could
+# therefore die without moving that ratio past 0.2. `EnvironmentGroupDead` is the
+# first-class replacement, built on the new labelled `groups_dead_by_env` sibling
+# of `groups_dead_currently` — a DEAD group never recovers on its own and must be
+# restarted by an operator, so it warrants its own alert, not a corner of a ratio.
 #
 # THRESHOLDS ARE FIRST GUESSES. 0.5 / 0.8 socket ratios, the 0.5 auth-failure
 # ratio, the >= 5 sample floors, the 0.2 dead-bot ratio and every `for:` window
@@ -101,11 +109,12 @@ groups:
           summary: "{{ $value | humanizePercentage }} of bots hold a WebSocket on env {{ $labels.environmentId }}"
           description: "Reconnect churn above normal for this environment. Below 50% this escalates to EnvironmentSocketDown, which inhibits this alert."
 
-      # Per-environment replacement for the retired DeadBotRatioHigh (and, in
-      # substance, for BotGroupDead: a DEAD group's bots are all DEAD, so a dead
-      # group shows up here as a step in its environment's ratio). There is no
-      # per-environment dead-GROUP gauge — groups_dead_currently is fleet-wide and
-      # unlabelled — so group-level deadness is only visible through its bots.
+      # Per-environment replacement for the retired DeadBotRatioHigh. A DEAD group's
+      # bots are all DEAD, so a dead group also shows up here as a step in its
+      # environment's ratio — but only a step: a 5-bot group dying inside a 100-bot
+      # environment moves this by 0.05 and never trips 0.2. Dead GROUPS are covered
+      # first-class by EnvironmentGroupDead below (Phase 4); this rule is about bots
+      # dying across an environment regardless of which group they belong to.
       #
       # Both operands are wrapped in `sum by (product, environmentId)` even though
       # bots_managed_by_env is already at that granularity: Prometheus stamps `job`
@@ -126,6 +135,30 @@ groups:
         annotations:
           summary: "{{ $value | humanizePercentage }} of bots are DEAD on env {{ $labels.environmentId }}"
           description: "A DEAD bot does not recover on its own. Usual causes: auth gateway rejecting logins, WS host unreachable, or the PING-before-AUTH race. Restart the affected group(s) once the cause is cleared."
+
+      # The first-class dead-GROUP rule, restoring in product-routed form what the
+      # retired BotGroupDead used to say. groups_dead_by_env is the labelled sibling
+      # of the groups_dead_currently fleet gauge (which stays, AD-V2) and uses the
+      # same predicate, so sum(groups_dead_by_env) == groups_dead_currently.
+      #
+      # No vector matching here on purpose: a bare gauge compared against a scalar.
+      # A ratio against a group-count denominator would need a second gauge and a
+      # second chance to mismatch label sets, and would buy nothing — one DEAD group
+      # is already actionable, whatever fraction of the environment it is.
+      #
+      # for: 5m, not 10m: the state is already debounced upstream (the health monitor
+      # only marks a group DEAD after consecutive failed checks) and it never clears
+      # by itself — a DEAD group stays DEAD until an operator restarts it. The window
+      # exists only so an operator-initiated restart in progress does not page anyone.
+      - alert: EnvironmentGroupDead
+        expr: groups_dead_by_env > 0
+        for: 5m
+        labels:
+          severity: critical
+          audience: product
+        annotations:
+          summary: "{{ $value }} bot group(s) DEAD on env {{ $labels.environmentId }}"
+          description: "A DEAD group does not recover on its own and stops betting entirely — it must be restarted (POST /api/v1/bot-group/{id}/restart, which rebuilds the runtime and reuses the existing accounts). Check EnvironmentSocketDown / EnvironmentAuthDown first: if the cause is still present the group will die again."
 
       # A2b — login/auth gateway down. verifytoken.aspx runs on every authoritative
       # balance fetch, so this counter moves continuously while bots play; that is
@@ -201,6 +234,41 @@ groups:
         annotations:
           summary: "No rounds on game {{ $labels.gameName }} (env {{ $labels.environmentId }}) for 20 minutes"
           description: "Bots are subscribed and authenticated but the server is sending no StartGame/SpinResult. Game is stopped server-side, the subchannel is wrong, or subscribers were pruned."
+
+  - name: bot-manager-balance
+    rules:
+      # A3 — a group that will NOT top itself up is running out of money.
+      #
+      # group_balance_ratio = avg(expectedBalance over isConnected() bots) / deposit
+      # amount, emitted only for groups with auto-deposit OFF and at least one active
+      # bot (AD-V13). Both filters are applied in the app, not here: a series simply
+      # does not exist for an auto-deposit group (dipping below 10% there is normal
+      # operation — it is what triggers the top-up) or for a stopped / fully
+      # reconnecting group (which would read 0 and page someone for nothing).
+      #
+      # A ratio, not an absolute: one threshold then covers every currency scale and
+      # deposit size, and 0.10 is the same figure the bots themselves use for
+      # MIN_BALANCE_PERCENT_OF_DEPOSIT — i.e. this fires exactly where an
+      # auto-deposit group would have topped up.
+      #
+      # The numerator is expectedCurrentBalance, not lastFetchedBalance (AD-V12):
+      # checkBalance() re-reads the server whenever the two diverge by more than 1%
+      # of the deposit, so they cannot be further apart than that, which is
+      # immaterial at a 10% threshold. The one case where expected is stale — a bot
+      # that stopped receiving rounds, so onNewSession() never runs and both values
+      # freeze — is GameNoRounds' job, not this rule's.
+      #
+      # for: 5m absorbs the flap of a group hovering on the line; no app-side
+      # throttling (AD-6 / Implementation Note 10).
+      - alert: GroupBalanceLow
+        expr: group_balance_ratio < 0.10
+        for: 5m
+        labels:
+          severity: warning
+          audience: product
+        annotations:
+          summary: "Group {{ $labels.groupName }} average balance at {{ $value | humanizePercentage }} of its deposit"
+          description: "Auto-deposit is OFF for this group, so it will not top itself up. Fund it or enable auto-deposit before the bots stop betting."
 
   - name: bot-manager-jvm
     rules:
