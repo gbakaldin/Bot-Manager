@@ -63,7 +63,14 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
             // {environmentId, product} tags from live iteration on the 10 s refresher
             // thread and must never also inherit that thread's MDC.
             "bots_managed_by_env",
-            "ws_connections_open_by_env"
+            "ws_connections_open_by_env",
+            // VIPTALK_ALERTING_V2 Phase 4: the per-environment dead-group gauge and
+            // the per-group balance pair. Same reasoning — they carry their own
+            // {environmentId, product} / {botGroupId, …} tags from live iteration on
+            // the refresher thread, whose MDC belongs to whatever ran there last.
+            "groups_dead_by_env",
+            "group_avg_balance",
+            "group_balance_ratio"
     );
 
     @Override

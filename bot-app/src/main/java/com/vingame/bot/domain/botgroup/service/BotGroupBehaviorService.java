@@ -59,6 +59,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -1516,6 +1517,122 @@ public class BotGroupBehaviorService {
             counts.merge(key, open, Integer::sum);
         }
         return counts;
+    }
+
+    /**
+     * Per-environment count of bot groups currently in DEAD state, backing the
+     * {@code groups_dead_by_env} MultiGauge (VIPTALK_ALERTING_V2 Phase 4).
+     * <p>
+     * The labelled sibling of the {@code groups_dead_currently} fleet gauge, which
+     * stays exactly as it is (AD-V2) — this does not replace it, it makes the same
+     * fact routable. Phase 3 retired {@code BotGroupDead} and left group-level
+     * deadness visible only indirectly, as a step in its bots' contribution to
+     * {@code EnvironmentDeadBotRatioHigh}; a DEAD group is an operator-actionable
+     * event in its own right (it must be one-click restarted), so it gets a
+     * first-class per-environment series again.
+     * <p>
+     * The predicate is {@code groupDeadSince != null} — deliberately the same one
+     * {@link #countGroupsDeadCurrently()} uses, so {@code sum(groups_dead_by_env)}
+     * equals {@code groups_dead_currently}. A row is emitted for <em>every</em>
+     * environment that has running groups, including the healthy zero, so a
+     * dashboard shows the healthy state rather than a gap.
+     */
+    public Map<EnvKey, Integer> countDeadGroupsByEnv() {
+        Map<EnvKey, Integer> counts = new LinkedHashMap<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            String envId = runtime.getEnvironmentId();
+            if (envId == null) continue;
+            counts.merge(new EnvKey(envId, runtime.getProduct()),
+                    runtime.getGroupDeadSince() != null ? 1 : 0, Integer::sum);
+        }
+        return counts;
+    }
+
+    /**
+     * Balance snapshot of one running bot group, backing the
+     * {@code group_avg_balance} / {@code group_balance_ratio} MultiGauges
+     * (VIPTALK_ALERTING_V2 AD-V12 / AD-V13).
+     *
+     * @param avgExpectedBalance mean {@link Bot#getExpectedBalance()} over the
+     *                           group's <em>active</em> ({@code isConnected()}) bots
+     * @param depositAmount      what a single auto-deposit top-up would credit —
+     *                           the denominator of the ratio
+     */
+    public record GroupBalance(String botGroupId, String groupName, String environmentId,
+                               String product, String gameId, String gameName,
+                               long avgExpectedBalance, long depositAmount) {
+
+        /** Average balance as a fraction of one deposit; the alert threshold is 0.10. */
+        public double ratio() {
+            return depositAmount > 0 ? (double) avgExpectedBalance / depositAmount : 0d;
+        }
+    }
+
+    /**
+     * Balance snapshot per running bot group, for the low-balance alert (A3).
+     * <p>
+     * <b>Reads {@code expectedCurrentBalance}, not {@code lastFetchedBalance}</b>
+     * (AD-V12). {@code checkBalance()} re-reads the server whenever the two diverge
+     * by more than {@code balanceSyncThreshold} — 1% of the deposit amount — so they
+     * can never be more than one 1% band apart, which is immaterial at a 10% alert
+     * threshold. {@code expected} is also the value the app itself uses to decide a
+     * top-up and the value the UI stat reports, so alerting on it keeps alert,
+     * behaviour and UI consistent. Same averaging shape as {@link #computeStats}.
+     * <p>
+     * A row is emitted only when (AD-V13):
+     * <ul>
+     *   <li>auto-deposit is <b>off</b> for the group — an auto-deposit group dipping
+     *       below 10% is normal operation, not an alert;</li>
+     *   <li>at least one bot is active ({@code isConnected()}) — a stopped or fully
+     *       reconnecting group must not read 0 and page someone.</li>
+     * </ul>
+     * The one case where {@code expected} is untrustworthy is a bot that stopped
+     * receiving rounds, so {@code onNewSession()} never runs and both balance values
+     * freeze. That is {@code GameNoRounds}' job (Phase 3), not this metric's.
+     * <p>
+     * Group-uniform fields ({@code behaviorConfig}, {@code game}) are read off the
+     * first bot that carries a configuration: every bot in a group is built from the
+     * same {@code BotBehaviorConfig} builder and the same {@code Game}. Nothing here
+     * touches Mongo — this runs on the 10 s gauge-refresh thread.
+     */
+    public Collection<GroupBalance> listGroupBalances() {
+        List<GroupBalance> balances = new ArrayList<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            List<Bot> bots = runtime.getBotInstances();
+            BotConfiguration sample = bots.stream()
+                    .map(Bot::getConfiguration)
+                    .filter(Objects::nonNull)
+                    .findFirst()
+                    .orElse(null);
+            if (sample == null) continue;
+
+            BotBehaviorConfig behavior = sample.getBehaviorConfig();
+            if (behavior == null || behavior.isAutoDepositEnabled()) continue;
+
+            List<Bot> activeBots = bots.stream().filter(Bot::isConnected).toList();
+            if (activeBots.isEmpty()) continue;
+
+            long depositAmount = behavior.getDepositAmount() > 0
+                    ? behavior.getDepositAmount()
+                    : Bot.DEFAULT_DEPOSIT_AMOUNT;
+            if (depositAmount <= 0) continue;
+
+            long avgExpectedBalance = activeBots.stream()
+                    .mapToLong(Bot::getExpectedBalance)
+                    .sum() / activeBots.size();
+
+            Game game = sample.getGame();
+            balances.add(new GroupBalance(
+                    runtime.getGroupId(),
+                    runtime.getGroupName() != null ? runtime.getGroupName() : runtime.getGroupId(),
+                    runtime.getEnvironmentId(),
+                    product(runtime, game),
+                    game != null ? game.getId() : null,
+                    game != null ? game.getName() : null,
+                    avgExpectedBalance,
+                    depositAmount));
+        }
+        return balances;
     }
 
     /** {@code GameType} enum name, or {@code ""} when unset. */

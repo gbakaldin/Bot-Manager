@@ -7,6 +7,7 @@ import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvStatusKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameStatusKey;
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GroupBalance;
 import com.vingame.bot.infrastructure.observability.InfoGaugeRefresher.InfoGauges;
 import io.micrometer.prometheusmetrics.PrometheusConfig;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
@@ -112,5 +113,37 @@ class InfoGaugePrometheusScrapeTest {
         assertThat(scrape).contains("# TYPE ws_connections_open_by_env gauge");
         assertThat(scrape).contains(
                 "ws_connections_open_by_env{environmentId=\"env-uuid-1\",product=\"116\"} 9.0");
+    }
+
+    @Test
+    void phase4Gauges_renderToPrometheusScrape_withTheLabelsTheRulesRouteOn() {
+        when(behaviorService.countDeadGroupsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 1));
+        when(behaviorService.listGroupBalances()).thenReturn(List.of(
+                new GroupBalance("group-uuid-1", "tptxg2", "env-uuid-1", "116",
+                        "game-uuid-1", "Tai Xiu", 25L, 250L)));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        String scrape = registry.scrape();
+
+        // EnvironmentGroupDead reads this bare, with no vector matching — but it still
+        // needs product/environmentId on the OUTPUT series to reach a product room.
+        assertThat(scrape).contains("# TYPE groups_dead_by_env gauge");
+        assertThat(scrape).contains(
+                "groups_dead_by_env{environmentId=\"env-uuid-1\",product=\"116\"} 1.0");
+
+        // GroupBalanceLow reads group_balance_ratio bare and names {{ $labels.groupName }}
+        // in its summary, so groupName must survive into the exposition.
+        assertThat(scrape).contains("# TYPE group_balance_ratio gauge");
+        assertThat(scrape).contains(
+                "group_balance_ratio{botGroupId=\"group-uuid-1\",environmentId=\"env-uuid-1\","
+                        + "gameId=\"game-uuid-1\",gameName=\"Tai Xiu\",groupName=\"tptxg2\","
+                        + "product=\"116\"} 0.1");
+        assertThat(scrape).contains("# TYPE group_avg_balance gauge");
+        assertThat(scrape).contains(
+                "group_avg_balance{botGroupId=\"group-uuid-1\",environmentId=\"env-uuid-1\","
+                        + "gameId=\"game-uuid-1\",gameName=\"Tai Xiu\",groupName=\"tptxg2\","
+                        + "product=\"116\"} 25.0");
     }
 }

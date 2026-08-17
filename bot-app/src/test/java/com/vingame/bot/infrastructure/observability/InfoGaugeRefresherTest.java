@@ -8,6 +8,7 @@ import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvStatusKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameStatusKey;
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GroupBalance;
 import com.vingame.bot.infrastructure.observability.InfoGaugeRefresher.InfoGauges;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -334,6 +335,111 @@ class InfoGaugeRefresherTest {
                 .tag("environmentId", "env-uuid-1").gauge().value()).isEqualTo(107.0);
     }
 
+    // ---- VIPTALK_ALERTING_V2 Phase 4: dead groups per env + per-group balance ----
+
+    @Test
+    void groupsDeadByEnvGauge_carriesEnvironmentIdAndProduct_andEmitsTheHealthyZero() {
+        when(behaviorService.countDeadGroupsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 2,
+                new EnvKey("env-uuid-2", "097"), 0));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        Gauge dead = registry.find("groups_dead_by_env").tag("environmentId", "env-uuid-1").gauge();
+        assertThat(dead).isNotNull();
+        assertThat(dead.value()).isEqualTo(2.0);
+        assertThat(dead.getId().getTag("product")).isEqualTo("116");
+
+        // The healthy environment keeps a series: EnvironmentGroupDead reads
+        // `groups_dead_by_env > 0`, and a dashboard should show 0, not a gap.
+        Gauge healthy = registry.find("groups_dead_by_env").tag("environmentId", "env-uuid-2").gauge();
+        assertThat(healthy).isNotNull();
+        assertThat(healthy.value()).isEqualTo(0.0);
+    }
+
+    @Test
+    void groupBalanceGauges_carryGroupIdentityAndTheRatio() {
+        when(behaviorService.listGroupBalances()).thenReturn(List.of(
+                new GroupBalance("group-uuid-1", "tptxg2", "env-uuid-1", "116",
+                        "game-uuid-1", "Tai Xiu", 25_000_000L, 250_000_000L)));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        Gauge avg = registry.find("group_avg_balance").tag("botGroupId", "group-uuid-1").gauge();
+        assertThat(avg).isNotNull();
+        assertThat(avg.value()).isEqualTo(25_000_000.0);
+
+        Gauge ratio = registry.find("group_balance_ratio").tag("botGroupId", "group-uuid-1").gauge();
+        assertThat(ratio).isNotNull();
+        assertThat(ratio.value()).isEqualTo(0.10);
+        // The label set that routes GroupBalanceLow to a product room and names the
+        // group in the message.
+        assertThat(ratio.getId().getTag("groupName")).isEqualTo("tptxg2");
+        assertThat(ratio.getId().getTag("environmentId")).isEqualTo("env-uuid-1");
+        assertThat(ratio.getId().getTag("product")).isEqualTo("116");
+        assertThat(ratio.getId().getTag("gameId")).isEqualTo("game-uuid-1");
+        assertThat(ratio.getId().getTag("gameName")).isEqualTo("Tai Xiu");
+    }
+
+    @Test
+    void groupBalanceGauges_dropTheRowWhenAGroupStopsQualifying() {
+        // A group that enables auto-deposit, stops, or loses its last connected bot
+        // disappears from listGroupBalances — its series must go with it rather than
+        // freeze at the last ratio and keep GroupBalanceLow firing forever.
+        when(behaviorService.listGroupBalances()).thenReturn(List.of(
+                new GroupBalance("group-uuid-1", "tptxg2", "env-uuid-1", "116",
+                        "game-uuid-1", "Tai Xiu", 1L, 100L)));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("group_balance_ratio").gauges()).isNotEmpty();
+
+        when(behaviorService.listGroupBalances()).thenReturn(List.of());
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("group_balance_ratio").gauges()).isEmpty();
+        assertThat(registry.find("group_avg_balance").gauges()).isEmpty();
+    }
+
+    @Test
+    void groupBalanceGauges_updateValues_whenTheRatioMovesForAnExistingGroup() {
+        when(behaviorService.listGroupBalances()).thenReturn(List.of(
+                new GroupBalance("group-uuid-1", "tptxg2", "env-uuid-1", "116",
+                        "game-uuid-1", "Tai Xiu", 50L, 100L)));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("group_balance_ratio").gauge().value()).isEqualTo(0.50);
+
+        when(behaviorService.listGroupBalances()).thenReturn(List.of(
+                new GroupBalance("group-uuid-1", "tptxg2", "env-uuid-1", "116",
+                        "game-uuid-1", "Tai Xiu", 5L, 100L)));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("group_balance_ratio").gauge().value()).isEqualTo(0.05);
+    }
+
+    @Test
+    void phase4Gauges_areOnTheAggregateExclusionList() {
+        MDC.put(BotMdc.BOT_GROUP_ID, "group-mdc");
+        MDC.put(BotMdc.PRODUCT, "999");
+
+        when(behaviorService.countDeadGroupsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 1));
+        when(behaviorService.listGroupBalances()).thenReturn(List.of(
+                new GroupBalance("group-uuid-1", "tptxg2", "env-uuid-1", "116",
+                        "game-uuid-1", "Tai Xiu", 10L, 100L)));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        Gauge dead = registry.find("groups_dead_by_env").gauge();
+        assertThat(dead).isNotNull();
+        assertThat(dead.getId().getTag(BotMdc.BOT_GROUP_ID)).isNull();
+        assertThat(dead.getId().getTag(BotMdc.PRODUCT)).isEqualTo("116");
+
+        for (String name : new String[]{"group_avg_balance", "group_balance_ratio"}) {
+            Gauge g = registry.find(name).gauge();
+            assertThat(g).as("%s registered", name).isNotNull();
+            // its own botGroupId, never the refresher thread's MDC
+            assertThat(g.getId().getTag(BotMdc.BOT_GROUP_ID)).isEqualTo("group-uuid-1");
+            assertThat(g.getId().getTag(BotMdc.PRODUCT)).isEqualTo("116");
+        }
+    }
+
     // ---- null-safety: a Game/Env tuple with null fields must not crash the refresh ----
 
     @Test
@@ -350,6 +456,10 @@ class InfoGaugeRefresherTest {
                 new EnvKey("env-uuid-1", null), 1));
         when(behaviorService.countOpenWsByEnv()).thenReturn(Map.of(
                 new EnvKey("env-uuid-1", null), 1));
+        // Same for a group row: a group on a game with no productCode, or a runtime
+        // built without a Game, must render "" rather than NPE out of the 10 s refresh.
+        when(behaviorService.listGroupBalances()).thenReturn(List.of(
+                new GroupBalance("group-uuid-1", null, null, null, null, null, 10L, 100L)));
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
@@ -367,6 +477,11 @@ class InfoGaugeRefresherTest {
                 .isEqualTo("");
         assertThat(registry.find("ws_connections_open_by_env").gauge().getId().getTag("product"))
                 .isEqualTo("");
+        Gauge ratio = registry.find("group_balance_ratio").gauge();
+        assertThat(ratio).isNotNull();
+        assertThat(ratio.getId().getTag("groupName")).isEqualTo("");
+        assertThat(ratio.getId().getTag("product")).isEqualTo("");
+        assertThat(ratio.getId().getTag("gameId")).isEqualTo("");
     }
 
     @Test
@@ -381,6 +496,9 @@ class InfoGaugeRefresherTest {
         assertThat(registry.find("bots_by_env_status").gauges()).isEmpty();
         assertThat(registry.find("bots_managed_by_env").gauges()).isEmpty();
         assertThat(registry.find("ws_connections_open_by_env").gauges()).isEmpty();
+        assertThat(registry.find("groups_dead_by_env").gauges()).isEmpty();
+        assertThat(registry.find("group_avg_balance").gauges()).isEmpty();
+        assertThat(registry.find("group_balance_ratio").gauges()).isEmpty();
     }
 
     // ---- scheduler lifecycle (PostConstruct start / PreDestroy stop) ----

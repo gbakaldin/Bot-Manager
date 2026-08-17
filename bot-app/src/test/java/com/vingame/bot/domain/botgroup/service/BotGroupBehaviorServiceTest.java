@@ -10,6 +10,7 @@ import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
+import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.botgroup.dto.BotGroupHealthDTO;
 import com.vingame.bot.domain.botgroup.dto.BotHealthDTO;
@@ -1919,6 +1920,165 @@ class BotGroupBehaviorServiceTest {
     }
 
     @Nested
+    @DisplayName("dead-group + balance snapshots (VIPTALK_ALERTING_V2 Phase 4)")
+    class DeadGroupAndBalanceSnapshotTests {
+
+        // ---- groups_dead_by_env: the labelled sibling of groups_dead_currently ----
+
+        @Test
+        @DisplayName("countDeadGroupsByEnv counts DEAD groups per environment and sums to countGroupsDeadCurrently")
+        void countDeadGroupsByEnv_aggregatesAcrossGroups() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime dead1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            BotGroupRuntime dead2 = new BotGroupRuntime("g-2", 0, "env-1", "Staging", "Group 2", "116");
+            BotGroupRuntime alive = new BotGroupRuntime("g-3", 0, "env-2", "Prod", "Group 3", "097");
+            try {
+                putBots(dead1, List.of(mockBotWithGame(BotStatus.DEAD, bauCua)));
+                putBots(dead2, List.of(mockBotWithGame(BotStatus.DEAD, bauCua)));
+                putBots(alive, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
+                dead1.markAsDead();
+                dead2.markAsDead();
+                runningGroups().put("g-1", dead1);
+                runningGroups().put("g-2", dead2);
+                runningGroups().put("g-3", alive);
+
+                Map<BotGroupBehaviorService.EnvKey, Integer> counts = service.countDeadGroupsByEnv();
+
+                assertThat(counts.get(new BotGroupBehaviorService.EnvKey("env-1", "116"))).isEqualTo(2);
+                // the healthy environment still gets a row, value 0 — a gap would read
+                // as "no data" on a dashboard rather than "nothing is dead"
+                assertThat(counts.get(new BotGroupBehaviorService.EnvKey("env-2", "097"))).isEqualTo(0);
+                // AD-V2: the labelled sibling must agree with the fleet aggregate it
+                // does NOT replace.
+                assertThat(counts.values().stream().mapToInt(Integer::intValue).sum())
+                        .isEqualTo(service.countGroupsDeadCurrently());
+            } finally {
+                dead1.getExecutor().shutdownNow();
+                dead2.getExecutor().shutdownNow();
+                alive.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+                runningGroups().remove("g-2");
+                runningGroups().remove("g-3");
+            }
+        }
+
+        // ---- group_balance_ratio ----
+
+        @Test
+        @DisplayName("listGroupBalances averages expectedBalance over connected bots only, and reports the ratio")
+        void listGroupBalances_averagesOverConnectedBots() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                // 200 + 400 over two CONNECTED bots = 300; the disconnected bot's 0 must
+                // not drag the average down (that is the "group is restarting", not
+                // "group is broke", case).
+                putBots(r1, List.of(
+                        mockBotWithBalance(bauCua, true, 200L, false, 1_000L),
+                        mockBotWithBalance(bauCua, true, 400L, false, 1_000L),
+                        mockBotWithBalance(bauCua, false, 0L, false, 1_000L)));
+                runningGroups().put("g-1", r1);
+
+                var balances = service.listGroupBalances();
+
+                assertThat(balances).hasSize(1);
+                var balance = balances.iterator().next();
+                assertThat(balance.botGroupId()).isEqualTo("g-1");
+                assertThat(balance.groupName()).isEqualTo("Group 1");
+                assertThat(balance.environmentId()).isEqualTo("env-1");
+                assertThat(balance.product()).isEqualTo("116");
+                assertThat(balance.gameId()).isEqualTo("game-uuid-1");
+                assertThat(balance.gameName()).isEqualTo("BauCua");
+                assertThat(balance.avgExpectedBalance()).isEqualTo(300L);
+                assertThat(balance.depositAmount()).isEqualTo(1_000L);
+                assertThat(balance.ratio()).isEqualTo(0.30);
+            } finally {
+                r1.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("listGroupBalances skips auto-deposit groups — dipping below 10% there is normal operation")
+        void listGroupBalances_skipsAutoDepositGroups() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime auto = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                putBots(auto, List.of(mockBotWithBalance(bauCua, true, 1L, true, 1_000L)));
+                runningGroups().put("g-1", auto);
+
+                assertThat(service.listGroupBalances()).isEmpty();
+            } finally {
+                auto.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("listGroupBalances skips a group with no connected bot — a stopped group must not read 0 and page")
+        void listGroupBalances_skipsGroupWithNoActiveBots() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime reconnecting = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                putBots(reconnecting, List.of(
+                        mockBotWithBalance(bauCua, false, 5_000L, false, 1_000L),
+                        mockBotWithBalance(bauCua, false, 5_000L, false, 1_000L)));
+                runningGroups().put("g-1", reconnecting);
+
+                assertThat(service.listGroupBalances()).isEmpty();
+            } finally {
+                reconnecting.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("listGroupBalances falls back to the default deposit amount when the group carries none")
+        void listGroupBalances_fallsBackToDefaultDepositAmount() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                // depositAmount 0 = unset, exactly as Bot.resolveDepositAmount() reads it.
+                // A zero denominator would make the ratio NaN/Infinity and silence the rule.
+                putBots(r1, List.of(mockBotWithBalance(bauCua, true,
+                        Bot.DEFAULT_DEPOSIT_AMOUNT / 20, false, 0L)));
+                runningGroups().put("g-1", r1);
+
+                var balance = service.listGroupBalances().iterator().next();
+
+                assertThat(balance.depositAmount()).isEqualTo(Bot.DEFAULT_DEPOSIT_AMOUNT);
+                assertThat(balance.ratio()).isEqualTo(0.05);
+            } finally {
+                r1.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("listGroupBalances tolerates a bot group with no bots and no behavior config")
+        void listGroupBalances_isNullSafe() {
+            BotGroupRuntime empty = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            BotGroupRuntime noConfig = new BotGroupRuntime("g-2", 0, "env-1", "Staging", "Group 2", "116");
+            try {
+                // A bot whose configuration carries no behaviorConfig: the gauge refresh
+                // runs every 10 s and must never throw out of it.
+                putBots(noConfig, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED,
+                        game("game-uuid-1", "BauCua", GameType.BETTING_MINI))));
+                runningGroups().put("g-1", empty);
+                runningGroups().put("g-2", noConfig);
+
+                assertThatCode(() -> service.listGroupBalances()).doesNotThrowAnyException();
+                assertThat(service.listGroupBalances()).isEmpty();
+            } finally {
+                empty.getExecutor().shutdownNow();
+                noConfig.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+                runningGroups().remove("g-2");
+            }
+        }
+    }
+
+    @Nested
     @DisplayName("`product` label cardinality + provenance (VIPTALK_ALERTING_V2 Phase 1)")
     class ProductLabelCardinalityTests {
 
@@ -2088,6 +2248,31 @@ class BotGroupBehaviorServiceTest {
                 .build();
         lenient().when(b.getStatus()).thenReturn(status);
         lenient().when(b.getConfiguration()).thenReturn(config);
+        return b;
+    }
+
+    /**
+     * A bot carrying the two things {@code listGroupBalances} reads beyond identity:
+     * the group-uniform {@link BotBehaviorConfig} (auto-deposit flag + deposit
+     * amount) and its own {@code expectedCurrentBalance} — AD-V12's numerator, NOT
+     * {@code lastFetchedBalance}.
+     */
+    private static Bot mockBotWithBalance(Game game, boolean connected, long expectedBalance,
+                                          boolean autoDepositEnabled, long depositAmount) {
+        Bot b = mock(Bot.class);
+        BotConfiguration config = BotConfiguration.builder()
+                .game(game)
+                .environmentId("env-1")
+                .botGroupId("g-1")
+                .botIndex(1)
+                .behaviorConfig(BotBehaviorConfig.builder()
+                        .autoDepositEnabled(autoDepositEnabled)
+                        .depositAmount(depositAmount)
+                        .build())
+                .build();
+        lenient().when(b.getConfiguration()).thenReturn(config);
+        lenient().when(b.isConnected()).thenReturn(connected);
+        lenient().when(b.getExpectedBalance()).thenReturn(expectedBalance);
         return b;
     }
 

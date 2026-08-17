@@ -81,13 +81,36 @@ class BotMdcTagsMeterFilterTest {
         MDC.put(BotMdc.ENVIRONMENT_ID, "e-mdc");
         MDC.put(BotMdc.PRODUCT, "999");
 
-        for (String name : new String[]{"bots_managed_by_env", "ws_connections_open_by_env"}) {
+        for (String name : new String[]{
+                "bots_managed_by_env", "ws_connections_open_by_env",
+                // Phase 4's dead-group sibling of groups_dead_currently
+                "groups_dead_by_env"}) {
             Meter.Id mapped = filter.map(id(name,
                     Tags.of("environmentId", "e1", "product", "116")));
             assertThat(mapped.getTags()).as("%s keeps its own tags only", name)
                     .extracting("key", "value")
                     .containsExactlyInAnyOrder(
                             org.assertj.core.groups.Tuple.tuple("environmentId", "e1"),
+                            org.assertj.core.groups.Tuple.tuple("product", "116"));
+        }
+    }
+
+    @Test
+    void map_groupBalanceGauges_keepTheirOwnGroupIdentity() {
+        // VIPTALK_ALERTING_V2 Phase 4: these carry a botGroupId of their OWN — the group
+        // the row is about — which must never be overwritten by whatever bot last ran on
+        // the 10 s refresher thread. (They also do not start with `bot_`, so the prefix
+        // gate already spares them; the allow-list entry is the explicit guarantee.)
+        MDC.put(BotMdc.BOT_GROUP_ID, "g-mdc");
+        MDC.put(BotMdc.PRODUCT, "999");
+
+        for (String name : new String[]{"group_avg_balance", "group_balance_ratio"}) {
+            Meter.Id mapped = filter.map(id(name,
+                    Tags.of("botGroupId", "g-1", "product", "116")));
+            assertThat(mapped.getTags()).as("%s keeps its own tags only", name)
+                    .extracting("key", "value")
+                    .containsExactlyInAnyOrder(
+                            org.assertj.core.groups.Tuple.tuple("botGroupId", "g-1"),
                             org.assertj.core.groups.Tuple.tuple("product", "116"));
         }
     }

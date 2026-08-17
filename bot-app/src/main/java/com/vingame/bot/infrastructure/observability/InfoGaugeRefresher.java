@@ -34,13 +34,25 @@ import java.util.concurrent.TimeUnit;
  *       per-environment analogue of {@code ws_connections_open}, using the same
  *       {@code Bot.isConnected()} predicate as the fleet gauge (deliberately
  *       <em>not</em> {@code BotStatus}).</li>
+ *   <li><b>groups_dead_by_env</b> {@code {environmentId, product}} —
+ *       per-environment analogue of {@code groups_dead_currently}, so a DEAD group
+ *       is alertable in its owning product's room instead of only showing up as a
+ *       step in that environment's dead-<em>bot</em> ratio (Phase 4).</li>
+ *   <li><b>group_avg_balance</b>
+ *       {@code {botGroupId, groupName, environmentId, product, gameId, gameName}} —
+ *       mean expected balance over a group's connected bots, absolute, for
+ *       dashboards (AD-V12).</li>
+ *   <li><b>group_balance_ratio</b> {@code {…same labels…}} — the same mean divided
+ *       by the group's deposit amount, so one threshold (0.10) covers every
+ *       currency scale and deposit size. Rows exist only for non-auto-deposit
+ *       groups with at least one active bot (AD-V13).</li>
  * </ul>
  * {@code product} (VIPTALK_ALERTING_V2 AD-V1) is the numeric product code and is
  * functionally determined by {@code environmentId} / {@code gameId}, so it adds an
  * extra label to existing series rather than new series. The fleet aggregates in
  * {@link ObservabilityConfig} stay unlabelled (AD-V2).
  * <p>
- * All six meter names are on the {@link BotMdcTagsMeterFilter} aggregate allow-list,
+ * All nine meter names are on the {@link BotMdcTagsMeterFilter} aggregate allow-list,
  * so they never inherit MDC tags from the refresher thread.
  * <p>
  * <b>Why {@code _join}, not {@code _info}:</b> {@code _info} is a <em>reserved
@@ -105,7 +117,10 @@ public class InfoGaugeRefresher {
                       MultiGauge botsByGameStatus,
                       MultiGauge botsByEnvStatus,
                       MultiGauge botsManagedByEnv,
-                      MultiGauge wsConnectionsOpenByEnv) {
+                      MultiGauge wsConnectionsOpenByEnv,
+                      MultiGauge groupsDeadByEnv,
+                      MultiGauge groupAvgBalance,
+                      MultiGauge groupBalanceRatio) {
     }
 
     /**
@@ -132,8 +147,19 @@ public class InfoGaugeRefresher {
         MultiGauge wsConnectionsOpenByEnv = MultiGauge.builder("ws_connections_open_by_env")
                 .description("Number of bots with an open WebSocket connection, broken down per environment")
                 .register(registry);
+        MultiGauge groupsDeadByEnv = MultiGauge.builder("groups_dead_by_env")
+                .description("Number of bot groups currently in DEAD state, broken down per environment")
+                .register(registry);
+        MultiGauge groupAvgBalance = MultiGauge.builder("group_avg_balance")
+                .description("Average expected balance over a group's connected bots (non-auto-deposit groups only)")
+                .register(registry);
+        MultiGauge groupBalanceRatio = MultiGauge.builder("group_balance_ratio")
+                .description("Average expected balance as a fraction of the group's deposit amount "
+                        + "(non-auto-deposit groups only)")
+                .register(registry);
         return new InfoGauges(gameInfo, environmentInfo, botsByGameStatus, botsByEnvStatus,
-                botsManagedByEnv, wsConnectionsOpenByEnv);
+                botsManagedByEnv, wsConnectionsOpenByEnv, groupsDeadByEnv,
+                groupAvgBalance, groupBalanceRatio);
     }
 
     /**
@@ -197,6 +223,31 @@ public class InfoGaugeRefresher {
         gauges.wsConnectionsOpenByEnv().register(behaviorService.countOpenWsByEnv().entrySet().stream()
                 .map(en -> MultiGauge.Row.of(envTags(en.getKey()), en.getValue()))
                 .toList(), true);
+
+        gauges.groupsDeadByEnv().register(behaviorService.countDeadGroupsByEnv().entrySet().stream()
+                .map(en -> MultiGauge.Row.of(envTags(en.getKey()), en.getValue()))
+                .toList(), true);
+
+        // Two rows per group off ONE snapshot: the absolute average (dashboards) and
+        // the ratio the alert threshold is expressed in. Taking both from the same
+        // listGroupBalances() call keeps them consistent within a refresh — reading
+        // the live bots twice could show a balance and a ratio from different instants.
+        var groupBalances = behaviorService.listGroupBalances();
+        gauges.groupAvgBalance().register(groupBalances.stream()
+                .map(b -> MultiGauge.Row.of(groupTags(b), b.avgExpectedBalance()))
+                .toList(), true);
+        gauges.groupBalanceRatio().register(groupBalances.stream()
+                .map(b -> MultiGauge.Row.of(groupTags(b), b.ratio()))
+                .toList(), true);
+    }
+
+    private static Tags groupTags(BotGroupBehaviorService.GroupBalance balance) {
+        return Tags.of("botGroupId", nullSafe(balance.botGroupId()),
+                "groupName", nullSafe(balance.groupName()),
+                "environmentId", nullSafe(balance.environmentId()),
+                "product", nullSafe(balance.product()),
+                "gameId", nullSafe(balance.gameId()),
+                "gameName", nullSafe(balance.gameName()));
     }
 
     private static Tags envTags(BotGroupBehaviorService.EnvKey key) {
