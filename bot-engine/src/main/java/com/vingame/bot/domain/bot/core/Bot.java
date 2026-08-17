@@ -4,6 +4,7 @@ import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.bot.coordination.JackpotScaler;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
@@ -215,6 +216,7 @@ public abstract class Bot {
                 configuration.getBotGroupId(),
                 configuration.getBotIndex(),
                 configuration.getEnvironmentId(),
+                productCode(),
                 configuration.getGame().getGameType().name(),
                 configuration.getGame().getId(),
                 configuration.getGame().getName(),
@@ -250,6 +252,20 @@ public abstract class Bot {
         } finally {
             BotMdc.clear();
         }
+    }
+
+    /**
+     * Numeric product code for this bot's game ({@code ProductCode.getCode()}, e.g.
+     * {@code "116"}) — the {@code product} MDC key / metric label of
+     * VIPTALK_ALERTING_V2 AD-V1. Returns {@code null} when the {@link
+     * com.vingame.bot.domain.game.model.Game} document has no {@code productCode}
+     * (older docs predating the field); MDC and the meter filter both skip nulls,
+     * so such a bot simply carries no {@code product} label.
+     */
+    protected String productCode() {
+        Game game = configuration.getGame();
+        if (game == null || game.getProductCode() == null) return null;
+        return game.getProductCode().getCode();
     }
 
     protected abstract void initializeSubclass();

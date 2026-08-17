@@ -172,6 +172,8 @@ public class BotGroupRuntime {
                     config.getBotGroupId(),
                     config.getBotIndex(),
                     config.getEnvironmentId(),
+                    config.getGame().getProductCode() != null
+                            ? config.getGame().getProductCode().getCode() : null,
                     config.getGame().getGameType().name(),
                     config.getGame().getId(),
                     config.getGame().getName(),

@@ -41,6 +41,7 @@ class BotMdcTagsMeterFilterTest {
         MDC.put(BotMdc.GAME_TYPE, "BETTING_MINI");
         MDC.put(BotMdc.GAME_ID, "game-uuid-1");
         MDC.put(BotMdc.GAME_NAME, "BauCua");
+        MDC.put(BotMdc.PRODUCT, "116");
 
         Meter.Id mapped = filter.map(id("bot_messages_total", Tags.of("cmd", "endGame")));
 
@@ -49,6 +50,7 @@ class BotMdcTagsMeterFilterTest {
                         org.assertj.core.groups.Tuple.tuple("cmd", "endGame"),
                         org.assertj.core.groups.Tuple.tuple(BotMdc.BOT_GROUP_ID, "g1"),
                         org.assertj.core.groups.Tuple.tuple(BotMdc.ENVIRONMENT_ID, "e1"),
+                        org.assertj.core.groups.Tuple.tuple(BotMdc.PRODUCT, "116"),
                         org.assertj.core.groups.Tuple.tuple(BotMdc.GAME_TYPE, "BETTING_MINI"),
                         org.assertj.core.groups.Tuple.tuple(BotMdc.GAME_ID, "game-uuid-1"),
                         org.assertj.core.groups.Tuple.tuple(BotMdc.GAME_NAME, "BauCua")
@@ -56,9 +58,46 @@ class BotMdcTagsMeterFilterTest {
     }
 
     @Test
+    void map_botMetric_withoutProductInMdc_omitsTheLabel() {
+        // Game.productCode is nullable on older Mongo documents (VIPTALK_ALERTING_V2
+        // Implementation Note 4): such a bot simply carries no `product` label rather
+        // than an empty one, and its audience:product alerts fall to the
+        // environmentId → Mongo hop.
+        MDC.put(BotMdc.BOT_GROUP_ID, "g1");
+        MDC.put(BotMdc.ENVIRONMENT_ID, "e1");
+
+        Meter.Id mapped = filter.map(id("bot_messages_total", Tags.of("cmd", "endGame")));
+
+        assertThat(mapped.getTags()).extracting("key")
+                .doesNotContain(BotMdc.PRODUCT);
+    }
+
+    @Test
+    void map_perEnvAggregateGauges_doNotAttachMdcTags() {
+        // AD-V1/AD-V2: bots_managed_by_env / ws_connections_open_by_env carry their
+        // own {environmentId, product} from live iteration; the 10 s refresher
+        // thread's MDC must never leak onto them.
+        MDC.put(BotMdc.BOT_GROUP_ID, "g1");
+        MDC.put(BotMdc.ENVIRONMENT_ID, "e-mdc");
+        MDC.put(BotMdc.PRODUCT, "999");
+
+        for (String name : new String[]{"bots_managed_by_env", "ws_connections_open_by_env"}) {
+            Meter.Id mapped = filter.map(id(name,
+                    Tags.of("environmentId", "e1", "product", "116")));
+            assertThat(mapped.getTags()).as("%s keeps its own tags only", name)
+                    .extracting("key", "value")
+                    .containsExactlyInAnyOrder(
+                            org.assertj.core.groups.Tuple.tuple("environmentId", "e1"),
+                            org.assertj.core.groups.Tuple.tuple("product", "116"));
+        }
+    }
+
+    @Test
     void map_aggregateGauge_doesNotAttachMdcTags() {
         MDC.put(BotMdc.BOT_GROUP_ID, "g1");
         MDC.put(BotMdc.ENVIRONMENT_ID, "e1");
+
+        MDC.put(BotMdc.PRODUCT, "116");
 
         for (String name : new String[]{
                 "bot_groups_running", "bots_managed", "ws_connections_open", "bots_by_status",
@@ -69,8 +108,12 @@ class BotMdcTagsMeterFilterTest {
                     .anyMatch(t -> BotMdc.BOT_GROUP_ID.equals(t.getKey()));
             boolean hasEnv = mapped.getTags().stream()
                     .anyMatch(t -> BotMdc.ENVIRONMENT_ID.equals(t.getKey()));
+            boolean hasProduct = mapped.getTags().stream()
+                    .anyMatch(t -> BotMdc.PRODUCT.equals(t.getKey()));
             assertThat(hasGroup).as("aggregate gauge %s must not get botGroupId", name).isFalse();
             assertThat(hasEnv).as("aggregate gauge %s must not get environmentId", name).isFalse();
+            // AD-V2: the fleet aggregates are fleet facts with no owning product.
+            assertThat(hasProduct).as("aggregate gauge %s must not get product", name).isFalse();
         }
     }
 

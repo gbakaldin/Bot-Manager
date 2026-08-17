@@ -57,7 +57,13 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
             "game_join",
             "environment_join",
             "bots_by_game_status",
-            "bots_by_env_status"
+            "bots_by_env_status",
+            // VIPTALK_ALERTING_V2 Phase 1: per-environment analogues of the
+            // bots_managed / ws_connections_open fleet gauges. They carry their own
+            // {environmentId, product} tags from live iteration on the 10 s refresher
+            // thread and must never also inherit that thread's MDC.
+            "bots_managed_by_env",
+            "ws_connections_open_by_env"
     );
 
     @Override
@@ -70,9 +76,10 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
             return id;
         }
 
-        List<Tag> extra = new ArrayList<>(5);
+        List<Tag> extra = new ArrayList<>(6);
         addTagIfPresent(extra, BotMdc.BOT_GROUP_ID);
         addTagIfPresent(extra, BotMdc.ENVIRONMENT_ID);
+        addTagIfPresent(extra, BotMdc.PRODUCT);
         addTagIfPresent(extra, BotMdc.GAME_TYPE);
         addTagIfPresent(extra, BotMdc.GAME_ID);
         addTagIfPresent(extra, BotMdc.GAME_NAME);

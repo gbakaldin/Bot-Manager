@@ -17,6 +17,15 @@ public final class BotMdc {
     public static final String BOT_GROUP_ID = "botGroupId";
     public static final String BOT_ID = "botId";
     public static final String ENVIRONMENT_ID = "environmentId";
+    /**
+     * Numeric product code (VIPTALK_ALERTING_V2 AD-V1), e.g. {@code "116"} /
+     * {@code "097"} — {@code ProductCode.getCode()}, not the enum name and not
+     * the display name. Carried on MDC so every {@code bot_*} meter picks it up
+     * as a Micrometer tag and Alertmanager can route by product. Adds no real
+     * cardinality: {@code product} is functionally determined by
+     * {@code environmentId} / {@code gameId}, both already on those series.
+     */
+    public static final String PRODUCT = "product";
     public static final String GAME_TYPE = "gameType";
     public static final String GAME_ID = "gameId";
     public static final String GAME_NAME = "gameName";
@@ -33,14 +42,19 @@ public final class BotMdc {
      * {@code gameName} carries the readable display name (e.g. {@code BauCua}), and
      * {@code gameId} carries the Mongo {@code _id} UUID string (stable per-Game key,
      * NOT the numeric {@code Game.gameId} gid which collides across products — AD-8).
+     * <p>
+     * {@code product} (VIPTALK_ALERTING_V2 AD-V1) carries the numeric product code
+     * ({@code ProductCode.getCode()}); null is tolerated — older {@code Game}
+     * documents may not have a {@code productCode} yet.
      */
     public static void set(String botGroupId, int botIndex,
-                           String environmentId, String gameType,
+                           String environmentId, String product, String gameType,
                            String gameId, String gameName,
                            String userName) {
         MDC.put(BOT_GROUP_ID, botGroupId);
         MDC.put(BOT_ID, String.valueOf(botIndex));
         MDC.put(ENVIRONMENT_ID, environmentId);
+        if (product != null) MDC.put(PRODUCT, product);
         if (gameType != null) MDC.put(GAME_TYPE, gameType);
         if (gameId != null) MDC.put(GAME_ID, gameId);
         if (gameName != null) MDC.put(GAME_NAME, gameName);
@@ -52,8 +66,18 @@ public final class BotMdc {
      * individual bot identity is not yet known.
      */
     public static void setGroupContext(String botGroupId, String environmentId) {
+        setGroupContext(botGroupId, environmentId, null);
+    }
+
+    /**
+     * Set partial MDC context for group-level operations, additionally carrying the
+     * numeric product code (VIPTALK_ALERTING_V2 AD-V1). A null {@code product} is
+     * skipped, so this is byte-for-byte the 2-arg form.
+     */
+    public static void setGroupContext(String botGroupId, String environmentId, String product) {
         MDC.put(BOT_GROUP_ID, botGroupId);
         MDC.put(ENVIRONMENT_ID, environmentId);
+        if (product != null) MDC.put(PRODUCT, product);
     }
 
     /**
@@ -63,6 +87,7 @@ public final class BotMdc {
         MDC.remove(BOT_GROUP_ID);
         MDC.remove(BOT_ID);
         MDC.remove(ENVIRONMENT_ID);
+        MDC.remove(PRODUCT);
         MDC.remove(GAME_TYPE);
         MDC.remove(GAME_ID);
         MDC.remove(GAME_NAME);

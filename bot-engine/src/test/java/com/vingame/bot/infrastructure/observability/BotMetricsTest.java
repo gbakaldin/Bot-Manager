@@ -27,6 +27,9 @@ class BotMetricsTest {
     private static final String GAME_TYPE = "BETTING_MINI";
     private static final String GAME_ID = "11111111-2222-3333-4444-555555555555";
     private static final String GAME_NAME = "BauCua";
+    // VIPTALK_ALERTING_V2 AD-V1: the numeric ProductCode.getCode(), not the enum
+    // name (P_116) and not the display name (TIP).
+    private static final String PRODUCT = "116";
 
     private MeterRegistry registry;
     private BotMetrics metrics;
@@ -50,6 +53,7 @@ class BotMetricsTest {
         MDC.put(BotMdc.GAME_TYPE, GAME_TYPE);
         MDC.put(BotMdc.GAME_ID, GAME_ID);
         MDC.put(BotMdc.GAME_NAME, GAME_NAME);
+        MDC.put(BotMdc.PRODUCT, PRODUCT);
     }
 
     @Test
@@ -61,12 +65,81 @@ class BotMetricsTest {
                 .tag("cmd", "endGame")
                 .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
                 .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
+                .tag(BotMdc.PRODUCT, PRODUCT)
                 .tag(BotMdc.GAME_TYPE, GAME_TYPE)
                 .tag(BotMdc.GAME_ID, GAME_ID)
                 .tag(BotMdc.GAME_NAME, GAME_NAME)
                 .counter();
         assertThat(c).isNotNull();
         assertThat(c.count()).isEqualTo(1.0);
+    }
+
+    /* ----- VIPTALK_ALERTING_V2 Phase 1 — the `product` routing label (AD-V1) ----- */
+
+    @Test
+    void productLabel_isEmittedAcrossTheRoutableCounters() {
+        // Every counter an audience:product Prometheus rule can be built on must
+        // carry `product`, otherwise the alert has nothing to route by.
+        setBotMdc();
+        metrics.incBotMessage("startGame");
+        metrics.incLogin(false);
+        metrics.incVerifyToken(false);
+        metrics.incBotWatchdogExpired();
+        metrics.incBotCreationFailure("auth");
+
+        String[] names = {
+                BotMetrics.BOT_MESSAGES_TOTAL,
+                BotMetrics.BOT_LOGIN_TOTAL,
+                BotMetrics.BOT_VERIFY_TOKEN_TOTAL,
+                BotMetrics.BOT_WATCHDOG_EXPIRED_TOTAL,
+                BotMetrics.BOT_CREATION_FAILURES_TOTAL
+        };
+        for (String name : names) {
+            Counter c = registry.find(name).tag(BotMdc.PRODUCT, PRODUCT).counter();
+            assertThat(c).as("counter %s carries product", name).isNotNull();
+        }
+    }
+
+    @Test
+    void productLabel_isTheNumericCode_notTheEnumNameOrDisplayName() {
+        setBotMdc();
+        metrics.incBotMessage("endGame");
+
+        assertThat(registry.find(BotMetrics.BOT_MESSAGES_TOTAL)
+                .tag(BotMdc.PRODUCT, "116").counter()).isNotNull();
+        assertThat(registry.find(BotMetrics.BOT_MESSAGES_TOTAL)
+                .tag(BotMdc.PRODUCT, "P_116").counter()).isNull();
+        assertThat(registry.find(BotMetrics.BOT_MESSAGES_TOTAL)
+                .tag(BotMdc.PRODUCT, "TIP").counter()).isNull();
+    }
+
+    @Test
+    void absentProductInMdc_omitsTheLabelRatherThanEmittingEmpty() {
+        // Game.productCode is nullable on older Mongo documents (Implementation
+        // Note 4). Bot.productCode() then returns null, BotMdc skips the key, and
+        // the counter must simply have no `product` tag.
+        MDC.put(BotMdc.BOT_GROUP_ID, GROUP_ID);
+        MDC.put(BotMdc.ENVIRONMENT_ID, ENV_ID);
+        metrics.incBotMessage("endGame");
+
+        Counter c = registry.find(BotMetrics.BOT_MESSAGES_TOTAL)
+                .tag("cmd", "endGame").counter();
+        assertThat(c).isNotNull();
+        assertThat(c.getId().getTags()).extracting("key").doesNotContain(BotMdc.PRODUCT);
+    }
+
+    @Test
+    void productLabel_addsNoNewTimeSeries_beyondTheExistingIdentitySet() {
+        // AD-V1 cardinality claim: product is functionally determined by
+        // environmentId/gameId, so two increments that differ ONLY by having the
+        // label present-vs-absent are the only way to split the series — within one
+        // real bot's MDC the product is constant, so N increments ⇒ 1 series.
+        setBotMdc();
+        for (int i = 0; i < 10; i++) {
+            metrics.incBotMessage("endGame");
+        }
+        assertThat(registry.find(BotMetrics.BOT_MESSAGES_TOTAL).tag("cmd", "endGame").counters())
+                .hasSize(1);
     }
 
     /* ----- GRAFANA_PER_GAME_ENV_DASHBOARDS Phase 1 — gameId / gameName labels + gameType fix ----- */
@@ -338,11 +411,14 @@ class BotMetricsTest {
                 .anyMatch(t -> BotMdc.GAME_ID.equals(t.getKey()));
         boolean hasGameName = c.getId().getTags().stream()
                 .anyMatch(t -> BotMdc.GAME_NAME.equals(t.getKey()));
+        boolean hasProduct = c.getId().getTags().stream()
+                .anyMatch(t -> BotMdc.PRODUCT.equals(t.getKey()));
         assertThat(hasGroup).isFalse();
         assertThat(hasEnv).isFalse();
         assertThat(hasGame).isFalse();
         assertThat(hasGameId).isFalse();
         assertThat(hasGameName).isFalse();
+        assertThat(hasProduct).isFalse();
     }
 
     @Test
