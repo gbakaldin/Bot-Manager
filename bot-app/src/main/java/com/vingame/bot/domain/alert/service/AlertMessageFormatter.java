@@ -43,7 +43,9 @@ import java.util.List;
  * <p>
  * The header line carries the instance label (VIPTALK_ALERTING AD-7): prod, loadtest
  * and staging run the same artifact and would otherwise be indistinguishable in a
- * shared room. Blank label ⇒ the segment is omitted rather than rendered empty.
+ * shared room. Blank label ⇒ the segment is omitted rather than rendered empty, and the
+ * constructor logs a WARN — nothing guesses a value, because a header that says
+ * {@code staging} on the prod box is worse than one that says nothing.
  */
 @Slf4j
 @Component
