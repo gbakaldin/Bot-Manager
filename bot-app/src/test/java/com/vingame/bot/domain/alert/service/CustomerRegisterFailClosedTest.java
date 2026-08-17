@@ -31,10 +31,15 @@ import static org.mockito.Mockito.when;
  * AD-V6/AD-V7).
  * <p>
  * The contract under test is <b>fail-closed</b>: a customer-facing message is rendered
- * <em>only</em> from a rule's own {@code public_summary}, and is otherwise not rendered
- * at all. It is never derived, degraded or approximated from the technical title, body,
+ * <em>only</em> from operator-authored copy declared for that audience — the rule's
+ * {@code public_summary} while it is firing, its {@code public_resolved_summary} (or the
+ * configured default recovery text) once it resolves — and is otherwise not rendered at
+ * all. It is never derived, degraded or approximated from the technical title, body,
  * severity or source — those are written for operators, and every one of them is a way
- * a stack-trace-shaped string or an environment id reaches a product room.
+ * a stack-trace-shaped string or an environment id reaches a product room. Nor is the
+ * firing copy reused for the recovery: a {@code ✅} over "we are having issues" is its own
+ * failure, and the recovery half of every {@code audience: both} incident is guaranteed
+ * traffic (AD-V9).
  * <p>
  * Each test below attacks that from a different direction: hostile technical content, the
  * hand-authored operator HTTP path, an {@code audience: product} rule that happens to
@@ -152,6 +157,94 @@ class CustomerRegisterFailClosedTest {
         assertThat(new RoutedMessage(productRoom(ProductCode.P_116), rendered,
                 AlertRegister.CUSTOMER, AlertRouter.OUTCOME_SENT, AlertRouter.REASON_OK)
                 .isDelivered()).isFalse();
+    }
+
+    /* ---------------- the recovery half must read as a recovery ---------------- */
+
+    @Test
+    @DisplayName("a RESOLVED customer copy never replays the firing wording under a ✅ marker")
+    void resolvedCustomerCopyDoesNotReplayTheOutageText() {
+        // The bug this pins: severity RESOLVED still carries the rule's public_summary
+        // (annotations are the rule's, not the notification's), so rendering it unchanged
+        // published "…is experiencing issues…" beneath a green tick at the exact moment
+        // the incident ended — in a room we do not control.
+        Alert resolved = new Alert(AlertSeverity.RESOLVED, HOSTILE_TITLE, HOSTILE_BODY,
+                ProductCode.P_116, "prometheus", AlertAudience.BOTH, PUBLIC_SUMMARY, null);
+
+        RoutedMessage customer = delivered(router(OPS_ROOM, true).route(resolved)).stream()
+                .filter(m -> m.register() == AlertRegister.CUSTOMER)
+                .findFirst().orElseThrow();
+
+        assertThat(customer.text())
+                .isEqualTo("✅ TIP (116) · prod\n" + AlertMessageFormatter.DEFAULT_PUBLIC_RESOLVED_SUMMARY)
+                .doesNotContain("experiencing issues")
+                .doesNotContain("OutOfMemoryError");
+    }
+
+    @Test
+    @DisplayName("the rule's own public_resolved_summary wins over the configured default")
+    void resolvedCustomerCopyPrefersTheRulesOwnWording() {
+        String recovered = "Dịch vụ đã hoạt động bình thường trở lại.";
+        Alert resolved = new Alert(AlertSeverity.RESOLVED, HOSTILE_TITLE, HOSTILE_BODY,
+                ProductCode.P_116, "prometheus", AlertAudience.BOTH, PUBLIC_SUMMARY, "  " + recovered + " ");
+
+        assertThat(new AlertMessageFormatter("prod").format(resolved, AlertRegister.CUSTOMER))
+                .isEqualTo("✅ TIP (116) · prod\n" + recovered);
+    }
+
+    @Test
+    @DisplayName("a RESOLVED alert that was never customer-facing publishes nothing at all")
+    void resolvedWithoutAnyDeclaredCustomerCopyIsSuppressed() {
+        // No public_summary ⇒ the firing half was suppressed too, so a room that was never
+        // told about the outage must not be told it is over. Fail-closed on both halves.
+        Alert resolved = new Alert(AlertSeverity.RESOLVED, HOSTILE_TITLE, HOSTILE_BODY,
+                ProductCode.P_116, "prometheus", AlertAudience.BOTH, null, null);
+
+        List<RoutedMessage> routed = router(OPS_ROOM, true).route(resolved);
+
+        assertThat(delivered(routed))
+                .singleElement()
+                .satisfies(m -> {
+                    assertThat(m.roomId()).isEqualTo(OPS_ROOM);
+                    assertThat(m.register()).isEqualTo(AlertRegister.TECHNICAL);
+                });
+        assertThat(routed).anySatisfy(m ->
+                assertThat(m.reason()).isEqualTo(AlertRouter.REASON_NO_RESOLVED_SUMMARY));
+    }
+
+    @Test
+    @DisplayName("webhook → room: the resolved half of an audience=both incident reads as a recovery")
+    void resolvedHalfOfTheIncidentRendersAsARecoveryEndToEnd() {
+        // AD-V9 routes the resolved notification of BotManagerDown through the app path
+        // deliberately, so this is guaranteed traffic, not a hypothetical.
+        List<String> texts = new ArrayList<>();
+        VipTalkClient client = mock(VipTalkClient.class);
+        when(client.send(anyString(), anyList())).thenAnswer(invocation -> {
+            texts.add(invocation.getArgument(0));
+            return VipTalkSendResult.sent(1, 200);
+        });
+        AlertRoomRegistry rooms = new AlertRoomRegistry(OPS_ROOM);
+        AlertMessageFormatter formatter = new AlertMessageFormatter("prod");
+        AlertService service = new AlertService(client, rooms, formatter,
+                new AlertRouter(rooms, formatter, true), new SimpleMeterRegistry());
+        AlertmanagerWebhookService webhook =
+                new AlertmanagerWebhookService(service, mock(EnvironmentService.class));
+
+        webhook.handle(new AlertmanagerWebhook("4", "resolved", Map.of(),
+                Map.of("audience", "both", "product", "116"), Map.of(),
+                "http://alertmanager:9093",
+                List.of(new AlertmanagerAlert("resolved",
+                        Map.of("alertname", "BotManagerDown", "severity", "critical"),
+                        Map.of("summary", "bot-manager is not scrapeable",
+                                "public_summary", PUBLIC_SUMMARY,
+                                "public_resolved_summary", "Everything is back to normal."),
+                        "2026-08-17T10:00:00Z", "2026-08-17T10:12:00Z"))));
+
+        assertThat(texts).hasSize(2);
+        assertThat(texts.getFirst()).contains("RESOLVED").contains("[resolved]");
+        assertThat(texts.get(1))
+                .isEqualTo("✅ TIP (116) · prod\nEverything is back to normal.")
+                .doesNotContain("experiencing issues");
     }
 
     /* ---------------- the hand-authored operator path ---------------- */

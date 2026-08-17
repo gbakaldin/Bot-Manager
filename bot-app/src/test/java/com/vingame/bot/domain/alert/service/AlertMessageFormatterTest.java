@@ -81,6 +81,46 @@ class AlertMessageFormatterTest {
     }
 
     @Test
+    void customerSummary_resolvedUsesTheRecoveryCopyAndNeverTheFiringCopy() {
+        AlertMessageFormatter formatter = new AlertMessageFormatter("prod", "All good again.");
+        Alert firing = new Alert(AlertSeverity.CRITICAL, "BotManagerDown", "detail",
+                ProductCode.P_116, "prometheus", AlertAudience.BOTH, "We are having issues.", null);
+
+        assertEquals("We are having issues.", formatter.customerSummary(firing));
+        // Same alert, resolved: the annotations are the rule's, so publicSummary is still
+        // there — and must not be what the product room reads under a ✅.
+        assertEquals("All good again.", formatter.customerSummary(new Alert(
+                AlertSeverity.RESOLVED, "BotManagerDown", "detail", ProductCode.P_116,
+                "prometheus", AlertAudience.BOTH, "We are having issues.", null)));
+        assertEquals("Fixed.", formatter.customerSummary(new Alert(
+                AlertSeverity.RESOLVED, "BotManagerDown", "detail", ProductCode.P_116,
+                "prometheus", AlertAudience.BOTH, "We are having issues.", "Fixed.")));
+    }
+
+    @Test
+    void customerSummary_isNullWhenThereIsNoDeclaredCustomerCopy() {
+        AlertMessageFormatter formatter = new AlertMessageFormatter("prod");
+
+        assertEquals(null, formatter.customerSummary(null));
+        assertEquals(null, formatter.customerSummary(new Alert(AlertSeverity.CRITICAL, "t", null,
+                ProductCode.P_116, "prometheus", AlertAudience.BOTH, null, null)));
+        // Resolved with no firing copy either: the room was never told about the outage.
+        assertEquals(null, formatter.customerSummary(new Alert(AlertSeverity.RESOLVED, "t", null,
+                ProductCode.P_116, "prometheus", AlertAudience.BOTH, null, null)));
+    }
+
+    @Test
+    void customerSummary_blankConfiguredDefaultFallsBackToTheBuiltInText() {
+        // An empty VIPTALK_PUBLIC_RESOLVED_SUMMARY in the compose file must not silently
+        // mute recovery notices, which is the failure a `${VAR:-}` default invites.
+        Alert resolved = new Alert(AlertSeverity.RESOLVED, "t", null, ProductCode.P_116,
+                "prometheus", AlertAudience.BOTH, "We are having issues.", null);
+
+        assertEquals(AlertMessageFormatter.DEFAULT_PUBLIC_RESOLVED_SUMMARY,
+                new AlertMessageFormatter("prod", "   ").customerSummary(resolved));
+    }
+
+    @Test
     void format_defaultsToTheTechnicalRegister() {
         Alert alert = Alert.forProduct(ProductCode.P_116, AlertSeverity.CRITICAL,
                 "Bot group DEAD", "18/18 bots dead", "prometheus");

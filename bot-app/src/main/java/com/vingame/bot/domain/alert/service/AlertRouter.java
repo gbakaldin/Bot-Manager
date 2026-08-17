@@ -35,8 +35,10 @@ import java.util.Set;
  *   <li>{@link AlertAudience#BOTH} → ops room technical, <b>plus</b> the product room in
  *       the customer register — and only when {@code viptalk.customer-notices-enabled}
  *       is on (AD-V7: staging must not push "the application is experiencing issues"
- *       into a live product room three times a day) and the rule carries a
- *       {@code public_summary} (AD-V6, fail-closed).</li>
+ *       into a live product room three times a day) and there is customer copy to
+ *       publish (AD-V6, fail-closed). The copy for the <b>resolved</b> half is the
+ *       rule's {@code public_resolved_summary} / the configured default, never the
+ *       firing wording — see {@link AlertMessageFormatter#customerSummary(Alert)}.</li>
  * </ul>
  * <b>Dedupe.</b> Decisions are deduplicated on room before they leave this class, first
  * one wins. That is the guard AD-V5 calls for: a {@code both} alert whose product has no
@@ -65,6 +67,12 @@ public class AlertRouter {
     public static final String REASON_NO_OPS_ROOM = "no_ops_room";
     public static final String REASON_CUSTOMER_NOTICES_DISABLED = "customer_notices_disabled";
     public static final String REASON_NO_PUBLIC_SUMMARY = "no_public_summary";
+    /**
+     * The recovery half of an {@code audience: both} incident had no {@code
+     * public_resolved_summary} and no configured default, so nothing was published rather
+     * than the firing copy being replayed under a {@code ✅} marker.
+     */
+    public static final String REASON_NO_RESOLVED_SUMMARY = "no_resolved_summary";
     /**
      * Set by {@link AlertService} when the transport skipped a routed message —
      * {@code viptalk.enabled=false} or a blank token. Distinguishes "we chose not to
@@ -162,10 +170,15 @@ public class AlertRouter {
             log.debug("Customer notice suppressed — viptalk.customer-notices-enabled=false: {}", alert.title());
             return RoutedMessage.dropped(AlertRegister.CUSTOMER, REASON_CUSTOMER_NOTICES_DISABLED);
         }
-        if (!alert.hasPublicSummary()) {
-            log.warn("Customer notice suppressed — rule has audience=both but no public_summary: {}",
-                    alert.title());
-            return RoutedMessage.dropped(AlertRegister.CUSTOMER, REASON_NO_PUBLIC_SUMMARY);
+        // The formatter owns which copy a product room may see — firing wording for the
+        // outage, recovery wording for the resolution, and nothing at all when neither is
+        // available. Gating on it here (rather than on hasPublicSummary) is what keeps the
+        // resolved half from replaying "…is experiencing issues…" under a ✅ marker.
+        if (formatter.customerSummary(alert) == null) {
+            String reason = alert.isResolved() ? REASON_NO_RESOLVED_SUMMARY : REASON_NO_PUBLIC_SUMMARY;
+            log.warn("Customer notice suppressed ({}) — audience=both, severity {}: {}",
+                    reason, alert.severity(), alert.title());
+            return RoutedMessage.dropped(AlertRegister.CUSTOMER, reason);
         }
         return toProductRoom(alert, AlertRegister.CUSTOMER);
     }

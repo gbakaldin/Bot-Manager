@@ -38,9 +38,10 @@ import java.util.Optional;
  * <b>Audience</b> (VIPTALK_ALERTING_V2 AD-V3/AD-V4) comes from the rule's
  * {@code audience} label, falling back to the payload's {@code commonLabels} and then to
  * {@link AlertAudience#INTERNAL}. The customer-facing copy for an
- * {@link AlertAudience#BOTH} alert comes from the {@code public_summary} annotation and
- * is never synthesised here (AD-V6) — the formatter and router decide whether it is
- * rendered at all.
+ * {@link AlertAudience#BOTH} alert comes from the {@code public_summary} annotation — and,
+ * for the {@code send_resolved} half of the same incident, from
+ * {@code public_resolved_summary} — and is never synthesised here (AD-V6); the formatter
+ * and router decide whether it is rendered at all.
  * <p>
  * <b>Batching</b>: alerts that resolve to the same {@code (product, audience)} are
  * rendered into a single message rather than one message per alert. Alertmanager already
@@ -62,6 +63,11 @@ public class AlertmanagerWebhookService {
     private static final String LABEL_SEVERITY = "severity";
     private static final String LABEL_AUDIENCE = "audience";
     private static final String ANNOTATION_PUBLIC_SUMMARY = "public_summary";
+    /**
+     * Recovery copy for the {@code send_resolved} half of an {@code audience: both} rule.
+     * Read exactly like {@code public_summary} and never derived from it (AD-V6).
+     */
+    private static final String ANNOTATION_PUBLIC_RESOLVED_SUMMARY = "public_resolved_summary";
 
     /** Cap on alerts rendered into one message; the rest are summarised as a count. */
     private static final int MAX_RENDERED_ALERTS = 20;
@@ -147,23 +153,26 @@ public class AlertmanagerWebhookService {
         }
 
         return new Alert(severity, title, body.toString(), key.product(), "prometheus",
-                key.audience(), publicSummary(alerts, commonAnnotations));
+                key.audience(),
+                annotation(alerts, commonAnnotations, ANNOTATION_PUBLIC_SUMMARY),
+                annotation(alerts, commonAnnotations, ANNOTATION_PUBLIC_RESOLVED_SUMMARY));
     }
 
     /**
-     * The customer-facing copy for the batch: the first non-blank {@code public_summary}
-     * annotation, else the payload-level one. A batch is one alertname in practice
-     * (Alertmanager groups by it), so "first" is not arbitrary; and AD-V6 makes the
-     * absence of a summary mean "render nothing", not "fall back to the technical text".
+     * A customer-facing annotation for the batch: the first non-blank per-alert value, else
+     * the payload-level one, else {@code null}. A batch is one alertname in practice
+     * (Alertmanager groups by it), so "first" is not arbitrary; and AD-V6 makes the absence
+     * of a summary mean "render nothing", not "fall back to the technical text".
      */
-    private String publicSummary(List<AlertmanagerAlert> alerts, Map<String, String> commonAnnotations) {
+    private String annotation(List<AlertmanagerAlert> alerts,
+                              Map<String, String> commonAnnotations, String name) {
         for (AlertmanagerAlert alert : alerts) {
-            String summary = alert.annotation(ANNOTATION_PUBLIC_SUMMARY);
-            if (summary != null && !summary.isBlank()) {
-                return summary.strip();
+            String value = alert.annotation(name);
+            if (value != null && !value.isBlank()) {
+                return value.strip();
             }
         }
-        String common = commonAnnotations.get(ANNOTATION_PUBLIC_SUMMARY);
+        String common = commonAnnotations.get(name);
         return common == null || common.isBlank() ? null : common.strip();
     }
 

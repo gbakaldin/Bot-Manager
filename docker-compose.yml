@@ -36,16 +36,22 @@ services:
       - SPRING_DATA_MONGODB_URI=mongodb://mongo:27017/botmanager
       # VipTalk alerting (VIPTALK_ALERTING AD-2). Values come from ./secrets.env,
       # which deploy.sh merges into the generated .env — the token must never be
-      # baked into the image or committed. All default to the disabled/staging
-      # posture, so a host without secrets.env deploys exactly as before.
+      # baked into the image or committed. All default to the disabled posture,
+      # so a host without secrets.env deploys exactly as before.
       - VIPTALK_ENABLED=${VIPTALK_ENABLED:-false}
       - VIPTALK_BOT_TOKEN=${VIPTALK_BOT_TOKEN:-}
       - VIPTALK_OPS_ROOM_ID=${VIPTALK_OPS_ROOM_ID:-}
-      - VIPTALK_INSTANCE_LABEL=${VIPTALK_INSTANCE_LABEL:-staging}
+      # No `staging` default on purpose: the label is the only thing distinguishing the
+      # three instances in a shared room (AD-V15), so a forgotten override on the prod box
+      # must render as "unlabelled" (and a startup WARN), not as a confident lie.
+      - VIPTALK_INSTANCE_LABEL=${VIPTALK_INSTANCE_LABEL:-}
       # Customer-facing register for `audience: both` alerts (VIPTALK_ALERTING_V2 AD-V7).
       # Default false: only the prod instance may write non-technical notices into a
       # product room.
       - VIPTALK_CUSTOMER_NOTICES_ENABLED=${VIPTALK_CUSTOMER_NOTICES_ENABLED:-false}
+      # Recovery copy for the RESOLVED half of an `audience: both` alert. Empty is safe —
+      # it falls back to the built-in default rather than muting recovery notices.
+      - VIPTALK_PUBLIC_RESOLVED_SUMMARY=${VIPTALK_PUBLIC_RESOLVED_SUMMARY:-}
     depends_on:
       mongo:
         condition: service_healthy

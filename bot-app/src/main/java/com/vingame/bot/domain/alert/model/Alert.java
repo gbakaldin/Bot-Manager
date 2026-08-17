@@ -20,6 +20,13 @@ import com.vingame.bot.domain.brand.model.ProductCode;
  *                      register, taken verbatim from the rule's {@code public_summary}
  *                      annotation. {@code null}/blank ⇒ the customer copy is suppressed
  *                      rather than synthesised from the technical text (AD-V6).
+ * @param publicResolvedSummary customer-facing copy for the <b>recovery</b> half of the same
+ *                      incident, from the rule's {@code public_resolved_summary} annotation.
+ *                      Sourced exactly like {@link #publicSummary} and never synthesised from
+ *                      it: replaying the outage wording under a {@code ✅} marker would tell a
+ *                      product room "we are having issues" at the moment the issue ended.
+ *                      {@code null}/blank ⇒ the configured default recovery text is used, and
+ *                      if that is blank too the customer copy is suppressed.
  */
 public record Alert(AlertSeverity severity,
                     String title,
@@ -27,7 +34,8 @@ public record Alert(AlertSeverity severity,
                     ProductCode product,
                     String source,
                     AlertAudience audience,
-                    String publicSummary) {
+                    String publicSummary,
+                    String publicResolvedSummary) {
 
     public Alert {
         if (severity == null) {
@@ -42,13 +50,23 @@ public record Alert(AlertSeverity severity,
     }
 
     /**
+     * The pre-{@code public_resolved_summary} shape, kept so every call site that only
+     * has firing copy (the webhook before an operator adds the annotation, and every
+     * existing test) constructs the same alert as before.
+     */
+    public Alert(AlertSeverity severity, String title, String body, ProductCode product,
+                 String source, AlertAudience audience, String publicSummary) {
+        this(severity, title, body, product, source, audience, publicSummary, null);
+    }
+
+    /**
      * Hand-authored, product-scoped alert — the operator path
      * ({@code POST /api/v1/alerts/product/{product}}) and the shape every pre-audience
      * call site used. Defaults to {@link AlertAudience#PRODUCT}: this form is always
      * about one product. The Alertmanager path always passes an audience explicitly.
      */
     public Alert(AlertSeverity severity, String title, String body, ProductCode product, String source) {
-        this(severity, title, body, product, source, AlertAudience.PRODUCT, null);
+        this(severity, title, body, product, source, AlertAudience.PRODUCT, null, null);
     }
 
     /** Product-scoped alert with detail. */
@@ -63,11 +81,22 @@ public record Alert(AlertSeverity severity,
 
     /** This alert with a different product, used when routing resolves one after construction. */
     public Alert withProduct(ProductCode newProduct) {
-        return new Alert(severity, title, body, newProduct, source, audience, publicSummary);
+        return new Alert(severity, title, body, newProduct, source, audience,
+                publicSummary, publicResolvedSummary);
     }
 
     /** Whether a customer-facing copy can be rendered at all (AD-V6 fail-closed gate). */
     public boolean hasPublicSummary() {
         return publicSummary != null && !publicSummary.isBlank();
+    }
+
+    /** Whether the rule declared its own recovery wording. */
+    public boolean hasPublicResolvedSummary() {
+        return publicResolvedSummary != null && !publicResolvedSummary.isBlank();
+    }
+
+    /** Whether this is the recovery half of an incident rather than the outage half. */
+    public boolean isResolved() {
+        return severity == AlertSeverity.RESOLVED;
     }
 }
