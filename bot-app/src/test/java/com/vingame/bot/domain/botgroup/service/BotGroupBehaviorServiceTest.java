@@ -1918,6 +1918,129 @@ class BotGroupBehaviorServiceTest {
         }
     }
 
+    @Nested
+    @DisplayName("`product` label cardinality + provenance (VIPTALK_ALERTING_V2 Phase 1)")
+    class ProductLabelCardinalityTests {
+
+        @Test
+        @DisplayName("adding product/environmentId/gameType splits no game rows: still one per (gameId, status)")
+        void gameRowsAreNotSplitByTheNewLabels() {
+            // AD-V1's claim, checked over the real aggregation: two groups on the SAME
+            // game must collapse into the same keys, so the row count is still exactly
+            // the number of distinct (gameId, status) pairs. A source that were not
+            // functionally determined by gameId would show up here as extra rows.
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            BotGroupRuntime r2 = new BotGroupRuntime("g-2", 0, "env-1", "Staging", "Group 2", "116");
+            try {
+                putBots(r1, List.of(
+                        mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua),
+                        mockBotWithGame(BotStatus.DEAD, bauCua)));
+                putBots(r2, List.of(
+                        mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua),
+                        mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
+                runningGroups().put("g-1", r1);
+                runningGroups().put("g-2", r2);
+
+                Map<BotGroupBehaviorService.GameStatusKey, Integer> counts =
+                        service.countBotsByGameAndStatus();
+
+                long distinctGameAndStatus = counts.keySet().stream()
+                        .map(k -> k.gameId() + "|" + k.status())
+                        .distinct().count();
+                assertThat(counts).hasSize((int) distinctGameAndStatus).hasSize(2);
+                assertThat(counts.get(new BotGroupBehaviorService.GameStatusKey(
+                        "game-uuid-1", "BauCua", BotStatus.CONNECTION_AUTHENTICATED,
+                        "env-1", "BETTING_MINI", "116"))).isEqualTo(3);
+            } finally {
+                r1.getExecutor().shutdownNow();
+                r2.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+                runningGroups().remove("g-2");
+            }
+        }
+
+        @Test
+        @DisplayName("per-env rows stay one per environment while groups agree on the product")
+        void envRowsAreNotSplitByProduct() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            BotGroupRuntime r2 = new BotGroupRuntime("g-2", 0, "env-1", "Staging", "Group 2", "116");
+            try {
+                putBots(r1, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
+                putBots(r2, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
+                runningGroups().put("g-1", r1);
+                runningGroups().put("g-2", r2);
+
+                assertThat(service.countManagedBotsByEnv()).hasSize(1);
+                assertThat(service.countOpenWsByEnv()).hasSize(1);
+                assertThat(service.countBotsByEnvAndStatus()).hasSize(1);
+            } finally {
+                r1.getExecutor().shutdownNow();
+                r2.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+                runningGroups().remove("g-2");
+            }
+        }
+
+        @Test
+        @DisplayName("sum(bots_managed_by_env) == bots_managed even if two groups on one env disagree on product")
+        void perEnvSumMatchesTheFleetGaugeEvenUnderProductChurn() {
+            // Reachable transiently: Environment.productCode is read at group START, so a
+            // product edit between two starts leaves two runtimes on one env carrying
+            // different products. That splits the row (identity churn, self-healing on
+            // restart) — but the Phase 1 verification query, sum(per-env) - fleet == 0,
+            // must still hold, because the split is a partition and not a duplication.
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime before = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            BotGroupRuntime after = new BotGroupRuntime("g-2", 0, "env-1", "Staging", "Group 2", "097");
+            try {
+                putBots(before, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua),
+                        mockBotWithGame(BotStatus.DEAD, bauCua)));
+                putBots(after, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
+                runningGroups().put("g-1", before);
+                runningGroups().put("g-2", after);
+
+                Map<BotGroupBehaviorService.EnvKey, Integer> counts = service.countManagedBotsByEnv();
+
+                assertThat(counts).hasSize(2);
+                assertThat(counts.values().stream().mapToInt(Integer::intValue).sum())
+                        .isEqualTo(service.getTotalManagedBots());
+            } finally {
+                before.getExecutor().shutdownNow();
+                after.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+                runningGroups().remove("g-2");
+            }
+        }
+
+        @Test
+        @DisplayName("game rows take the product from Game, env rows from the Environment — they can disagree")
+        void gameAndEnvRowsHaveDifferentProductProvenance() {
+            // Documented provenance, not a preference: bots_by_game_status/game_join read
+            // Game.productCode, while bots_by_env_status/bots_managed_by_env read the
+            // product threaded off Environment.productCode at group start. A Game whose
+            // productCode contradicts its Environment therefore routes its game-scoped and
+            // env-scoped alerts to two different product rooms. Pinned so the divergence is
+            // a visible decision rather than a surprise in an incident.
+            Game misfiled = game("game-uuid-9", "Misfiled", GameType.BETTING_MINI,
+                    "env-1", ProductCode.P_097);
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                putBots(runtime, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, misfiled)));
+                runningGroups().put("g-1", runtime);
+
+                assertThat(service.countBotsByGameAndStatus().keySet())
+                        .allSatisfy(k -> assertThat(k.product()).isEqualTo("097"));
+                assertThat(service.countManagedBotsByEnv().keySet())
+                        .allSatisfy(k -> assertThat(k.product()).isEqualTo("116"));
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+    }
+
     private static Game game(String id, String name, GameType type) {
         // environmentId + productCode are what make `product` functionally dependent
         // on labels already present (VIPTALK_ALERTING_V2 AD-V1), so the gauge-support
