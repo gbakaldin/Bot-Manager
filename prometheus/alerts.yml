@@ -1,0 +1,219 @@
+# Alerting rules for the Bot Manager observability pipeline.
+#
+# Bind-mounted into the prometheus container at /etc/prometheus/alerts.yml and
+# referenced from prometheus.yml's rule_files. Editable on the host without root,
+# matching the prometheus.yml / ./logs / ./grafana/provisioning pattern.
+#
+# Delivery: Prometheus → Alertmanager → bot-manager /api/v1/alerts/alertmanager
+# → VipTalk. See docs/plans/VIPTALK_ALERTING.md and VIPTALK_ALERTING_V2.md.
+#
+# ROUTING (VIPTALK_ALERTING_V2 AD-V3, superseding AD-5). Every rule declares an
+# `audience` label, and that label alone decides which rooms see it:
+#
+#   audience: internal → the ops room only. Infrastructure facts with no owning
+#                        product (JVM, host, the app itself being restarted).
+#   audience: product  → that product's room only, never the ops room. Everything
+#                        that concerns one product's bots.
+#   audience: both     → the ops room in the technical register PLUS the product
+#                        room in the customer register, rendered from the rule's
+#                        `public_summary` annotation (never synthesised from
+#                        `summary` — AD-V6 fail-closed).
+#
+# An absent `audience` defaults to `internal` (AD-V4) so an unlabelled rule can
+# never vanish — but that default is a safety net, not a licence: the unit test
+# `AlertRulesAudienceTest` parses this file and fails the build if any rule here
+# omits it, or if an `audience: both` rule has no `public_summary`.
+#
+# A product-routed rule must carry `product` (or `environmentId`, which
+# bot-manager resolves to a product via Mongo) on its OUTPUT series. Every metric
+# used below is per-environment and carries both since VIPTALK_ALERTING_V2
+# Phase 1; the `sum by (product, environmentId, …)` clauses are what keep those
+# labels on the alert. An `audience: product` alert whose product has no VipTalk
+# room yet lands in the ops room tagged `↪️ MISROUTED` (amended AD-V5) — it is
+# never dropped.
+#
+# RETIRED here (VIPTALK_ALERTING_V2 Phase 3, user decision 2026-08-17):
+# `BotGroupDead`, `DeadBotRatioHigh`, `WsConnectionsBelowFleet`. They were built
+# on the unlabelled fleet aggregates (groups_dead_currently, bots_dead_currently,
+# bots_managed, ws_connections_open), which carry no product and so could only
+# ever reach the ops room — precisely the product-level noise the ops room is
+# meant to be free of. Their per-environment, product-labelled equivalents are
+# `EnvironmentSocketDown` / `EnvironmentSocketDegraded` and
+# `EnvironmentDeadBotRatioHigh` below. The aggregate gauges themselves stay
+# (AD-V2): they are dashboard facts, not alert sources.
+#
+# THRESHOLDS ARE FIRST GUESSES. 0.5 / 0.8 socket ratios, the 0.5 auth-failure
+# ratio, the >= 5 sample floors, the 0.2 dead-bot ratio and every `for:` window
+# were chosen from the shape of past incidents, not from measured data. Expect to
+# tune them once these rules have run against a real fleet for a few days.
+
+groups:
+  - name: bot-manager-availability
+    rules:
+      # audience: both — the one alert the product rooms hear about in their own
+      # register. `public_summary` is what they get; without it the customer copy
+      # is suppressed rather than synthesised from `summary` (AD-V6), and on a
+      # non-prod instance the whole customer half is gated off (AD-V7).
+      - alert: BotManagerDown
+        expr: up{job="bot-manager"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          audience: both
+        annotations:
+          summary: "bot-manager is not scrapeable"
+          description: "Prometheus has failed to scrape bot-manager for 2 minutes — the app is down, wedged, or the container was replaced."
+          public_summary: "ALERT! Bot Management application is experiencing issues, backend team is aware and will deliver fixes soon."
+
+  - name: bot-manager-environment
+    rules:
+      # A2a — socket down. Mirrors the retired WsConnectionsBelowFleet predicate
+      # (Bot.isConnected(), NOT BotStatus) but per environment, so it routes to the
+      # product room. ws_connections_open_by_env emits a zero row for every
+      # environment that has managed bots, so a total outage still produces a
+      # series — the whole point of the per-env gauge pair.
+      #
+      # The ratio is deliberately the LEFT operand of `and`: `a and b` yields a's
+      # values, so writing the guard first would make $value the managed-bot count
+      # and render "2000%" for 20 bots. (The retired fleet rule had exactly that
+      # defect; the plan's draft of this rule inherited it.)
+      - alert: EnvironmentSocketDown
+        expr: |
+          (ws_connections_open_by_env / bots_managed_by_env) < 0.5
+          and bots_managed_by_env > 0
+        for: 10m
+        labels:
+          severity: critical
+          audience: product
+        annotations:
+          summary: "Only {{ $value | humanizePercentage }} of bots hold a WebSocket on env {{ $labels.environmentId }}"
+          description: "WS host unreachable, or the PING-before-AUTH race. Check the game server and the WS hostname for this environment."
+
+      - alert: EnvironmentSocketDegraded
+        expr: |
+          (ws_connections_open_by_env / bots_managed_by_env) < 0.8
+          and bots_managed_by_env > 0
+        for: 10m
+        labels:
+          severity: warning
+          audience: product
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of bots hold a WebSocket on env {{ $labels.environmentId }}"
+          description: "Reconnect churn above normal for this environment. Below 50% this escalates to EnvironmentSocketDown, which inhibits this alert."
+
+      # Per-environment replacement for the retired DeadBotRatioHigh (and, in
+      # substance, for BotGroupDead: a DEAD group's bots are all DEAD, so a dead
+      # group shows up here as a step in its environment's ratio). There is no
+      # per-environment dead-GROUP gauge — groups_dead_currently is fleet-wide and
+      # unlabelled — so group-level deadness is only visible through its bots.
+      #
+      # Both operands are wrapped in `sum by (product, environmentId)` even though
+      # bots_managed_by_env is already at that granularity: Prometheus stamps `job`
+      # and `instance` onto every scraped series, so dividing a `sum by (…)` result
+      # by a RAW series would compare a 2-label set against a 4-label set and match
+      # nothing. Aggregating both sides is what makes the division line up.
+      - alert: EnvironmentDeadBotRatioHigh
+        expr: |
+          (
+            sum by (product, environmentId) (bots_by_env_status{status="DEAD"})
+            / clamp_min(sum by (product, environmentId) (bots_managed_by_env), 1)
+          ) > 0.2
+          and sum by (product, environmentId) (bots_managed_by_env) > 0
+        for: 10m
+        labels:
+          severity: warning
+          audience: product
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of bots are DEAD on env {{ $labels.environmentId }}"
+          description: "A DEAD bot does not recover on its own. Usual causes: auth gateway rejecting logins, WS host unreachable, or the PING-before-AUTH race. Restart the affected group(s) once the cause is cleared."
+
+      # A2b — login/auth gateway down. verifytoken.aspx runs on every authoritative
+      # balance fetch, so this counter moves continuously while bots play; that is
+      # what makes it the PRIMARY auth signal. The >= 5 floor keeps a single failed
+      # read on an idle environment from paging anyone, and clamp_min guards the
+      # divide-by-zero.
+      - alert: EnvironmentAuthDown
+        expr: |
+          (
+            sum by (product, environmentId) (increase(bot_verify_token_total{outcome="failure"}[10m]))
+            / clamp_min(sum by (product, environmentId) (increase(bot_verify_token_total[10m])), 1)
+          ) > 0.5
+          and sum by (product, environmentId) (increase(bot_verify_token_total[10m])) >= 5
+        for: 10m
+        labels:
+          severity: critical
+          audience: product
+        annotations:
+          summary: "Auth gateway failing {{ $value | humanizePercentage }} of balance reads on env {{ $labels.environmentId }}"
+          description: "verifytoken.aspx is rejecting or unreachable. Bots keep their WS but cannot read balance or re-auth."
+
+      # The corroborating half of A2b. bot_login_total only moves at group start
+      # and re-auth, so this rule is SILENT on a steady-state fleet by design —
+      # silence here is not evidence that login is healthy, EnvironmentAuthDown is.
+      - alert: EnvironmentLoginFailing
+        expr: |
+          (
+            sum by (product, environmentId) (increase(bot_login_total{outcome="failure"}[15m]))
+            / clamp_min(sum by (product, environmentId) (increase(bot_login_total[15m])), 1)
+          ) > 0.5
+          and sum by (product, environmentId) (increase(bot_login_total[15m])) >= 5
+        for: 5m
+        labels:
+          severity: critical
+          audience: product
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of logins failing on env {{ $labels.environmentId }}"
+          description: "Only meaningful while logins are being attempted (group start / periodic re-auth). Silence here does not mean login is healthy."
+
+  - name: bot-manager-game
+    rules:
+      # A1 — game configured and subscribed, but no server rounds arriving.
+      # `unless` (not `and`) is load-bearing: a game that has NEVER delivered a
+      # round has no bot_messages_total series at all, so `and` would never fire —
+      # which is exactly the tx7 / "0 sessions ever" case we most need to catch.
+      # cmd="startGame" covers BETTING_MINI/TAI_XIU, cmd="spin" is the server's
+      # SpinResult for SLOT (SlotMachineBot.java:213).
+      #
+      # Both operands MUST reduce to the identical label set — `unless` matches on
+      # the full set, so one stray label on either side silences the rule instead
+      # of misrouting it. That is why `product` has a single authority (the
+      # Environment) for both the gauge rows and the bot_* counters.
+      #
+      # CONNECTION_AUTHENTICATED, not STARTED: STARTED is stamped before the WS
+      # auth completes, while CONNECTION_AUTHENTICATED is set in onSubscribe, i.e.
+      # "the server acknowledged our subscription" — precisely "this game is
+      # supposed to be sending us rounds".
+      - alert: GameNoRounds
+        expr: |
+          (
+            sum by (product, environmentId, gameId, gameName, gameType)
+              (bots_by_game_status{status="CONNECTION_AUTHENTICATED"}) > 0
+          )
+          unless
+          (
+            sum by (product, environmentId, gameId, gameName, gameType)
+              (increase(bot_messages_total{cmd=~"startGame|spin"}[10m])) > 0
+          )
+        for: 10m
+        labels:
+          severity: critical
+          audience: product
+        annotations:
+          summary: "No rounds on game {{ $labels.gameName }} (env {{ $labels.environmentId }}) for 20 minutes"
+          description: "Bots are subscribed and authenticated but the server is sending no StartGame/SpinResult. Game is stopped server-side, the subchannel is wrong, or subscribers were pruned."
+
+  - name: bot-manager-jvm
+    rules:
+      # The thread-leak sawtooth (resolved by the ws-parser 3.0.5 bump) showed as
+      # unbounded live-thread growth ending in native-thread exhaustion and a JVM
+      # restart. This is the regression guard for it. Fleet-wide JVM fact with no
+      # owning product, so audience: internal (B2).
+      - alert: JvmThreadsHigh
+        expr: jvm_threads_live_threads > 2000
+        for: 15m
+        labels:
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "JVM live threads at {{ $value }}"
+          description: "Sustained high thread count — the thread-leak sawtooth signature. Check reconnect churn and executor lifecycles before the JVM exhausts native threads."
