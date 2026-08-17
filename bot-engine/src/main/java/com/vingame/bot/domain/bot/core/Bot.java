@@ -260,7 +260,7 @@ public abstract class Bot {
      * <p>
      * Delegates to {@link BotConfiguration#resolveProductCode()}, which reads the product
      * the group's <b>environment</b> resolved at start and only falls back to the
-     * {@code Game} document. One implementation for every site that labels a meter, so the
+     * {@link Game} document. One implementation for every site that labels a meter, so the
      * bot-scoped counters and the environment-scoped gauges cannot disagree about which
      * product room an alert belongs in. {@code null} when neither knows one; MDC and the
      * meter filter both skip nulls, so such a bot simply carries no {@code product} label.
