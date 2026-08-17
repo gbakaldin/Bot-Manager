@@ -255,17 +255,18 @@ public abstract class Bot {
     }
 
     /**
-     * Numeric product code for this bot's game ({@code ProductCode.getCode()}, e.g.
-     * {@code "116"}) — the {@code product} MDC key / metric label of
-     * VIPTALK_ALERTING_V2 AD-V1. Returns {@code null} when the {@link
-     * com.vingame.bot.domain.game.model.Game} document has no {@code productCode}
-     * (older docs predating the field); MDC and the meter filter both skip nulls,
-     * so such a bot simply carries no {@code product} label.
+     * Numeric product code for this bot ({@code ProductCode.getCode()}, e.g. {@code "116"})
+     * — the {@code product} MDC key / metric label of VIPTALK_ALERTING_V2 AD-V1.
+     * <p>
+     * Delegates to {@link BotConfiguration#resolveProductCode()}, which reads the product
+     * the group's <b>environment</b> resolved at start and only falls back to the
+     * {@code Game} document. One implementation for every site that labels a meter, so the
+     * bot-scoped counters and the environment-scoped gauges cannot disagree about which
+     * product room an alert belongs in. {@code null} when neither knows one; MDC and the
+     * meter filter both skip nulls, so such a bot simply carries no {@code product} label.
      */
     protected String productCode() {
-        Game game = configuration.getGame();
-        if (game == null || game.getProductCode() == null) return null;
-        return game.getProductCode().getCode();
+        return configuration.resolveProductCode();
     }
 
     protected abstract void initializeSubclass();

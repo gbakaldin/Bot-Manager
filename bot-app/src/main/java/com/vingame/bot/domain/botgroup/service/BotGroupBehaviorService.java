@@ -304,6 +304,20 @@ public class BotGroupBehaviorService {
             // Load game configuration (throws ResourceNotFoundException if not found)
             Game game = gameService.findById(group.getGameId());
 
+            // The `product` metric label comes from the environment for every meter this
+            // group produces (AD-V1). A Game filed under a different product than the
+            // environment it belongs to is a data error: it does not split the label any
+            // more, but it does mean the game's own document is wrong, and Phase 3's rules
+            // are named after products. Once per group start, never per bot.
+            if (game.getProductCode() != null && environment.getProductCode() != null
+                    && game.getProductCode() != environment.getProductCode()) {
+                log.warn("Game {} is filed under product {} but environment {} is product {} — "
+                                + "alerts for this group are routed by the environment's product. "
+                                + "Fix the game's productCode.",
+                        game.getName(), game.getProductCode(), environment.getName(),
+                        environment.getProductCode());
+            }
+
             // Compute per-bot strategy assignment up-front. The identifier shape
             // (namePrefix + botIndex) matches what createSingleBot builds for
             // the username, so the assignment.get(username) lookup hits.
@@ -721,6 +735,9 @@ public class BotGroupBehaviorService {
         BotConfiguration configuration = BotConfiguration.builder()
                 .credentials(credentials)
                 .environmentId(group.getEnvironmentId())
+                // The single source of the `product` metric label (AD-V1): the environment,
+                // which is also what the per-environment gauges carry. See product(...).
+                .productCode(product(environment, game))
                 .botGroupId(group.getId())
                 .botIndex(botIndex)
                 .game(game)
@@ -1389,7 +1406,7 @@ public class BotGroupBehaviorService {
                 if (game == null) continue;
                 distinct.putIfAbsent(game.getId(),
                         new GameInfo(game.getId(), game.getName(), gameType(game),
-                                game.getEnvironmentId(), product(game)));
+                                game.getEnvironmentId(), product(runtime, game)));
             }
         }
         return distinct.values();
@@ -1426,7 +1443,7 @@ public class BotGroupBehaviorService {
                 Game game = bot.getConfiguration().getGame();
                 if (game == null) continue;
                 GameStatusKey key = new GameStatusKey(game.getId(), game.getName(), bot.getStatus(),
-                        game.getEnvironmentId(), gameType(game), product(game));
+                        game.getEnvironmentId(), gameType(game), product(runtime, game));
                 counts.merge(key, 1, Integer::sum);
             }
         }
@@ -1497,12 +1514,39 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Numeric product code of the game ({@code ProductCode.getCode()}, AD-V1), or
-     * {@code null} for older {@code Game} documents that predate the field — the
-     * gauge row builders render a null as {@code ""}.
+     * The numeric product code for a game-scoped gauge row (AD-V1).
+     * <p>
+     * <b>The environment wins.</b> Every gauge row and every {@code bot_*} counter now
+     * resolves {@code product} from the running group's {@code Environment}; the
+     * {@code Game}'s own {@code productCode} is only a fallback for a runtime built
+     * without one. Before this, game rows read {@code Game.productCode} and env rows read
+     * {@code Environment.productCode}, so a game filed under the wrong product sent its
+     * {@code GameNoRounds} and its {@code EnvironmentSocketDown} to two different product
+     * rooms — and, worse, broke {@code GameNoRounds} itself, whose {@code unless} only
+     * fires when both operands agree on every label. A contradiction is logged at group
+     * start (see {@code startLocked}); this method makes it harmless meanwhile.
+     *
+     * @param runtime the running group the bot belongs to; may be {@code null}.
+     * @param game    the bot's game; may be {@code null}.
+     * @return the numeric code, or {@code null} when neither knows one — the gauge row
+     *         builders render a null as {@code ""}.
      */
-    private static String product(Game game) {
-        return game.getProductCode() != null ? game.getProductCode().getCode() : null;
+    private static String product(BotGroupRuntime runtime, Game game) {
+        if (runtime != null && runtime.getProduct() != null && !runtime.getProduct().isEmpty()) {
+            return runtime.getProduct();
+        }
+        return game != null && game.getProductCode() != null ? game.getProductCode().getCode() : null;
+    }
+
+    /**
+     * The numeric product code to stamp on a group's bots and meters: the environment's,
+     * falling back to the game's. The one place the authority is decided.
+     */
+    private static String product(Environment environment, Game game) {
+        if (environment != null && environment.getProductCode() != null) {
+            return environment.getProductCode().getCode();
+        }
+        return game != null && game.getProductCode() != null ? game.getProductCode().getCode() : null;
     }
 
     /**

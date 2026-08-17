@@ -206,8 +206,11 @@ public class BotGroupRuntime {
                     config.getBotGroupId(),
                     config.getBotIndex(),
                     config.getEnvironmentId(),
-                    config.getGame().getProductCode() != null
-                            ? config.getGame().getProductCode().getCode() : null,
+                    // Same resolution the bot's own meters use — the environment's product,
+                    // falling back to the game's (VIPTALK_ALERTING_V2 AD-V1). Reusing it
+                    // rather than re-deriving it here is what keeps this MDC and the bot's
+                    // from ever labelling the same bot with two products.
+                    config.resolveProductCode(),
                     config.getGame().getGameType().name(),
                     config.getGame().getId(),
                     config.getGame().getName(),

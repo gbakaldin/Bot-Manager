@@ -2015,14 +2015,14 @@ class BotGroupBehaviorServiceTest {
         }
 
         @Test
-        @DisplayName("game rows take the product from Game, env rows from the Environment — they can disagree")
-        void gameAndEnvRowsHaveDifferentProductProvenance() {
-            // Documented provenance, not a preference: bots_by_game_status/game_join read
-            // Game.productCode, while bots_by_env_status/bots_managed_by_env read the
-            // product threaded off Environment.productCode at group start. A Game whose
-            // productCode contradicts its Environment therefore routes its game-scoped and
-            // env-scoped alerts to two different product rooms. Pinned so the divergence is
-            // a visible decision rather than a surprise in an incident.
+        @DisplayName("one authority: a Game contradicting its Environment still labels every row with the environment's product")
+        void gameRowsFollowTheEnvironmentProductWhenTheGameContradictsIt() {
+            // The environment is the single source of `product` (it is the brand's gateway;
+            // Game.productCode is a nullable convenience copy). Before this, game rows read
+            // Game.productCode and env rows read Environment.productCode, so a misfiled game
+            // sent its GameNoRounds and its EnvironmentSocketDown to two different product
+            // rooms — and broke GameNoRounds outright, since its `unless` only fires when
+            // both operands agree on every label after sum by(...).
             Game misfiled = game("game-uuid-9", "Misfiled", GameType.BETTING_MINI,
                     "env-1", ProductCode.P_097);
             BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
@@ -2031,8 +2031,27 @@ class BotGroupBehaviorServiceTest {
                 runningGroups().put("g-1", runtime);
 
                 assertThat(service.countBotsByGameAndStatus().keySet())
-                        .allSatisfy(k -> assertThat(k.product()).isEqualTo("097"));
+                        .allSatisfy(k -> assertThat(k.product()).isEqualTo("116"));
+                assertThat(service.listRunningGameInfo())
+                        .allSatisfy(i -> assertThat(i.product()).isEqualTo("116"));
                 assertThat(service.countManagedBotsByEnv().keySet())
+                        .allSatisfy(k -> assertThat(k.product()).isEqualTo("116"));
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("a runtime with no product (legacy/ad-hoc) falls back to the Game's, so rows still label")
+        void gameRowsFallBackToTheGameProductWhenTheRuntimeHasNone() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1", "Staging");
+            try {
+                putBots(runtime, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
+                runningGroups().put("g-1", runtime);
+
+                assertThat(service.countBotsByGameAndStatus().keySet())
                         .allSatisfy(k -> assertThat(k.product()).isEqualTo("116"));
             } finally {
                 runtime.getExecutor().shutdownNow();

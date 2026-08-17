@@ -33,6 +33,24 @@ public class BotConfiguration {
     String botGroupId;
 
     /**
+     * Numeric product code ({@code ProductCode.getCode()}, e.g. {@code "116"}) this bot
+     * runs under — the {@code product} MDC key / metric label of VIPTALK_ALERTING_V2
+     * AD-V1.
+     * <p>
+     * Resolved <b>from the {@code Environment}</b> (a bot-app entity)
+     * at group start, which is the single authority for the label: an environment is a
+     * brand's gateway, so its product is the one alert routing must agree on. {@code Game}
+     * carries its own {@code productCode}, but it is a nullable convenience copy that can
+     * contradict the environment — and a game-scoped alert and an environment-scoped alert
+     * for the same bots landing in two different product rooms is worse than either being
+     * wrong. {@link #resolveProductCode()} is the only reader; it falls back to the game
+     * so configurations built without an environment (tests, ad-hoc tooling) still label.
+     * <p>
+     * Nullable: an {@code Environment} document may predate {@code productCode}.
+     */
+    String productCode;
+
+    /**
      * Index of this bot within its group (1-based).
      * Used for MDC logging context.
      */
@@ -87,4 +105,22 @@ public class BotConfiguration {
      * only ever set directly, not via the fill-to-target assignment.
      */
     SlotStrategyId slotStrategyId;
+
+    /**
+     * The numeric product code to label this bot's meters and MDC with, or {@code null}
+     * when neither the environment nor the game knows one.
+     * <p>
+     * One implementation, three callers ({@code Bot.initialize}, {@code
+     * BotGroupRuntime.startBot} and the per-game gauge rows), so the null-guard over a
+     * nullable Mongo field cannot drift between them and split a metric series.
+     */
+    public String resolveProductCode() {
+        if (productCode != null && !productCode.isEmpty()) {
+            return productCode;
+        }
+        if (game == null || game.getProductCode() == null) {
+            return null;
+        }
+        return game.getProductCode().getCode();
+    }
 }

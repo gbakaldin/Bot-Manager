@@ -16,16 +16,20 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * The source of the {@code product} metric label (VIPTALK_ALERTING_V2 AD-V1).
  * <p>
- * {@code Bot.productCode()} is what makes the whole Phase 1 cardinality argument hold:
- * it reads the product off <b>the same {@code Game} document</b> that already supplies
- * {@code gameId}, {@code gameName}, {@code gameType} and {@code environmentId} to the
- * very same series. Because those all come from one object, a given {@code gameId} can
- * only ever present one {@code product} — which is the functional dependency AD-V1
- * claims, and the reason the label costs no series
- * (see {@code ProductLabelCardinalityTest}).
+ * {@code Bot.productCode()} is what makes the whole Phase 1 cardinality argument hold.
+ * It delegates to {@code BotConfiguration.resolveProductCode()}, which reads the product
+ * the group's <b>environment</b> resolved at start and falls back to the bot's
+ * {@code Game}. Either way it is <b>one value per {@code environmentId}</b>, and
+ * therefore one value per {@code gameId} — the functional dependency AD-V1 claims, and
+ * the reason the label costs no series (see {@code ProductLabelCardinalityTest}).
  * <p>
- * It also has to be null-tolerant: {@code Game.productCode} post-dates some Mongo
- * documents, and a bot on such a game must simply carry no label rather than fail or
+ * The environment is the authority on purpose: the per-environment gauges
+ * ({@code bots_managed_by_env}, {@code bots_by_env_status}) can only read it from there,
+ * so sourcing the bot-scoped counters anywhere else would let one group's game-scoped and
+ * environment-scoped alerts route to two different product rooms.
+ * <p>
+ * It also has to be null-tolerant: {@code productCode} post-dates some Mongo documents on
+ * both entities, and a bot with neither must simply carry no label rather than fail or
  * emit an empty one.
  */
 @DisplayName("Bot.productCode() — source of the `product` metric label")
@@ -88,6 +92,27 @@ class BotProductLabelTest {
                 bot(shared, 1).product(), bot(shared, 2).product(), bot(shared, 3).product());
 
         assertThat(products).containsOnly("116");
+    }
+
+    @Test
+    @DisplayName("the environment's product (set on the configuration at group start) wins over the Game's")
+    void configurationProductWinsOverTheGameDocument() {
+        // The contradiction case: a Game filed under P_097 running in a P_116 environment.
+        // Both the bot's counters and the per-environment gauges must say 116, or
+        // GameNoRounds (which joins the two families on `product`) silently never fires.
+        ProductBot bot = new ProductBot();
+        bot.setConfiguration(BotConfiguration.builder()
+                .credentials(BotCredentials.builder()
+                        .username("bot1").password("pw").fingerprint("fp").build())
+                .environmentId("env-1")
+                .productCode("116")
+                .botGroupId("group-1")
+                .botIndex(1)
+                .game(game("g8", "Misfiled", ProductCode.P_097))
+                .zoneName("MiniGame3")
+                .build());
+
+        assertThat(bot.product()).isEqualTo("116");
     }
 
     @Test
