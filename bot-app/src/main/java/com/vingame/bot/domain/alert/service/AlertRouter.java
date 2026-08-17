@@ -105,15 +105,16 @@ public class AlertRouter {
         }
         AlertAudience audience = alert.audience() == null ? AlertAudience.INTERNAL : alert.audience();
 
-        List<RoutedMessage> decisions = new ArrayList<>(2);
-        switch (audience) {
-            case INTERNAL -> decisions.add(toOpsRoom(alert));
-            case PRODUCT -> decisions.add(toProductRoom(alert, AlertRegister.TECHNICAL));
-            case BOTH -> {
-                decisions.add(toOpsRoom(alert));
-                decisions.add(customerCopy(alert));
-            }
-        }
+        // A switch EXPRESSION, deliberately with no `default`: the compiler then refuses to
+        // build until a newly added AlertAudience constant is routed here. A statement with
+        // no default would compile clean and produce an empty decision list — no room, no
+        // WARN, no counter row, and a 200 back to Alertmanager, i.e. the alert vanishes.
+        // That is exactly the silent loss AD-V4 exists to prevent.
+        List<RoutedMessage> decisions = switch (audience) {
+            case INTERNAL -> List.of(toOpsRoom(alert));
+            case PRODUCT -> List.of(toProductRoom(alert, AlertRegister.TECHNICAL));
+            case BOTH -> List.of(toOpsRoom(alert), customerCopy(alert));
+        };
         return dedupeByRoom(decisions);
     }
 
@@ -205,6 +206,16 @@ public class AlertRouter {
             }
             if (seen.add(decision.roomId())) {
                 deduped.add(decision);
+            } else if (decision.register() == AlertRegister.CUSTOMER) {
+                // A customer notice that reaches nobody is the loss AD-V5's amendment
+                // exists to avoid, so it is never a DEBUG line. Two ways to get here: the
+                // product has no room yet (rollout state, self-retiring), or ops-room-id
+                // has been pointed at a product room (misconfiguration — AlertRoomRegistry
+                // says so at startup too).
+                log.warn("Customer notice not published — room {} already holds the technical "
+                                + "copy of this alert (unwired product room, or viptalk.ops-room-id "
+                                + "points at a product room)", decision.roomId());
+                deduped.add(decision.suppressed());
             } else {
                 log.debug("Suppressed a duplicate message for room {} ({} register)",
                         decision.roomId(), decision.register());

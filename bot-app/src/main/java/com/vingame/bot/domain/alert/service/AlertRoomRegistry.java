@@ -38,13 +38,28 @@ public class AlertRoomRegistry {
         this.opsRoomId = opsRoomId == null ? "" : opsRoomId.strip();
 
         List<ProductCode> wired = new ArrayList<>();
+        List<ProductCode> collisions = new ArrayList<>();
         for (ProductCode product : ProductCode.values()) {
             if (product.hasVipTalkRoom()) {
                 wired.add(product);
+                if (product.getVipTalkRoomId().equals(this.opsRoomId)) {
+                    collisions.add(product);
+                }
             }
         }
         log.info("VipTalk rooms: {} product room(s) wired {}, ops room {}",
                 wired.size(), wired, this.opsRoomId.isEmpty() ? "not configured" : "configured");
+        if (!collisions.isEmpty()) {
+            // Not fatal, but lossy in a way that is otherwise invisible: an `audience: both`
+            // alert renders two registers for two rooms, and if those rooms are the same
+            // room the customer notice is deduplicated away — the product room then only
+            // ever sees operator wording. Say it once, loudly, at startup.
+            log.warn("viptalk.ops-room-id is also the product room of {} — `audience: both` "
+                            + "alerts for {} will publish the technical copy only, and the "
+                            + "customer notice will be suppressed as a duplicate. Give the ops "
+                            + "room its own room ID.",
+                    collisions, collisions);
+        }
     }
 
     /**
@@ -58,7 +73,8 @@ public class AlertRoomRegistry {
     }
 
     /**
-     * The catch-all ops room, or empty when {@code viptalk.ops-room-id} is unset.
+     * The ops room, or empty when {@code viptalk.ops-room-id} is unset. Not a catch-all
+     * since AD-V3 — see the class javadoc.
      */
     public Optional<String> opsRoom() {
         return opsRoomId.isEmpty() ? Optional.empty() : Optional.of(opsRoomId);
