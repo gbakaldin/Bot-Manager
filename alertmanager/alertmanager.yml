@@ -1,0 +1,67 @@
+# Alertmanager configuration for the Bot Manager alerting pipeline.
+#
+# Bind-mounted into the alertmanager container at /etc/alertmanager/alertmanager.yml
+# (see docker-compose.yml), editable on the host without root.
+#
+# There is exactly one receiver: a webhook into bot-manager, which resolves the
+# target VipTalk room per alert from the rule's `audience` label — ops room for
+# `internal`, the product's room for `product`, both (in two registers) for
+# `both` — and posts the message. The product itself comes from the `product`
+# label, else from the `environmentId` label via Mongo. See
+# docs/plans/VIPTALK_ALERTING.md and VIPTALK_ALERTING_V2.md (AD-V3).
+#
+# Grouping, dedup and repeat live HERE, not in the app (VIPTALK_ALERTING AD-6) —
+# that is the whole reason for putting Alertmanager in front of the bot rather than
+# calling the VipTalk API from app code on every event.
+
+route:
+  receiver: viptalk
+
+  # One notification per (alertname, product, environmentId, audience) tuple.
+  # bot-manager batches everything in a group that shares a room into a single
+  # message, so grouping here directly controls message volume in the rooms.
+  # `audience` is constant per rule, so adding it changes no grouping today — it
+  # is defensive: grouping must never merge two registers (an internal alert and
+  # a customer-facing one) into a single message (VIPTALK_ALERTING_V2 AD-V3).
+  group_by: ['alertname', 'product', 'environmentId', 'audience']
+
+  # Wait this long after the first alert in a new group before notifying, so a
+  # burst that fires together arrives as one message.
+  group_wait: 30s
+  # Wait this long before notifying about new alerts added to an existing group.
+  group_interval: 5m
+  # Re-send a still-firing group this often. 4h is deliberately slow: these rooms
+  # are shared with people who are not on call for the bot fleet.
+  repeat_interval: 4h
+
+receivers:
+  - name: viptalk
+    webhook_configs:
+      # Compose service name + container-internal port (bot-manager listens on 8085
+      # inside the container; the host's 8080 mapping is not used on this network).
+      - url: http://bot-manager:8085/api/v1/alerts/alertmanager
+        # Send the RESOLVED half too — an alert that clears without a follow-up
+        # message leaves the room believing the fleet is still broken.
+        send_resolved: true
+        # bot-manager answers 502 when VipTalk did not accept the message, which is
+        # what makes this retry meaningful (VIPTALK_ALERTING AD-8).
+        max_alerts: 0
+
+inhibit_rules:
+  # When bot-manager itself is down, every fleet gauge goes stale and its alerts are
+  # noise on top of the real problem. Suppress them while BotManagerDown is firing.
+  - source_matchers:
+      - alertname = "BotManagerDown"
+    target_matchers:
+      - severity =~ "warning|critical"
+    equal: ['job']
+
+  # EnvironmentSocketDown (< 50%) and EnvironmentSocketDegraded (< 80%) overlap by
+  # construction — every outage satisfies both. Suppress the warning while the
+  # critical is firing for the same environment, so a product room gets one message
+  # about one condition rather than two with different percentages.
+  - source_matchers:
+      - alertname = "EnvironmentSocketDown"
+    target_matchers:
+      - alertname = "EnvironmentSocketDegraded"
+    equal: ['product', 'environmentId']

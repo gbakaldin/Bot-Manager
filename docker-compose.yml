@@ -125,9 +125,33 @@ services:
       # ./logs and ./grafana/provisioning patterns. See
       # docs/plans/OBSERVABILITY.md Architecture Decision 9.
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Alerting rules, referenced from prometheus.yml's rule_files. Same bind-mount
+      # rationale — edited on the host, no image rebuild. VIPTALK_ALERTING Phase 3.
+      - ./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       # Named volume for the TSDB. Prometheus is sensitive to host filesystem
       # semantics; the operator does not need to inspect tsdb files directly.
       - prometheus-data:/prometheus
+    depends_on:
+      - bot-manager
+
+  # Groups / dedups / repeats firing alerts and webhooks them into bot-manager,
+  # which routes each to the VipTalk room of the product it concerns.
+  # See docs/plans/VIPTALK_ALERTING.md. Not exposed on the host by default — it is
+  # internal infrastructure like Prometheus; uncomment the port to reach its UI.
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    restart: unless-stopped
+    logging: *default-logging
+    # ports:
+    #   - "9093:9093"
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Notification/silence state, so a restart does not re-send everything that
+      # is still firing.
+      - alertmanager-data:/alertmanager
     depends_on:
       - bot-manager
 
@@ -136,3 +160,4 @@ volumes:
   loki-data:
   grafana-data:
   prometheus-data:
+  alertmanager-data:

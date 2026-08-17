@@ -12,6 +12,20 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alerting rules, evaluated every `evaluation_interval`. Bind-mounted alongside
+# this file (see docker-compose.yml). VIPTALK_ALERTING Phase 3.
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# Firing alerts are handed to Alertmanager, which does the grouping, dedup and
+# repeat handling, then webhooks bot-manager, which routes to a VipTalk room.
+# Compose service name + container-internal port.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
 scrape_configs:
   - job_name: bot-manager
     metrics_path: /actuator/prometheus
