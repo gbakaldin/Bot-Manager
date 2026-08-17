@@ -34,6 +34,18 @@ services:
       - "8080:8085"
     environment:
       - SPRING_DATA_MONGODB_URI=mongodb://mongo:27017/botmanager
+      # VipTalk alerting (VIPTALK_ALERTING AD-2). Values come from ./secrets.env,
+      # which deploy.sh merges into the generated .env — the token must never be
+      # baked into the image or committed. All default to the disabled/staging
+      # posture, so a host without secrets.env deploys exactly as before.
+      - VIPTALK_ENABLED=${VIPTALK_ENABLED:-false}
+      - VIPTALK_BOT_TOKEN=${VIPTALK_BOT_TOKEN:-}
+      - VIPTALK_OPS_ROOM_ID=${VIPTALK_OPS_ROOM_ID:-}
+      - VIPTALK_INSTANCE_LABEL=${VIPTALK_INSTANCE_LABEL:-staging}
+      # Customer-facing register for `audience: both` alerts (VIPTALK_ALERTING_V2 AD-V7).
+      # Default false: only the prod instance may write non-technical notices into a
+      # product room.
+      - VIPTALK_CUSTOMER_NOTICES_ENABLED=${VIPTALK_CUSTOMER_NOTICES_ENABLED:-false}
     depends_on:
       mongo:
         condition: service_healthy
