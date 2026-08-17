@@ -4,6 +4,7 @@ import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvInfo;
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvStatusKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameStatusKey;
@@ -63,8 +64,8 @@ class InfoGaugeRefresherTest {
     @Test
     void gameInfoGauge_carriesGameIdNameAndType_withValueOne() {
         when(behaviorService.listRunningGameInfo()).thenReturn(List.of(
-                new GameInfo("game-uuid-1", "BauCua", "BETTING_MINI"),
-                new GameInfo("game-uuid-2", "SlotA", "SLOT")));
+                new GameInfo("game-uuid-1", "BauCua", "BETTING_MINI", "env-uuid-1", "116"),
+                new GameInfo("game-uuid-2", "SlotA", "SLOT", "env-uuid-1", "116")));
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
@@ -73,17 +74,20 @@ class InfoGaugeRefresherTest {
         assertThat(bauCua.value()).isEqualTo(1.0);
         assertThat(bauCua.getId().getTag("gameName")).isEqualTo("BauCua");
         assertThat(bauCua.getId().getTag("gameType")).isEqualTo("BETTING_MINI");
+        assertThat(bauCua.getId().getTag("environmentId")).isEqualTo("env-uuid-1");
+        assertThat(bauCua.getId().getTag("product")).isEqualTo("116");
 
         Gauge slot = registry.find("game_join").tag("gameName", "SlotA").gauge();
         assertThat(slot).isNotNull();
         assertThat(slot.getId().getTag("gameId")).isEqualTo("game-uuid-2");
         assertThat(slot.getId().getTag("gameType")).isEqualTo("SLOT");
+        assertThat(slot.getId().getTag("product")).isEqualTo("116");
     }
 
     @Test
     void environmentInfoGauge_carriesEnvironmentIdAndName_withValueOne() {
         when(behaviorService.listRunningEnvironmentInfo()).thenReturn(List.of(
-                new EnvInfo("env-uuid-1", "Staging")));
+                new EnvInfo("env-uuid-1", "Staging", "116")));
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
@@ -91,12 +95,13 @@ class InfoGaugeRefresherTest {
         assertThat(env).isNotNull();
         assertThat(env.value()).isEqualTo(1.0);
         assertThat(env.getId().getTag("environmentName")).isEqualTo("Staging");
+        assertThat(env.getId().getTag("product")).isEqualTo("116");
     }
 
     @Test
     void infoGauges_dropStaleRowsOnRefresh() {
         when(behaviorService.listRunningGameInfo()).thenReturn(List.of(
-                new GameInfo("game-uuid-1", "BauCua", "BETTING_MINI")));
+                new GameInfo("game-uuid-1", "BauCua", "BETTING_MINI", "env-uuid-1", "116")));
         InfoGaugeRefresher.refresh(behaviorService, gauges);
         assertThat(registry.find("game_join").tag("gameId", "game-uuid-1").gauge()).isNotNull();
 
@@ -113,9 +118,9 @@ class InfoGaugeRefresherTest {
         MDC.put(BotMdc.GAME_ID, "game-mdc");
 
         when(behaviorService.listRunningGameInfo()).thenReturn(List.of(
-                new GameInfo("game-uuid-1", "BauCua", "BETTING_MINI")));
+                new GameInfo("game-uuid-1", "BauCua", "BETTING_MINI", "env-uuid-1", "116")));
         when(behaviorService.listRunningEnvironmentInfo()).thenReturn(List.of(
-                new EnvInfo("env-uuid-1", "Staging")));
+                new EnvInfo("env-uuid-1", "Staging", "116")));
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
@@ -132,8 +137,10 @@ class InfoGaugeRefresherTest {
     @Test
     void botsByGameStatusGauge_breaksDownBotCountsByStatusPerGame() {
         when(behaviorService.countBotsByGameAndStatus()).thenReturn(Map.of(
-                new GameStatusKey("game-uuid-1", "BauCua", BotStatus.CONNECTION_AUTHENTICATED), 3,
-                new GameStatusKey("game-uuid-1", "BauCua", BotStatus.DEAD), 1));
+                new GameStatusKey("game-uuid-1", "BauCua", BotStatus.CONNECTION_AUTHENTICATED,
+                        "env-uuid-1", "BETTING_MINI", "116"), 3,
+                new GameStatusKey("game-uuid-1", "BauCua", BotStatus.DEAD,
+                        "env-uuid-1", "BETTING_MINI", "116"), 1));
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
@@ -144,6 +151,11 @@ class InfoGaugeRefresherTest {
         assertThat(connected).isNotNull();
         assertThat(connected.value()).isEqualTo(3.0);
         assertThat(connected.getId().getTag("gameName")).isEqualTo("BauCua");
+        // GameNoRounds (Phase 3) needs these three on the left operand so the
+        // `unless` sides produce identical label sets after sum by(...).
+        assertThat(connected.getId().getTag("gameType")).isEqualTo("BETTING_MINI");
+        assertThat(connected.getId().getTag("environmentId")).isEqualTo("env-uuid-1");
+        assertThat(connected.getId().getTag("product")).isEqualTo("116");
 
         Gauge dead = registry.find("bots_by_game_status")
                 .tag("gameId", "game-uuid-1")
@@ -156,8 +168,8 @@ class InfoGaugeRefresherTest {
     @Test
     void botsByEnvStatusGauge_breaksDownBotCountsByStatusPerEnvironment() {
         when(behaviorService.countBotsByEnvAndStatus()).thenReturn(Map.of(
-                new EnvStatusKey("env-uuid-1", BotStatus.CONNECTION_AUTHENTICATED), 5,
-                new EnvStatusKey("env-uuid-1", BotStatus.DEAD), 2));
+                new EnvStatusKey("env-uuid-1", BotStatus.CONNECTION_AUTHENTICATED, "116"), 5,
+                new EnvStatusKey("env-uuid-1", BotStatus.DEAD, "116"), 2));
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
@@ -167,6 +179,7 @@ class InfoGaugeRefresherTest {
                 .gauge();
         assertThat(connected).isNotNull();
         assertThat(connected.value()).isEqualTo(5.0);
+        assertThat(connected.getId().getTag("product")).isEqualTo("116");
 
         Gauge dead = registry.find("bots_by_env_status")
                 .tag("environmentId", "env-uuid-1")
@@ -185,7 +198,8 @@ class InfoGaugeRefresherTest {
         // group on an already-tracked game stayed invisible (the "7 active bots"
         // bug — two RIK groups, 7 + 100, gauge stuck at 7).
         when(behaviorService.countBotsByGameAndStatus()).thenReturn(Map.of(
-                new GameStatusKey("game-uuid-1", "Tai Xiu Jackpot", BotStatus.CONNECTION_AUTHENTICATED), 7));
+                new GameStatusKey("game-uuid-1", "Tai Xiu Jackpot", BotStatus.CONNECTION_AUTHENTICATED,
+                        "env-uuid-1", "TAI_XIU", "114"), 7));
         InfoGaugeRefresher.refresh(behaviorService, gauges);
         assertThat(registry.find("bots_by_game_status")
                 .tag("gameId", "game-uuid-1")
@@ -194,7 +208,8 @@ class InfoGaugeRefresherTest {
 
         // A second group on the same game brings the live count to 107.
         when(behaviorService.countBotsByGameAndStatus()).thenReturn(Map.of(
-                new GameStatusKey("game-uuid-1", "Tai Xiu Jackpot", BotStatus.CONNECTION_AUTHENTICATED), 107));
+                new GameStatusKey("game-uuid-1", "Tai Xiu Jackpot", BotStatus.CONNECTION_AUTHENTICATED,
+                        "env-uuid-1", "TAI_XIU", "114"), 107));
         InfoGaugeRefresher.refresh(behaviorService, gauges);
         assertThat(registry.find("bots_by_game_status")
                 .tag("gameId", "game-uuid-1")
@@ -207,7 +222,7 @@ class InfoGaugeRefresherTest {
         // Same overwrite=false freeze, env scope: the per-env count must track
         // live state across refreshes for a persisting (environmentId, status) row.
         when(behaviorService.countBotsByEnvAndStatus()).thenReturn(Map.of(
-                new EnvStatusKey("env-uuid-1", BotStatus.CONNECTION_AUTHENTICATED), 7));
+                new EnvStatusKey("env-uuid-1", BotStatus.CONNECTION_AUTHENTICATED, "116"), 7));
         InfoGaugeRefresher.refresh(behaviorService, gauges);
         assertThat(registry.find("bots_by_env_status")
                 .tag("environmentId", "env-uuid-1")
@@ -215,7 +230,7 @@ class InfoGaugeRefresherTest {
                 .gauge().value()).isEqualTo(7.0);
 
         when(behaviorService.countBotsByEnvAndStatus()).thenReturn(Map.of(
-                new EnvStatusKey("env-uuid-1", BotStatus.CONNECTION_AUTHENTICATED), 107));
+                new EnvStatusKey("env-uuid-1", BotStatus.CONNECTION_AUTHENTICATED, "116"), 107));
         InfoGaugeRefresher.refresh(behaviorService, gauges);
         assertThat(registry.find("bots_by_env_status")
                 .tag("environmentId", "env-uuid-1")
@@ -229,9 +244,10 @@ class InfoGaugeRefresherTest {
         MDC.put(BotMdc.ENVIRONMENT_ID, "env-xyz");
 
         when(behaviorService.countBotsByGameAndStatus()).thenReturn(Map.of(
-                new GameStatusKey("game-uuid-1", "BauCua", BotStatus.DEAD), 1));
+                new GameStatusKey("game-uuid-1", "BauCua", BotStatus.DEAD,
+                        "env-uuid-1", "BETTING_MINI", "116"), 1));
         when(behaviorService.countBotsByEnvAndStatus()).thenReturn(Map.of(
-                new EnvStatusKey("env-uuid-1", BotStatus.DEAD), 1));
+                new EnvStatusKey("env-uuid-1", BotStatus.DEAD, "116"), 1));
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
@@ -243,6 +259,81 @@ class InfoGaugeRefresherTest {
         assertThat(env.getId().getTag(BotMdc.BOT_GROUP_ID)).isNull();
     }
 
+    // ---- VIPTALK_ALERTING_V2 Phase 1: per-environment aggregate MultiGauges ----
+
+    @Test
+    void botsManagedByEnvGauge_carriesEnvironmentIdAndProduct() {
+        when(behaviorService.countManagedBotsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 12,
+                new EnvKey("env-uuid-2", "097"), 5));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        Gauge tip = registry.find("bots_managed_by_env").tag("environmentId", "env-uuid-1").gauge();
+        assertThat(tip).isNotNull();
+        assertThat(tip.value()).isEqualTo(12.0);
+        assertThat(tip.getId().getTag("product")).isEqualTo("116");
+
+        Gauge bom = registry.find("bots_managed_by_env").tag("environmentId", "env-uuid-2").gauge();
+        assertThat(bom).isNotNull();
+        assertThat(bom.value()).isEqualTo(5.0);
+        assertThat(bom.getId().getTag("product")).isEqualTo("097");
+    }
+
+    @Test
+    void wsConnectionsOpenByEnvGauge_carriesEnvironmentIdAndProduct_andTracksZero() {
+        // A zero row is the case EnvironmentSocketDown must catch: bots are managed
+        // but none holds a socket. It must be emitted, not omitted.
+        when(behaviorService.countManagedBotsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 12));
+        when(behaviorService.countOpenWsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 0));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        Gauge open = registry.find("ws_connections_open_by_env")
+                .tag("environmentId", "env-uuid-1").gauge();
+        assertThat(open).isNotNull();
+        assertThat(open.value()).isEqualTo(0.0);
+        assertThat(open.getId().getTag("product")).isEqualTo("116");
+    }
+
+    @Test
+    void perEnvGauges_areOnTheAggregateExclusionList() {
+        MDC.put(BotMdc.BOT_GROUP_ID, "group-xyz");
+        MDC.put(BotMdc.PRODUCT, "999");
+
+        when(behaviorService.countManagedBotsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 3));
+        when(behaviorService.countOpenWsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 3));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        for (String name : new String[]{"bots_managed_by_env", "ws_connections_open_by_env"}) {
+            Gauge g = registry.find(name).tag("environmentId", "env-uuid-1").gauge();
+            assertThat(g).as("%s registered", name).isNotNull();
+            assertThat(g.getId().getTag(BotMdc.BOT_GROUP_ID)).isNull();
+            // the row's own product wins; the refresher thread's MDC never leaks in
+            assertThat(g.getId().getTag(BotMdc.PRODUCT)).isEqualTo("116");
+        }
+    }
+
+    @Test
+    void perEnvGauges_updateValues_whenCountsChangeForExistingTagSet() {
+        when(behaviorService.countManagedBotsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 7));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("bots_managed_by_env")
+                .tag("environmentId", "env-uuid-1").gauge().value()).isEqualTo(7.0);
+
+        when(behaviorService.countManagedBotsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 107));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+        assertThat(registry.find("bots_managed_by_env")
+                .tag("environmentId", "env-uuid-1").gauge().value()).isEqualTo(107.0);
+    }
+
     // ---- null-safety: a Game/Env tuple with null fields must not crash the refresh ----
 
     @Test
@@ -250,9 +341,15 @@ class InfoGaugeRefresherTest {
         // listRunningGameInfo null-guards gameType in the service, but the refresher
         // must also tolerate a null gameName/gameType/gameId without NPE, emitting "".
         when(behaviorService.listRunningGameInfo()).thenReturn(List.of(
-                new GameInfo("game-uuid-1", null, null)));
+                new GameInfo("game-uuid-1", null, null, null, null)));
         when(behaviorService.listRunningEnvironmentInfo()).thenReturn(List.of(
-                new EnvInfo("env-uuid-1", null)));
+                new EnvInfo("env-uuid-1", null, null)));
+        // Game.productCode is nullable on older Mongo documents (Implementation
+        // Note 4) — a null product must render as "" and never NPE.
+        when(behaviorService.countManagedBotsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", null), 1));
+        when(behaviorService.countOpenWsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", null), 1));
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
@@ -260,9 +357,16 @@ class InfoGaugeRefresherTest {
         assertThat(game).isNotNull();
         assertThat(game.getId().getTag("gameName")).isEqualTo("");
         assertThat(game.getId().getTag("gameType")).isEqualTo("");
+        assertThat(game.getId().getTag("environmentId")).isEqualTo("");
+        assertThat(game.getId().getTag("product")).isEqualTo("");
         Gauge env = registry.find("environment_join").tag("environmentId", "env-uuid-1").gauge();
         assertThat(env).isNotNull();
         assertThat(env.getId().getTag("environmentName")).isEqualTo("");
+        assertThat(env.getId().getTag("product")).isEqualTo("");
+        assertThat(registry.find("bots_managed_by_env").gauge().getId().getTag("product"))
+                .isEqualTo("");
+        assertThat(registry.find("ws_connections_open_by_env").gauge().getId().getTag("product"))
+                .isEqualTo("");
     }
 
     @Test
@@ -275,6 +379,8 @@ class InfoGaugeRefresherTest {
         assertThat(registry.find("environment_join").gauges()).isEmpty();
         assertThat(registry.find("bots_by_game_status").gauges()).isEmpty();
         assertThat(registry.find("bots_by_env_status").gauges()).isEmpty();
+        assertThat(registry.find("bots_managed_by_env").gauges()).isEmpty();
+        assertThat(registry.find("ws_connections_open_by_env").gauges()).isEmpty();
     }
 
     // ---- scheduler lifecycle (PostConstruct start / PreDestroy stop) ----

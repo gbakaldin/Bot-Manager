@@ -319,7 +319,9 @@ public class BotGroupBehaviorService {
 
             // Create runtime state
             BotGroupRuntime runtime = new BotGroupRuntime(id, group.getBotCount(),
-                    group.getEnvironmentId(), environment.getName());
+                    group.getEnvironmentId(), environment.getName(), group.getName(),
+                    environment.getProductCode() != null
+                            ? environment.getProductCode().getCode() : null);
             runningGroups.put(id, runtime);
 
             // BET_COORDINATION (AD-9/AD-10): build a group-scoped coordinator only
@@ -1337,23 +1339,41 @@ public class BotGroupBehaviorService {
      * {@code gameType} enum name. {@code gameId} is the Mongo {@code _id} (a UUID
      * string), NOT {@link Game#getGameId()} (the env-scoped numeric channel) — see AD-8.
      */
-    public record GameInfo(String gameId, String gameName, String gameType) {
+    public record GameInfo(String gameId, String gameName, String gameType,
+                           String environmentId, String product) {
     }
 
     /**
      * Identity tuple for the {@code environment_join} join gauge (AD-2): the
      * environment id and its readable name (threaded into {@link BotGroupRuntime}
-     * at group start from {@code Environment.getName()}).
+     * at group start from {@code Environment.getName()}), plus the numeric product
+     * code (VIPTALK_ALERTING_V2 AD-V1).
      */
-    public record EnvInfo(String environmentId, String environmentName) {
+    public record EnvInfo(String environmentId, String environmentName, String product) {
     }
 
-    /** Grouping key for {@code bots_by_game_status}: game identity + bot status. */
-    public record GameStatusKey(String gameId, String gameName, BotStatus status) {
+    /**
+     * Grouping key for {@code bots_by_game_status}: game identity + bot status.
+     * {@code environmentId}, {@code gameType} and {@code product} are carried so the
+     * {@code GameNoRounds} rule's {@code unless} operands produce identical label
+     * sets on both sides after {@code sum by(...)} (VIPTALK_ALERTING_V2 Phase 1/3).
+     * All three are functionally determined by {@code gameId}, so they add no series.
+     */
+    public record GameStatusKey(String gameId, String gameName, BotStatus status,
+                                String environmentId, String gameType, String product) {
     }
 
-    /** Grouping key for {@code bots_by_env_status}: environment id + bot status. */
-    public record EnvStatusKey(String environmentId, BotStatus status) {
+    /** Grouping key for {@code bots_by_env_status}: environment id + product + bot status. */
+    public record EnvStatusKey(String environmentId, BotStatus status, String product) {
+    }
+
+    /**
+     * Grouping key for the per-environment aggregate gauges
+     * {@code bots_managed_by_env} / {@code ws_connections_open_by_env}
+     * (VIPTALK_ALERTING_V2 Phase 1). {@code product} is functionally determined by
+     * {@code environmentId}, so it costs no extra series.
+     */
+    public record EnvKey(String environmentId, String product) {
     }
 
     /**
@@ -1367,9 +1387,9 @@ public class BotGroupBehaviorService {
             for (Bot bot : runtime.getBotInstances()) {
                 Game game = bot.getConfiguration().getGame();
                 if (game == null) continue;
-                String gameType = game.getGameType() != null ? game.getGameType().name() : "";
                 distinct.putIfAbsent(game.getId(),
-                        new GameInfo(game.getId(), game.getName(), gameType));
+                        new GameInfo(game.getId(), game.getName(), gameType(game),
+                                game.getEnvironmentId(), product(game)));
             }
         }
         return distinct.values();
@@ -1389,7 +1409,7 @@ public class BotGroupBehaviorService {
             if (envId == null) continue;
             String envName = runtime.getEnvironmentName() != null
                     ? runtime.getEnvironmentName() : envId;
-            distinct.putIfAbsent(envId, new EnvInfo(envId, envName));
+            distinct.putIfAbsent(envId, new EnvInfo(envId, envName, runtime.getProduct()));
         }
         return distinct.values();
     }
@@ -1405,7 +1425,8 @@ public class BotGroupBehaviorService {
             for (Bot bot : runtime.getBotInstances()) {
                 Game game = bot.getConfiguration().getGame();
                 if (game == null) continue;
-                GameStatusKey key = new GameStatusKey(game.getId(), game.getName(), bot.getStatus());
+                GameStatusKey key = new GameStatusKey(game.getId(), game.getName(), bot.getStatus(),
+                        game.getEnvironmentId(), gameType(game), product(game));
                 counts.merge(key, 1, Integer::sum);
             }
         }
@@ -1423,11 +1444,65 @@ public class BotGroupBehaviorService {
             String envId = runtime.getEnvironmentId();
             if (envId == null) continue;
             for (Bot bot : runtime.getBotInstances()) {
-                EnvStatusKey key = new EnvStatusKey(envId, bot.getStatus());
+                EnvStatusKey key = new EnvStatusKey(envId, bot.getStatus(), runtime.getProduct());
                 counts.merge(key, 1, Integer::sum);
             }
         }
         return counts;
+    }
+
+    /**
+     * Per-environment analogue of {@link #getTotalManagedBots()}, backing the
+     * {@code bots_managed_by_env} MultiGauge (VIPTALK_ALERTING_V2 Phase 1). Groups
+     * sharing an environment aggregate into one row; {@code sum(bots_managed_by_env)}
+     * must equal {@code bots_managed}.
+     */
+    public Map<EnvKey, Integer> countManagedBotsByEnv() {
+        Map<EnvKey, Integer> counts = new LinkedHashMap<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            String envId = runtime.getEnvironmentId();
+            if (envId == null) continue;
+            counts.merge(new EnvKey(envId, runtime.getProduct()),
+                    runtime.getBotInstances().size(), Integer::sum);
+        }
+        return counts;
+    }
+
+    /**
+     * Per-environment analogue of {@link #getOpenWsConnectionCount()}, backing the
+     * {@code ws_connections_open_by_env} MultiGauge (VIPTALK_ALERTING_V2 Phase 1).
+     * Uses {@link Bot#isConnected()} — deliberately the same predicate as the fleet
+     * gauge, NOT {@code BotStatus}, so the per-environment rule mirrors the retired
+     * fleet rule exactly. A row is emitted for every environment that has managed
+     * bots, including one with zero open sockets (the case the rule must catch).
+     */
+    public Map<EnvKey, Integer> countOpenWsByEnv() {
+        Map<EnvKey, Integer> counts = new LinkedHashMap<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            String envId = runtime.getEnvironmentId();
+            if (envId == null) continue;
+            EnvKey key = new EnvKey(envId, runtime.getProduct());
+            int open = 0;
+            for (Bot bot : runtime.getBotInstances()) {
+                if (bot.isConnected()) open++;
+            }
+            counts.merge(key, open, Integer::sum);
+        }
+        return counts;
+    }
+
+    /** {@code GameType} enum name, or {@code ""} when unset. */
+    private static String gameType(Game game) {
+        return game.getGameType() != null ? game.getGameType().name() : "";
+    }
+
+    /**
+     * Numeric product code of the game ({@code ProductCode.getCode()}, AD-V1), or
+     * {@code null} for older {@code Game} documents that predate the field — the
+     * gauge row builders render a null as {@code ""}.
+     */
+    private static String product(Game game) {
+        return game.getProductCode() != null ? game.getProductCode().getCode() : null;
     }
 
     /**

@@ -3,6 +3,7 @@ package com.vingame.bot.infrastructure.observability;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvInfo;
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvStatusKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameStatusKey;
@@ -54,13 +55,14 @@ class InfoGaugePrometheusScrapeTest {
     @Test
     void infoJoinGauges_renderToPrometheusScrape_withTheirLabels() {
         when(behaviorService.listRunningGameInfo()).thenReturn(List.of(
-                new GameInfo("game-uuid-1", "BauCua", "BETTING_MINI")));
+                new GameInfo("game-uuid-1", "BauCua", "BETTING_MINI", "env-uuid-1", "116")));
         when(behaviorService.listRunningEnvironmentInfo()).thenReturn(List.of(
-                new EnvInfo("env-uuid-1", "Staging")));
+                new EnvInfo("env-uuid-1", "Staging", "116")));
         when(behaviorService.countBotsByGameAndStatus()).thenReturn(Map.of(
-                new GameStatusKey("game-uuid-1", "BauCua", BotStatus.DEAD), 1));
+                new GameStatusKey("game-uuid-1", "BauCua", BotStatus.DEAD,
+                        "env-uuid-1", "BETTING_MINI", "116"), 1));
         when(behaviorService.countBotsByEnvAndStatus()).thenReturn(Map.of(
-                new EnvStatusKey("env-uuid-1", BotStatus.DEAD), 1));
+                new EnvStatusKey("env-uuid-1", BotStatus.DEAD, "116"), 1));
 
         InfoGaugeRefresher.refresh(behaviorService, gauges);
 
@@ -71,20 +73,44 @@ class InfoGaugePrometheusScrapeTest {
         // stripping), so these assertions failed (RED state confirmed).
         assertThat(scrape).contains("# TYPE game_join gauge");
         assertThat(scrape).contains(
-                "game_join{gameId=\"game-uuid-1\",gameName=\"BauCua\",gameType=\"BETTING_MINI\"} 1.0");
+                "game_join{environmentId=\"env-uuid-1\",gameId=\"game-uuid-1\","
+                        + "gameName=\"BauCua\",gameType=\"BETTING_MINI\",product=\"116\"} 1.0");
 
         assertThat(scrape).contains("# TYPE environment_join gauge");
         assertThat(scrape).contains(
-                "environment_join{environmentId=\"env-uuid-1\",environmentName=\"Staging\"} 1.0");
+                "environment_join{environmentId=\"env-uuid-1\",environmentName=\"Staging\","
+                        + "product=\"116\"} 1.0");
 
         // The suffix-stripped bare names must NOT leak into the exposition.
         assertThat(scrape).doesNotContain("\n# TYPE game gauge");
         assertThat(scrape).doesNotContain("\n# TYPE environment gauge");
 
-        // Siblings (the working status gauges) keep rendering as before.
+        // Siblings (the working status gauges) keep rendering as before, now with the
+        // environmentId / gameType / product labels VIPTALK_ALERTING_V2 Phase 1 adds.
         assertThat(scrape).contains(
-                "bots_by_game_status{gameId=\"game-uuid-1\",gameName=\"BauCua\",status=\"DEAD\"} 1.0");
+                "bots_by_game_status{environmentId=\"env-uuid-1\",gameId=\"game-uuid-1\","
+                        + "gameName=\"BauCua\",gameType=\"BETTING_MINI\",product=\"116\","
+                        + "status=\"DEAD\"} 1.0");
         assertThat(scrape).contains(
-                "bots_by_env_status{environmentId=\"env-uuid-1\",status=\"DEAD\"} 1.0");
+                "bots_by_env_status{environmentId=\"env-uuid-1\",product=\"116\",status=\"DEAD\"} 1.0");
+    }
+
+    @Test
+    void perEnvAggregateGauges_renderToPrometheusScrape_withEnvironmentIdAndProduct() {
+        when(behaviorService.countManagedBotsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 12));
+        when(behaviorService.countOpenWsByEnv()).thenReturn(Map.of(
+                new EnvKey("env-uuid-1", "116"), 9));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        String scrape = registry.scrape();
+
+        assertThat(scrape).contains("# TYPE bots_managed_by_env gauge");
+        assertThat(scrape).contains(
+                "bots_managed_by_env{environmentId=\"env-uuid-1\",product=\"116\"} 12.0");
+        assertThat(scrape).contains("# TYPE ws_connections_open_by_env gauge");
+        assertThat(scrape).contains(
+                "ws_connections_open_by_env{environmentId=\"env-uuid-1\",product=\"116\"} 9.0");
     }
 }

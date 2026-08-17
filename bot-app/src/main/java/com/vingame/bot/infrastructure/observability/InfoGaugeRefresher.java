@@ -17,17 +17,30 @@ import java.util.concurrent.TimeUnit;
  * Owns the Phase 2 / Phase 3 {@link MultiGauge}s and refreshes their row sets from
  * live bot state on a fixed cadence.
  * <ul>
- *   <li><b>game_join</b> {@code {gameId, gameName, gameType}} value 1 — join gauge
- *       so a dashboard maps {@code gameId} to readable names (AD-2).</li>
- *   <li><b>environment_join</b> {@code {environmentId, environmentName}} value 1 —
- *       env-name join gauge; {@code environmentName} is threaded into the runtime at
- *       group start (AD-2).</li>
- *   <li><b>bots_by_game_status</b> {@code {gameId, gameName, status}} — bot count per
- *       game per status (AD-3).</li>
- *   <li><b>bots_by_env_status</b> {@code {environmentId, status}} — bot count per
- *       environment per status (AD-3).</li>
+ *   <li><b>game_join</b> {@code {gameId, gameName, gameType, environmentId, product}}
+ *       value 1 — join gauge so a dashboard maps {@code gameId} to readable names
+ *       (AD-2).</li>
+ *   <li><b>environment_join</b> {@code {environmentId, environmentName, product}}
+ *       value 1 — env-name join gauge; {@code environmentName} and {@code product}
+ *       are threaded into the runtime at group start (AD-2, AD-V1).</li>
+ *   <li><b>bots_by_game_status</b>
+ *       {@code {gameId, gameName, gameType, environmentId, product, status}} — bot
+ *       count per game per status (AD-3).</li>
+ *   <li><b>bots_by_env_status</b> {@code {environmentId, product, status}} — bot
+ *       count per environment per status (AD-3).</li>
+ *   <li><b>bots_managed_by_env</b> {@code {environmentId, product}} — per-environment
+ *       analogue of the {@code bots_managed} fleet gauge (AD-V1/AD-V2).</li>
+ *   <li><b>ws_connections_open_by_env</b> {@code {environmentId, product}} —
+ *       per-environment analogue of {@code ws_connections_open}, using the same
+ *       {@code Bot.isConnected()} predicate as the fleet gauge (deliberately
+ *       <em>not</em> {@code BotStatus}).</li>
  * </ul>
- * All four meter names are on the {@link BotMdcTagsMeterFilter} aggregate allow-list,
+ * {@code product} (VIPTALK_ALERTING_V2 AD-V1) is the numeric product code and is
+ * functionally determined by {@code environmentId} / {@code gameId}, so it adds an
+ * extra label to existing series rather than new series. The fleet aggregates in
+ * {@link ObservabilityConfig} stay unlabelled (AD-V2).
+ * <p>
+ * All six meter names are on the {@link BotMdcTagsMeterFilter} aggregate allow-list,
  * so they never inherit MDC tags from the refresher thread.
  * <p>
  * <b>Why {@code _join}, not {@code _info}:</b> {@code _info} is a <em>reserved
@@ -84,17 +97,19 @@ public class InfoGaugeRefresher {
     }
 
     /**
-     * The four MultiGauges, kept together so the refresher (and tests) re-register
+     * The MultiGauges, kept together so the refresher (and tests) re-register
      * all of them from one live snapshot.
      */
     record InfoGauges(MultiGauge gameInfo,
                       MultiGauge environmentInfo,
                       MultiGauge botsByGameStatus,
-                      MultiGauge botsByEnvStatus) {
+                      MultiGauge botsByEnvStatus,
+                      MultiGauge botsManagedByEnv,
+                      MultiGauge wsConnectionsOpenByEnv) {
     }
 
     /**
-     * Register the four MultiGauges against the given registry. Package-private so
+     * Register the MultiGauges against the given registry. Package-private so
      * tests build them on a {@code SimpleMeterRegistry} and drive {@link #refresh}
      * deterministically without scheduling.
      */
@@ -111,11 +126,18 @@ public class InfoGaugeRefresher {
         MultiGauge botsByEnvStatus = MultiGauge.builder("bots_by_env_status")
                 .description("Number of bots in each status, broken down per environment")
                 .register(registry);
-        return new InfoGauges(gameInfo, environmentInfo, botsByGameStatus, botsByEnvStatus);
+        MultiGauge botsManagedByEnv = MultiGauge.builder("bots_managed_by_env")
+                .description("Number of managed bot instances, broken down per environment")
+                .register(registry);
+        MultiGauge wsConnectionsOpenByEnv = MultiGauge.builder("ws_connections_open_by_env")
+                .description("Number of bots with an open WebSocket connection, broken down per environment")
+                .register(registry);
+        return new InfoGauges(gameInfo, environmentInfo, botsByGameStatus, botsByEnvStatus,
+                botsManagedByEnv, wsConnectionsOpenByEnv);
     }
 
     /**
-     * Re-register the row set of all four MultiGauges from the current live bot
+     * Re-register the row set of every MultiGauge from the current live bot
      * iteration. Side-effect-isolated so tests can drive a deterministic refresh.
      * <p>
      * <b>Every register call passes {@code overwrite=true}.</b> Micrometer's
@@ -135,14 +157,17 @@ public class InfoGaugeRefresher {
                 .map(g -> MultiGauge.Row.of(
                         Tags.of("gameId", nullSafe(g.gameId()),
                                 "gameName", nullSafe(g.gameName()),
-                                "gameType", nullSafe(g.gameType())),
+                                "gameType", nullSafe(g.gameType()),
+                                "environmentId", nullSafe(g.environmentId()),
+                                "product", nullSafe(g.product())),
                         1))
                 .toList(), true);
 
         gauges.environmentInfo().register(behaviorService.listRunningEnvironmentInfo().stream()
                 .map(e -> MultiGauge.Row.of(
                         Tags.of("environmentId", nullSafe(e.environmentId()),
-                                "environmentName", nullSafe(e.environmentName())),
+                                "environmentName", nullSafe(e.environmentName()),
+                                "product", nullSafe(e.product())),
                         1))
                 .toList(), true);
 
@@ -150,6 +175,9 @@ public class InfoGaugeRefresher {
                 .map(en -> MultiGauge.Row.of(
                         Tags.of("gameId", nullSafe(en.getKey().gameId()),
                                 "gameName", nullSafe(en.getKey().gameName()),
+                                "gameType", nullSafe(en.getKey().gameType()),
+                                "environmentId", nullSafe(en.getKey().environmentId()),
+                                "product", nullSafe(en.getKey().product()),
                                 "status", en.getKey().status().name()),
                         en.getValue()))
                 .toList(), true);
@@ -157,9 +185,23 @@ public class InfoGaugeRefresher {
         gauges.botsByEnvStatus().register(behaviorService.countBotsByEnvAndStatus().entrySet().stream()
                 .map(en -> MultiGauge.Row.of(
                         Tags.of("environmentId", nullSafe(en.getKey().environmentId()),
+                                "product", nullSafe(en.getKey().product()),
                                 "status", en.getKey().status().name()),
                         en.getValue()))
                 .toList(), true);
+
+        gauges.botsManagedByEnv().register(behaviorService.countManagedBotsByEnv().entrySet().stream()
+                .map(en -> MultiGauge.Row.of(envTags(en.getKey()), en.getValue()))
+                .toList(), true);
+
+        gauges.wsConnectionsOpenByEnv().register(behaviorService.countOpenWsByEnv().entrySet().stream()
+                .map(en -> MultiGauge.Row.of(envTags(en.getKey()), en.getValue()))
+                .toList(), true);
+    }
+
+    private static Tags envTags(BotGroupBehaviorService.EnvKey key) {
+        return Tags.of("environmentId", nullSafe(key.environmentId()),
+                "product", nullSafe(key.product()));
     }
 
     private static String nullSafe(String value) {

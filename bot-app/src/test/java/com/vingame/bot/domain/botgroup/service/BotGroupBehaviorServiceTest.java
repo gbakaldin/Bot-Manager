@@ -5,6 +5,7 @@ import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.bot.coordination.JackpotScaler;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.BotStatus;
+import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
@@ -1716,7 +1717,7 @@ class BotGroupBehaviorServiceTest {
     class GameEnvSnapshotTests {
 
         @Test
-        @DisplayName("listRunningGameInfo returns distinct (gameId, gameName, gameType) over live bots")
+        @DisplayName("listRunningGameInfo returns distinct (gameId, gameName, gameType, environmentId, product) over live bots")
         void listRunningGameInfo_distinctGames() {
             Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
             Game slot = game("game-uuid-2", "SlotA", GameType.SLOT);
@@ -1737,8 +1738,10 @@ class BotGroupBehaviorServiceTest {
                 assertThat(infos).extracting(BotGroupBehaviorService.GameInfo::gameId)
                         .containsExactlyInAnyOrder("game-uuid-1", "game-uuid-2");
                 assertThat(infos).contains(
-                        new BotGroupBehaviorService.GameInfo("game-uuid-1", "BauCua", "BETTING_MINI"),
-                        new BotGroupBehaviorService.GameInfo("game-uuid-2", "SlotA", "SLOT"));
+                        new BotGroupBehaviorService.GameInfo("game-uuid-1", "BauCua", "BETTING_MINI",
+                                "env-1", "116"),
+                        new BotGroupBehaviorService.GameInfo("game-uuid-2", "SlotA", "SLOT",
+                                "env-1", "116"));
             } finally {
                 r1.getExecutor().shutdownNow();
                 r2.getExecutor().shutdownNow();
@@ -1748,11 +1751,11 @@ class BotGroupBehaviorServiceTest {
         }
 
         @Test
-        @DisplayName("listRunningEnvironmentInfo uses the threaded environmentName; falls back to id when null")
+        @DisplayName("listRunningEnvironmentInfo uses the threaded environmentName + product; falls back to id when null")
         void listRunningEnvironmentInfo_usesThreadedName() {
             Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
-            BotGroupRuntime named = new BotGroupRuntime("g-1", 0, "env-1", "Staging");
-            BotGroupRuntime unnamed = new BotGroupRuntime("g-2", 0, "env-2"); // no name
+            BotGroupRuntime named = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            BotGroupRuntime unnamed = new BotGroupRuntime("g-2", 0, "env-2"); // no name, no product
             try {
                 putBots(named, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
                 putBots(unnamed, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
@@ -1762,9 +1765,10 @@ class BotGroupBehaviorServiceTest {
                 var infos = service.listRunningEnvironmentInfo();
 
                 assertThat(infos).contains(
-                        new BotGroupBehaviorService.EnvInfo("env-1", "Staging"),
-                        // fallback: id used as display when name not threaded in
-                        new BotGroupBehaviorService.EnvInfo("env-2", "env-2"));
+                        new BotGroupBehaviorService.EnvInfo("env-1", "Staging", "116"),
+                        // fallback: id used as display when name not threaded in;
+                        // a runtime built without a product carries a null product
+                        new BotGroupBehaviorService.EnvInfo("env-2", "env-2", null));
             } finally {
                 named.getExecutor().shutdownNow();
                 unnamed.getExecutor().shutdownNow();
@@ -1790,9 +1794,11 @@ class BotGroupBehaviorServiceTest {
                         service.countBotsByGameAndStatus();
 
                 assertThat(counts.get(new BotGroupBehaviorService.GameStatusKey(
-                        "game-uuid-1", "BauCua", BotStatus.CONNECTION_AUTHENTICATED))).isEqualTo(3);
+                        "game-uuid-1", "BauCua", BotStatus.CONNECTION_AUTHENTICATED,
+                        "env-1", "BETTING_MINI", "116"))).isEqualTo(3);
                 assertThat(counts.get(new BotGroupBehaviorService.GameStatusKey(
-                        "game-uuid-1", "BauCua", BotStatus.DEAD))).isEqualTo(1);
+                        "game-uuid-1", "BauCua", BotStatus.DEAD,
+                        "env-1", "BETTING_MINI", "116"))).isEqualTo(1);
             } finally {
                 r1.getExecutor().shutdownNow();
                 runningGroups().remove("g-1");
@@ -1805,8 +1811,8 @@ class BotGroupBehaviorServiceTest {
             Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
             Game slot = game("game-uuid-2", "SlotA", GameType.SLOT);
             // two groups in the same environment must aggregate together
-            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging");
-            BotGroupRuntime r2 = new BotGroupRuntime("g-2", 0, "env-1", "Staging");
+            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            BotGroupRuntime r2 = new BotGroupRuntime("g-2", 0, "env-1", "Staging", "Group 2", "116");
             try {
                 putBots(r1, List.of(
                         mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua),
@@ -1820,9 +1826,9 @@ class BotGroupBehaviorServiceTest {
                         service.countBotsByEnvAndStatus();
 
                 assertThat(counts.get(new BotGroupBehaviorService.EnvStatusKey(
-                        "env-1", BotStatus.CONNECTION_AUTHENTICATED))).isEqualTo(2);
+                        "env-1", BotStatus.CONNECTION_AUTHENTICATED, "116"))).isEqualTo(2);
                 assertThat(counts.get(new BotGroupBehaviorService.EnvStatusKey(
-                        "env-1", BotStatus.DEAD))).isEqualTo(1);
+                        "env-1", BotStatus.DEAD, "116"))).isEqualTo(1);
             } finally {
                 r1.getExecutor().shutdownNow();
                 r2.getExecutor().shutdownNow();
@@ -1830,13 +1836,103 @@ class BotGroupBehaviorServiceTest {
                 runningGroups().remove("g-2");
             }
         }
+
+        // ---- VIPTALK_ALERTING_V2 Phase 1: per-environment aggregate accessors ----
+
+        @Test
+        @DisplayName("countManagedBotsByEnv aggregates groups sharing an environment and sums to getTotalManagedBots")
+        void countManagedBotsByEnv_aggregatesAcrossGroups() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            BotGroupRuntime r2 = new BotGroupRuntime("g-2", 0, "env-1", "Staging", "Group 2", "116");
+            BotGroupRuntime r3 = new BotGroupRuntime("g-3", 0, "env-2", "Prod", "Group 3", "097");
+            try {
+                putBots(r1, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua),
+                        mockBotWithGame(BotStatus.DEAD, bauCua)));
+                putBots(r2, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
+                putBots(r3, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
+                runningGroups().put("g-1", r1);
+                runningGroups().put("g-2", r2);
+                runningGroups().put("g-3", r3);
+
+                Map<BotGroupBehaviorService.EnvKey, Integer> counts = service.countManagedBotsByEnv();
+
+                assertThat(counts.get(new BotGroupBehaviorService.EnvKey("env-1", "116"))).isEqualTo(3);
+                assertThat(counts.get(new BotGroupBehaviorService.EnvKey("env-2", "097"))).isEqualTo(1);
+                // the per-env gauge must sum to the fleet gauge (AD-V2 verification)
+                assertThat(counts.values().stream().mapToInt(Integer::intValue).sum())
+                        .isEqualTo(service.getTotalManagedBots());
+            } finally {
+                r1.getExecutor().shutdownNow();
+                r2.getExecutor().shutdownNow();
+                r3.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+                runningGroups().remove("g-2");
+                runningGroups().remove("g-3");
+            }
+        }
+
+        @Test
+        @DisplayName("countOpenWsByEnv uses isConnected() — not BotStatus — and sums to getOpenWsConnectionCount")
+        void countOpenWsByEnv_usesIsConnectedPredicate() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                // Deliberately CONNECTION_AUTHENTICATED but NOT connected: the gauge must
+                // follow isConnected(), mirroring the fleet gauge's predicate exactly.
+                Bot connected = mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua);
+                lenient().when(connected.isConnected()).thenReturn(true);
+                Bot zombie = mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua);
+                lenient().when(zombie.isConnected()).thenReturn(false);
+                putBots(r1, List.of(connected, zombie));
+                runningGroups().put("g-1", r1);
+
+                Map<BotGroupBehaviorService.EnvKey, Integer> counts = service.countOpenWsByEnv();
+
+                assertThat(counts.get(new BotGroupBehaviorService.EnvKey("env-1", "116"))).isEqualTo(1);
+                assertThat(counts.values().stream().mapToInt(Integer::intValue).sum())
+                        .isEqualTo(service.getOpenWsConnectionCount());
+            } finally {
+                r1.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("countOpenWsByEnv emits a zero row for an environment whose bots all lost the socket")
+        void countOpenWsByEnv_emitsZeroRow() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                putBots(r1, List.of(mockBotWithGame(BotStatus.DEAD, bauCua)));
+                runningGroups().put("g-1", r1);
+
+                // The row must exist with value 0 — omitting it would make
+                // EnvironmentSocketDown (Phase 3) silently never fire.
+                assertThat(service.countOpenWsByEnv())
+                        .containsEntry(new BotGroupBehaviorService.EnvKey("env-1", "116"), 0);
+            } finally {
+                r1.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
     }
 
     private static Game game(String id, String name, GameType type) {
+        // environmentId + productCode are what make `product` functionally dependent
+        // on labels already present (VIPTALK_ALERTING_V2 AD-V1), so the gauge-support
+        // tuples read them straight off the Game the bot holds.
+        return game(id, name, type, "env-1", ProductCode.P_116);
+    }
+
+    private static Game game(String id, String name, GameType type,
+                             String environmentId, ProductCode productCode) {
         Game g = new Game();
         g.setId(id);
         g.setName(name);
         g.setGameType(type);
+        g.setEnvironmentId(environmentId);
+        g.setProductCode(productCode);
         return g;
     }
 

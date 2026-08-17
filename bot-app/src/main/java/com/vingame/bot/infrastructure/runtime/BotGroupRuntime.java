@@ -54,6 +54,18 @@ public class BotGroupRuntime {
     // it without a per-scrape DB lookup. May be null for callers that construct a
     // runtime without an Environment (older tests / ad-hoc tooling).
     private final String environmentName;
+    // Readable bot-group display name, threaded in at group start from
+    // BotGroup.getName() exactly like environmentName. Carried so group-scoped
+    // gauges can label a row with something an operator recognises without a
+    // per-scrape DB lookup. May be null for callers that construct a runtime
+    // without a BotGroup (older tests / ad-hoc tooling).
+    private final String groupName;
+    // Numeric product code (ProductCode.getCode(), e.g. "116") of the environment
+    // this group runs against, threaded in at group start — the `product` metric
+    // label of VIPTALK_ALERTING_V2 AD-V1. Functionally determined by
+    // environmentId, so per-env gauges gain the label at zero cardinality cost.
+    // May be null when the Environment has no productCode.
+    private final String product;
     // CopyOnWriteArrayList: bot creation writes infrequently while the Prometheus
     // scrape thread reads via gauge suppliers in ObservabilityConfig. Avoids CME
     // without coarse external locking.
@@ -121,9 +133,31 @@ public class BotGroupRuntime {
      *                        {@code Environment.getName()}); may be null
      */
     public BotGroupRuntime(String groupId, int botCount, String environmentId, String environmentName) {
+        this(groupId, botCount, environmentId, environmentName, null, null);
+    }
+
+    /**
+     * Create a new runtime for a bot group, carrying the readable environment and
+     * group names plus the numeric product code for the per-environment gauges
+     * (VIPTALK_ALERTING_V2 AD-V1).
+     *
+     * @param groupId         The bot group ID
+     * @param botCount        Number of bots in the group (used for initial capacity, not thread pool sizing)
+     * @param environmentId   The environment ID (used for MDC logging context)
+     * @param environmentName The readable environment display name (from
+     *                        {@code Environment.getName()}); may be null
+     * @param groupName       The readable bot-group display name (from
+     *                        {@code BotGroup.getName()}); may be null
+     * @param product         The numeric product code (from
+     *                        {@code Environment.getProductCode().getCode()}); may be null
+     */
+    public BotGroupRuntime(String groupId, int botCount, String environmentId,
+                           String environmentName, String groupName, String product) {
         this.groupId = groupId;
         this.environmentId = environmentId;
         this.environmentName = environmentName;
+        this.groupName = groupName;
+        this.product = product;
         this.botInstances = new CopyOnWriteArrayList<>();
         this.botFutures = new CopyOnWriteArrayList<>();
         this.executor = createExecutor(groupId);
