@@ -52,6 +52,12 @@ services:
       # Recovery copy for the RESOLVED half of an `audience: both` alert. Empty is safe —
       # it falls back to the built-in default rather than muting recovery notices.
       - VIPTALK_PUBLIC_RESOLVED_SUMMARY=${VIPTALK_PUBLIC_RESOLVED_SUMMARY:-}
+      # Log configuration lives on the host, not in the image (LOG_VOLUME_TIERING
+      # AD-2). A level or retention change is then a `docker compose restart` on
+      # the box instead of a rebuild + redeploy of the whole fleet -- untenable
+      # at 10 environments. The in-jar copy stays in sync as the fallback: set
+      # LOGGING_CONFIG= (empty) to use it and ignore the mount below.
+      - LOGGING_CONFIG=${LOGGING_CONFIG:-/app/config/log4j2.properties}
     depends_on:
       mongo:
         condition: service_healthy
@@ -59,6 +65,12 @@ services:
       - "gamems.dev:10.30.1.104"
     volumes:
       - ./logs:/app/logs
+      # Twin of bot-app/src/main/resources/log4j2.properties, byte-identical below
+      # its header. Read-only: the app must never rewrite its own log config.
+      # If this file is missing on the host, compose creates a DIRECTORY here and
+      # the app fails to start loudly -- which is the intended failure mode, not
+      # silently running at log4j2's DefaultConfiguration (ERROR to console only).
+      - ./logging/log4j2.properties:/app/config/log4j2.properties:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8085/actuator/health"]
       interval: 30s
