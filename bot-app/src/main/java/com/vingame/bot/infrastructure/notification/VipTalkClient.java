@@ -1,6 +1,7 @@
 package com.vingame.bot.infrastructure.notification;
 
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -51,6 +52,19 @@ public class VipTalkClient {
     private final Duration requestTimeout;
     private final HttpPoster poster;
 
+    /**
+     * The constructor Spring uses.
+     * <p>
+     * {@code @Autowired} is <b>load-bearing</b>, not decoration: this class also declares
+     * a package-private test seam below, and Spring only auto-selects a constructor when
+     * there is exactly one. With two candidates and no annotation it falls back to a no-arg
+     * constructor that does not exist, and the context fails at startup with
+     * {@code NoSuchMethodException: VipTalkClient.<init>()} — which is exactly what took
+     * bot-manager into a crash loop on the 2026-08-18 staging deploy. Do not remove it
+     * while the seam exists. Cf. {@code AlertMessageFormatter}, which has the same shape
+     * and the same annotation.
+     */
+    @Autowired
     public VipTalkClient(
             @Value("${viptalk.enabled:false}") boolean enabled,
             @Value("${viptalk.base-url:https://api.viptalk.org}") String baseUrl,
