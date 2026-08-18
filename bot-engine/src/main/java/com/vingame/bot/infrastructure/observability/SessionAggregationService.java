@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 
 /**
@@ -29,12 +30,21 @@ import java.util.function.Supplier;
  * {@code setMetrics}, and is null-tolerant on the bot side so unit tests without
  * Spring still run.
  * <p>
- * <b>Emit levels (resolved decision).</b> The StartGame session-entry line and the
- * EndGame results summary emit at <b>INFO</b> — they are per-session/per-round
- * lifecycle, one line per group per round, not per-bot detail. The 5s UpdateBet
- * running summary ({@link #flushOnce(long)}) emits at <b>DEBUG</b> (per-round detail,
- * one line per active session every 5s — 720 lines/hr/session would breach the INFO
- * low-tens/hr norm).
+ * <b>Emit levels (LOG_VOLUME_TIERING AD-8 — this REVERSES the previous decision).</b>
+ * <b>Every</b> line this service emits is now <b>DEBUG</b>: the StartGame session-entry
+ * line, the EndGame results summary, and the 5s UpdateBet running summary
+ * ({@link #flushOnce(long)}). The two per-round lines used to be INFO on the grounds
+ * that they are group-scoped rather than per-bot, which is true and turned out not to
+ * be the binding constraint: they were the only INFO class whose rate scales with
+ * <em>round rate</em>, ~13 lines/s (~0.7 GB/day) at 300 groups on 45s rounds, which is
+ * more than every other INFO class combined and would have dwarfed the tier-1 and
+ * tier-2 aggregates that Phase 1 introduced INFO-as-a-default for.
+ * <p>
+ * The signal is not lost. Staging runs at DEBUG, so it is default-visible there;
+ * prod covers it with {@code bot_bets_placed_total} / {@code bot_bet_amount_total} /
+ * {@code bot_winnings_total}; and {@link #drainRollup()} hands the per-group rounds and
+ * stake to the 5-minute tier-2 fleet rollup, which carries them at INFO. Phase 2's
+ * scoped per-group DEBUG is how a single group's per-round detail comes back on demand.
  * <p>
  * <b>Slots (Phase 3, AD-12).</b> Slot machines have no shared {@code sid} round and
  * no StartGame/EndGame, so instead of a session key they use a synthetic per-{@code
@@ -103,6 +113,36 @@ public class SessionAggregationService {
     }
 
     private final ConcurrentHashMap<SessionKey, SessionAccumulator> sessions = new ConcurrentHashMap<>();
+
+    /**
+     * Per-group rounds/stake counters since the last {@link #drainRollup()}, feeding the
+     * tier-2 fleet rollup (LOG_VOLUME_TIERING Phase 1 step 3). This is what keeps AD-8's
+     * INFO->DEBUG demotion of the per-round summaries from losing operational signal at
+     * the default level: instead of ~13 lines/s of per-round detail, the same activity
+     * surfaces as two numbers on a line that is already being emitted every 5 minutes.
+     * <p>
+     * Keyed by {@code botGroupId} only -- deliberately coarser than {@link SessionKey},
+     * because the rollup is per group, and coarser keys mean a smaller map. Bounded by the
+     * number of running groups and reclaimed by {@link #evictGroup(String)} and by the
+     * drain itself, which removes entries that drained to zero.
+     */
+    private final ConcurrentHashMap<String, RollupCounters> rollup = new ConcurrentHashMap<>();
+
+    /** Mutable per-group counters. {@link LongAdder} so the bet path stays lock-free. */
+    private static final class RollupCounters {
+        private final LongAdder rounds = new LongAdder();
+        private final LongAdder staked = new LongAdder();
+    }
+
+    /**
+     * One group's activity since the previous drain (LOG_VOLUME_TIERING Phase 1 step 3).
+     *
+     * @param rounds sessions that closed in the window -- exactly the number of per-round
+     *               summary lines AD-8 moved off INFO
+     * @param staked total staked across those rounds, as the bots sent it
+     */
+    public record GroupRollup(String botGroupId, long rounds, long staked) {
+    }
 
     /**
      * Single app-wide virtual-thread scheduler driving the 5s UpdateBet flush and
@@ -301,10 +341,12 @@ public class SessionAggregationService {
         SessionContext ctx = contextFor(key);
         String line = strategy.renderStartLine(candidate, ctx);
         String sample = rawSample != null ? rawSample.get() : null;
+        // DEBUG, not INFO (LOG_VOLUME_TIERING AD-8). See onSessionEnd for the reasoning;
+        // this is the entry half of the same per-round pair.
         if (sample != null) {
-            log.info("{} | sample: {}", line, sample);
+            log.debug("{} | sample: {}", line, sample);
         } else {
-            log.info(line);
+            log.debug(line);
         }
     }
 
@@ -411,19 +453,70 @@ public class SessionAggregationService {
         if (!acc.markEndLogged()) {
             return; // another bot already logged the summary for this session
         }
+        recordRollupRound(key.botGroupId(), acc.totalStaked());
         SessionContext ctx = contextFor(key);
         String line = acc.strategy().renderEndLine(acc, ctx);
         String sample = rawSample != null ? rawSample.get() : null;
+        // DEBUG, not INFO (LOG_VOLUME_TIERING AD-8). This pair was the ONLY INFO class
+        // whose rate scales with round rate -- ~13 lines/s (~0.7 GB/day) at 300 groups on
+        // 45 s rounds, dwarfing tiers 1 and 2 combined and defeating the point of an INFO
+        // default. Nothing is lost: it stays default-visible on staging (which runs at
+        // DEBUG), it is fully covered in prod by bot_bets_placed_total /
+        // bot_bet_amount_total / bot_winnings_total, and the rounds+staked counters
+        // drained just above ride the tier-2 rollup at INFO. It is one level constant
+        // away from being reverted.
         if (sample != null) {
-            log.info("{} | sample: {}", line, sample);
+            log.debug("{} | sample: {}", line, sample);
         } else {
-            log.info(line);
+            log.debug(line);
         }
         // Grace-then-evict (AD-8): recordEnd() marked the entry `ended` and touched
         // lastActivityNanos, so the next flush tick removes it once idle past
         // GRACE_NANOS. The entry lingers for the grace window so a late straggler
         // EndGame/flush touches (and thus re-graces) it rather than resurrecting an
         // orphan; the TTL sweep is the backstop if the grace clock keeps getting reset.
+    }
+
+    /**
+     * Credit one closed round to the group's rollup counters. Called once per round per
+     * group -- from the same CAS-guarded branch that logs the summary -- so {@code rounds}
+     * counts rounds, not bots.
+     */
+    private void recordRollupRound(String botGroupId, long staked) {
+        RollupCounters counters = rollup.computeIfAbsent(botGroupId, id -> new RollupCounters());
+        counters.rounds.increment();
+        counters.staked.add(staked);
+    }
+
+    /**
+     * Drain and reset the per-group rounds/stake counters (LOG_VOLUME_TIERING Phase 1
+     * step 3). Called by the tier-2 fleet rollup on its 5-minute cadence; each call
+     * returns the activity since the previous call.
+     * <p>
+     * Drain-and-reset rather than read-and-accumulate so the rollup line reports a
+     * <em>window</em>, which is the operationally useful figure (a monotonically rising
+     * total is what Prometheus is for) and so the caller cannot forget to reset. Entries
+     * that drain to zero are removed, so a stopped group's counter does not linger.
+     * <p>
+     * Groups with no activity in the window are absent from the result; the caller renders
+     * them as zero.
+     */
+    public java.util.List<GroupRollup> drainRollup() {
+        java.util.List<GroupRollup> drained = new java.util.ArrayList<>(rollup.size());
+        for (Map.Entry<String, RollupCounters> entry : rollup.entrySet()) {
+            RollupCounters counters = entry.getValue();
+            long rounds = counters.rounds.sumThenReset();
+            long staked = counters.staked.sumThenReset();
+            if (rounds == 0 && staked == 0) {
+                // Idle since the last drain -- reclaim. Value-guarded, and a concurrent
+                // increment that loses this race costs at most a few units on a
+                // deliberately downsampled operational line.
+                rollup.remove(entry.getKey(), counters);
+                continue;
+            }
+            drained.add(new GroupRollup(entry.getKey(), rounds, staked));
+        }
+        return drained;
     }
 
     /**
@@ -435,6 +528,7 @@ public class SessionAggregationService {
             return;
         }
         sessions.keySet().removeIf(k -> botGroupId.equals(k.botGroupId()));
+        rollup.remove(botGroupId);
     }
 
     /** Live session count — exposed for tests and (later) a heap gauge. */

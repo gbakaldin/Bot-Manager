@@ -123,15 +123,21 @@ class SessionAggregationServiceTest {
     }
 
     @Test
-    @DisplayName("StartGame session-entry line emits at INFO and names group + sid")
-    void startLine_isInfo_andCarriesIdentity() {
+    @DisplayName("StartGame session-entry line emits at DEBUG (AD-8) and names group + sid")
+    void startLine_isDebug_andCarriesIdentity() {
         setBotMdc();
         service.onSessionStart(SID, BettingSessionStrategy.INSTANCE, () -> "raw");
 
         List<LogEvent> starts = eventsContaining("entered session " + SID);
         assertThat(starts).hasSize(1);
         LogEvent e = starts.get(0);
-        assertThat(e.getLevel()).isEqualTo(Level.INFO);
+        // DEBUG, not INFO. LOG_VOLUME_TIERING AD-8 deliberately REVERSES the earlier
+        // decision that these two per-round lines belong at INFO: they were the only INFO
+        // class whose rate scales with round rate (~13 lines/s at 300 groups), which would
+        // have dwarfed the tier-1 and tier-2 aggregates that INFO now exists to carry. The
+        // level is asserted rather than ignored precisely because it is one constant away
+        // from being reverted by accident.
+        assertThat(e.getLevel()).isEqualTo(Level.DEBUG);
         String msg = e.getMessage().getFormattedMessage();
         assertThat(msg).contains(GAME_NAME).contains(GROUP_ID).contains("sample: raw");
     }
@@ -157,7 +163,8 @@ class SessionAggregationServiceTest {
         List<LogEvent> ends = eventsContaining("session " + SID + " ended");
         assertThat(ends).as("exactly one EndGame summary").hasSize(1);
         LogEvent e = ends.get(0);
-        assertThat(e.getLevel()).isEqualTo(Level.INFO);
+        // DEBUG per AD-8 — see startLine_isDebug_andCarriesIdentity.
+        assertThat(e.getLevel()).isEqualTo(Level.DEBUG);
         String msg = e.getMessage().getFormattedMessage();
         // total staked == 100 + 250 + 300 + 50 = 700 (outbound recordBet sum).
         assertThat(msg).contains("total staked: 700");
