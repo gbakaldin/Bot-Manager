@@ -2076,6 +2076,89 @@ class BotGroupBehaviorServiceTest {
                 runningGroups().remove("g-2");
             }
         }
+
+        /**
+         * <b>Known defect, pinned rather than fixed.</b> {@code Bot.expectedCurrentBalance}
+         * is constructed as {@code -100,000,000} and is only ever written from a server
+         * read inside {@code checkBalance()} / {@code deposit()}, both of which run from
+         * {@code onNewSession()} — i.e. from the <em>first round</em>, not from connecting.
+         * The real value is pinned in
+         * {@code bot-engine BalanceGaugeSemanticsTest#expectedBalanceIsANegativeSentinelBeforeTheFirstServerRead};
+         * this test shows what {@code listGroupBalances} does with it.
+         * <p>
+         * {@code isConnected()} is true well before the first round, so the sentinel is
+         * published as a negative ratio and {@code GroupBalanceLow} ({@code < 0.10}) fires
+         * once its 5 m {@code for:} window elapses. Harmless when rounds arrive every
+         * 30–60 s; it bites in the one case that matters — a game delivering no rounds at
+         * all — where it duplicates {@code GameNoRounds} into the product room with
+         * nonsense wording ("average balance at -2,000% of its deposit"). The plan's own
+         * Phase 4 verification expects every value in {@code (0, ~1.0]}.
+         * <p>
+         * Suggested fix for Dev: require a completed server read before counting a bot
+         * ({@code getLastFetchedBalance() >= 0}; its sentinel is {@code -1}), and skip the
+         * group when none qualify — the same shape as the existing {@code activeBots}
+         * guard, and for the same reason.
+         */
+        @Test
+        @DisplayName("DEFECT: a connected-but-not-yet-playing group publishes a negative ratio "
+                + "that trips GroupBalanceLow")
+        void listGroupBalances_publishesTheUninitialisedSentinel() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime fresh = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                // Exactly what a real Bot reports between "socket authenticated" and
+                // "first round received" — see BalanceGaugeSemanticsTest.
+                putBots(fresh, List.of(
+                        mockBotWithBalance(bauCua, true, -100_000_000L, false, 5_000_000L),
+                        mockBotWithBalance(bauCua, true, -100_000_000L, false, 5_000_000L)));
+                runningGroups().put("g-1", fresh);
+
+                var balance = service.listGroupBalances().iterator().next();
+
+                assertThat(balance.avgExpectedBalance())
+                        .as("the sentinel is averaged, not filtered out")
+                        .isEqualTo(-100_000_000L);
+                assertThat(balance.ratio())
+                        .as("group_balance_ratio for a group nobody has read a balance for")
+                        .isEqualTo(-20.0);
+                assertThat(balance.ratio() < 0.10)
+                        .as("GroupBalanceLow fires on it")
+                        .isTrue();
+            } finally {
+                fresh.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("a group is dropped from the gauge the moment its last bot disconnects, "
+                + "so a dying group never freezes at its last ratio")
+        void listGroupBalances_dropsTheGroupWhenTheLastBotDisconnects() {
+            // Complements InfoGaugeRefresherTest's row-removal test from the source side:
+            // the refresher can only drop a row if this method stops emitting it. A group
+            // whose bots have all dropped their sockets (a DEAD group, or one mid-restart)
+            // must vanish rather than keep publishing the balance it had when it died —
+            // GroupBalanceLow has no way to tell a stale row from a live one.
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime dying = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                Bot connected = mockBotWithBalance(bauCua, true, 100L, false, 10_000L);
+                Bot disconnected = mockBotWithBalance(bauCua, false, 100L, false, 10_000L);
+                putBots(dying, List.of(connected, disconnected));
+                runningGroups().put("g-1", dying);
+
+                assertThat(service.listGroupBalances()).hasSize(1);
+
+                when(connected.isConnected()).thenReturn(false);
+
+                assertThat(service.listGroupBalances())
+                        .as("no connected bot ⇒ no row ⇒ the series disappears on the next refresh")
+                        .isEmpty();
+            } finally {
+                dying.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
     }
 
     @Nested
