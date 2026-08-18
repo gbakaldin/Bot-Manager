@@ -232,6 +232,33 @@ mapper.registerSubtypes(messageTypes.getTypeRegistrations(offset, game.isMd5()))
 
 CRUD operations for game configurations.
 
+### AlertController - `/api/v1/alerts`
+
+Outbound alerting / announcements into **VipTalk** (Matrix-backed internal
+messenger). See `docs/plans/VIPTALK_ALERTING.md`.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/product/{product}` | Publish to one product's room (`116` / `P_116` / `TIP` all accepted) |
+| POST | `/broadcast` | Publish to every wired room — the maintenance-notice path |
+| POST | `/alertmanager` | Prometheus Alertmanager webhook receiver |
+| GET | `/rooms` | Which products have a room wired (room IDs masked) |
+
+- **Room IDs live on `ProductCode.vipTalkRoomId`**, not in config — one room per
+  product, `@JsonIgnore`d so they never leak through `/api/v1/brand`. A `null`
+  room means "not wired yet" and is skipped, never an error.
+- **Bot token is config only**: `viptalk.bot-token` / `VIPTALK_BOT_TOKEN`.
+  `viptalk.enabled=false` by default; enabled-with-blank-token self-disables with
+  an ERROR rather than failing startup.
+- **Alertmanager owns dedup/grouping/repeat**, not the app — that is why alerts
+  route through `prometheus/alerts.yml` → Alertmanager → this webhook rather than
+  from `AlertService` call sites. Webhook answers **502** on VipTalk failure so
+  Alertmanager retries, **200** when the channel is disabled.
+- Alert → room resolution: `product` label → `environmentId` label (resolved to a
+  product via Mongo) → `viptalk.ops-room-id` fallback.
+- `viptalk.instance-label` is stamped into every message: prod / loadtest /
+  staging run the same artifact into the same rooms.
+
 ## Core Classes
 
 ### Bot (`domain/bot/core/Bot.java`)
@@ -290,6 +317,44 @@ Every client that shows this 3-line pattern will be dropped by the server. Clien
 **Fix:** Set `connected = true` in the handshake completion handler on the IO thread itself, before sending AUTH. Do not rely on the bot-creation thread to set the flag — by the time it runs, the IO thread may have already attempted (and dropped) the AUTH message.
 
 **Secondary issue:** No reconnection logic exists for any bot. When `channelInactive` fires (server closes connection), nothing triggers a reconnect. The bot's scheduler threads keep trying to send messages in a tight loop until the health monitor intervenes. This affects both the 10 AUTH-failed bots and any bots that disconnect mid-session.
+
+### Bets Never Settle — Host IP Not Whitelisted With Back Office
+
+**Symptom:** Everything looks healthy. Bots authenticate, connect, subscribe, and
+send bets. Rounds enter and settle. But `confirmed staked` reads **0** on every
+EndGame, `total win` reads 0, and account balances never move — they stay at
+exactly the deposited amount no matter how many thousands of bets are placed.
+Funding works fine, which is what makes it so misleading.
+
+**Root cause:** The bot host's egress IP is not whitelisted with the back-office
+team **for that brand/product**. The gateway accepts the connection and the bet
+frames, but nothing is settled server-side.
+
+**This looks exactly like a wallet-partition bug and has now been misdiagnosed as
+one twice** — once on staging, once on P_116 prod (2026-08-12). The partition
+theory is superficially compelling because `ApiGatewayClient.deposit`'s javadoc
+does describe a real agency-vs-game-spendable split, and `verifytoken.aspx`
+reports a different partition than the game engine debits. Resist it. **Check
+whitelisting first — it is cheap to rule out and it has been the answer both
+times.**
+
+**How to confirm:** The tell is that the zero-effect is **fleet-wide and
+pre-existing**, not specific to the new group or game. Check a long-running
+incumbent group on the same brand: if it has staked many times its own balance
+over days and its balance is still pristine, no bot on that brand is settling.
+A single group looking wrong is a game/config problem; every group looking wrong
+is whitelisting.
+
+**Fix:** Ask the back-office team to whitelist the bot host IP for that brand.
+Note it is **per-brand** — a host whitelisted for one product is not whitelisted
+for another, so this recurs on every new brand brought up.
+
+**After the fix:** settlement is immediate — server balances start drifting off
+the deposited figure within a few rounds. Note that most bots will still *report*
+the original figure for a while, because `checkBalance()` only re-reads the
+server when local drift exceeds `BALANCE_SYNC_PERCENT_OF_DEPOSIT` (1% of the
+deposit amount). Look for a **spread** of distinct `lastFetchedBalance` values
+rather than expecting all of them to move at once.
 
 ### Server-Side Subscriber Pruning (Silent Zombie Bots)
 
