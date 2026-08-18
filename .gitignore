@@ -44,6 +44,10 @@ startup.sh
 ### Deploy-generated env file (HOST_UID/HOST_GID written by deploy.sh) ###
 .env
 
+### Host-local secrets merged into .env by deploy.sh (VipTalk bot token etc.) ###
+### Template is committed as secrets.env.example — the real file never is. ###
+secrets.env
+
 ### Deploy payloads / build artifacts (never commit — ~hundreds of MB) ###
 bot.tar
 infra-images.tar.gz
