@@ -1417,7 +1417,7 @@ public class BotGroupBehaviorService {
                 if (game == null) continue;
                 distinct.putIfAbsent(game.getId(),
                         new GameInfo(game.getId(), game.getName(), gameType(game),
-                                game.getEnvironmentId(), product(runtime, game)));
+                                environmentId(runtime, game), product(runtime, game)));
             }
         }
         return distinct.values();
@@ -1454,7 +1454,7 @@ public class BotGroupBehaviorService {
                 Game game = bot.getConfiguration().getGame();
                 if (game == null) continue;
                 GameStatusKey key = new GameStatusKey(game.getId(), game.getName(), bot.getStatus(),
-                        game.getEnvironmentId(), gameType(game), product(runtime, game));
+                        environmentId(runtime, game), gameType(game), product(runtime, game));
                 counts.merge(key, 1, Integer::sum);
             }
         }
@@ -1663,6 +1663,33 @@ public class BotGroupBehaviorService {
             return runtime.getProduct();
         }
         return game != null && game.getProductCode() != null ? game.getProductCode().getCode() : null;
+    }
+
+    /**
+     * The environment id for a game-scoped gauge row — the exact counterpart of
+     * {@link #product(BotGroupRuntime, Game)}, and for the same reason.
+     * <p>
+     * <b>The running group wins.</b> {@code bot_messages_total} and every other
+     * {@code bot_*} counter takes {@code environmentId} from the MDC, which is set from
+     * {@code BotConfiguration.environmentId} — i.e. {@code BotGroup.environmentId}. The
+     * game-scoped gauges used to take it from {@code Game.environmentId} instead, and
+     * {@code BotGroupService} deliberately tolerates a {@code Game} whose
+     * {@code environmentId} is null (it only rejects one that <em>disagrees</em>). For such
+     * a game the gauge row carried {@code environmentId=""} while the counter carried the
+     * real UUID, so {@code GameNoRounds}' {@code unless} could never pair its two operands
+     * and the rule fired permanently for a perfectly healthy game — a {@code critical},
+     * {@code audience: product} page into a product room, forever.
+     *
+     * @param runtime the running group the bot belongs to; may be {@code null}.
+     * @param game    the bot's game; may be {@code null}.
+     * @return the environment id, or {@code null} when neither knows one — the gauge row
+     *         builders render a null as {@code ""}.
+     */
+    private static String environmentId(BotGroupRuntime runtime, Game game) {
+        if (runtime != null && runtime.getEnvironmentId() != null && !runtime.getEnvironmentId().isEmpty()) {
+            return runtime.getEnvironmentId();
+        }
+        return game != null ? game.getEnvironmentId() : null;
     }
 
     /**

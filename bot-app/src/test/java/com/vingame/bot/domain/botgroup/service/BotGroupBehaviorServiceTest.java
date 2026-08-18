@@ -2286,6 +2286,49 @@ class BotGroupBehaviorServiceTest {
         }
 
         @Test
+        @DisplayName("one authority: a Game with no environmentId still labels every row with the group's environment")
+        void gameRowsFollowTheGroupEnvironmentWhenTheGameHasNone() {
+            // BotGroupService only rejects a Game whose environmentId DISAGREES with the
+            // group's — a null one is a supported state. Before this, such a game produced
+            // gauge rows carrying environmentId="" while bot_messages_total carried the real
+            // UUID, so GameNoRounds' `unless` matched nothing and the rule fired permanently,
+            // critical + audience:product, for a perfectly healthy game.
+            Game noEnv = game("game-uuid-8", "NoEnv", GameType.BETTING_MINI, null, ProductCode.P_116);
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                putBots(runtime, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, noEnv)));
+                runningGroups().put("g-1", runtime);
+
+                assertThat(service.countBotsByGameAndStatus().keySet())
+                        .allSatisfy(k -> assertThat(k.environmentId()).isEqualTo("env-1"));
+                assertThat(service.listRunningGameInfo())
+                        .allSatisfy(i -> assertThat(i.environmentId()).isEqualTo("env-1"));
+                assertThat(service.countBotsByEnvAndStatus().keySet())
+                        .allSatisfy(k -> assertThat(k.environmentId()).isEqualTo("env-1"));
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("a runtime with no environment (legacy/ad-hoc) falls back to the Game's, so rows still label")
+        void gameRowsFallBackToTheGameEnvironmentWhenTheRuntimeHasNone() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, null, null);
+            try {
+                putBots(runtime, List.of(mockBotWithGame(BotStatus.CONNECTION_AUTHENTICATED, bauCua)));
+                runningGroups().put("g-1", runtime);
+
+                assertThat(service.countBotsByGameAndStatus().keySet())
+                        .allSatisfy(k -> assertThat(k.environmentId()).isEqualTo("env-1"));
+            } finally {
+                runtime.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
         @DisplayName("a runtime with no product (legacy/ad-hoc) falls back to the Game's, so rows still label")
         void gameRowsFallBackToTheGameProductWhenTheRuntimeHasNone() {
             Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
