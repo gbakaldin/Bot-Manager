@@ -152,15 +152,27 @@ public class SlotMachineBot extends Bot {
 
         // numLines / allowedBetValues are NOT known yet — they arrive with the
         // 1300 response and are captured in onSubscribe (AD-12).
-        log.info("SlotMachineBot initialized: game={}, gid={}, strategy={}",
+        // LOG_VOLUME_TIERING tier 1 — see the twin in BettingMiniGameBot: DEBUG per
+        // bot, one INFO line per group from GroupLifecycleAggregator.
+        log.debug("SlotMachineBot initialized: game={}, gid={}, strategy={}",
                 game.getName(), gid, strategyId);
+        if (groupLifecycleAggregator != null) {
+            groupLifecycleAggregator.recordInitialized(
+                    "game=" + game.getName() + ", gid=" + gid + ", strategy=" + strategyId);
+        }
     }
 
     private void onNewSession() {
         long balance = checkBalance();
         BotBehaviorConfig behavior = configuration.getBehaviorConfig();
         if (behavior.isAutoDepositEnabled() && balance < getMinBalance()) {
-            log.info("Bot {}: balance {} below minimum {}, triggering deposit", getUserName(), balance, getMinBalance());
+            // LOG_VOLUME_TIERING tier 1: DEBUG per bot, one INFO line per group per
+            // deposit round from GroupLifecycleAggregator. One line per bot per
+            // top-up is a bot-count-scaled INFO class, which the tier model forbids.
+            log.debug("Bot {}: balance {} below minimum {}, triggering deposit", getUserName(), balance, getMinBalance());
+            if (groupLifecycleAggregator != null) {
+                groupLifecycleAggregator.recordAutoDeposit(getMinBalance() - balance);
+            }
             deposit();
         } else {
             log.debug("Bot {}: session balance {}", getUserName(), balance);

@@ -9,6 +9,7 @@ import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
@@ -56,6 +57,13 @@ public abstract class Bot {
     // singleton bean). Null-tolerant exactly like {@code metrics}: unit-test fixtures
     // that build a bot without Spring leave it null and every feed callsite guards on it.
     protected SessionAggregationService sessionAggregator;
+
+    // Group-level lifecycle aggregation (LOG_VOLUME_TIERING tier 1) — set via
+    // builder-style setter (BotFactory wires the singleton bean), mirroring
+    // {@code sessionAggregator}. Folds the per-bot "initialized" and "triggering
+    // deposit" lines into one line per group; null-tolerant, so a fixture without
+    // Spring simply gets the per-bot DEBUG lines and no aggregate.
+    protected GroupLifecycleAggregator groupLifecycleAggregator;
 
     // Group-scoped bet coordinator — set via builder-style setter by the runtime
     // startBot loop (one instance per running group; NOT app-scoped, so it is not
@@ -188,6 +196,17 @@ public abstract class Bot {
     }
 
     /**
+     * Wire the app-scoped {@link GroupLifecycleAggregator} (LOG_VOLUME_TIERING tier 1).
+     * Null-tolerant and fluent, mirroring {@link #setSessionAggregator}. Must be set
+     * before {@link #initialize()}, because {@code initializeSubclass()} is where the
+     * per-bot "initialized" feed happens.
+     */
+    public Bot setGroupLifecycleAggregator(GroupLifecycleAggregator groupLifecycleAggregator) {
+        this.groupLifecycleAggregator = groupLifecycleAggregator;
+        return this;
+    }
+
+    /**
      * Wire the group-scoped {@link BetCoordinator}. Null-tolerant and fluent,
      * mirroring {@link #setSessionAggregator}. A {@code null} argument (coordination
      * off) leaves the bot on today's byte-for-byte path — {@code applyCoordination}
@@ -294,7 +313,12 @@ public abstract class Bot {
     }
 
     public void restart() {
-        log.info("Bot {}: restart requested", userName);
+        // LOG_VOLUME_TIERING tier 1: DEBUG, not INFO. Periodic logout restarts one bot
+        // per group per cycle, so at 30k bots this was a standing ~8 INFO lines/s that
+        // said nothing a group-level line does not. The "why" is already at INFO at
+        // group level — the periodic-logout cycle line — and this is the per-bot detail
+        // under it.
+        log.debug("Bot {}: restart requested", userName);
         // Close the outgoing client unconditionally BEFORE its reference is overwritten
         // (BOT_LIVENESS_SEMANTICS AD-6). Previously guarded on isOpen(), so a restart on a
         // dead channel — the common case, since restart is what a dead channel provokes —

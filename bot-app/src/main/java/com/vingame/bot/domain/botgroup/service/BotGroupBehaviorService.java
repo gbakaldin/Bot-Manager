@@ -38,6 +38,7 @@ import com.vingame.bot.domain.game.sort.GameSortRow;
 import com.vingame.bot.domain.game.sort.GameSorter;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.environment.model.Environment;
@@ -89,6 +90,14 @@ public class BotGroupBehaviorService {
     private final BotFactory botFactory;
     private final BotMetrics botMetrics;
     private final SessionAggregationService sessionAggregationService;
+
+    /**
+     * Tier-1 log aggregation (LOG_VOLUME_TIERING). Used here for two things only:
+     * declaring a group's expected bot count before the fan-out, so its one
+     * "N/M bots initialized" line can name the denominator, and evicting the group's
+     * pending counters on teardown alongside {@code sessionAggregationService}.
+     */
+    private final GroupLifecycleAggregator groupLifecycleAggregator;
 
     /**
      * Max number of bots to create/authenticate simultaneously.
@@ -170,7 +179,8 @@ public class BotGroupBehaviorService {
             GameService gameService,
             BotFactory botFactory,
             BotMetrics botMetrics,
-            SessionAggregationService sessionAggregationService
+            SessionAggregationService sessionAggregationService,
+            GroupLifecycleAggregator groupLifecycleAggregator
     ) {
         this.botGroupService = botGroupService;
         this.environmentService = environmentService;
@@ -178,6 +188,7 @@ public class BotGroupBehaviorService {
         this.botFactory = botFactory;
         this.botMetrics = botMetrics;
         this.sessionAggregationService = sessionAggregationService;
+        this.groupLifecycleAggregator = groupLifecycleAggregator;
 
         // Use virtual threads for scheduled tasks
         this.scheduler = Executors.newScheduledThreadPool(4, Thread.ofVirtual().factory());
@@ -399,6 +410,13 @@ public class BotGroupBehaviorService {
             log.info("Creating {} bots for group {} with parallel execution (parallelism={})",
                     group.getBotCount(), group.getName(), botCreationParallelism);
 
+            // Declare the target count for tier 1 (LOG_VOLUME_TIERING). This is the only
+            // place that knows both the target and the group's display name, so without
+            // it the aggregated line can only report how many bots came up, not how many
+            // were meant to — and "47" reads like success where "47/50" reads like three
+            // auth failures.
+            groupLifecycleAggregator.expectInitialized(id, group.getName(), group.getBotCount());
+
             // Create bots in parallel with controlled concurrency
             List<Bot> bots = createBotsInParallel(group, environment, game, strategyAssignment);
 
@@ -508,6 +526,7 @@ public class BotGroupBehaviorService {
                             // Drop any session entries a partially-started group registered
                             // before the failure, so a failed start leaks nothing (AD-8).
                             sessionAggregationService.evictGroup(failedRuntime.getGroupId());
+                            groupLifecycleAggregator.evictGroup(failedRuntime.getGroupId());
                         } finally {
                             BotMdc.clear();
                         }
@@ -852,6 +871,7 @@ public class BotGroupBehaviorService {
         // Drop this group's aggregated-session entries immediately so nothing dangles
         // (AD-8 group-stop hook). TTL sweep is the backstop; this reclaims on stop.
         sessionAggregationService.evictGroup(id);
+        groupLifecycleAggregator.evictGroup(id);
 
         // Remove from runtime map
         runningGroups.remove(id);
@@ -915,6 +935,7 @@ public class BotGroupBehaviorService {
 
         // Drop aggregated-session entries and stop managing the group.
         sessionAggregationService.evictGroup(id);
+        groupLifecycleAggregator.evictGroup(id);
         runningGroups.remove(id);
 
         log.info("Bot group {} stopped and logged out (cascade delete)", id);

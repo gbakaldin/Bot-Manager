@@ -12,6 +12,7 @@ import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.infrastructure.observability.BotMdcTagsMeterFilter;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import io.micrometer.core.instrument.Counter;
@@ -91,6 +92,9 @@ class BotGroupBehaviorServiceRestartTest {
 
     @Mock
     private SessionAggregationService sessionAggregationService;
+
+    @Mock
+    private GroupLifecycleAggregator groupLifecycleAggregator;
 
     @InjectMocks
     private BotGroupBehaviorService service;
@@ -402,7 +406,7 @@ class BotGroupBehaviorServiceRestartTest {
 
         BotGroupBehaviorService realMetricsService = new BotGroupBehaviorService(
                 botGroupService, environmentService, gameService, botFactory, realMetrics,
-                sessionAggregationService);
+                sessionAggregationService, groupLifecycleAggregator);
         ReflectionTestUtils.setField(realMetricsService, "deadBotGroupThreshold", 0.80);
         ReflectionTestUtils.setField(realMetricsService, "botCreationParallelism", 10);
         ReflectionTestUtils.setField(realMetricsService, "watchdogTimeoutSeconds", 180L);
@@ -602,7 +606,7 @@ class BotGroupBehaviorServiceRestartTest {
 
         BotGroupBehaviorService svc = new BotGroupBehaviorService(
                 botGroupService, environmentService, gameService, botFactory, realMetrics,
-                sessionAggregationService);
+                sessionAggregationService, groupLifecycleAggregator);
         ReflectionTestUtils.setField(svc, "deadBotGroupThreshold", 0.80);
         ReflectionTestUtils.setField(svc, "botCreationParallelism", 10);
         ReflectionTestUtils.setField(svc, "watchdogTimeoutSeconds", 180L);

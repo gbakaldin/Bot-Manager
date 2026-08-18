@@ -71,7 +71,10 @@ class BotFactoryTaiXiuWiringTest {
     }
 
     private BotFactory factory() {
-        return new BotFactory(clientRegistry, eventLoopGroup, botMetrics, new com.vingame.bot.infrastructure.observability.SessionAggregationService(), strategyFactory, slotStrategyFactory);
+        return new BotFactory(clientRegistry, eventLoopGroup, botMetrics,
+                new com.vingame.bot.infrastructure.observability.SessionAggregationService(),
+                new com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator(),
+                strategyFactory, slotStrategyFactory);
     }
 
     private static EnvironmentClients envClientsWith(Environment env,

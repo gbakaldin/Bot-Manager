@@ -189,9 +189,18 @@ public class BettingMiniGameBot extends Bot {
                 Thread.ofVirtual().name("watchdog-" + getUserName()).factory()
         );
 
-        log.info("BettingMiniGameBot initialized: game={}, offset={}, options={}, md5={}, watchdog={}s, strategy={}",
+        // LOG_VOLUME_TIERING tier 1: DEBUG per bot, INFO once per group. This line's
+        // rate is a direct function of bot count (30k bots => 30k lines at group
+        // start), which INFO may no longer carry; the group-level count, game and
+        // strategy come out of GroupLifecycleAggregator as a single line instead.
+        log.debug("BettingMiniGameBot initialized: game={}, offset={}, options={}, md5={}, watchdog={}s, strategy={}",
                 game.getName(), offset, game.getEffectiveOptionAffinities().size(), game.isMd5(),
                 configuration.getWatchdogTimeoutSeconds(), effectiveId);
+        if (groupLifecycleAggregator != null) {
+            groupLifecycleAggregator.recordInitialized(
+                    "game=" + game.getName() + ", type=" + game.getGameType()
+                            + ", strategy=" + effectiveId);
+        }
     }
 
     // ----------------------------------------------------------------------
@@ -329,7 +338,13 @@ public class BettingMiniGameBot extends Bot {
         long balance = checkBalance();
         BotBehaviorConfig behavior = configuration.getBehaviorConfig();
         if (behavior.isAutoDepositEnabled() && balance < getMinBalance()) {
-            log.info("Bot {}: balance {} below minimum {}, triggering deposit", getUserName(), balance, getMinBalance());
+            // LOG_VOLUME_TIERING tier 1: DEBUG per bot, one INFO line per group per
+            // deposit round from GroupLifecycleAggregator. One line per bot per
+            // top-up is a bot-count-scaled INFO class, which the tier model forbids.
+            log.debug("Bot {}: balance {} below minimum {}, triggering deposit", getUserName(), balance, getMinBalance());
+            if (groupLifecycleAggregator != null) {
+                groupLifecycleAggregator.recordAutoDeposit(getMinBalance() - balance);
+            }
             deposit();
         } else {
             log.debug("Bot {}: session balance {}", getUserName(), balance);

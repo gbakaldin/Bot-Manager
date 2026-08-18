@@ -2,6 +2,7 @@ package com.vingame.bot.domain.bot.service;
 
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
@@ -66,6 +67,7 @@ public class BotFactory {
     private final EventLoopGroup eventLoopGroup;
     private final BotMetrics botMetrics;
     private final SessionAggregationService sessionAggregator;
+    private final GroupLifecycleAggregator groupLifecycleAggregator;
     private final BettingStrategyFactory strategyFactory;
     private final SlotStrategyFactory slotStrategyFactory;
 
@@ -74,12 +76,14 @@ public class BotFactory {
                       EventLoopGroup eventLoopGroup,
                       BotMetrics botMetrics,
                       SessionAggregationService sessionAggregator,
+                      GroupLifecycleAggregator groupLifecycleAggregator,
                       BettingStrategyFactory strategyFactory,
                       SlotStrategyFactory slotStrategyFactory) {
         this.clientRegistry = clientRegistry;
         this.eventLoopGroup = eventLoopGroup;
         this.botMetrics = botMetrics;
         this.sessionAggregator = sessionAggregator;
+        this.groupLifecycleAggregator = groupLifecycleAggregator;
         this.strategyFactory = strategyFactory;
         this.slotStrategyFactory = slotStrategyFactory;
     }
@@ -187,9 +191,17 @@ public class BotFactory {
             .setConfiguration(configuration)
             .setMetrics(botMetrics)
             .setSessionAggregator(sessionAggregator)
+            // Must be wired BEFORE initialize(): initializeSubclass() is where the
+            // per-bot "initialized" feed happens (LOG_VOLUME_TIERING tier 1).
+            .setGroupLifecycleAggregator(groupLifecycleAggregator)
             .initialize();
 
-        log.info("Successfully created bot {} for environment {}",
+        // LOG_VOLUME_TIERING tier 1: DEBUG, not INFO. Not one of the five sites the
+        // plan enumerates, but the same line class — one per bot at group start, so
+        // 30k lines on a 30k-bot fleet start. Leaving it at INFO would have defeated
+        // the demotion of the "initialized" twins three lines above it; the group-level
+        // replacement is GroupLifecycleAggregator's "N/M bots initialized" line.
+        log.debug("Successfully created bot {} for environment {}",
             configuration.getCredentials().getUsername(), environmentId);
 
         return bot;
