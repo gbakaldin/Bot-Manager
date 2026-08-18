@@ -10,6 +10,7 @@ import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
+import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.websocketparser.VingameWebSocketClient;
@@ -330,9 +331,10 @@ public abstract class Bot {
         // wallet partition). Replaces the legacy GameMsClient agency-transfer path,
         // which credited the agency partition the game engine never debits — the
         // P_097/BOM "balance visible but every bet rejected" symptom.
-        boolean success = apiGatewayClient.deposit(userName, 1_000_000_000L);
+        long depositAmount = resolveDepositAmount();
+        boolean success = apiGatewayClient.deposit(userName, depositAmount);
         if (success) {
-            log.debug("Bot {}: Deposit successful, fetching new balance...", userName);
+            log.debug("Bot {}: Deposit of {} successful, fetching new balance...", userName, depositAmount);
             if (metrics != null) metrics.incBotAutoDeposit(true);
             recordFetchedBalance(apiGatewayClient.getBalance(
                 getClient().getAuthToken(),
@@ -348,12 +350,13 @@ public abstract class Bot {
     }
 
     protected long checkBalance() {
-        log.debug("checkBalance() ENTRY. lastFetched: {}, expected: {}, delta: {}",
+        long syncThreshold = balanceSyncThreshold();
+        log.debug("checkBalance() ENTRY. lastFetched: {}, expected: {}, delta: {}, threshold: {}",
                  lastFetchedBalance, expectedCurrentBalance.get(),
-                 Math.abs(lastFetchedBalance - expectedCurrentBalance.get()));
+                 Math.abs(lastFetchedBalance - expectedCurrentBalance.get()), syncThreshold);
 
-        if (Math.abs(lastFetchedBalance - expectedCurrentBalance.get()) > 1_000_000L) {
-            log.debug("checkBalance() fetching from server (delta > 1M)");
+        if (Math.abs(lastFetchedBalance - expectedCurrentBalance.get()) > syncThreshold) {
+            log.debug("checkBalance() fetching from server (delta > {})", syncThreshold);
             recordFetchedBalance(apiGatewayClient.getBalance(
                 getClient().getAuthToken(),
                 credentials.getFingerprint(),
@@ -391,8 +394,80 @@ public abstract class Bot {
         lastFetchedBalance = newBalance;
     }
 
+    /**
+     * Amount credited by a single auto-deposit top-up when the group's
+     * {@code BotBehaviorConfig} carries no explicit {@code depositAmount}
+     * (i.e. it is {@code 0}). This is the value {@link #deposit()} used
+     * unconditionally before {@code bot.deposit.amount} made it configurable, so
+     * any caller that builds a config without the field keeps the prior behavior.
+     */
+    public static final long DEFAULT_DEPOSIT_AMOUNT = 1_000_000_000L;
+
+    /**
+     * Resolve the per-top-up deposit amount for this bot: the configured
+     * {@code depositAmount} when positive, else {@link #DEFAULT_DEPOSIT_AMOUNT}.
+     * Null-safe on {@code configuration} for fixtures that call {@code deposit()}
+     * without one.
+     */
+    private long resolveDepositAmount() {
+        BotBehaviorConfig behavior = configuration != null
+                ? configuration.getBehaviorConfig()
+                : null;
+        long configured = behavior != null ? behavior.getDepositAmount() : 0L;
+        return configured > 0 ? configured : DEFAULT_DEPOSIT_AMOUNT;
+    }
+
+    /**
+     * Auto-deposit trigger threshold as a percentage of the per-top-up deposit
+     * amount. A bot tops up once its balance falls below this fraction of what a
+     * single deposit credits.
+     */
+    public static final int MIN_BALANCE_PERCENT_OF_DEPOSIT = 10;
+
+    /**
+     * Local-vs-server balance drift, as a percentage of the deposit amount, above
+     * which {@link #checkBalance()} re-reads the authoritative server balance
+     * instead of trusting its local running figure.
+     */
+    public static final int BALANCE_SYNC_PERCENT_OF_DEPOSIT = 1;
+
+    /**
+     * Drift threshold at which {@link #checkBalance()} re-syncs from the server,
+     * derived from the configured deposit amount rather than fixed.
+     * <p>
+     * This was a hardcoded {@code 1_000_000L}, which only suited one currency
+     * scale and, on a small deposit, meant a bot could stake a large fraction of
+     * its balance without ever re-reading the server. That is precisely how the
+     * 2026-08-10 prod TIP freeze stayed invisible: bots funded with 5,000,000
+     * staked up to 358,000 each — 7% of balance — and never crossed the 1,000,000
+     * drift, so the app never noticed the server balance had not moved at all.
+     * At 1% of a 5,000,000 deposit the re-read now happens every 50,000 of drift.
+     * <p>
+     * Floored at 1 so a very small configured deposit cannot produce a zero
+     * threshold, which would re-fetch on every single call — each of which pays
+     * the {@code getBalance} round trip.
+     */
+    private long balanceSyncThreshold() {
+        return Math.max(1L, resolveDepositAmount() * BALANCE_SYNC_PERCENT_OF_DEPOSIT / 100);
+    }
+
+    /**
+     * Balance below which auto-deposit fires, derived from the configured
+     * {@link #resolveDepositAmount() deposit amount} rather than being a fixed
+     * figure.
+     * <p>
+     * This was previously a hardcoded {@code 5_000_000L}, which only made sense
+     * for one currency scale and — once {@code bot.deposit.amount} became
+     * configurable — could equal the deposit amount itself. When threshold and
+     * top-up are equal, the first deposit lands the bot exactly <i>at</i> the
+     * threshold rather than clearing it, so the next bet immediately re-triggers
+     * a second full top-up. Deriving the threshold keeps it an order of magnitude
+     * below the credit, so one deposit always buys real runway.
+     * <p>
+     * Integer arithmetic throughout — no floating point on money.
+     */
     protected long getMinBalance() {
-        return 5_000_000L;
+        return resolveDepositAmount() * MIN_BALANCE_PERCENT_OF_DEPOSIT / 100;
     }
 
     public long getExpectedBalance() {

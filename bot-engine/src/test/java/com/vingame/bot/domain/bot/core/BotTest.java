@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.core;
 
+import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.game.model.Game;
@@ -160,8 +161,66 @@ class BotTest {
         }
 
         @Test
-        @DisplayName("Refetches when delta exceeds 1M and updates both cached and expected balances")
+        @DisplayName("Sync threshold is 1% of the configured deposit amount")
+        void syncThresholdDerivesFromDepositAmount() throws Exception {
+            bot.setConfiguration(configurationWithDepositAmount(5_000_000L));
+            // 1% of 5,000,000 = 50,000. A 60,000 drift must re-read the server.
+            setLong(bot, "lastFetchedBalance", 5_000_000L);
+            ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(4_940_000L);
+
+            bot.client = wsClient;
+            when(wsClient.getAuthToken()).thenReturn("tok");
+            when(apiGatewayClient.getBalance("tok", "fp-1", "botuser1")).thenReturn(4_900_000L);
+
+            bot.checkBalanceExposed();
+
+            verify(apiGatewayClient).getBalance("tok", "fp-1", "botuser1");
+        }
+
+        @Test
+        @DisplayName("The prod-TIP freeze would now be caught: 358k drift on a 5M deposit re-reads")
+        void driftThatPreviouslyStayedInvisibleNowSyncs() throws Exception {
+            // Regression guard for 2026-08-10. Bots funded with 5,000,000 staked up to
+            // 358,000 each while the server balance never moved, but the old hardcoded
+            // 1,000,000 threshold meant checkBalance() never re-read and the freeze went
+            // unnoticed. At 1% of deposit the threshold is 50,000, so this re-reads.
+            bot.setConfiguration(configurationWithDepositAmount(5_000_000L));
+            setLong(bot, "lastFetchedBalance", 5_000_000L);
+            ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(5_000_000L - 358_000L);
+
+            bot.client = wsClient;
+            when(wsClient.getAuthToken()).thenReturn("tok");
+            when(apiGatewayClient.getBalance("tok", "fp-1", "botuser1")).thenReturn(5_000_000L);
+
+            bot.checkBalanceExposed();
+
+            // Server says nothing was debited — the local model is corrected back to 5M,
+            // which is what makes the freeze observable rather than silent.
+            verify(apiGatewayClient).getBalance("tok", "fp-1", "botuser1");
+            assertThat(bot.getExpectedBalance()).isEqualTo(5_000_000L);
+        }
+
+        @Test
+        @DisplayName("Threshold floors at 1 so a tiny deposit cannot force a fetch every call")
+        void syncThresholdFloorsAtOne() throws Exception {
+            bot.setConfiguration(configurationWithDepositAmount(50L)); // 1% == 0 before flooring
+            setLong(bot, "lastFetchedBalance", 100L);
+            ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(100L); // delta 0
+
+            bot.checkBalanceExposed();
+
+            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
+        }
+
+        @Test
+        @DisplayName("Refetches when delta exceeds the threshold and updates both cached and expected balances")
         void shouldRefetchWhenDeltaLarge() throws Exception {
+            // Pin an explicit deposit amount so the threshold is deterministic: 1% of
+            // 5,000,000 = 50,000. Previously this test relied on the hardcoded 1,000,000
+            // and the fixture's absent behaviorConfig; with the threshold now derived,
+            // the fallback deposit (1,000,000,000) would put it at 10,000,000 and a 3M
+            // delta would correctly NOT re-fetch.
+            bot.setConfiguration(configurationWithDepositAmount(5_000_000L));
             setLong(bot, "lastFetchedBalance", 1_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(-2_000_000L); // delta = 3M
 
@@ -239,6 +298,105 @@ class BotTest {
             assertThat(bot.getExpectedBalance()).isEqualTo(1_000_000L);
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
         }
+
+        @Test
+        @DisplayName("Deposits the configured depositAmount when the behavior config sets one")
+        void shouldUseConfiguredDepositAmount() throws Exception {
+            bot.setConfiguration(configurationWithDepositAmount(5_000_000L));
+            setLong(bot, "lastFetchedBalance", 1_000_000L);
+            ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
+
+            when(apiGatewayClient.deposit("botuser1", 5_000_000L)).thenReturn(false);
+
+            bot.deposit();
+
+            verify(apiGatewayClient).deposit("botuser1", 5_000_000L);
+            verify(apiGatewayClient, never()).deposit("botuser1", Bot.DEFAULT_DEPOSIT_AMOUNT);
+        }
+
+        @Test
+        @DisplayName("getMinBalance is 10% of the configured deposit amount")
+        void minBalanceDerivesFromDepositAmount() {
+            bot.setConfiguration(configurationWithDepositAmount(5_000_000L));
+
+            assertThat(bot.getMinBalance()).isEqualTo(500_000L);
+        }
+
+        @Test
+        @DisplayName("getMinBalance tracks the fallback amount when depositAmount is unset")
+        void minBalanceDerivesFromFallbackAmount() {
+            bot.setConfiguration(configurationWithDepositAmount(0L));
+
+            assertThat(bot.getMinBalance())
+                    .isEqualTo(Bot.DEFAULT_DEPOSIT_AMOUNT * Bot.MIN_BALANCE_PERCENT_OF_DEPOSIT / 100);
+        }
+
+        @Test
+        @DisplayName("A single deposit clears the threshold outright — no immediate re-trigger")
+        void oneDepositClearsTheThreshold() {
+            // Regression guard for the prod behavior observed on 2026-08-06: when the
+            // threshold equalled the deposit amount, topping up from 0 landed the bot
+            // exactly AT the threshold, so the first bet re-tripped it and a second
+            // full top-up fired ~2 minutes later. The post-deposit balance must now sit
+            // strictly above the threshold by a wide margin.
+            bot.setConfiguration(configurationWithDepositAmount(5_000_000L));
+
+            long balanceAfterOneDepositFromZero = 5_000_000L;
+
+            assertThat(balanceAfterOneDepositFromZero).isGreaterThan(bot.getMinBalance());
+            assertThat(bot.getMinBalance()).isLessThan(5_000_000L);
+        }
+
+        @Test
+        @DisplayName("Falls back to DEFAULT_DEPOSIT_AMOUNT when depositAmount is unset (0)")
+        void shouldFallBackWhenDepositAmountUnset() throws Exception {
+            bot.setConfiguration(configurationWithDepositAmount(0L));
+            setLong(bot, "lastFetchedBalance", 1_000_000L);
+            ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
+
+            when(apiGatewayClient.deposit("botuser1", Bot.DEFAULT_DEPOSIT_AMOUNT)).thenReturn(false);
+
+            bot.deposit();
+
+            verify(apiGatewayClient).deposit("botuser1", Bot.DEFAULT_DEPOSIT_AMOUNT);
+        }
+    }
+
+    /**
+     * Rebuild the standard fixture configuration with an explicit
+     * {@code depositAmount} on the behavior config. The base {@link #setUp()}
+     * config carries no behavior config at all, which is itself the
+     * "unset ⇒ fall back" case the other deposit tests already exercise.
+     */
+    private BotConfiguration configurationWithDepositAmount(long depositAmount) {
+        BotCredentials credentials = BotCredentials.builder()
+                .username("botuser1")
+                .password("pw")
+                .fingerprint("fp-1")
+                .build();
+
+        Game game = Game.builder()
+                .id("g1")
+                .name("BauCua")
+                .gameType(GameType.BETTING_MINI)
+                .pluginName("BauCua")
+                .offset(2000)
+                .numberOfOptions(6)
+                .build();
+
+        return BotConfiguration.builder()
+                .credentials(credentials)
+                .environmentId("env-1")
+                .botGroupId("group-1")
+                .botIndex(1)
+                .game(game)
+                .zoneName("MiniGame3")
+                .timeoutMillis(60_000L)
+                .watchdogTimeoutSeconds(120L)
+                .behaviorConfig(BotBehaviorConfig.builder()
+                        .depositAmount(depositAmount)
+                        .build())
+                .build();
     }
 
     /* ----- money-drain instrumentation (METRICS_IMPROVEMENT Phase 1) ----- */

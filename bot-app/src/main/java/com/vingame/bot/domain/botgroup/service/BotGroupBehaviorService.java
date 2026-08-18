@@ -131,6 +131,15 @@ public class BotGroupBehaviorService {
     private long watchdogTimeoutSeconds;
 
     /**
+     * Amount credited by a single auto-deposit top-up, per environment. Defaults to
+     * the value {@code Bot.deposit()} previously hardcoded, so an instance with no
+     * explicit setting behaves exactly as before. Global rather than per-group: the
+     * sensible value tracks the product's currency scale, not the fleet.
+     */
+    @Value("${bot.deposit.amount:1000000000}")
+    private long depositAmount;
+
+    /**
      * Scheduler for timed operations (scheduled restarts, etc.)
      * Uses virtual threads for efficiency.
      */
@@ -684,7 +693,8 @@ public class BotGroupBehaviorService {
                 .minBetsPerRound(group.getMinBetsPerRound())
                 .maxBetsPerRound(group.getMaxBetsPerRound())
                 .chatEnabled(group.isChatEnabled())
-                .autoDepositEnabled(group.isAutoDepositEnabled());
+                .autoDepositEnabled(group.isAutoDepositEnabled())
+                .depositAmount(depositAmount);
         // BET_COORDINATION (AD-7): under coordination the coordinator is the sole
         // throttle, so per-bot skip is redundant — pin betSkipPercentage to 0 so
         // bots propose every eligible tick (maximal headroom for trim-only steering).

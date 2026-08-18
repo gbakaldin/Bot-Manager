@@ -51,6 +51,19 @@ public class BotBehaviorConfig {
     boolean autoDepositEnabled;
 
     /**
+     * Amount credited by a single auto-deposit top-up, sourced from the
+     * {@code bot.deposit.amount} property in {@code createSingleBot}.
+     * <p>
+     * {@code 0} means "unset" and falls back to
+     * {@link com.vingame.bot.domain.bot.core.Bot#DEFAULT_DEPOSIT_AMOUNT}, which is
+     * the value this was hardcoded to before it became configurable. The fallback
+     * keeps every {@code BotBehaviorConfig} built without this field — test
+     * fixtures and any non-{@code createSingleBot} caller — on exactly the prior
+     * behavior.
+     */
+    long depositAmount;
+
+    /**
      * Percentage chance (0-100) to skip a bet opportunity.
      * Higher values mean fewer bets. Default should be around 60.
      */
