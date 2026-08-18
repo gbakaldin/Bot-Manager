@@ -19,7 +19,8 @@ The main entry point is `com.vingame.bot.Starter` (Spring Boot application).
 ## Technology Stack
 
 - **Java 21** with Virtual Threads (Project Loom)
-- **Spring Boot 4.0.0** with Spring Web
+- **Spring Boot 3.4.0** with Spring Web (the parent `pom.xml` pins 3.4.0; this file
+  said 4.0.0 for a long time and was simply wrong)
 - **Maven** for dependency management
 - **MongoDB** via Spring Data MongoDB
 - **Lombok** for boilerplate reduction
@@ -31,84 +32,105 @@ The main entry point is `com.vingame.bot.Starter` (Spring Boot application).
 
 ## Logging Guidelines
 
-Normative levels for `com.vingame.bot.*`. Production currently runs at DEBUG; the
-audit reclassified per-bot/per-message detail so the threshold can be safely
-raised to INFO without losing lifecycle context. MDC (`botGroupId`, `botId`,
-`gameType`) is on every per-bot line — operators drill in via
-`POST /actuator/loggers/com.vingame.bot {"configuredLevel":"DEBUG"}`.
+Normative levels for `com.vingame.bot.*`, restructured by
+`docs/plans/LOG_VOLUME_TIERING.md` (Phase 1) around a **tier model**. The target is
+~10 prod environments x 2-3k bots each, where the previous shape projected to
+**46-124 GB/day** against a 10 GB accumulated-file cap on a box that has already
+died once on ENOSPC (2026-06-30, taking Mongo with it).
 
-- **INFO** — Group-level lifecycle visible at default level on a healthy
-  system. Application startup, bot group create / start / stop / restart,
-  group state transitions, scheduled-restart firing, periodic-logout
-  scheduler started/stopped, periodic-logout cycle starting (the "why" for
-  the per-bot restart that follows), and the per-session aggregated
-  StartGame session-entry / EndGame results summaries emitted by
-  `SessionAggregationService` (one line per group per round each — these
-  *replace* the per-frame WS flood, they do not add to it). Baseline
-  group-lifecycle INFO is still low tens of lines per hour; the per-round
-  session summaries are additional and scale with round rate (~2 INFO lines
-  per round per active betting/Tai Xiu group), which is the deliberate
-  trade for killing the per-frame flood. (The 5 s UpdateBet running summary
-  is DEBUG, not INFO.) Do **not** use for per-bot status transitions,
-  per-HTTP-call envelopes, balance checks, or per-message dispatch.
-- **DEBUG** — Per-bot / per-session aggregate detail. Per-bot status
-  transitions, per-bot deposit success/failure, HTTP request/response bodies
-  (login, register, verifytoken, updateFullname, deposit success path),
-  reconnect attempt success, balance fetch, per-bot periodic-logout
-  completion, and the 5 s per-session UpdateBet running summary (plus the
-  slot per-`(group,gameId)` window summary) emitted by
-  `SessionAggregationService` — one aggregated line every 5 s per active
-  session, *not* per frame. As of STRATEGY_DECISION_AGGREGATION that 5 s
-  UpdateBet summary also carries the **strategy-decision distribution** —
-  betting option histogram (`options: [0]x12 [5]x20`) and amount min/avg/max
-  for betting/Tai Xiu, and the bet-size histogram (`bets: [100]x30`) for the
-  slot window — making it the default-visible betting-behavior view. Raw
-  per-frame WS dispatch is **not** here, and **neither are the per-bot,
-  per-bet strategy-decision lines** (the "sending bet / parked decision /
-  decide: bet / chooseBet / sending spin" family): STRATEGY_DECISION_AGGREGATION
-  folded that signal into the 5 s aggregate above and demoted the per-bot
-  drill-in to TRACE (see below), further superseding the interim per-bot
-  strategy DEBUG levels AGGREGATED_SESSION_LOGGING had left in place. Per-bot
-  **balance fetch and status transitions stay DEBUG** — they are not a
-  strategy decision and are not covered by the aggregate. So at the production
-  DEBUG default only these aggregates, balance/status/deposit lines, and the
-  INFO session summaries surface — the per-frame flood and the per-bet
-  decision flood are both gone.
-- **WARN** — Recoverable anomalies that warrant investigation if they
-  persist. Bot WS disconnect (triggers retry), watchdog expiry, partial
-  registration result, deposit failure for a single bot, deposit non-200
-  HTTP response (status + body), periodic logout interrupted. Do **not**
-  use for expected outcomes — those stay at INFO via the exception handler.
-- **ERROR** — Failures requiring operator attention. Bot group marked DEAD,
-  re-authentication failed (bot lost), 5xx upstream, failed to load display
-  names, executor interrupted during shutdown. Page-on-ERROR is reasonable;
-  keep volume low.
-- **TRACE** — Wire-level / packet-level detail **plus per-bot strategy-decision
-  drill-in**. Carries **all** raw WS frame dumps from `OutputPrinter`: the
-  raw/prettified siblings (`defaultOutputPrinter` / `prettifiedOutputPrinter`,
-  demoted by RESILIENCE_HARDENING P0a) *and* the MDC-tagged per-bot
-  `User <name>: ...` printer (`debugOutputPrinter`, the one actually wired into
-  `BettingMiniGameBot`/`SlotMachineBot`), which AGGREGATED_SESSION_LOGGING
-  Phase 4 moved here from DEBUG — finalizing P0a, which had left this active
-  printer at DEBUG where it kept flooding at the production default. As of
-  STRATEGY_DECISION_AGGREGATION Phase 3 it also carries the per-bot, per-bet
-  **strategy-decision** lines demoted from DEBUG (`BettingMiniGameBot` "sending
-  bet" / "strategy parked decision" / "strategy skipped tick",
-  `SlotMachineBot` "parked spin" / "sending spin",
-  `RandomBehaviorStrategy`/`MartingaleStrategySupport` "decide: bet" /
-  skip-gate / "onRoundEnd" / "cap hit", and `FixedBetStrategy`/`RandomBetStrategy`
-  "chooseBet") — the group-level view of those decisions now rides the 5 s
-  aggregate at DEBUG (option/bet histogram + amount summary), while the per-bot
-  detail is TRACE-only. No per-frame WS printer logs and no per-bet decision
-  logs above TRACE now; both drill-ins are opt-in via
-  `POST /actuator/loggers/com.vingame.bot {"configuredLevel":"TRACE"}`, and the
-  default-visible per-session view comes from the `SessionAggregationService`
-  INFO/DEBUG summaries. Keep it to genuine packet-level / per-bet-decision
-  detail; do not adopt as a verbose-DEBUG junk drawer.
+**The rule that decides every level question:**
 
-When demoting INFO→DEBUG, keep the MDC tag on the line — that is what makes
-the demotion safe. WARN/ERROR are out of scope for routine reclassification;
-they're invisibly coupled to downstream alerting.
+> **INFO must not contain anything whose rate is a function of bot count or round
+> rate.** If a line fires once per bot, once per round, or once per message, it is
+> DEBUG or TRACE, and its group-level aggregate is what goes to INFO.
+
+Everything below follows from that. MDC (`botGroupId`, `botId`, `environmentId`,
+`product`, `gameType`, `gameId`, `gameName`, `botUserName`) is on every per-bot and
+every aggregated line -- keeping the tag is what makes a demotion safe.
+
+### Level and how it is set
+
+- **The shipped default is INFO** (`logger.app.level = info`, both
+  `log4j2.properties` twins). It used to be `debug`, baked into the jar.
+- **Change it without a rebuild:** `LOGGING_LEVEL_COM_VINGAME_BOT`, passed by
+  compose as `${BOT_LOG_LEVEL:-INFO}`. Spring Boot applies `logging.level.*` over
+  `log4j2.properties` and mutates the existing `com.vingame.bot` LoggerConfig in
+  place, preserving `additivity=false` and both appenderRefs. Verified in the build
+  by `LoggingLevelOverrideTest` -- **do not rename that logger**, or the override
+  silently starts creating a fresh appender-less LoggerConfig instead.
+- **Staging sets `BOT_LOG_LEVEL=DEBUG`** in `secrets.env`/`.env`. Prod does not.
+- `POST /actuator/loggers/com.vingame.bot {"configuredLevel":"DEBUG"}` still works
+  and is still the escape hatch -- but it is **global**. On a 10-environment prod
+  instance that is a **~5 GB/hour action**. Phase 2 adds scoped per-group DEBUG with
+  a TTL; until then, treat a global flip as an incident-scale decision.
+- Log config is bind-mounted (`logging/log4j2.properties` ->
+  `/app/config/log4j2.properties`, selected by `LOGGING_CONFIG`), so a level or
+  retention change is a `docker compose restart`, not a fleet redeploy. The in-jar
+  copy is the fallback and **must stay in sync** -- `Log4j2TwinConfigTest` fails the
+  build if the twins drift.
+
+### The tiers
+
+- **INFO -- tier 1: group-level lifecycle.** Application startup, bot group
+  create / start / stop / restart, group state transitions, scheduled-restart
+  firing, periodic-logout scheduler started/stopped and cycle starting, coordinator
+  / jackpot-scaler creation, and the **aggregated group lines** from
+  `GroupLifecycleAggregator`:
+  `group <id> (<name>): 47/50 bots initialized, game=..., strategy=...` and
+  `group <id> (<name>): N bots auto-deposited, total <sum>` -- one line per group per
+  start, replacing what used to be one line per bot.
+- **INFO -- tier 2: the 5-minute fleet rollup** (`FleetRollupLogger`). One line per
+  running environment (`env <id> (<name>, product <code>): groups=, bots=,
+  connected=, dead=, deadGroups=, rounds=, staked=`), plus a detail line
+  **only for a group that is not clean** (`group <id> (<name>): playing=,
+  reconnecting=, dead=n/m, groupDead=, rounds=, staked=`). A group is clean when it
+  is not DEAD and has no DEAD or RECONNECTING bot. **Volume scales with sickness,
+  not with fleet size** -- that is the design, not an implementation detail. An idle
+  instance emits nothing.
+- **DEBUG -- per-bot and per-session detail.** Per-bot status transitions, per-bot
+  balance fetch, HTTP request/response bodies, reconnect attempt success, per-bot
+  periodic-logout completion, `Bot.restart`'s "restart requested", the per-bot
+  `... initialized` and `triggering deposit` lines and BotFactory's
+  `Successfully created bot` (all four now aggregated at INFO by tier 1), the 5 s
+  `SessionAggregationService` UpdateBet running summary with its strategy-decision
+  histogram, the slot per-`(group, gameId)` window summary, **and (AD-8, see below)
+  the per-round StartGame session-entry and EndGame results summaries.**
+- **WARN -- recoverable anomalies worth investigating if they persist.** Bot WS
+  disconnect, watchdog expiry, partial registration result, deposit failure or
+  non-200 for a single bot, periodic logout interrupted, session-cap eviction. Not
+  for expected outcomes.
+- **ERROR -- failures needing operator attention.** Bot group marked DEAD,
+  re-authentication failed, 5xx upstream, failed to load display names, executor
+  interrupted during shutdown. Page-on-ERROR is reasonable; keep volume low.
+- **TRACE -- wire-level and per-bet drill-in.** All raw WS frame dumps from
+  `OutputPrinter` (including the MDC-tagged per-bot `debugOutputPrinter` actually
+  wired into `BettingMiniGameBot`/`SlotMachineBot`) and the per-bot, per-bet
+  strategy-decision lines (`BettingMiniGameBot` "sending bet" / "strategy parked
+  decision" / "strategy skipped tick", `SlotMachineBot` "parked spin" / "sending
+  spin", `RandomBehaviorStrategy` / `MartingaleStrategySupport` "decide: bet" /
+  skip-gate / "onRoundEnd" / "cap hit", `FixedBetStrategy` / `RandomBetStrategy`
+  "chooseBet"). Genuine packet-level / per-decision detail only -- not a
+  verbose-DEBUG junk drawer.
+
+### AD-8 -- the per-round session summaries moved INFO -> DEBUG
+
+**This reverses the previous guideline in this file**, which put the StartGame
+session-entry and EndGame results lines at INFO on the grounds that they are
+group-scoped rather than per-bot. That is still true, and it was not the binding
+constraint: they were the **only** INFO class whose rate scales with round rate --
+~13 lines/s, ~0.7 GB/day at 300 groups on 45 s rounds, more than every other INFO
+class combined. Left at INFO they would have dwarfed tiers 1 and 2 and made "INFO
+is the cheap default" false on arrival.
+
+The signal is not lost. Staging runs at DEBUG, so they are default-visible there.
+Prod covers the same facts with `bot_bets_placed_total` / `bot_bet_amount_total` /
+`bot_winnings_total`. And `SessionAggregationService.drainRollup()` hands per-group
+`rounds` and `staked` to the tier-2 rollup, which carries them at INFO every 5
+minutes. Phase 2's scoped per-group DEBUG is how one group's per-round detail comes
+back on demand.
+
+`SessionAggregationServiceTest` asserts the DEBUG level explicitly, because this is
+one level constant away from being reverted by accident.
 
 ## Package Structure
 
