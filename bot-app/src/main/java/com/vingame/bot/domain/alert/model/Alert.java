@@ -27,6 +27,13 @@ import com.vingame.bot.domain.brand.model.ProductCode;
  *                      product room "we are having issues" at the moment the issue ended.
  *                      {@code null}/blank ⇒ the configured default recovery text is used, and
  *                      if that is blank too the customer copy is suppressed.
+ * @param customerFiringDeliveredOutOfBand whether the <b>firing</b> half of this incident's
+ *                      customer copy is published by a delivery path other than this
+ *                      application — today, {@code viptalk-shim} for {@code BotManagerDown}.
+ *                      From the rule's {@code customer_firing_delivered_out_of_band}
+ *                      annotation. When true the app publishes only the recovery half, so a
+ *                      product room cannot be told "we are having issues" twice, the second
+ *                      time <em>after</em> the issue ended (see below).
  */
 public record Alert(AlertSeverity severity,
                     String title,
@@ -35,7 +42,8 @@ public record Alert(AlertSeverity severity,
                     String source,
                     AlertAudience audience,
                     String publicSummary,
-                    String publicResolvedSummary) {
+                    String publicResolvedSummary,
+                    boolean customerFiringDeliveredOutOfBand) {
 
     public Alert {
         if (severity == null) {
@@ -50,13 +58,25 @@ public record Alert(AlertSeverity severity,
     }
 
     /**
+     * The shape every call site uses that has no out-of-band delivery to declare — which
+     * is all of them except the Alertmanager webhook. Defaults to {@code false}: the app
+     * owns both halves of an incident unless a rule says otherwise.
+     */
+    public Alert(AlertSeverity severity, String title, String body, ProductCode product,
+                 String source, AlertAudience audience, String publicSummary,
+                 String publicResolvedSummary) {
+        this(severity, title, body, product, source, audience, publicSummary,
+                publicResolvedSummary, false);
+    }
+
+    /**
      * The pre-{@code public_resolved_summary} shape, kept so every call site that only
      * has firing copy (the webhook before an operator adds the annotation, and every
      * existing test) constructs the same alert as before.
      */
     public Alert(AlertSeverity severity, String title, String body, ProductCode product,
                  String source, AlertAudience audience, String publicSummary) {
-        this(severity, title, body, product, source, audience, publicSummary, null);
+        this(severity, title, body, product, source, audience, publicSummary, null, false);
     }
 
     /**
@@ -66,7 +86,7 @@ public record Alert(AlertSeverity severity,
      * about one product. The Alertmanager path always passes an audience explicitly.
      */
     public Alert(AlertSeverity severity, String title, String body, ProductCode product, String source) {
-        this(severity, title, body, product, source, AlertAudience.PRODUCT, null, null);
+        this(severity, title, body, product, source, AlertAudience.PRODUCT, null, null, false);
     }
 
     /** Product-scoped alert with detail. */
@@ -82,7 +102,7 @@ public record Alert(AlertSeverity severity,
     /** This alert with a different product, used when routing resolves one after construction. */
     public Alert withProduct(ProductCode newProduct) {
         return new Alert(severity, title, body, newProduct, source, audience,
-                publicSummary, publicResolvedSummary);
+                publicSummary, publicResolvedSummary, customerFiringDeliveredOutOfBand);
     }
 
     /** Whether a customer-facing copy can be rendered at all (AD-V6 fail-closed gate). */

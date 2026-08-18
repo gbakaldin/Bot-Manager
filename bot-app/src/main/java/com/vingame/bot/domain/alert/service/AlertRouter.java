@@ -38,7 +38,11 @@ import java.util.Set;
  *       into a live product room three times a day) and there is customer copy to
  *       publish (AD-V6, fail-closed). The copy for the <b>resolved</b> half is the
  *       rule's {@code public_resolved_summary} / the configured default, never the
- *       firing wording — see {@link AlertMessageFormatter#customerSummary(Alert)}.</li>
+ *       firing wording — see {@link AlertMessageFormatter#customerSummary(Alert)}.
+ *       When the rule declares {@code customer_firing_delivered_out_of_band}, the app
+ *       publishes <b>only</b> the resolved half: the firing half is the shim's, and
+ *       delivering both would let a product room hear about the outage twice, the
+ *       second time after it ended.</li>
  * </ul>
  * <b>Dedupe.</b> Decisions are deduplicated on room before they leave this class, first
  * one wins. That is the guard AD-V5 calls for: a {@code both} alert whose product has no
@@ -73,6 +77,14 @@ public class AlertRouter {
      * than the firing copy being replayed under a {@code ✅} marker.
      */
     public static final String REASON_NO_RESOLVED_SUMMARY = "no_resolved_summary";
+    /**
+     * The firing half of this incident's customer copy is published by another delivery
+     * path (today {@code viptalk-shim}, for {@code BotManagerDown}), so the app publishes
+     * only the recovery half. Counted rather than silent: this is a deliberate
+     * non-delivery of customer-facing copy, and AD-V5's whole point is that those are
+     * visible.
+     */
+    public static final String REASON_DELIVERED_OUT_OF_BAND = "delivered_out_of_band";
     /**
      * Set by {@link AlertService} when the transport skipped a routed message —
      * {@code viptalk.enabled=false} or a blank token. Distinguishes "we chose not to
@@ -162,14 +174,30 @@ public class AlertRouter {
     }
 
     /**
-     * The product-room half of an {@link AlertAudience#BOTH} alert. Two independent gates,
-     * both fail-closed, both counted so a silent non-delivery is still visible.
+     * The product-room half of an {@link AlertAudience#BOTH} alert. Three independent
+     * gates, all fail-closed, all counted so a silent non-delivery is still visible.
      */
     private RoutedMessage customerCopy(Alert alert) {
         if (!customerNoticesEnabled) {
             // AD-V7: not an anomaly on staging/loadtest, it is the configured posture.
             log.debug("Customer notice suppressed — viptalk.customer-notices-enabled=false: {}", alert.title());
             return RoutedMessage.dropped(AlertRegister.CUSTOMER, REASON_CUSTOMER_NOTICES_DISABLED);
+        }
+        // The firing half of an out-of-band incident belongs to the other delivery path,
+        // and ONLY to it. AD-V9 assumed the app's firing notification simply fails while
+        // the app is down — but Alertmanager retries, and BotManagerDown keeps firing
+        // until Prometheus completes a scrape and re-evaluates, tens of seconds AFTER the
+        // app is back. A retry landing in that window delivers the FIRING payload, so a
+        // product room would read: shim's outage copy (during) → app's outage copy (after
+        // recovery, indistinguishable from a NEW outage) → recovery copy. Nothing can
+        // dedupe across two independent paths and AD-6 forbids an app-side state machine,
+        // so ownership is split instead: the shim owns firing, the app owns recovery.
+        // The technical register is unaffected — the ops room can take a duplicate, and
+        // it is the one that most wants the app's own richer copy when it returns.
+        if (alert.customerFiringDeliveredOutOfBand() && !alert.isResolved()) {
+            log.debug("Customer notice suppressed — the firing copy is delivered out of band "
+                    + "(viptalk-shim); the app publishes only the recovery: {}", alert.title());
+            return RoutedMessage.dropped(AlertRegister.CUSTOMER, REASON_DELIVERED_OUT_OF_BAND);
         }
         // The formatter owns which copy a product room may see — firing wording for the
         // outage, recovery wording for the resolution, and nothing at all when neither is

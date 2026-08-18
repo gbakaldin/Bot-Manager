@@ -90,6 +90,16 @@ groups:
           # (viptalk.public-resolved-summary) would cover this generically; an explicit
           # annotation is better because it can name what recovered.
           public_resolved_summary: "UPDATE: the Bot Management issue reported earlier has been resolved. The application is operating normally again. Thank you for your patience."
+          # Ownership of the two halves, declared where the two-path routing is. The
+          # shim publishes the FIRING customer copy; the app must not publish it as
+          # well. AD-V9 assumed the app's firing notification simply fails while the
+          # app is down, but Alertmanager RETRIES, and this alert keeps firing until
+          # Prometheus completes a scrape and re-evaluates — tens of seconds after the
+          # app is back. A retry landing in that window would tell a product room "we
+          # are having issues" AFTER the issue ended, reading as a second outage. With
+          # this annotation the app publishes only the recovery half; the ops room is
+          # unaffected (the technical register is not gated by it).
+          customer_firing_delivered_out_of_band: "true"
 
       # AD-V10 — deliberately a SEPARATE rule from BotManagerDown, not a variant of it.
       # The app is up when this fires, so it needs no out-of-band delivery and travels

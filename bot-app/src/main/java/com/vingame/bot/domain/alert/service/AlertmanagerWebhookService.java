@@ -68,6 +68,14 @@ public class AlertmanagerWebhookService {
      * Read exactly like {@code public_summary} and never derived from it (AD-V6).
      */
     private static final String ANNOTATION_PUBLIC_RESOLVED_SUMMARY = "public_resolved_summary";
+    /**
+     * Declares that the <b>firing</b> half of this rule's customer copy is published by a
+     * delivery path other than this application — {@code viptalk-shim}, for
+     * {@code BotManagerDown}. The app then publishes only the recovery half; see
+     * {@link AlertRouter#REASON_DELIVERED_OUT_OF_BAND}.
+     */
+    private static final String ANNOTATION_CUSTOMER_FIRING_OUT_OF_BAND =
+            "customer_firing_delivered_out_of_band";
 
     /** Cap on alerts rendered into one message; the rest are summarised as a count. */
     private static final int MAX_RENDERED_ALERTS = 20;
@@ -155,7 +163,12 @@ public class AlertmanagerWebhookService {
         return new Alert(severity, title, body.toString(), key.product(), "prometheus",
                 key.audience(),
                 annotation(alerts, commonAnnotations, ANNOTATION_PUBLIC_SUMMARY),
-                annotation(alerts, commonAnnotations, ANNOTATION_PUBLIC_RESOLVED_SUMMARY));
+                annotation(alerts, commonAnnotations, ANNOTATION_PUBLIC_RESOLVED_SUMMARY),
+                // Any alert in the batch claiming out-of-band firing delivery makes the
+                // whole batch's customer copy out-of-band. Fail-closed in the direction
+                // that matters: a duplicate customer notice after recovery is worse than
+                // a missing one, because the shim already delivered the real one.
+                flag(alerts, commonAnnotations, ANNOTATION_CUSTOMER_FIRING_OUT_OF_BAND));
     }
 
     /**
@@ -174,6 +187,22 @@ public class AlertmanagerWebhookService {
         }
         String common = commonAnnotations.get(name);
         return common == null || common.isBlank() ? null : common.strip();
+    }
+
+    /**
+     * A boolean annotation for the batch: true when <em>any</em> alert in it, or the
+     * payload level, says {@code true}. Anything else — absent, blank, {@code "false"}, a
+     * typo — reads false, so an annotation nobody wrote can never suppress a customer
+     * notice the app is supposed to deliver.
+     */
+    private boolean flag(List<AlertmanagerAlert> alerts,
+                         Map<String, String> commonAnnotations, String name) {
+        for (AlertmanagerAlert alert : alerts) {
+            if (Boolean.parseBoolean(value(alert.annotation(name), "false"))) {
+                return true;
+            }
+        }
+        return Boolean.parseBoolean(value(commonAnnotations.get(name), "false"));
     }
 
     /**

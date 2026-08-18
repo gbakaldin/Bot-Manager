@@ -191,6 +191,33 @@ class AlertRulesAudienceTest {
                 .isEqualTo("both");
         assertThat(rule.annotation("public_summary")).isNotBlank();
         assertThat(rule.annotation("public_resolved_summary")).isNotBlank();
+        // The two paths' split of ownership, declared on the rule rather than hardcoded in
+        // Java: the shim publishes the FIRING customer copy, so the app must not. Without
+        // it, an Alertmanager retry of the app webhook that succeeds after recovery — a
+        // window of tens of seconds, since BotManagerDown stays firing until Prometheus
+        // re-evaluates — tells a product room about an outage that is already over.
+        assertThat(rule.annotation("customer_firing_delivered_out_of_band"))
+                .as("BotManagerDown's firing customer copy is delivered by viptalk-shim; "
+                        + "without this annotation the app delivers a second copy of it, "
+                        + "possibly after the outage ended")
+                .isEqualTo("true");
+    }
+
+    @Test
+    @DisplayName("only a rule with an out-of-band delivery path may claim one")
+    void nothingElseClaimsOutOfBandDelivery() {
+        // The annotation suppresses customer-facing copy the app would otherwise publish.
+        // On any rule that does NOT have a second delivery path (i.e. anything but the one
+        // alertmanager.yml fans out to viptalk-static-down), that is not a de-duplication,
+        // it is a silent loss of the notice.
+        for (Rule rule : alertingRules()) {
+            if ("BotManagerDown".equals(rule.name())) continue;
+            assertThat(rule.annotation("customer_firing_delivered_out_of_band"))
+                    .as("rule %s claims its firing customer copy is delivered out of band, but "
+                            + "only BotManagerDown is routed to the shim — nothing would "
+                            + "publish it at all", rule.name())
+                    .isNull();
+        }
     }
 
     @Test

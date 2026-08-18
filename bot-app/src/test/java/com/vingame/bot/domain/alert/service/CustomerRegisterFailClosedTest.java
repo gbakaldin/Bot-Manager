@@ -247,6 +247,46 @@ class CustomerRegisterFailClosedTest {
                 .doesNotContain("experiencing issues");
     }
 
+    @Test
+    @DisplayName("webhook → room: the FIRING half owned by the shim is not published a second time by the app")
+    void firingHalfOfAnOutOfBandIncidentIsNotDuplicatedByTheApp() {
+        // AD-V9 assumed the app's firing notification just fails while the app is down.
+        // Alertmanager retries, and BotManagerDown keeps firing until Prometheus completes
+        // a scrape and re-evaluates — tens of seconds AFTER the app is back — so a retry
+        // can land post-recovery. Without the split of ownership the product room reads:
+        // shim outage copy → app outage copy (looks like a NEW outage) → recovery copy.
+        List<String> texts = new ArrayList<>();
+        VipTalkClient client = mock(VipTalkClient.class);
+        when(client.send(anyString(), anyList())).thenAnswer(invocation -> {
+            texts.add(invocation.getArgument(0));
+            return VipTalkSendResult.sent(1, 200);
+        });
+        AlertRoomRegistry rooms = new AlertRoomRegistry(OPS_ROOM);
+        AlertMessageFormatter formatter = new AlertMessageFormatter("prod");
+        AlertService service = new AlertService(client, rooms, formatter,
+                new AlertRouter(rooms, formatter, true), new SimpleMeterRegistry());
+        AlertmanagerWebhookService webhook =
+                new AlertmanagerWebhookService(service, mock(EnvironmentService.class));
+
+        webhook.handle(new AlertmanagerWebhook("4", "firing", Map.of(),
+                Map.of("audience", "both", "product", "116"), Map.of(),
+                "http://alertmanager:9093",
+                List.of(new AlertmanagerAlert("firing",
+                        Map.of("alertname", "BotManagerDown", "severity", "critical"),
+                        Map.of("summary", "bot-manager is not scrapeable",
+                                "public_summary", PUBLIC_SUMMARY,
+                                "public_resolved_summary", "Everything is back to normal.",
+                                "customer_firing_delivered_out_of_band", "true"),
+                        "2026-08-17T10:00:00Z", ""))));
+
+        assertThat(texts)
+                .as("only the ops technical copy — the product room's copy is the shim's")
+                .hasSize(1);
+        assertThat(texts.getFirst())
+                .contains("CRITICAL")
+                .doesNotContain(PUBLIC_SUMMARY);
+    }
+
     /* ---------------- the hand-authored operator path ---------------- */
 
     @Test

@@ -33,6 +33,8 @@ class AlertRouterTest {
     private static final String PUBLIC_SUMMARY =
             "ALERT! Bot Management application is experiencing issues, backend team is aware "
                     + "and will deliver fixes soon.";
+    private static final String RESOLVED_SUMMARY =
+            "UPDATE: the Bot Management issue reported earlier has been resolved.";
 
     private AlertRouter router(String opsRoom, boolean customerNotices) {
         AlertRoomRegistry rooms = new AlertRoomRegistry(opsRoom);
@@ -176,6 +178,46 @@ class AlertRouterTest {
 
         assertEquals(AlertRouter.REASON_NO_OPS_ROOM, routed.getFirst().reason());
         assertEquals(productRoom(ProductCode.P_116), routed.get(1).roomId());
+    }
+
+    @Test
+    void firingCustomerCopyIsSuppressedWhenAnotherPathOwnsIt() {
+        // BotManagerDown's firing customer copy is published by viptalk-shim while the app
+        // is down. Alertmanager RETRIES the app webhook, and the alert stays firing until
+        // Prometheus re-evaluates — tens of seconds after the app is back — so a retry can
+        // succeed post-recovery and tell the product room about an outage that is over.
+        // Two independent paths cannot dedupe, so ownership is split instead.
+        List<RoutedMessage> routed = router(OPS_ROOM, true).route(outOfBand(AlertSeverity.CRITICAL));
+
+        List<RoutedMessage> delivered = routed.stream().filter(RoutedMessage::isDelivered).toList();
+        assertEquals(1, delivered.size(), "the ops room still gets the technical copy");
+        assertEquals(OPS_ROOM, delivered.getFirst().roomId());
+        assertEquals(AlertRegister.TECHNICAL, delivered.getFirst().register());
+
+        RoutedMessage suppressed = routed.get(1);
+        assertFalse(suppressed.isDelivered());
+        assertEquals(AlertRegister.CUSTOMER, suppressed.register());
+        assertEquals(AlertRouter.REASON_DELIVERED_OUT_OF_BAND, suppressed.reason());
+    }
+
+    @Test
+    void resolvedCustomerCopyIsStillDeliveredByTheApp() {
+        // The other half of the same split: the shim cannot say "recovered" (its text is a
+        // fixed string and its receiver sets send_resolved: false), so if the app withheld
+        // this too, a product room would hear about an outage and never hear it ended.
+        List<RoutedMessage> routed = router(OPS_ROOM, true).route(outOfBand(AlertSeverity.RESOLVED));
+
+        RoutedMessage customer = routed.get(1);
+        assertTrue(customer.isDelivered(), "the recovery copy is the app's job (AD-V9)");
+        assertEquals(productRoom(ProductCode.P_116), customer.roomId());
+        assertEquals(AlertRegister.CUSTOMER, customer.register());
+        assertTrue(customer.text().contains(RESOLVED_SUMMARY), customer.text());
+    }
+
+    private Alert outOfBand(AlertSeverity severity) {
+        return new Alert(severity, "BotManagerDown", "scrape failed for 2m",
+                ProductCode.P_116, "prometheus", AlertAudience.BOTH,
+                PUBLIC_SUMMARY, RESOLVED_SUMMARY, true);
     }
 
     @Test
