@@ -27,6 +27,7 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
+import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import org.junit.jupiter.api.AfterEach;
@@ -84,6 +85,9 @@ class BotGroupBehaviorServiceTest {
 
     @Mock
     private SessionAggregationService sessionAggregationService;
+
+    @Mock
+    private GroupLifecycleAggregator groupLifecycleAggregator;
 
     @Captor
     private ArgumentCaptor<BotGroup> botGroupCaptor;

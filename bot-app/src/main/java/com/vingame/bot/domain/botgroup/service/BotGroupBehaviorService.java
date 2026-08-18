@@ -1580,6 +1580,63 @@ public class BotGroupBehaviorService {
     }
 
     /**
+     * Health snapshot of one running bot group, backing the tier-2 fleet rollup
+     * (LOG_VOLUME_TIERING Phase 1 step 3).
+     * <p>
+     * These are exactly the figures {@link #monitorHealth(BotGroupRuntime)} already
+     * computes on its 30 s cadence and logs at DEBUG per group. The rollup does not
+     * recompute them differently or add a subsystem — it reads them on a 5-minute
+     * cadence and prints a line only for the groups that are <em>not</em> clean, so
+     * INFO volume scales with sickness rather than with fleet size.
+     *
+     * @param groupDead whether the group itself has been marked DEAD (the same
+     *                  {@code groupDeadSince != null} predicate as
+     *                  {@link #countDeadGroupsByEnv()}), which is a reason to print a
+     *                  detail line even when every surviving bot looks fine
+     */
+    public record GroupHealth(String botGroupId, String groupName, String environmentId,
+                              String product, int playing, int reconnecting, int dead,
+                              int total, boolean groupDead) {
+
+        /**
+         * A group is clean when nothing about it warrants a line: it is not DEAD and no
+         * bot is DEAD or RECONNECTING. Deliberately <em>not</em> "playing == total" — a
+         * bot in a transient CONNECTING/AUTHENTICATING state during a start is normal
+         * and must not make every group print a line for the first few minutes of its
+         * life.
+         */
+        public boolean isClean() {
+            return !groupDead && dead == 0 && reconnecting == 0;
+        }
+    }
+
+    /**
+     * Per-group health snapshot over every running group, for the tier-2 fleet rollup.
+     * Same live iteration and same predicates as {@link #monitorHealth(BotGroupRuntime)}:
+     * {@code dead}/{@code reconnecting} from {@link BotStatus}, {@code playing} from
+     * {@link Bot#isConnected()} (the connection predicate, not a status).
+     */
+    public Collection<GroupHealth> listGroupHealth() {
+        List<GroupHealth> health = new ArrayList<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            List<Bot> bots = runtime.getBotInstances();
+            int dead = 0;
+            int reconnecting = 0;
+            int playing = 0;
+            for (Bot bot : bots) {
+                if (bot.getStatus() == BotStatus.DEAD) dead++;
+                if (bot.getStatus() == BotStatus.RECONNECTING) reconnecting++;
+                if (bot.isConnected()) playing++;
+            }
+            health.add(new GroupHealth(runtime.getGroupId(), runtime.getGroupName(),
+                    runtime.getEnvironmentId(), runtime.getProduct(),
+                    playing, reconnecting, dead, bots.size(),
+                    runtime.getGroupDeadSince() != null));
+        }
+        return health;
+    }
+
+    /**
      * Balance snapshot of one running bot group, backing the
      * {@code group_avg_balance} / {@code group_balance_ratio} MultiGauges
      * (VIPTALK_ALERTING_V2 AD-V12 / AD-V13).
