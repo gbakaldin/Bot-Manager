@@ -63,6 +63,16 @@ groups:
       # register. `public_summary` is what they get; without it the customer copy
       # is suppressed rather than synthesised from `summary` (AD-V6), and on a
       # non-prod instance the whole customer half is gated off (AD-V7).
+      #
+      # This is also the ONE alert that cannot be delivered by the normal path: it
+      # fires exactly when bot-manager — the webhook receiver that forwards to
+      # VipTalk — is unscrapeable. alertmanager.yml therefore routes it to two
+      # receivers (AD-V9): the `viptalk-shim` container, which posts to VipTalk
+      # directly and delivers the FIRING half while the app is dead, and the normal
+      # app webhook, which delivers the RESOLVED half — by definition the app is
+      # back when this alert resolves. Keep `public_summary` in step with the shim's
+      # built-in customer text (viptalk-shim/shim.py DEFAULT_DOWN_TEXT), or the same
+      # outage reads two different ways depending on which path delivered it.
       - alert: BotManagerDown
         expr: up{job="bot-manager"} == 0
         for: 2m
@@ -73,6 +83,40 @@ groups:
           summary: "bot-manager is not scrapeable"
           description: "Prometheus has failed to scrape bot-manager for 2 minutes — the app is down, wedged, or the container was replaced."
           public_summary: "ALERT! Bot Management application is experiencing issues, backend team is aware and will deliver fixes soon."
+          # Recovery copy for the product room. Without it the resolved half would
+          # render "…is experiencing issues…" under a ✅ marker, i.e. a green tick over
+          # text saying the application is broken — the formatter renders public_summary
+          # verbatim and has no way to reword it. The configured fallback
+          # (viptalk.public-resolved-summary) would cover this generically; an explicit
+          # annotation is better because it can name what recovered.
+          public_resolved_summary: "UPDATE: the Bot Management issue reported earlier has been resolved. The application is operating normally again. Thank you for your patience."
+
+      # AD-V10 — deliberately a SEPARATE rule from BotManagerDown, not a variant of it.
+      # The app is up when this fires, so it needs no out-of-band delivery and travels
+      # the normal webhook. And it is `internal`, not `both`: an already-recovered
+      # restart is not something to tell a product room about — by the time anyone read
+      # it, it would be describing something that is no longer happening.
+      #
+      # `changes(...[15m])` sees a restart only when samples from BOTH runs sit in the
+      # window, so it catches a redeploy or a crash-restart (seconds to minutes of
+      # downtime) and NOT an outage longer than 15 minutes — for which the old series
+      # has aged out and only BotManagerDown has anything to say. That is the right
+      # split of labour: this rule is for the restart nobody noticed.
+      #
+      # It fires on planned deploys too. That is intended, not noise: a deploy loses
+      # every in-memory bot runtime exactly like a crash does, and the groups need
+      # restarting either way. Note Alertmanager's BotManagerDown inhibit (equal: job,
+      # and this rule carries job="bot-manager") can hold this back while the down
+      # alert is still active — it delays the notification to the next group_interval
+      # rather than dropping it, since the expression stays true for 15 minutes.
+      - alert: BotManagerRestarted
+        expr: changes(process_start_time_seconds{job="bot-manager"}[15m]) > 0
+        labels:
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "bot-manager restarted (JVM start time changed)"
+          description: "An unplanned restart loses all in-memory bot runtimes; groups must be re-started. If this repeats, check for OOM/native-thread exhaustion."
 
   - name: bot-manager-environment
     rules:
