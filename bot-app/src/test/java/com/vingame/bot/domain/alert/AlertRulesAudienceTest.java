@@ -54,7 +54,13 @@ class AlertRulesAudienceTest {
     private static final Set<String> RETIRED_RULES =
             Set.of("BotGroupDead", "DeadBotRatioHigh", "WsConnectionsBelowFleet");
 
-    private record Rule(String name, Map<String, Object> labels, Map<String, Object> annotations) {
+    private record Rule(String group, String name,
+                        Map<String, Object> labels, Map<String, Object> annotations) {
+
+        /** Whether this rule is about the application rather than the host it runs on. */
+        boolean isAppScoped() {
+            return group.startsWith("bot-manager");
+        }
 
         String audience() {
             return string(labels, "audience");
@@ -90,10 +96,11 @@ class AlertRulesAudienceTest {
 
         List<Rule> rules = new ArrayList<>();
         for (Map<String, Object> group : (List<Map<String, Object>>) root.get("groups")) {
+            String groupName = String.valueOf(group.get("name"));
             for (Map<String, Object> rule : (List<Map<String, Object>>) group.get("rules")) {
                 Object name = rule.get("alert");
                 if (name == null) continue;
-                rules.add(new Rule(name.toString(),
+                rules.add(new Rule(groupName, name.toString(),
                         (Map<String, Object>) rule.get("labels"),
                         (Map<String, Object>) rule.get("annotations")));
             }
@@ -230,6 +237,35 @@ class AlertRulesAudienceTest {
             assertThat(rule.annotation("summary"))
                     .as("rule %s must declare annotations.summary — it is the message body", rule.name())
                     .isNotBlank();
+        }
+    }
+
+    @Test
+    @DisplayName("every app-scoped rule declares job: bot-manager, and no host rule does")
+    void appScopedRulesCarryTheJobLabelTheInhibitMatchesOn() {
+        // alertmanager.yml suppresses app alerts while BotManagerDown fires, matched on
+        // `equal: ['job']` — which is what keeps the host rules (job="node") visible, since
+        // a full disk is often WHY the app is down. Phase 3's `sum by (product,
+        // environmentId)` clauses drop `job` from the series, so four rules silently fell
+        // out of the inhibit's coverage while their bare-gauge siblings stayed in. A static
+        // label survives any aggregation, which is why it is declared rather than carried.
+        for (Rule rule : alertingRules()) {
+            String job = Rule.string(rule.labels(), "job");
+            if (rule.isAppScoped()) {
+                assertThat(job)
+                        .as("rule %s (group %s) is app-scoped, so it must declare labels.job: "
+                                + "bot-manager — otherwise BotManagerDown does not inhibit it "
+                                + "and it pages while the app is known to be down",
+                                rule.name(), rule.group())
+                        .isEqualTo("bot-manager");
+            } else {
+                assertThat(job)
+                        .as("rule %s (group %s) is a host rule; labelling it job=bot-manager "
+                                + "would let an app outage suppress it, and the host facts are "
+                                + "exactly what stays true when the app is gone",
+                                rule.name(), rule.group())
+                        .isNotEqualTo("bot-manager");
+            }
         }
     }
 

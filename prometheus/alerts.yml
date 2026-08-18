@@ -77,6 +77,7 @@ groups:
         expr: up{job="bot-manager"} == 0
         for: 2m
         labels:
+          job: bot-manager
           severity: critical
           audience: both
         annotations:
@@ -122,6 +123,7 @@ groups:
       - alert: BotManagerRestarted
         expr: changes(process_start_time_seconds{job="bot-manager"}[15m]) > 0
         labels:
+          job: bot-manager
           severity: warning
           audience: internal
         annotations:
@@ -146,6 +148,7 @@ groups:
           and bots_managed_by_env > 0
         for: 10m
         labels:
+          job: bot-manager
           severity: critical
           audience: product
         annotations:
@@ -158,6 +161,7 @@ groups:
           and bots_managed_by_env > 0
         for: 10m
         labels:
+          job: bot-manager
           severity: warning
           audience: product
         annotations:
@@ -185,6 +189,7 @@ groups:
           and sum by (product, environmentId) (bots_managed_by_env) > 0
         for: 10m
         labels:
+          job: bot-manager
           severity: warning
           audience: product
         annotations:
@@ -209,6 +214,7 @@ groups:
         expr: groups_dead_by_env > 0
         for: 5m
         labels:
+          job: bot-manager
           severity: critical
           audience: product
         annotations:
@@ -229,6 +235,7 @@ groups:
           and sum by (product, environmentId) (increase(bot_verify_token_total[10m])) >= 5
         for: 10m
         labels:
+          job: bot-manager
           severity: critical
           audience: product
         annotations:
@@ -247,6 +254,7 @@ groups:
           and sum by (product, environmentId) (increase(bot_login_total[15m])) >= 5
         for: 5m
         labels:
+          job: bot-manager
           severity: critical
           audience: product
         annotations:
@@ -284,6 +292,7 @@ groups:
           )
         for: 10m
         labels:
+          job: bot-manager
           severity: critical
           audience: product
         annotations:
@@ -319,6 +328,7 @@ groups:
         expr: group_balance_ratio < 0.10
         for: 5m
         labels:
+          job: bot-manager
           severity: warning
           audience: product
         annotations:
@@ -335,6 +345,7 @@ groups:
         expr: jvm_threads_live_threads > 2000
         for: 15m
         labels:
+          job: bot-manager
           severity: warning
           audience: internal
         annotations:

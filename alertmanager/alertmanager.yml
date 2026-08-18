@@ -94,8 +94,22 @@ receivers:
         max_alerts: 0
 
 inhibit_rules:
-  # When bot-manager itself is down, every fleet gauge goes stale and its alerts are
-  # noise on top of the real problem. Suppress them while BotManagerDown is firing.
+  # When bot-manager itself is down, every gauge it produces goes stale and its alerts
+  # are noise on top of the real problem. Suppress them while BotManagerDown is firing.
+  #
+  # `equal: ['job']` is what keeps the host rules (job="node") visible — a dead app is
+  # no reason to stop hearing that the disk is full, and the disk being full is often
+  # WHY the app is dead. But it only works if every app-scoped alert actually carries
+  # `job`, and Phase 3's `sum by (product, environmentId)` clauses DROP it: aggregation
+  # keeps only the labels named. That silently un-inhibited EnvironmentAuthDown,
+  # EnvironmentLoginFailing, EnvironmentDeadBotRatioHigh and GameNoRounds while leaving
+  # their bare-gauge siblings inhibited — a split nothing in the design intended.
+  #
+  # So every rule in the `bot-manager-*` groups now declares `job: bot-manager` as a
+  # static label, which survives any aggregation because it is stamped on the alert
+  # rather than carried from the series. `AlertRulesAudienceTest` fails the build if one
+  # forgets it, or if a `host` rule adopts it — the same file-level-contract argument as
+  # the `audience` label.
   - source_matchers:
       - alertname = "BotManagerDown"
     target_matchers:
