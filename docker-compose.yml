@@ -155,6 +155,65 @@ services:
     depends_on:
       - bot-manager
 
+  # The out-of-band delivery hop for BotManagerDown (VIPTALK_ALERTING_V2 Phase 6 /
+  # AD-V8b). Alertmanager webhooks it, it POSTs straight to VipTalk.
+  #
+  # Why a second container rather than a second code path in bot-manager: BotManagerDown
+  # fires precisely when bot-manager is unscrapeable, and bot-manager is what forwards
+  # alerts to VipTalk. The message about the app being down therefore cannot be delivered
+  # by the app. This service shares nothing with it — no code, no Mongo, no JVM — so it
+  # keeps working when the app is gone. It deliberately has NO `depends_on: bot-manager`
+  # for the same reason.
+  #
+  # A stock python image with the script bind-mounted, not a built image: the shim is
+  # stdlib-only (Phase 0 proved VipTalk accepts a JSON body, so it is a field remap and
+  # needs no libraries), and deploy.sh only runs `docker compose up` — an image that
+  # needed building would be one more thing to get wrong on the box. Same bind-mount
+  # posture as prometheus.yml / alerts.yml / alertmanager.yml. The patch version is left
+  # floating on purpose: no dependency of ours pins it.
+  #
+  # It runs on EVERY instance, not just prod, and self-disables on blank config. The plan
+  # said "not started when VIPTALK_DOWN_ROOM_IDS is empty", but the receiver pointing here
+  # lives in the committed alertmanager.yml, so an absent container would leave Alertmanager
+  # retrying a connection-refused webhook during an outage. Instead the customer register
+  # is empty off prod (that is what AD-V7 actually asks for) while the technical register
+  # still delivers "staging bot-manager is down" to the ops room, which is useful.
+  viptalk-shim:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["python", "-u", "/app/shim.py"]
+    environment:
+      # Same token and same ops room as bot-manager, from the same secrets.env entries —
+      # config for a second delivery path, not a second source of truth (AD-V14).
+      - VIPTALK_BOT_TOKEN=${VIPTALK_BOT_TOKEN:-}
+      - VIPTALK_OPS_ROOM_ID=${VIPTALK_OPS_ROOM_ID:-}
+      # Product rooms for the customer register. Empty off prod (AD-V7) ⇒ the shim
+      # delivers only the technical register there.
+      - VIPTALK_DOWN_ROOM_IDS=${VIPTALK_DOWN_ROOM_IDS:-}
+      # Stamped into both texts. Three instances share the ops room and this is the only
+      # thing telling them apart (AD-7 / AD-V15); blank ⇒ no segment, never a guess.
+      - VIPTALK_INSTANCE_LABEL=${VIPTALK_INSTANCE_LABEL:-}
+      # Optional wording overrides. Blank ⇒ the built-in copy, which is kept in step with
+      # BotManagerDown's public_summary in prometheus/alerts.yml.
+      - VIPTALK_DOWN_TEXT=${VIPTALK_DOWN_TEXT:-}
+      - VIPTALK_DOWN_OPS_TEXT=${VIPTALK_DOWN_OPS_TEXT:-}
+      - VIPTALK_BASE_URL=${VIPTALK_BASE_URL:-https://api.viptalk.org}
+      # The script mount is read-only; without this python warns on every start trying to
+      # write __pycache__ next to it.
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ./viptalk-shim/shim.py:/app/shim.py:ro
+    # /health reports the resolved config with the token masked — how the delivery path is
+    # checked without waiting for (or staging) an outage.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
   # Host CPU / RAM / filesystem metrics, scraped by Prometheus as job `node`.
   # VIPTALK_ALERTING_V2 Phase 5 / AD-V11.
   #
