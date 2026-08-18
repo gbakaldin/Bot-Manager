@@ -149,6 +149,51 @@ class AlertRulesAudienceTest {
     }
 
     @Test
+    @DisplayName("an audience=both rule says something different when it recovers")
+    void everyBothRuleCarriesItsOwnRecoveryCopy() {
+        for (Rule rule : alertingRules()) {
+            if (!"both".equals(rule.audience())) continue;
+            String resolved = rule.annotation("public_resolved_summary");
+            // AlertMessageFormatter renders public_summary VERBATIM, so without its own
+            // recovery copy a resolving `both` alert publishes the outage wording under a
+            // ✅ marker — a green tick over text saying the application is broken.
+            // viptalk.public-resolved-summary would catch this generically, but the same
+            // argument as AD-V4 applies: a configured fallback is a safety net for payloads
+            // we did not author, not a licence for our own file to leave it out.
+            assertThat(resolved)
+                    .as("rule %s is audience=both, so it must declare public_resolved_summary — "
+                            + "otherwise its recovery message reads as an outage", rule.name())
+                    .isNotNull()
+                    .isNotBlank();
+            assertThat(resolved)
+                    .as("rule %s recovers with the same words it fired with, which is the exact "
+                            + "defect public_resolved_summary exists to prevent", rule.name())
+                    .isNotEqualTo(rule.annotation("public_summary"));
+        }
+    }
+
+    @Test
+    @DisplayName("BotManagerDown still carries the contract the out-of-band path depends on")
+    void theAppDownRuleIsTheCustomerFacingOne() {
+        Rule rule = alertingRules().stream()
+                .filter(r -> "BotManagerDown".equals(r.name()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "BotManagerDown is gone — the app-down path (shim + AD-V9 fan-out in "
+                                + "alertmanager.yml) is routed on this alertname and is now dead code"));
+
+        // Pinned by name because Phase 6 wires real infrastructure to this one rule:
+        // alertmanager.yml matches its alertname to reach the shim, and the shim's fixed
+        // text is written to match its public_summary. Renaming it silently unhooks both.
+        assertThat(rule.audience())
+                .as("BotManagerDown must stay audience=both — product rooms hearing about the "
+                        + "outage in their own register is the whole reason the shim exists")
+                .isEqualTo("both");
+        assertThat(rule.annotation("public_summary")).isNotBlank();
+        assertThat(rule.annotation("public_resolved_summary")).isNotBlank();
+    }
+
+    @Test
     @DisplayName("every rule still carries a severity and a summary for the technical register")
     void everyRuleIsRenderable() {
         for (Rule rule : alertingRules()) {
