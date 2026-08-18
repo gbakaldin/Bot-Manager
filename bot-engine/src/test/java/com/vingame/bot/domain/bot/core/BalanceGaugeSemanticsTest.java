@@ -37,7 +37,8 @@ import static org.mockito.Mockito.when;
  * {@code BotGroupBehaviorServiceTest} / {@code InfoGaugeRefresherTest} cover with mocks
  * and therefore cannot tell you what a <em>real</em> {@code Bot} reports.
  * <p>
- * The bound holds — and one case falls outside it. See
+ * The bound holds once a server read has happened. Before that there is none, and the
+ * gauge excludes the bot on the strength of the sentinel pairing pinned by
  * {@link #expectedBalanceIsANegativeSentinelBeforeTheFirstServerRead()}.
  */
 @DisplayName("group_balance_ratio numerator — Bot.getExpectedBalance() semantics (AD-V12)")
@@ -71,7 +72,8 @@ class BalanceGaugeSemanticsTest {
     }
 
     /**
-     * <b>Known defect, pinned rather than fixed (QA cannot touch {@code src/main}).</b>
+     * The {@code Bot}-side fact that Phase 4's gauge has to cope with, and the marker it
+     * now copes with it <em>by</em>.
      * <p>
      * A bot that has connected but has not yet completed a round reports
      * {@code -100,000,000} — the constructor sentinel — because
@@ -81,40 +83,36 @@ class BalanceGaugeSemanticsTest {
      * round arrives there has been no server read.
      * <p>
      * {@code listGroupBalances()} filters on {@code isConnected()}, which is true well
-     * before the first round, so the sentinel reaches the gauge:
+     * before the first round, so the sentinel used to reach the gauge:
      * {@code -100,000,000 / 5,000,000 = -20}, and {@code group_balance_ratio < 0.10}
-     * fires after its 5 m {@code for:} window. The plan's own Phase 4 verification says
-     * to expect each value in {@code (0, ~1.0]}, so this is out of contract by the
-     * plan's own statement.
+     * fired after its 5 m {@code for:} window — out of contract by the plan's own Phase 4
+     * verification, which expects each value in {@code (0, ~1.0]}. Normally harmless
+     * (rounds arrive every 30–60 s, well inside {@code for: 5m}); it bit in exactly the
+     * case that matters, a game delivering no rounds at all (the tx7 "0 sessions ever"
+     * shape), where every connected bot holds the sentinel forever and
+     * {@code GroupBalanceLow} fires alongside {@code GameNoRounds}, publishing "average
+     * balance at -2,000% of its deposit" into a product room.
      * <p>
-     * Normally harmless — rounds arrive every 30–60 s, well inside {@code for: 5m}. It
-     * bites in exactly the case that matters: a game delivering no rounds at all (the
-     * tx7 "0 sessions ever" shape) makes every connected bot hold the sentinel forever,
-     * so {@code GroupBalanceLow} fires alongside {@code GameNoRounds} and publishes
-     * "average balance at -2,000% of its deposit" into a product room.
-     * <p>
-     * Cheapest fix for Dev: have {@code listGroupBalances()} count only bots that have
-     * completed a server read (e.g. {@code getLastFetchedBalance() >= 0}, whose own
-     * sentinel is {@code -1}), and skip the group when none have.
+     * {@code listGroupBalances()} now counts only bots that have completed a server read,
+     * and {@code lastFetchedBalance == -1} is the marker it reads. That pairing is the
+     * contract this test pins: <b>a negative {@code expectedBalance} implies a negative
+     * {@code lastFetchedBalance}</b>. If a future change ever set one without the other,
+     * the filter would silently stop working and the sentinel would be back on the gauge.
      */
     @Test
-    @DisplayName("DEFECT: a connected bot that has never seen a round reports a negative sentinel balance")
+    @DisplayName("before the first server read: expected is the negative sentinel AND lastFetched is -1")
     void expectedBalanceIsANegativeSentinelBeforeTheFirstServerRead() {
         assertThat(bot.getExpectedBalance())
                 .as("this is the numerator Phase 4's group_balance_ratio divides by the deposit")
                 .isEqualTo(UNINITIALISED_EXPECTED_BALANCE)
                 .isNegative();
 
-        // What the gauge would publish for a one-bot group in this state, and what
-        // GroupBalanceLow (< 0.10) would do with it.
-        double ratio = (double) bot.getExpectedBalance() / DEPOSIT;
-        assertThat(ratio).isNegative();
-        assertThat(ratio < 0.10)
-                .as("GroupBalanceLow fires on a group whose balance nobody has read yet")
-                .isTrue();
+        assertThat(bot.getLastFetchedBalance())
+                .as("the marker listGroupBalances() uses to exclude this bot from the average")
+                .isNegative();
 
-        // And the group is eligible for the gauge as soon as the socket is up, which is
-        // long before the first round: listGroupBalances() filters on isConnected().
+        // No server read has happened: the group is eligible for the gauge as soon as the
+        // socket is up, which is long before the first round.
         verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
     }
 

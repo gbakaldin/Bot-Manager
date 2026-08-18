@@ -1583,8 +1583,11 @@ public class BotGroupBehaviorService {
      * <ul>
      *   <li>auto-deposit is <b>off</b> for the group — an auto-deposit group dipping
      *       below 10% is normal operation, not an alert;</li>
-     *   <li>at least one bot is active ({@code isConnected()}) — a stopped or fully
-     *       reconnecting group must not read 0 and page someone.</li>
+     *   <li>at least one bot is active ({@code isConnected()}) <em>and</em> has had its
+     *       balance established by a server read ({@code lastFetchedBalance >= 0}) — a
+     *       stopped or fully reconnecting group must not read 0 and page someone, and a
+     *       freshly started one must not publish the uninitialised
+     *       {@code expectedCurrentBalance} sentinel.</li>
      * </ul>
      * The one case where {@code expected} is untrustworthy is a bot that stopped
      * receiving rounds, so {@code onNewSession()} never runs and both balance values
@@ -1609,7 +1612,22 @@ public class BotGroupBehaviorService {
             BotBehaviorConfig behavior = sample.getBehaviorConfig();
             if (behavior == null || behavior.isAutoDepositEnabled()) continue;
 
-            List<Bot> activeBots = bots.stream().filter(Bot::isConnected).toList();
+            // Connected AND with a balance actually established from the server.
+            // `expectedCurrentBalance` starts at the -100,000,000 sentinel and is only
+            // written from a server read, which happens on the first ROUND, not on
+            // connect — while isConnected() is true well before that. Averaging the
+            // sentinel published group_balance_ratio = -20.0 and fired GroupBalanceLow
+            // on a perfectly healthy freshly-started group. Harmless when rounds arrive
+            // inside the 5m `for:`; it bit in exactly the case that matters — a game
+            // delivering no rounds at all freezes every bot on the sentinel forever, so
+            // the product room got "average balance at -2,000% of its deposit" next to
+            // the GameNoRounds it duplicates. A bot whose balance has never been
+            // established has nothing to say about the group's balance, so it is not
+            // counted; a group where none has is not published at all.
+            List<Bot> activeBots = bots.stream()
+                    .filter(Bot::isConnected)
+                    .filter(bot -> bot.getLastFetchedBalance() >= 0)
+                    .toList();
             if (activeBots.isEmpty()) continue;
 
             long depositAmount = behavior.getDepositAmount() > 0

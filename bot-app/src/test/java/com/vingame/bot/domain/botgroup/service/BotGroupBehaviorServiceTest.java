@@ -2078,31 +2078,27 @@ class BotGroupBehaviorServiceTest {
         }
 
         /**
-         * <b>Known defect, pinned rather than fixed.</b> {@code Bot.expectedCurrentBalance}
-         * is constructed as {@code -100,000,000} and is only ever written from a server
-         * read inside {@code checkBalance()} / {@code deposit()}, both of which run from
-         * {@code onNewSession()} — i.e. from the <em>first round</em>, not from connecting.
-         * The real value is pinned in
+         * {@code Bot.expectedCurrentBalance} is constructed as {@code -100,000,000} and is
+         * only ever written from a server read inside {@code checkBalance()} /
+         * {@code deposit()}, both of which run from {@code onNewSession()} — i.e. from the
+         * <em>first round</em>, not from connecting. The real value is pinned in
          * {@code bot-engine BalanceGaugeSemanticsTest#expectedBalanceIsANegativeSentinelBeforeTheFirstServerRead};
-         * this test shows what {@code listGroupBalances} does with it.
+         * this test covers what {@code listGroupBalances} does with it.
          * <p>
-         * {@code isConnected()} is true well before the first round, so the sentinel is
-         * published as a negative ratio and {@code GroupBalanceLow} ({@code < 0.10}) fires
-         * once its 5 m {@code for:} window elapses. Harmless when rounds arrive every
-         * 30–60 s; it bites in the one case that matters — a game delivering no rounds at
-         * all — where it duplicates {@code GameNoRounds} into the product room with
-         * nonsense wording ("average balance at -2,000% of its deposit"). The plan's own
-         * Phase 4 verification expects every value in {@code (0, ~1.0]}.
-         * <p>
-         * Suggested fix for Dev: require a completed server read before counting a bot
-         * ({@code getLastFetchedBalance() >= 0}; its sentinel is {@code -1}), and skip the
-         * group when none qualify — the same shape as the existing {@code activeBots}
-         * guard, and for the same reason.
+         * {@code isConnected()} is true well before the first round, so the sentinel used
+         * to be published as a negative ratio, and {@code GroupBalanceLow} ({@code < 0.10})
+         * fired once its 5 m {@code for:} window elapsed. Harmless when rounds arrive every
+         * 30–60 s; it bit in the one case that matters — a game delivering no rounds at all
+         * — where it duplicated {@code GameNoRounds} into the product room with nonsense
+         * wording ("average balance at -2,000% of its deposit"). The plan's own Phase 4
+         * verification expects every value in {@code (0, ~1.0]}, and now it holds: a bot
+         * with no completed server read ({@code lastFetchedBalance == -1}) is not counted,
+         * and a group where none has is not published.
          */
         @Test
-        @DisplayName("DEFECT: a connected-but-not-yet-playing group publishes a negative ratio "
-                + "that trips GroupBalanceLow")
-        void listGroupBalances_publishesTheUninitialisedSentinel() {
+        @DisplayName("a connected-but-not-yet-playing group publishes no row at all, "
+                + "rather than the uninitialised sentinel")
+        void listGroupBalances_skipsGroupsWithNoEstablishedBalance() {
             Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
             BotGroupRuntime fresh = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
             try {
@@ -2113,19 +2109,37 @@ class BotGroupBehaviorServiceTest {
                         mockBotWithBalance(bauCua, true, -100_000_000L, false, 5_000_000L)));
                 runningGroups().put("g-1", fresh);
 
-                var balance = service.listGroupBalances().iterator().next();
-
-                assertThat(balance.avgExpectedBalance())
-                        .as("the sentinel is averaged, not filtered out")
-                        .isEqualTo(-100_000_000L);
-                assertThat(balance.ratio())
-                        .as("group_balance_ratio for a group nobody has read a balance for")
-                        .isEqualTo(-20.0);
-                assertThat(balance.ratio() < 0.10)
-                        .as("GroupBalanceLow fires on it")
-                        .isTrue();
+                assertThat(service.listGroupBalances())
+                        .as("no row means no series means no alert — the honest state for "
+                                + "a balance nobody has read yet")
+                        .isEmpty();
             } finally {
                 fresh.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+            }
+        }
+
+        @Test
+        @DisplayName("a group part-way through its first round averages only the bots that have read a balance")
+        void listGroupBalances_averagesOnlyBotsWithAnEstablishedBalance() {
+            // The realistic transitional shape: rounds have started, some bots have run
+            // checkBalance() and some have not. Averaging the sentinel in would drag the
+            // group's ratio negative and fire on a group that is fine.
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime mixed = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            try {
+                putBots(mixed, List.of(
+                        mockBotWithBalance(bauCua, true, 600L, false, 1_000L),
+                        mockBotWithBalance(bauCua, true, 400L, false, 1_000L),
+                        mockBotWithBalance(bauCua, true, -100_000_000L, false, 1_000L)));
+                runningGroups().put("g-1", mixed);
+
+                var balance = service.listGroupBalances().iterator().next();
+
+                assertThat(balance.avgExpectedBalance()).isEqualTo(500L);
+                assertThat(balance.ratio()).isEqualTo(0.50);
+            } finally {
+                mixed.getExecutor().shutdownNow();
                 runningGroups().remove("g-1");
             }
         }
@@ -2399,6 +2413,14 @@ class BotGroupBehaviorServiceTest {
         lenient().when(b.getConfiguration()).thenReturn(config);
         lenient().when(b.isConnected()).thenReturn(connected);
         lenient().when(b.getExpectedBalance()).thenReturn(expectedBalance);
+        // Keep the two balance fields coherent with a real Bot: expectedCurrentBalance is
+        // only ever written from a server read, and lastFetchedBalance (sentinel -1) is
+        // written by the same read — so a negative expected balance means no read has
+        // happened yet, and lastFetchedBalance must still be -1. listGroupBalances now
+        // filters on that, so a mock that reported 0 here would hide the very case the
+        // filter exists for.
+        lenient().when(b.getLastFetchedBalance())
+                .thenReturn(expectedBalance >= 0 ? expectedBalance : -1L);
         return b;
     }
 
