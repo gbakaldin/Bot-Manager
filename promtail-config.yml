@@ -27,8 +27,21 @@ scrape_configs:
       - timestamp:
           source: timestamp
           format: "2006-01-02T15:04:05.000Z0700"
+      # `level` MUST stay a label: loki-config.yaml's retention_stream selectors
+      # match on it, and they degrade silently to the global period if it is
+      # demoted back to a plain field (LOG_VOLUME_TIERING AD-6).
       - labels:
           level:
           botGroupId:
           environmentId:
           gameType:
+      # Committed but DISABLED on purpose (LOG_VOLUME_TIERING AD-6). Dropping
+      # DEBUG/TRACE at ingest is the cheapest possible control, but it would also
+      # make Phase 2's scoped per-group DEBUG invisible in Grafana — which is the
+      # entire point of Phase 2. Loki's 24 h per-stream retention for
+      # {level=~"DEBUG|TRACE"} is the primary control instead. Uncomment ONLY on
+      # an instance that is provably drowning, and expect to lose scoped-debug
+      # visibility there.
+#      - match:
+#          selector: '{level=~"DEBUG|TRACE"}'
+#          action: drop

@@ -3,9 +3,10 @@
 # Overriding -config.file drops the image's bundled /etc/loki/local-config.yaml,
 # so the server/common/schema blocks below are restated verbatim from the 3.3.2
 # default to preserve the existing on-disk data layout (loki-data volume at
-# /loki). The only additions are limits_config.retention_period + the compactor
-# retention block, so the loki-data volume can no longer grow unbounded (it hit
-# 33.7 GB and ENOSPC-killed the whole stack on 2026-06-30).
+# /loki). The only additions are the limits_config retention block (period +
+# per-stream overrides) and the compactor retention block, so the loki-data
+# volume can no longer grow unbounded (it hit 33.7 GB and ENOSPC-killed the
+# whole stack on 2026-06-30).
 
 auth_enabled: false
 
@@ -34,9 +35,30 @@ schema_config:
         prefix: index_
         period: 24h
 
-# Retention: drop log data older than 7 days.
+# Retention is level-aware (LOG_VOLUME_TIERING AD-6). `retention_period` is the
+# default for every stream that matches no selector below — i.e. INFO, the tier
+# that has to stay queryable for weeks — and is raised 168h -> 720h (30 d).
+# `retention_stream` then splits the two extremes: WARN/ERROR are cheap and are
+# the ones an incident is reconstructed from, so they also get 30 d; DEBUG/TRACE
+# are 46–124 GB/day at fleet scale and are only ever read within minutes of the
+# event, so they get 24 h.
+#
+# These selectors only work because `level` is promoted to a Loki LABEL by
+# promtail-config.yml's `labels` stage. Remove that stage and the split silently
+# degrades to the global period — it does not error.
+#
+# Retention is enforced by the compactor on its compaction_interval (10 m) and
+# after retention_delete_delay (2 h), so do not expect same-minute deletion when
+# verifying.
 limits_config:
-  retention_period: 168h
+  retention_period: 720h
+  retention_stream:
+    - selector: '{level=~"WARN|ERROR"}'
+      priority: 1
+      period: 720h
+    - selector: '{level=~"DEBUG|TRACE"}'
+      priority: 1
+      period: 24h
 
 # The compactor is what actually enforces retention for the tsdb/filesystem
 # store. delete_request_store is mandatory in Loki 3.x once retention_enabled is
