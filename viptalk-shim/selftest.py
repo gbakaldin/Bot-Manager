@@ -30,8 +30,12 @@ What is covered here:
   * a blank instance label => no bracket segment at all;
   * the ops room listed twice => both registers land in it (no dedupe here,
     unlike the app's AlertRouter);
-  * a non-numeric port/timeout => Config() raises before the server binds, which
-    under `restart: unless-stopped` is a crash loop;
+  * a non-numeric port/timeout => the default plus a loud log, never a crash loop;
+  * VIPTALK_ENABLED=false => the shim is muted too, not just the app; unset => on;
+  * VIPTALK_CUSTOMER_NOTICES_ENABLED=false => ops served, product rooms not;
+  * a scheme-less VIPTALK_BASE_URL => self-disabled and ANSWERED, not a traceback
+    with no HTTP response at all;
+  * the bot token never reaching a log line, on either failure branch;
   * an unknown GET path => 404 with a hint.
 
 What is NOT covered: the real VipTalk API (Phase 0 verified the {"text",
@@ -97,7 +101,11 @@ class FakeVipTalk(object):
                     "contentType": self.headers.get("Content-Type"),
                     "body": json.loads(raw.decode("utf-8")),
                 })
-                body = b'{"message":"ok"}'
+                # The real VipTalk echoes the request path back in the `path` field of
+                # its error bodies (spike.md), and the bot token IS that path — so the
+                # stub does too, which is what makes the redaction test real rather
+                # than a test of a string the server would never have sent.
+                body = json.dumps({"message": "ok", "path": self.path}).encode("utf-8")
                 self.send_response(next_status())
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -436,23 +444,146 @@ def test_ops_room_listed_twice_gets_both_registers():
         viptalk.stop()
 
 
-def test_bad_numeric_config_fails_loudly_at_startup():
-    print("non-numeric port/timeout -> Config raises rather than starting half-configured")
-    # DOCUMENTED SHARP EDGE. Every other malformed input is tolerated on purpose ("a
-    # payload-schema change must not drop an outage notice"), but a non-numeric
-    # VIPTALK_SHIM_PORT or VIPTALK_TIMEOUT_SECONDS raises out of Config() before the
+def test_bad_numeric_config_falls_back_instead_of_crash_looping():
+    print("non-numeric port/timeout -> default + a loud log, never a crash loop")
+    # Every other malformed input is tolerated on purpose ("a payload-schema change must
+    # not drop an outage notice"), and this one used not to be: a non-numeric
+    # VIPTALK_SHIM_PORT or VIPTALK_TIMEOUT_SECONDS raised out of Config() BEFORE the
     # server binds. With restart: unless-stopped that is a crash loop — the container
-    # is then down for exactly the outage it exists to report, and the only trace is
-    # in `docker compose logs viptalk-shim`. Cheap to make it fall back to the default
-    # instead; pinned here so the choice is visible.
-    for name in ("VIPTALK_SHIM_PORT", "VIPTALK_TIMEOUT_SECONDS"):
+    # down for exactly the outage it exists to report, the only trace in
+    # `docker compose logs viptalk-shim`. These are hand-edited on the host, so the typo
+    # is likely; the config layer is now as total as the request layer.
+    expected = {"VIPTALK_SHIM_PORT": ("port", 8080), "VIPTALK_TIMEOUT_SECONDS": ("timeout", 10.0)}
+    for name, (attribute, default) in expected.items():
         env = base_env("http://127.0.0.1:1")
         env[name] = "not-a-number"
         try:
-            shim.Config(env)
-            check(False, "%s='not-a-number' is accepted (fallback to default)" % name)
+            config = shim.Config(env)
+            equal(getattr(config, attribute), default,
+                  "%s='not-a-number' falls back to the default" % name)
         except ValueError:
-            check(True, "%s='not-a-number' raises ValueError at startup (crash loop)" % name)
+            check(False, "%s='not-a-number' still raises at startup (crash loop)" % name)
+
+
+def test_master_switch_disables_the_shim():
+    print("VIPTALK_ENABLED=false -> fully disabled, 200, no sends")
+    # The documented master switch used to gate only the app, leaving this process armed:
+    # an operator muting alerting for a migration still got BotManagerDown published from
+    # here — customer-facing copy included, where product rooms were wired. That is the
+    # single most sensitive message in the system escaping the switch documented to stop it.
+    viptalk = FakeVipTalk()
+    env = base_env(viptalk.url)
+    env["VIPTALK_ENABLED"] = "false"
+    server, url = start_shim(env)
+    try:
+        status, _ = post(url, FIRING)
+        equal(status, 200, "a deliberate mute is not a failure to retry")
+        equal(len(viptalk.requests), 0, "nothing sent on either register")
+        _, health = get(url)
+        equal(health["enabled"], False, "/health reports the mute")
+        equal(health["masterSwitch"], False, "and says which switch caused it")
+    finally:
+        server.shutdown()
+        viptalk.stop()
+
+
+def test_master_switch_defaults_to_on():
+    print("VIPTALK_ENABLED unset -> still delivers (a missing variable must not mute the outage path)")
+    viptalk = FakeVipTalk()
+    env = base_env(viptalk.url)
+    env.pop("VIPTALK_ENABLED", None)
+    server, url = start_shim(env)
+    try:
+        status, _ = post(url, FIRING)
+        equal(status, 200, "delivered")
+        equal(len(viptalk.requests), 2, "both registers, as before")
+    finally:
+        server.shutdown()
+        viptalk.stop()
+
+
+def test_customer_notices_flag_suppresses_only_the_customer_register():
+    print("VIPTALK_CUSTOMER_NOTICES_ENABLED=false -> ops still served, product rooms not")
+    # AD-V7's one flag for customer copy now has one answer across both delivery paths.
+    viptalk = FakeVipTalk()
+    env = base_env(viptalk.url)
+    env["VIPTALK_CUSTOMER_NOTICES_ENABLED"] = "false"
+    server, url = start_shim(env)
+    try:
+        status, _ = post(url, FIRING)
+        equal(status, 200, "delivered")
+        equal(len(viptalk.requests), 1, "only the technical register goes out")
+        equal(viptalk.requests[0]["body"]["roomIds"], ["!ops:matrix-uat.viptalk.org"],
+              "and it is the ops one")
+        _, health = get(url)
+        equal(health["customerNoticesEnabled"], False, "/health says the customer copy is off")
+    finally:
+        server.shutdown()
+        viptalk.stop()
+
+
+def test_scheme_less_base_url_is_answered_not_thrown():
+    print("VIPTALK_BASE_URL with no scheme -> disabled, 200, no traceback, no token in the log")
+    # `Request()` parses the URL and raises ValueError on `api.viptalk.org` — from OUTSIDE
+    # the try, so it escaped send -> deliver -> do_POST, printed the token in a traceback,
+    # and left Alertmanager with NO response at all: a transport error, retried forever,
+    # during the outage. /health called it `enabled: true` the whole time.
+    env = base_env("api.viptalk.org")
+    config = shim.Config(env)
+    check(not config.base_url_usable, "a scheme-less base URL is recognised as unusable")
+    check(not config.enabled, "and makes the shim self-disable rather than fail per-request")
+
+    server, url = start_shim(env)
+    try:
+        status, _ = post(url, FIRING)
+        equal(status, 200, "the shim still ANSWERS — its whole contract")
+        _, health = get(url)
+        equal(health["baseUrlUsable"], False, "/health reports the typo instead of hiding it")
+    finally:
+        server.shutdown()
+
+    # And if it is somehow reached anyway, send() must swallow it rather than escape.
+    config.enabled_flag = True
+    check(shim.send(config, "hi", ["!ops:vt.org"]) is False,
+          "send() returns False on an unparseable URL rather than raising")
+
+
+def test_the_token_never_reaches_a_log_line():
+    print("VipTalk error body echoing the request path -> token redacted in the log")
+    # spike.md: VipTalk echoes the full request path back in the `path` field of its error
+    # body, and the token IS that path. The 4xx that guarantees this branch runs is a wrong
+    # or expired token — the moment the token is most sensitive. stderr goes to the
+    # container's json-file log and on into Loki, which is not a secret store.
+    token = base_env("")["VIPTALK_BOT_TOKEN"]
+    viptalk = FakeVipTalk(status=400)
+    env = base_env(viptalk.url)
+    lines = []
+    original_log = shim.log
+    shim.log = lines.append
+    try:
+        server, url = start_shim(env)
+        try:
+            post(url, FIRING)
+        finally:
+            server.shutdown()
+    finally:
+        shim.log = original_log
+        viptalk.stop()
+
+    check(any("HTTP 400" in line for line in lines), "the rejection is still reported")
+    check(any("/v1/bot/***/sendMessage" in line for line in lines),
+          "the echoed path survives with the token replaced, so the log is still useful")
+    check(not any(token in line for line in lines),
+          "the bot token is in none of them: %r" % (lines,))
+
+    # The other leak was `%r` of an exception carrying the URL — e.g. InvalidURL from a
+    # control character pasted into secrets.env. Same redaction, applied to str(error).
+    config = shim.Config(base_env("http://127.0.0.1:1"))
+    config.token = "SECRET\x01TOKEN"
+    equal(config.redact("URL can't contain control characters. "
+                        "'/v1/bot/SECRET\x01TOKEN/sendMessage'"),
+          "URL can't contain control characters. '/v1/bot/***/sendMessage'",
+          "an exception's text is redacted the same way")
 
 
 def test_unknown_get_path_is_404():
@@ -486,7 +617,12 @@ def main():
                  test_room_lists_accept_commas_and_stray_whitespace,
                  test_no_instance_label_means_no_prefix,
                  test_ops_room_listed_twice_gets_both_registers,
-                 test_bad_numeric_config_fails_loudly_at_startup,
+                 test_bad_numeric_config_falls_back_instead_of_crash_looping,
+                 test_master_switch_disables_the_shim,
+                 test_master_switch_defaults_to_on,
+                 test_customer_notices_flag_suppresses_only_the_customer_register,
+                 test_scheme_less_base_url_is_answered_not_thrown,
+                 test_the_token_never_reaches_a_log_line,
                  test_unknown_get_path_is_404):
         test()
     print("")

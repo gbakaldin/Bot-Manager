@@ -316,26 +316,33 @@ class AlertPipelineWiringTest {
     }
 
     @Test
-    @DisplayName("GAP, pinned: VIPTALK_ENABLED does not gate the shim")
-    void theMasterSwitchDoesNotReachTheShim() {
-        // secrets.env.example calls VIPTALK_ENABLED the "master switch", and it is — for the
-        // app. The shim has its own notion of enabled (a token plus at least one room) and
-        // never reads it, so on a host with the token and ops room filled in but alerting
-        // deliberately switched off, BotManagerDown still reaches VipTalk through the shim
-        // while every other alert is silent.
+    @DisplayName("the master switch and the customer-copy switch both reach the shim")
+    void bothSwitchesReachTheShim() {
+        // secrets.env.example calls VIPTALK_ENABLED the "master switch". It used to be one
+        // only for the app: the shim had its own notion of enabled (a token plus at least
+        // one room) and never read it, so on a host with the token and ops room filled in
+        // but alerting deliberately switched off, BotManagerDown still reached VipTalk
+        // through the shim — including, where VIPTALK_DOWN_ROOM_IDS was populated,
+        // customer-facing copy into a live product room. "Alerting is off" now means off on
+        // both paths.
         //
-        // Defensible: the app-down notice is the one alert you least want a stale switch to
-        // suppress. But it is a surprise — "alerting is off" is not true while it holds, and
-        // a maintenance window that deliberately silences the rooms will still hear from
-        // every bot-manager restart that lasts past `for: 2m`. Pinned so it stays a decision
-        // rather than an accident; the fix, if wanted, is one env var and one `if`.
-        assertThat(composeService("viptalk-shim").get("environment").toString())
-                .doesNotContain("VIPTALK_ENABLED");
-        assertThat(text("viptalk-shim", "shim.py")).doesNotContain("VIPTALK_ENABLED");
+        // Same for VIPTALK_CUSTOMER_NOTICES_ENABLED: AD-V7 makes it THE flag governing
+        // customer-facing copy, and the shim's room-list gate was a second, independent
+        // switch that could disagree with it. The room list is still required; the flag can
+        // now veto, which is what one policy with one answer looks like.
+        String environment = composeService("viptalk-shim").get("environment").toString();
+        String script = text("viptalk-shim", "shim.py");
+
+        assertThat(environment).contains("VIPTALK_ENABLED", "VIPTALK_CUSTOMER_NOTICES_ENABLED");
+        assertThat(script).contains("\"VIPTALK_ENABLED\"", "\"VIPTALK_CUSTOMER_NOTICES_ENABLED\"");
         assertThat(text("secrets.env.example"))
-                .as("the template does describe VIPTALK_ENABLED as a master switch, which is "
-                        + "what makes the asymmetry worth writing down")
+                .as("the template describes VIPTALK_ENABLED as a master switch, and now it is one")
                 .contains("VIPTALK_ENABLED");
+        // Default true on the compose side, not false: an unset variable must never silence
+        // the out-of-band path, which is the one delivery route that survives the app dying.
+        assertThat(environment)
+                .contains("VIPTALK_ENABLED=${VIPTALK_ENABLED:-true}")
+                .contains("VIPTALK_CUSTOMER_NOTICES_ENABLED=${VIPTALK_CUSTOMER_NOTICES_ENABLED:-true}");
     }
 
     @Test

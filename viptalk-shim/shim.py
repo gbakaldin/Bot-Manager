@@ -40,6 +40,12 @@ what broke. That is also why the Alertmanager receiver pointing here sets
 is delivered by the normal app webhook, which by definition is reachable again
 once `BotManagerDown` resolves (AD-V9).
 
+Both of the app's switches are honoured here too: `VIPTALK_ENABLED=false` (the
+documented master switch) disables this process entirely, and
+`VIPTALK_CUSTOMER_NOTICES_ENABLED=false` suppresses the customer register while
+leaving the ops one — so "alerting is off" means off on both paths, and AD-V7's
+one policy has one answer rather than two that can disagree.
+
 The instance label is stamped into both texts (AD-7 / AD-V15): prod, loadtest and
 staging run the same artifact into the same ops room, and it is the only thing
 that tells them apart.
@@ -69,6 +75,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -105,6 +112,35 @@ def _mask(token):
     return "<unset>" if not token else token[:4] + "…(" + str(len(token)) + " chars)"
 
 
+def _number(name, raw, default, cast):
+    """A numeric env var, falling back LOUDLY to `default` on anything unparseable.
+
+    `VIPTALK_TIMEOUT_SECONDS=10s` or `VIPTALK_SHIM_PORT=8O80` used to raise straight
+    out of Config(), before the server binds — under `restart: unless-stopped` that is
+    a crash loop, i.e. the shim is down for precisely the outage it exists to report,
+    with the only trace in `docker compose logs`. These values are hand-edited on the
+    host, so a typo is likely; the same posture as `enabled` applies — carry on and say
+    so, rather than die.
+    """
+    if not raw:
+        return default
+    try:
+        return cast(raw)
+    except (TypeError, ValueError):
+        log("WARN %s=%r is not a number — falling back to %r" % (name, raw, default))
+        return default
+
+
+def _flag(raw, default):
+    """A boolean env var. Anything unrecognised keeps `default` rather than raising."""
+    value = (raw or "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 class Config(object):
     """Everything this process knows, resolved once at startup from the environment."""
 
@@ -115,8 +151,20 @@ class Config(object):
         self.base_url = get("VIPTALK_BASE_URL", "https://api.viptalk.org").rstrip("/")
         self.token = get("VIPTALK_BOT_TOKEN")
         self.instance_label = get("VIPTALK_INSTANCE_LABEL")
-        self.timeout = float(get("VIPTALK_TIMEOUT_SECONDS", "10") or "10")
-        self.port = int(get("VIPTALK_SHIM_PORT", "8080") or "8080")
+        self.timeout = _number("VIPTALK_TIMEOUT_SECONDS", get("VIPTALK_TIMEOUT_SECONDS", "10"), 10.0, float)
+        self.port = _number("VIPTALK_SHIM_PORT", get("VIPTALK_SHIM_PORT", "8080"), 8080, int)
+
+        # The two app-side switches, honoured here too. Before this the shim read
+        # neither: an operator who set VIPTALK_ENABLED=false — the documented "master
+        # switch" — silenced the app and left this process armed, so the next
+        # BotManagerDown still published, including customer-facing copy into a live
+        # product room. Default true so an unset variable keeps the delivery path alive
+        # (the app's own default is false; the difference is deliberate — the app-down
+        # notice is the one you least want a *missing* variable to suppress).
+        self.enabled_flag = _flag(get("VIPTALK_ENABLED", "true"), True)
+        # AD-V7's one flag for customer copy. The room list is still required as well;
+        # this makes the app's flag able to veto, which is what "one policy" means.
+        self.customer_notices = _flag(get("VIPTALK_CUSTOMER_NOTICES_ENABLED", "true"), True)
 
         self.ops_rooms = _rooms(get("VIPTALK_OPS_ROOM_ID"))
         self.down_rooms = _rooms(get("VIPTALK_DOWN_ROOM_IDS"))
@@ -124,24 +172,52 @@ class Config(object):
         self.down_text = get("VIPTALK_DOWN_TEXT") or DEFAULT_DOWN_TEXT
 
     @property
+    def base_url_usable(self):
+        """A base URL urllib can actually open.
+
+        A scheme-less `VIPTALK_BASE_URL` (`api.viptalk.org`) is an ordinary secrets.env
+        typo, and `Request()` raises `ValueError` on it — with the token in the message.
+        Checked once here so the state reads as "not configured" instead of failing on
+        every notification.
+        """
+        return urllib.parse.urlsplit(self.base_url).scheme in ("http", "https")
+
+    @property
     def enabled(self):
-        """A token and at least one room, or there is nothing this process can do.
+        """A token, a usable base URL, at least one room, and the master switch on.
 
         Blank config is a normal, expected state (a host with no secrets.env, or a
         non-prod instance with no product rooms wired), so it self-disables and says
         so rather than refusing to start — a crash-looping container would be one
         more thing broken during the outage this is meant to report.
         """
-        return bool(self.token) and bool(self.ops_rooms or self.down_rooms)
+        return (self.enabled_flag
+                and bool(self.token)
+                and self.base_url_usable
+                and bool(self.ops_rooms or self.down_rooms))
 
     def registers(self):
         """(name, text, rooms) for each register that has somewhere to go."""
         out = []
         if self.ops_rooms:
             out.append(("technical", self._stamped(self.ops_text), self.ops_rooms))
-        if self.down_rooms:
+        if self.down_rooms and self.customer_notices:
             out.append(("customer", self._stamped(self.down_text), self.down_rooms))
         return out
+
+    def redact(self, text):
+        """Strip the bot token out of anything on its way to a log.
+
+        The token is in the URL PATH, and VipTalk echoes the request path back in the
+        `path` field of its error bodies (docs/reviews/VIPTALK_ALERTING_V2/spike.md) —
+        so the most likely 4xx of all, a wrong or expired token, would otherwise write
+        the token to stderr, into the container's json-file log, into Loki, forever.
+        Some exceptions (`InvalidURL`) carry the URL too. Exact substring replace: the
+        token is a known string here, so no false positives and no misses.
+        """
+        if not text or not self.token:
+            return text
+        return text.replace(self.token, "***")
 
     def _stamped(self, text):
         """Prefix the instance label so a shared room can tell prod from staging.
@@ -155,10 +231,17 @@ class Config(object):
         return {
             "enabled": self.enabled,
             "baseUrl": self.base_url,
+            "baseUrlUsable": self.base_url_usable,
             "token": _mask(self.token),
             "instanceLabel": self.instance_label or None,
             "opsRooms": len(self.ops_rooms),
+            # Rooms wired vs rooms that will actually be used: with
+            # VIPTALK_CUSTOMER_NOTICES_ENABLED=false the customer register is off even
+            # though the room list is populated, and /health is where an operator finds
+            # that out without staging an outage.
             "productRooms": len(self.down_rooms),
+            "customerNoticesEnabled": self.customer_notices,
+            "masterSwitch": self.enabled_flag,
         }
 
 
@@ -173,12 +256,17 @@ def send(config, text, rooms):
     Never raises: a failure here must become a 502 to Alertmanager (which retries),
     not a stack trace that leaves the notification in an unknown state.
     """
-    url = config.base_url + "/v1/bot/" + config.token + "/sendMessage"
-    body = json.dumps({"text": text, "roomIds": rooms}).encode("utf-8")
-    request = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"Content-Type": "application/json", "Accept": "application/json"})
     try:
+        url = config.base_url + "/v1/bot/" + config.token + "/sendMessage"
+        body = json.dumps({"text": text, "roomIds": rooms}).encode("utf-8")
+        # Request() is what PARSES the url, so it must be inside the try: a scheme-less
+        # VIPTALK_BASE_URL raised ValueError from here, which escaped send -> deliver ->
+        # do_POST, printed the token in a traceback, and left Alertmanager with NO
+        # response at all — during the outage. `enabled` now rejects that config up
+        # front; this is the belt to that braces.
+        request = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/json", "Accept": "application/json"})
         with urllib.request.urlopen(request, timeout=config.timeout) as response:
             response.read()
             return 200 <= response.status < 300
@@ -188,10 +276,14 @@ def send(config, text, rooms):
             detail = error.read().decode("utf-8", "replace")[:300]
         except Exception:  # noqa: BLE001 - diagnostics only, never worth failing over
             pass
-        log("ERROR VipTalk rejected the message: HTTP %s %s" % (error.code, detail))
+        log("ERROR VipTalk rejected the message: HTTP %s %s"
+            % (error.code, config.redact(detail)))
         return False
     except Exception as error:  # noqa: BLE001 - URLError, socket timeout, DNS, TLS…
-        log("ERROR VipTalk unreachable: %r" % (error,))
+        # type + redacted str, never repr: repr on InvalidURL and friends embeds the
+        # full URL, and the token is in it.
+        log("ERROR VipTalk unreachable: %s: %s"
+            % (type(error).__name__, config.redact(str(error))))
         return False
 
 
@@ -200,8 +292,10 @@ def deliver(config, payload_status, sender=send):
     if not config.enabled:
         # 200, not 502: a deliberately unconfigured instance must not make
         # Alertmanager retry forever over something that will never succeed.
-        log("SKIP notification — shim is not configured (token=%s, opsRooms=%d, productRooms=%d)"
-            % (_mask(config.token), len(config.ops_rooms), len(config.down_rooms)))
+        log("SKIP notification — shim is not configured "
+            "(enabled=%s, token=%s, baseUrlUsable=%s, opsRooms=%d, productRooms=%d)"
+            % (config.enabled_flag, _mask(config.token), config.base_url_usable,
+               len(config.ops_rooms), len(config.down_rooms)))
         return 200
 
     if payload_status == "resolved":
@@ -227,10 +321,25 @@ class Handler(BaseHTTPRequestHandler):
     config = None  # injected by serve()
 
     def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
-        body = self._read_body()
-        status_label, alert_names = _describe(body)
-        log("webhook %s status=%s alerts=%s" % (self.path, status_label or "?", alert_names or "?"))
-        self._respond(deliver(self.config, status_label))
+        # Total by construction. This handler is the last line of defence for a process
+        # whose whole job is to ANSWER during an incident: an exception escaping here
+        # makes socketserver print a traceback and close the connection with no HTTP
+        # response at all, which Alertmanager sees as a transport error and retries —
+        # re-raising, forever, while the outage is in progress. 502 is the honest answer
+        # to "something unexpected broke", and it keeps the retry meaningful.
+        try:
+            body = self._read_body()
+            status_label, alert_names = _describe(body)
+            log("webhook %s status=%s alerts=%s"
+                % (self.path, status_label or "?", alert_names or "?"))
+            status = deliver(self.config, status_label)
+        except Exception as error:  # noqa: BLE001 - answering matters more than the reason
+            config = self.config
+            detail = config.redact(str(error)) if config else str(error)
+            log("ERROR unhandled failure handling the webhook: %s: %s"
+                % (type(error).__name__, detail))
+            status = 502
+        self._respond(status)
 
     def do_GET(self):  # noqa: N802
         if self.path.startswith("/health"):
@@ -281,8 +390,12 @@ def serve(config):
     log("viptalk-shim listening on :%d %s" % (config.port, json.dumps(config.summary())))
     if not config.enabled:
         log("WARN shim is NOT configured — it will accept webhooks and send nothing. "
-            "Set VIPTALK_BOT_TOKEN plus VIPTALK_OPS_ROOM_ID and/or VIPTALK_DOWN_ROOM_IDS "
-            "in secrets.env on this host.")
+            "Set VIPTALK_ENABLED=true and VIPTALK_BOT_TOKEN plus VIPTALK_OPS_ROOM_ID "
+            "and/or VIPTALK_DOWN_ROOM_IDS in secrets.env on this host.")
+    if config.token and not config.base_url_usable:
+        log("ERROR VIPTALK_BASE_URL=%r has no http/https scheme — nothing can be sent. "
+            "This is the one config error /health would otherwise report as healthy."
+            % (config.base_url,))
     return server
 
 

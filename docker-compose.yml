@@ -186,6 +186,16 @@ services:
     environment:
       # Same token and same ops room as bot-manager, from the same secrets.env entries —
       # config for a second delivery path, not a second source of truth (AD-V14).
+      #
+      # The master switch and the customer-copy switch reach BOTH paths. Without these
+      # two lines VIPTALK_ENABLED=false silenced the app and left this container armed,
+      # so the next BotManagerDown still published — including customer-facing copy into
+      # a live product room, which is the single most sensitive message in the system
+      # escaping the switch documented to stop it. Default true: an unset variable must
+      # not silence the out-of-band path (the app's own default is false, deliberately
+      # the other way round — see shim.py).
+      - VIPTALK_ENABLED=${VIPTALK_ENABLED:-true}
+      - VIPTALK_CUSTOMER_NOTICES_ENABLED=${VIPTALK_CUSTOMER_NOTICES_ENABLED:-true}
       - VIPTALK_BOT_TOKEN=${VIPTALK_BOT_TOKEN:-}
       - VIPTALK_OPS_ROOM_ID=${VIPTALK_OPS_ROOM_ID:-}
       # Product rooms for the customer register. Empty off prod (AD-V7) ⇒ the shim
