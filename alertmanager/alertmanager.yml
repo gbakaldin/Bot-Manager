@@ -3,12 +3,23 @@
 # Bind-mounted into the alertmanager container at /etc/alertmanager/alertmanager.yml
 # (see docker-compose.yml), editable on the host without root.
 #
-# There is exactly one receiver: a webhook into bot-manager, which resolves the
-# target VipTalk room per alert from the rule's `audience` label — ops room for
+# The default receiver is a webhook into bot-manager, which resolves the target
+# VipTalk room per alert from the rule's `audience` label — ops room for
 # `internal`, the product's room for `product`, both (in two registers) for
 # `both` — and posts the message. The product itself comes from the `product`
 # label, else from the `environmentId` label via Mongo. See
 # docs/plans/VIPTALK_ALERTING.md and VIPTALK_ALERTING_V2.md (AD-V3).
+#
+# There is one exception, and it is the reason for the second receiver below:
+# BotManagerDown fires precisely when bot-manager is unscrapeable, i.e. when the
+# receiver above is dead. The message about the app being down cannot be delivered
+# by the app, so it also goes to `viptalk-static-down`, a shim container that posts
+# to VipTalk directly (VIPTALK_ALERTING_V2 AD-V8b / AD-V9, Phase 6).
+#
+# NO SECRETS LIVE HERE. Both receivers are in-network compose service names; the
+# VipTalk token is the shim container's environment variable, from secrets.env.
+# That is what lets this file stay plain and committed rather than being rendered
+# from a template at deploy time.
 #
 # Grouping, dedup and repeat live HERE, not in the app (VIPTALK_ALERTING AD-6) —
 # that is the whole reason for putting Alertmanager in front of the bot rather than
@@ -34,6 +45,26 @@ route:
   # are shared with people who are not on call for the bot fleet.
   repeat_interval: 4h
 
+  # BotManagerDown goes to BOTH receivers (AD-V9): the shim delivers the outage
+  # notice while the app is dead, and the app delivers the recovery notice, which
+  # by definition it can, because the app being back is what resolves this alert.
+  #
+  # TWO sibling routes for one alertname, which looks redundant and is not. A child
+  # route that matches CONSUMES the alert: `continue: true` continues to the next
+  # SIBLING, not to the parent's own receiver. So with only the first route here,
+  # BotManagerDown would reach the shim and never reach bot-manager — no recovery
+  # message would ever be sent, which is exactly the half AD-V9 is about. (The plan's
+  # draft of this block had that shape; it is a routing-semantics bug, not a typo.)
+  # The second route has no `continue`, so matching stops there.
+  routes:
+    - matchers:
+        - alertname = "BotManagerDown"
+      receiver: viptalk-static-down
+      continue: true
+    - matchers:
+        - alertname = "BotManagerDown"
+      receiver: viptalk
+
 receivers:
   - name: viptalk
     webhook_configs:
@@ -45,6 +76,21 @@ receivers:
         send_resolved: true
         # bot-manager answers 502 when VipTalk did not accept the message, which is
         # what makes this retry meaningful (VIPTALK_ALERTING AD-8).
+        max_alerts: 0
+
+  # The out-of-band hop. Reached only by the BotManagerDown route above.
+  - name: viptalk-static-down
+    webhook_configs:
+      - url: http://viptalk-shim:8080/alertmanager
+        # send_resolved: false — the shim's text is a fixed string held in the
+        # container and cannot say "recovered"; publishing it on recovery would put
+        # "the application is experiencing issues" in a room at the moment the
+        # incident ended. The recovery half comes from the `viptalk` receiver above
+        # (AD-V9). The shim also refuses a payload marked resolved, so this line and
+        # the shim agree rather than one trusting the other.
+        send_resolved: false
+        # Same posture as the app receiver: the shim answers 502 when VipTalk did not
+        # accept the message, so a retry is meaningful.
         max_alerts: 0
 
 inhibit_rules:
