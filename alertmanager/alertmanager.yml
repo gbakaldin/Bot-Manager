@@ -65,3 +65,13 @@ inhibit_rules:
     target_matchers:
       - alertname = "EnvironmentSocketDegraded"
     equal: ['product', 'environmentId']
+
+  # Same construction, same fix, for the host disk pair: HostDiskSpaceCritical (< 7%
+  # free) can never fire without HostDiskSpaceLow (< 15%) also firing, and two messages
+  # quoting two percentages of one filesystem is worse than one. Matched on the
+  # filesystem, not just the host, so a second mount filling still gets its own message.
+  - source_matchers:
+      - alertname = "HostDiskSpaceCritical"
+    target_matchers:
+      - alertname = "HostDiskSpaceLow"
+    equal: ['instance', 'mountpoint']

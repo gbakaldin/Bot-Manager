@@ -51,9 +51,10 @@
 # restarted by an operator, so it warrants its own alert, not a corner of a ratio.
 #
 # THRESHOLDS ARE FIRST GUESSES. 0.5 / 0.8 socket ratios, the 0.5 auth-failure
-# ratio, the >= 5 sample floors, the 0.2 dead-bot ratio and every `for:` window
-# were chosen from the shape of past incidents, not from measured data. Expect to
-# tune them once these rules have run against a real fleet for a few days.
+# ratio, the >= 5 sample floors, the 0.2 dead-bot ratio, the host disk / RAM / CPU
+# levels in the `host` group, and every `for:` window were chosen from the shape of
+# past incidents, not from measured data. Expect to tune them once these rules have
+# run against a real fleet for a few days.
 
 groups:
   - name: bot-manager-availability
@@ -285,3 +286,119 @@ groups:
         annotations:
           summary: "JVM live threads at {{ $value }}"
           description: "Sustained high thread count — the thread-leak sawtooth signature. Check reconnect churn and executor lifecycles before the JVM exhausts native threads."
+
+  # A4 — the host itself: storage, RAM, CPU. All `audience: internal` (requirement B2):
+  # these are the fundamental facts the ops room exists for, they have no owning product,
+  # and none of them carries a `public_summary` — there is no customer register for
+  # "the box is out of disk".
+  #
+  # Every series here comes from the node-exporter container (job `node`), NOT from
+  # actuator (AD-V11). The decisive reason is the 2026-06-30 outage: a disk-full event
+  # kills the app, so an app-sourced disk metric goes dark exactly when it matters.
+  # Actuator's disk_free_bytes stays enabled as a free JVM-side cross-check; deliberately
+  # no rule binds to it.
+  #
+  # THRESHOLDS ARE FIRST GUESSES, like the ones above — 15%/7% free, 10% available RAM,
+  # 90% CPU, and every `for:` window were chosen from the shape of the 2026-06-30 outage
+  # and the box's known size, not from measured growth rates. Tune once they have run
+  # against the real host for a few days.
+  - name: host
+    rules:
+      # The rule this whole phase was bought by. On 2026-06-30 Loki ran with no retention,
+      # filled Bot-1's disk, and ENOSPC-killed Mongo — taking bot-manager AND the whole
+      # observability stack down with it, because they are one compose project on one box.
+      # So this must fire with enough headroom to actually act on (delete a volume, prune
+      # images), not at 99% when the box is already unrecoverable-by-ssh.
+      #
+      # Stated as free fraction because that is what node-exporter reports directly; the
+      # user's framing is occupancy, so read 0.15 free as 85% occupied.
+      #
+      # mountpoint="/" is the point of the selector, not decoration. node-exporter emits a
+      # node_filesystem_* series per mount, and on a Docker host most of those are tmpfs
+      # and per-container overlay mounts that are irrelevant, tiny, and permanently near
+      # full — alerting across all of them would be pure noise. `/` is the filesystem that
+      # filled. The fstype exclusion is belt-and-braces for a host that reports `/` oddly.
+      #
+      # The SAME selector appears on both sides of the division on purpose: `/` matches on
+      # the full label set (device, fstype, mountpoint, instance, job), so an asymmetric
+      # selector pairs series for reasons that have nothing to do with the threshold, and
+      # a non-pairing side yields no result at all rather than an error.
+      #
+      # Release-time check (plan Phase 0 Q2, still open): confirm on Bot-1 that this series
+      # exists and that node_filesystem_size_bytes{mountpoint="/"} agrees with `df -h /`.
+      # A missing result means --path.rootfs / pid:host are wrong and this rule is blind.
+      - alert: HostDiskSpaceLow
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+          / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+          < 0.15
+        for: 10m
+        labels:
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "Host disk {{ $value | humanizePercentage }} free on {{ $labels.instance }}"
+          description: "Check the Loki volume and Docker image/container layers first — that is what filled it on 2026-06-30 (`docker system df`, then the loki-data volume). Loki retention and the json-file log caps are the permanent fix; freeing space is the immediate one."
+
+      # Same expression, one threshold down. Inhibited-over in alertmanager.yml so the ops
+      # room hears one disk message, not two with different percentages.
+      - alert: HostDiskSpaceCritical
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+          / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay|squashfs"}
+          < 0.07
+        for: 5m
+        labels:
+          severity: critical
+          audience: internal
+        annotations:
+          summary: "Host disk {{ $value | humanizePercentage }} free on {{ $labels.instance }} — Mongo will be killed on ENOSPC"
+          description: "This is the 2026-06-30 state. Mongo dies first and takes the bot fleet's persistence with it. Free space NOW: `docker system prune`, then the loki-data volume."
+
+      # MemAvailable, not MemFree: MemFree counts page cache as used and would sit near
+      # zero on any healthy long-running box. Both operands are single series carrying the
+      # identical label set (instance, job), so the division pairs one-to-one.
+      - alert: HostMemoryLow
+        expr: |
+          node_memory_MemAvailable_bytes
+          / node_memory_MemTotal_bytes
+          < 0.10
+        for: 10m
+        labels:
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "Host memory {{ $value | humanizePercentage }} available on {{ $labels.instance }}"
+          description: "The JVM is the largest tenant on this box; a bot fleet ramp or a thread leak shows up here before the OOM killer picks a victim. Check jvm_memory_used_bytes and jvm_threads_live_threads alongside this."
+
+      # 1 - idle, averaged across cores. `avg by (instance)` collapses the per-cpu series;
+      # `1 - <vector>` is scalar-vector arithmetic, which drops the metric name and keeps
+      # `instance`, so $value is a fraction of total capacity across all cores.
+      #
+      # 15m, and 0.90 not 0.80: a bot fleet ramp legitimately pins this box for minutes at
+      # a time. This is meant to catch a runaway (reconnect storm, GC death spiral), not
+      # honest work.
+      - alert: HostCpuHigh
+        expr: 1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.90
+        for: 15m
+        labels:
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "Host CPU at {{ $value | humanizePercentage }} on {{ $labels.instance }} for 15 minutes"
+          description: "Sustained saturation. Distinguish an honest fleet ramp from a runaway: check bots_managed against reconnect churn and GC time before restarting anything."
+
+      # Without this, the three rules above fail silent — no node-exporter means no series,
+      # and a rule with no series never fires. Note BotManagerDown does NOT inhibit this
+      # (its inhibit matches `equal: ['job']`, and this is job="node"), which is correct:
+      # when the app is down, "the host is also blind" is exactly what an operator needs
+      # to know, not something to suppress.
+      - alert: NodeExporterDown
+        expr: up{job="node"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "node-exporter is not scrapeable — host CPU/RAM/disk alerting is blind"
+          description: "HostDiskSpaceLow/Critical, HostMemoryLow and HostCpuHigh cannot fire while this is firing. Check `docker compose ps node-exporter`; if the host itself is dying, this may be the only warning you get."
