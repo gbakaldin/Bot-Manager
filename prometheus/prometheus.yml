@@ -4,9 +4,9 @@
 # (see docker-compose.yml). Editable on the host without root, matching the
 # ./logs and ./grafana/provisioning patterns.
 #
-# Phase 1 of docs/plans/OBSERVABILITY.md: single scrape target, no alerting
-# rules. Bot-side counters/gauges land in Phase 2; this file does not change
-# when they do (Micrometer exposes everything under the same endpoint).
+# Two scrape targets: bot-manager's actuator endpoint (Micrometer exposes every
+# bot-side counter/gauge under it, so this file does not change when meters are
+# added) and node-exporter for host CPU / RAM / disk.
 
 global:
   scrape_interval: 15s
@@ -36,3 +36,17 @@ scrape_configs:
           # on 8085 inside the container (see application.properties:server.port);
           # the host's 8080 mapping in docker-compose.yml is not used here.
           - bot-manager:8085
+
+  # Host CPU / RAM / filesystem, from the node-exporter container (VIPTALK_ALERTING_V2
+  # Phase 5 / AD-V11). Deliberately a SEPARATE job from bot-manager: when the app dies —
+  # e.g. because the disk filled, the 2026-06-30 failure — this target keeps answering,
+  # which is the whole reason the host rules are not built on actuator's disk metrics.
+  # The job name is load-bearing: `up{job="node"}` is what NodeExporterDown watches, and
+  # Alertmanager's BotManagerDown inhibit matches on `equal: ['job']`, so host alerts are
+  # correctly NOT suppressed while the app is down.
+  - job_name: node
+    static_configs:
+      # Compose service name + container-internal port; node-exporter has no host port
+      # mapping, matching the alertmanager posture.
+      - targets:
+          - node-exporter:9100

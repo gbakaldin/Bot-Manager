@@ -155,6 +155,42 @@ services:
     depends_on:
       - bot-manager
 
+  # Host CPU / RAM / filesystem metrics, scraped by Prometheus as job `node`.
+  # VIPTALK_ALERTING_V2 Phase 5 / AD-V11.
+  #
+  # Why a separate container rather than actuator's disk_free_bytes: a disk-full event
+  # kills the app, and with it any metric the app produces — which is precisely the
+  # 2026-06-30 shape, where Loki's unbounded volume ENOSPC-killed Mongo and took the box
+  # down. node-exporter keeps reporting when the JVM is gone, and it is the only source
+  # that sees host RAM at all (actuator sees JVM heap). Actuator's disk metrics stay
+  # enabled as a free JVM-side cross-check; no rule binds to them.
+  #
+  # Not exposed on the host, matching the alertmanager posture — Prometheus reaches it
+  # over the compose network.
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    logging: *default-logging
+    # The filesystem collector reads the mount table from /proc/1/mounts, so it needs the
+    # host PID namespace to see the HOST's mounts instead of this container's.
+    pid: host
+    command:
+      # Everything the filesystem collector stats is resolved under /host, and the prefix
+      # is stripped again before it becomes the `mountpoint` label — so the host root
+      # reads back as mountpoint="/", which is what the disk rules select on.
+      - "--path.rootfs=/host"
+      # Upstream's default exclusion set (dev/proc/sys/run credentials, and per-container
+      # overlay mounts under /var/lib/docker, which are noise on a Docker host) plus our
+      # own bind target. `$$` is compose's escape for a literal `$`. Restating the
+      # defaults is deliberate: naming this flag replaces them wholesale, and dropping
+      # `/var/lib/docker/.+` would re-add one series set per container layer.
+      - "--collector.filesystem.mount-points-exclude=^/(dev|etc|host|proc|sys|run/credentials/.+|var/lib/docker/.+|var/lib/kubelet/pods/.+)($$|/)"
+    volumes:
+      # Read-only, and rslave so mounts made on the host after this container starts
+      # still propagate in. Needs no privilege beyond what compose already has — there is
+      # still no passwordless sudo on Bot-1 and none is required.
+      - /:/host:ro,rslave
+
 volumes:
   mongo-data:
   loki-data:
