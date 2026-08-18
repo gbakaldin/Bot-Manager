@@ -58,6 +58,15 @@ services:
       # at 10 environments. The in-jar copy stays in sync as the fallback: set
       # LOGGING_CONFIG= (empty) to use it and ignore the mount below.
       - LOGGING_CONFIG=${LOGGING_CONFIG:-/app/config/log4j2.properties}
+      # Default level for com.vingame.bot (LOG_VOLUME_TIERING AD-7). The shipped
+      # default is INFO -- a cheap, correct floor whose rate is a function of
+      # neither bot count nor round rate. Staging sets BOT_LOG_LEVEL=DEBUG in
+      # secrets.env/.env; prod leaves it unset and reaches for per-group scoped
+      # DEBUG (Phase 2) instead. Spring Boot relaxed-binds this env name to the
+      # `logging.level.com.vingame.bot` property and applies it OVER
+      # log4j2.properties, mutating the existing LoggerConfig in place -- the
+      # additivity=false and both appenderRefs of that logger survive.
+      - LOGGING_LEVEL_COM_VINGAME_BOT=${BOT_LOG_LEVEL:-INFO}
     depends_on:
       mongo:
         condition: service_healthy
