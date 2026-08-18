@@ -57,8 +57,14 @@ BEHAVIOUR
                     when there was nothing to send); 502 on a VipTalk failure, so
                     Alertmanager retries (VIPTALK_ALERTING AD-8, matching what
                     bot-manager's own webhook endpoint answers).
-  GET  /health      200 + a config summary with the token masked. This is how the
-                    delivery path is checked WITHOUT waiting for an outage.
+  GET  /health      200 + a config summary with the token masked, plus `lastSend` —
+                    the outcome of the last REAL send attempt (null if there has not
+                    been one). It never probes VipTalk: this is the compose
+                    healthcheck, and a probe every 30 s in three instances would put a
+                    standing synthetic load on a third-party messenger. So it answers
+                    "is this configured, and what happened last time it tried", and is
+                    careful not to imply more — `baseUrlWellFormed` is a check on the
+                    URL string alone.
 
 Deliberately permissive about the request path and the request body: a typo in
 the receiver URL, or an Alertmanager payload-schema change, must not be the
@@ -96,6 +102,18 @@ DEFAULT_OPS_TEXT = (
     "silent until it returns.\n"
     "— via viptalk-shim (out-of-band; the app could not deliver this)"
 )
+
+# api.viptalk.org sits behind Cloudflare, and Cloudflare blocks urllib's default
+# `Python-urllib/3.12` on browser signature: HTTP 403, error 1010, "the site owner has
+# blocked access based on your browser's signature". Isolated on 2026-08-18 by holding URL,
+# token, room and host fixed and varying ONLY this header — curl's default and
+# `Java-http-client/21.0.2` both delivered, `Python-urllib/3.12` did not. So every send
+# from this container failed while /health cheerfully reported the channel usable.
+#
+# Honest, not a disguise: it identifies the actual client. It is deliberately NOT a browser
+# string — impersonating Chrome would be both a lie and a thing that ages badly. The Java
+# path (VipTalkClient) is unaffected and is intentionally left alone.
+USER_AGENT = "viptalk-shim/1.0 (bot-manager alerting; +https://github.com/vingame)"
 
 
 def _env(name, default=""):
@@ -171,16 +189,55 @@ class Config(object):
         self.ops_text = get("VIPTALK_DOWN_OPS_TEXT") or DEFAULT_OPS_TEXT
         self.down_text = get("VIPTALK_DOWN_TEXT") or DEFAULT_DOWN_TEXT
 
+        # Outcome of the last REAL send attempt: (ok, when, detail). None until one has
+        # been made. See `last_send` for why /health reports this.
+        self._last_send = None
+
     @property
-    def base_url_usable(self):
-        """A base URL urllib can actually open.
+    def base_url_well_formed(self):
+        """The base URL PARSES as something urllib can open. Says nothing about reachability.
 
         A scheme-less `VIPTALK_BASE_URL` (`api.viptalk.org`) is an ordinary secrets.env
         typo, and `Request()` raises `ValueError` on it — with the token in the message.
         Checked once here so the state reads as "not configured" instead of failing on
         every notification.
+
+        Named for what it does since 2026-08-18. It used to be `base_url_usable` and was
+        published on /health as `baseUrlUsable`, which read as "the delivery path works" —
+        and it reported exactly that while Cloudflare was 403ing 100% of sends. A string
+        check must not be able to claim that; what the channel is actually doing is in
+        `last_send`.
         """
         return urllib.parse.urlsplit(self.base_url).scheme in ("http", "https")
+
+    def record_send(self, ok, detail=None):
+        """Remember how the last real send went, for /health to report.
+
+        Deliberately passive: /health must NOT probe VipTalk. It is the compose
+        healthcheck and runs every 30 s in three instances — a probe there would put a
+        standing synthetic load on a third-party messenger and could itself get the shim
+        rate-limited or blocked, i.e. break the thing it is checking. This costs nothing
+        and reports the only evidence that actually counts: what happened the last time
+        this process really tried.
+        """
+        self._last_send = (bool(ok), time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                           self.redact(detail) if detail else None)
+
+    @property
+    def last_send(self):
+        """`{outcome, at, detail}` for the last send, or None if nothing has been sent yet.
+
+        None is an honest answer and NOT a failure: a healthy instance may go weeks
+        without an outage to report. It means "no evidence either way", which is exactly
+        what `baseUrlUsable: true` was silently pretending not to be.
+        """
+        if self._last_send is None:
+            return None
+        ok, when, detail = self._last_send
+        summary = {"outcome": "sent" if ok else "failed", "at": when}
+        if detail:
+            summary["detail"] = detail
+        return summary
 
     @property
     def enabled(self):
@@ -193,7 +250,7 @@ class Config(object):
         """
         return (self.enabled_flag
                 and bool(self.token)
-                and self.base_url_usable
+                and self.base_url_well_formed
                 and bool(self.ops_rooms or self.down_rooms))
 
     def registers(self):
@@ -231,7 +288,14 @@ class Config(object):
         return {
             "enabled": self.enabled,
             "baseUrl": self.base_url,
-            "baseUrlUsable": self.base_url_usable,
+            # Renamed from `baseUrlUsable` (2026-08-18): it is a check on the STRING, and
+            # under the old name /health read as proof the channel worked — while every
+            # send was being 403ed by Cloudflare. The name now claims only what is true.
+            "baseUrlWellFormed": self.base_url_well_formed,
+            # The honest health signal: what happened on the last real attempt. null until
+            # there has been one. An operator reading this can tell "never tried" from
+            # "tried and rejected", which is the distinction that was missing.
+            "lastSend": self.last_send,
             "token": _mask(self.token),
             "instanceLabel": self.instance_label or None,
             "opsRooms": len(self.ops_rooms),
@@ -266,10 +330,17 @@ def send(config, text, rooms):
         # front; this is the belt to that braces.
         request = urllib.request.Request(
             url, data=body, method="POST",
-            headers={"Content-Type": "application/json", "Accept": "application/json"})
+            headers={"Content-Type": "application/json",
+                     "Accept": "application/json",
+                     # Load-bearing — see USER_AGENT. Without it urllib supplies
+                     # `Python-urllib/3.12` and Cloudflare 403s every single send.
+                     "User-Agent": USER_AGENT})
         with urllib.request.urlopen(request, timeout=config.timeout) as response:
             response.read()
-            return 200 <= response.status < 300
+            status = response.status
+        accepted = 200 <= status < 300
+        config.record_send(accepted, None if accepted else "HTTP %s" % status)
+        return accepted
     except urllib.error.HTTPError as error:
         detail = ""
         try:
@@ -278,12 +349,15 @@ def send(config, text, rooms):
             pass
         log("ERROR VipTalk rejected the message: HTTP %s %s"
             % (error.code, config.redact(detail)))
+        config.record_send(False, "HTTP %s %s" % (error.code, config.redact(detail)[:120]))
         return False
     except Exception as error:  # noqa: BLE001 - URLError, socket timeout, DNS, TLS…
         # type + redacted str, never repr: repr on InvalidURL and friends embeds the
         # full URL, and the token is in it.
         log("ERROR VipTalk unreachable: %s: %s"
             % (type(error).__name__, config.redact(str(error))))
+        config.record_send(False, "%s: %s" % (type(error).__name__,
+                                              config.redact(str(error))[:120]))
         return False
 
 
@@ -293,8 +367,8 @@ def deliver(config, payload_status, sender=send):
         # 200, not 502: a deliberately unconfigured instance must not make
         # Alertmanager retry forever over something that will never succeed.
         log("SKIP notification — shim is not configured "
-            "(enabled=%s, token=%s, baseUrlUsable=%s, opsRooms=%d, productRooms=%d)"
-            % (config.enabled_flag, _mask(config.token), config.base_url_usable,
+            "(enabled=%s, token=%s, baseUrlWellFormed=%s, opsRooms=%d, productRooms=%d)"
+            % (config.enabled_flag, _mask(config.token), config.base_url_well_formed,
                len(config.ops_rooms), len(config.down_rooms)))
         return 200
 
@@ -392,9 +466,8 @@ def serve(config):
         log("WARN shim is NOT configured — it will accept webhooks and send nothing. "
             "Set VIPTALK_ENABLED=true and VIPTALK_BOT_TOKEN plus VIPTALK_OPS_ROOM_ID "
             "and/or VIPTALK_DOWN_ROOM_IDS in secrets.env on this host.")
-    if config.token and not config.base_url_usable:
-        log("ERROR VIPTALK_BASE_URL=%r has no http/https scheme — nothing can be sent. "
-            "This is the one config error /health would otherwise report as healthy."
+    if config.token and not config.base_url_well_formed:
+        log("ERROR VIPTALK_BASE_URL=%r has no http/https scheme — nothing can be sent."
             % (config.base_url,))
     return server
 

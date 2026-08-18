@@ -214,8 +214,12 @@ services:
       - PYTHONDONTWRITEBYTECODE=1
     volumes:
       - ./viptalk-shim/shim.py:/app/shim.py:ro
-    # /health reports the resolved config with the token masked — how the delivery path is
-    # checked without waiting for (or staging) an outage.
+    # /health reports the resolved config with the token masked, plus `lastSend` — how the
+    # last real delivery attempt went. It does NOT probe VipTalk (this check runs every
+    # 30 s in three instances; a probe here would hammer a third-party messenger), so a
+    # 200 means "the process is up and answering", not "the channel works". For that, read
+    # `lastSend`: on 2026-08-18 this endpoint reported healthy while Cloudflare was 403ing
+    # every send.
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3).read()"]

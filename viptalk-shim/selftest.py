@@ -36,6 +36,10 @@ What is covered here:
   * a scheme-less VIPTALK_BASE_URL => self-disabled and ANSWERED, not a traceback
     with no HTTP response at all;
   * the bot token never reaching a log line, on either failure branch;
+  * an explicit, non-browser User-Agent on every request — urllib's default is
+    Cloudflare-blocked in front of the real api.viptalk.org (403, error 1010);
+  * /health reporting the outcome of the last REAL send rather than a check on
+    the base-URL string, which read healthy through a 100% delivery failure;
   * an unknown GET path => 404 with a hint.
 
 What is NOT covered: the real VipTalk API (Phase 0 verified the {"text",
@@ -99,6 +103,9 @@ class FakeVipTalk(object):
                 outer.requests.append({
                     "path": self.path,
                     "contentType": self.headers.get("Content-Type"),
+                    # Recorded because it is load-bearing: Cloudflare blocks urllib's
+                    # default UA in front of the real api.viptalk.org.
+                    "userAgent": self.headers.get("User-Agent"),
                     "body": json.loads(raw.decode("utf-8")),
                 })
                 # The real VipTalk echoes the request path back in the `path` field of
@@ -530,7 +537,7 @@ def test_scheme_less_base_url_is_answered_not_thrown():
     # during the outage. /health called it `enabled: true` the whole time.
     env = base_env("api.viptalk.org")
     config = shim.Config(env)
-    check(not config.base_url_usable, "a scheme-less base URL is recognised as unusable")
+    check(not config.base_url_well_formed, "a scheme-less base URL is recognised as malformed")
     check(not config.enabled, "and makes the shim self-disable rather than fail per-request")
 
     server, url = start_shim(env)
@@ -538,7 +545,8 @@ def test_scheme_less_base_url_is_answered_not_thrown():
         status, _ = post(url, FIRING)
         equal(status, 200, "the shim still ANSWERS — its whole contract")
         _, health = get(url)
-        equal(health["baseUrlUsable"], False, "/health reports the typo instead of hiding it")
+        equal(health["baseUrlWellFormed"], False,
+              "/health reports the typo instead of hiding it")
     finally:
         server.shutdown()
 
@@ -586,6 +594,77 @@ def test_the_token_never_reaches_a_log_line():
           "an exception's text is redacted the same way")
 
 
+def test_requests_carry_an_explicit_user_agent():
+    print("every VipTalk request identifies itself — urllib's default UA is Cloudflare-blocked")
+    # 2026-08-18: api.viptalk.org is behind Cloudflare, which 403s `Python-urllib/3.12` with
+    # error 1010 ("blocked based on your browser's signature"). Isolated by holding URL,
+    # token, room and host fixed and varying only this header: curl's default and
+    # `Java-http-client/21.0.2` delivered, urllib's did not. So 100% of the shim's sends
+    # failed — on the one path that only runs when bot-manager is already down — while
+    # /health called itself healthy. A header nobody sets by hand is exactly the kind of
+    # thing that silently regresses, hence a test rather than a comment.
+    viptalk = FakeVipTalk()
+    server, url = start_shim(base_env(viptalk.url))
+    try:
+        post(url, FIRING)
+        equal(len(viptalk.requests), 2, "both registers attempted")
+        for request in viptalk.requests:
+            equal(request["userAgent"], shim.USER_AGENT,
+                  "the request identifies itself as the shim")
+            check("Python-urllib" not in (request["userAgent"] or ""),
+                  "urllib's default UA — the blocked signature — is never sent")
+    finally:
+        server.shutdown()
+        viptalk.stop()
+
+    check("Python-urllib" not in shim.USER_AGENT and "Mozilla" not in shim.USER_AGENT,
+          "the UA is honest: neither urllib's default nor a browser impersonation")
+
+
+def test_health_reports_the_last_real_send():
+    print("GET /health -> the outcome of the last real send, not a string check")
+    # The defect this closes: /health used to publish `baseUrlUsable`, which is
+    # `urlsplit(url).scheme in ("http","https")` — a check on the STRING. During the
+    # 2026-08-18 incident it read `true` while every send was being 403ed, so the endpoint
+    # that exists to answer "does the channel work" was answering yes about a channel that
+    # was 100% down. /health still must not probe VipTalk (it is the compose healthcheck,
+    # every 30 s, three instances), so it reports evidence it already has instead.
+    failing = FakeVipTalk(status=403)
+    server, url = start_shim(base_env(failing.url))
+    try:
+        _, health = get(url)
+        equal(health["lastSend"], None,
+              "nothing sent yet reads as 'no evidence', not as healthy")
+        check("baseUrlUsable" not in health,
+              "the name that implied reachability is gone")
+        equal(health["baseUrlWellFormed"], True,
+              "the URL-shape check survives under a name that claims only that")
+
+        equal(post(url, FIRING)[0], 502, "a rejected send is a 502")
+        _, health = get(url)
+        equal(health["lastSend"]["outcome"], "failed",
+              "/health now says the channel is failing instead of hiding it")
+        check("403" in health["lastSend"]["detail"],
+              "and says why, so an operator sees the Cloudflare status without a log dive")
+        check("at" in health["lastSend"], "with a timestamp, so staleness is visible")
+    finally:
+        server.shutdown()
+        failing.stop()
+
+    working = FakeVipTalk()
+    server, url = start_shim(base_env(working.url))
+    try:
+        equal(post(url, FIRING)[0], 200, "a successful send is a 200")
+        _, health = get(url)
+        equal(health["lastSend"]["outcome"], "sent", "a success is reported as such")
+        check(health["lastSend"].get("detail") is None, "with no failure detail attached")
+        check(base_env("")["VIPTALK_BOT_TOKEN"] not in json.dumps(health),
+              "and the token is still nowhere in the response")
+    finally:
+        server.shutdown()
+        working.stop()
+
+
 def test_unknown_get_path_is_404():
     print("GET on an unexpected path -> 404 with a hint, not a stack trace")
     viptalk = FakeVipTalk()
@@ -623,6 +702,8 @@ def main():
                  test_customer_notices_flag_suppresses_only_the_customer_register,
                  test_scheme_less_base_url_is_answered_not_thrown,
                  test_the_token_never_reaches_a_log_line,
+                 test_requests_carry_an_explicit_user_agent,
+                 test_health_reports_the_last_real_send,
                  test_unknown_get_path_is_404):
         test()
     print("")
