@@ -140,8 +140,9 @@ public class VipTalkClient {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            log.warn("VipTalk send to {} room(s) failed in transport: {}", roomIds.size(), e.getMessage());
-            return VipTalkSendResult.failed(roomIds.size(), 0, "VipTalk transport failure: " + e.getMessage());
+            String detail = redact(e.getMessage());
+            log.warn("VipTalk send to {} room(s) failed in transport: {}", roomIds.size(), detail);
+            return VipTalkSendResult.failed(roomIds.size(), 0, "VipTalk transport failure: " + detail);
         }
 
         if (response.statusCode() >= 200 && response.statusCode() < 300) {
@@ -150,9 +151,13 @@ public class VipTalkClient {
         }
 
         // Body is included: VipTalk reports the reason (bad token, bot not in room) there,
-        // and those are exactly the failures an operator has to act on.
+        // and those are exactly the failures an operator has to act on. It is REDACTED
+        // first: VipTalk echoes the request path back in the error body's `path` field
+        // (see docs/reviews/VIPTALK_ALERTING_V2/spike.md) and the bot token is in that
+        // path — so the single most likely 4xx, a bad or expired token, would otherwise
+        // write the token to WARN and ship it to Loki.
         log.warn("VipTalk returned HTTP {} for {} room(s): {}",
-                response.statusCode(), roomIds.size(), response.body());
+                response.statusCode(), roomIds.size(), redact(response.body()));
         return VipTalkSendResult.failed(roomIds.size(), response.statusCode(),
                 "VipTalk returned HTTP " + response.statusCode());
     }
@@ -174,6 +179,28 @@ public class VipTalkClient {
 
     private static String urlEncode(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Replaces every occurrence of the bot token with {@code ***}.
+     * <p>
+     * Applied to anything derived from a response body or a transport exception before
+     * it reaches a log or a {@link VipTalkSendResult} detail. The token is a known exact
+     * string here, so this is a substring replace rather than a pattern guess — no
+     * false positives, no misses. Both the URL-encoded and the raw form are covered:
+     * the token rides in the path unencoded, but an echoed path may come back encoded.
+     * <p>
+     * A blank token means the channel is disabled and nothing is sent; the guard is
+     * there so {@code replace("", …)} — which would splice {@code ***} between every
+     * character — can never run.
+     */
+    String redact(String value) {
+        if (value == null || botToken.isEmpty()) {
+            return value;
+        }
+        String redacted = value.replace(botToken, "***");
+        String encoded = urlEncode(botToken);
+        return encoded.equals(botToken) ? redacted : redacted.replace(encoded, "***");
     }
 
     /** Minimal HTTP response view — just what the client needs, and trivially fakeable in tests. */
