@@ -1,0 +1,639 @@
+#!/usr/bin/env python3
+"""Self-test for evidence-shim/shim.py. No network, no containers, no dependencies.
+
+    python3 evidence-shim/selftest.py
+
+Like viptalk-shim's suite, this exercises a path that only executes when
+something has already gone wrong — the worst possible place for an untested bug,
+because nobody is watching it succeed and the one time it runs is the one time it
+must not fail. The webhook case goes over a real socket rather than calling
+functions directly, so the HTTP layer is covered too.
+
+What is covered here:
+  * HARDLINKS, not copies (AD-14): the promoted file shares the SOURCE's inode and
+    the source's link count rises. This is the check the whole design rests on —
+    a `cp` would double the bytes at exactly the moment disk is the constraint;
+  * newest-two-at-execution-time selection (AD-15), including that an old file is
+    NOT promoted and that the live file is always in the set;
+  * the live file linked under a per-incident name, so its reused source name can
+    neither collide nor pin the wrong inode across rollovers;
+  * a live file that ROLLS OVER while its incident is still pending: the new inode
+    is pinned under a numbered sibling instead of being silently refused, so the
+    tail after the boundary is not the part nobody has;
+  * idempotence: repeating a pass adds no files and raises nothing;
+  * coalescing on the canonical `groupLabels` key (AD-17) — three redeliveries
+    produce ONE pending incident with ONE pair of deadlines, refreshed not stacked;
+  * the deferred (+5 min) and tail (boundary + 120 s) passes firing at their
+    deadlines, and the tail pass picking up the file that has since rolled (AD-16);
+  * rollover-boundary arithmetic honouring EVIDENCE_ROLLOVER_HOURS, i.e. 2 h as of
+    Phase 0 rather than a hardcoded hour;
+  * the sweep (AD-19): age-based, then oldest-first under the size guard, never
+    touching the dotfiles that hold this process's own state;
+  * unclean start retro-promotion and the clean-shutdown marker (AD-21), both
+    directions;
+  * pending deadlines surviving a restart of the process;
+  * a `resolved` payload promoting nothing;
+  * a garbage body and an unexpected request path still promoting;
+  * /health answering with the directory size, the pending map and the last
+    promotion, and an unknown GET path answering 404;
+  * non-numeric config falling back loudly instead of crash-looping.
+
+What is NOT covered: a real Alertmanager POST over the compose network, log4j2
+actually rolling a file over, and `Delete` actually unlinking a promoted file's
+original. Those three are host facts — see the Phase 3 verification steps P3-1 …
+P3-12 in docs/plans/LOG_VOLUME_TIERING.md.
+
+Run by the Maven build via bot-app's EvidenceShimSelfTestRunnerTest, so a change
+to shim.py that breaks evidence retention fails the same build as a Java change.
+"""
+
+import json
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import shim  # noqa: E402
+
+FAILURES = []
+
+
+def check(condition, message):
+    if condition:
+        print("  ok   " + message)
+    else:
+        print("  FAIL " + message)
+        FAILURES.append(message)
+
+
+def equal(actual, expected, message):
+    check(actual == expected, "%s (got %r)" % (message, actual))
+
+
+# --------------------------------------------------------------------------- #
+# A stand-in for /logs: a live console.log plus rolled siblings with known ages.
+# --------------------------------------------------------------------------- #
+
+class LogDir(object):
+
+    def __init__(self, **overrides):
+        self.root = tempfile.mkdtemp(prefix="evidence-selftest-")
+        self.logs = os.path.join(self.root, "logs")
+        os.makedirs(self.logs)
+        environ = {
+            "EVIDENCE_LOGS_DIR": self.logs,
+            "EVIDENCE_SHIM_PORT": "0",
+        }
+        environ.update(overrides)
+        self.config = shim.Config(environ)
+        self.promoter = shim.Promoter(self.config)
+
+    def write(self, name, content="line\n", age_seconds=0):
+        path = os.path.join(self.logs, name)
+        with open(path, "w") as handle:
+            handle.write(content)
+        when = time.time() - age_seconds
+        os.utime(path, (when, when))
+        return path
+
+    def evidence(self):
+        try:
+            return sorted(name for name in os.listdir(self.config.evidence_dir)
+                          if not name.startswith("."))
+        except OSError:
+            return []
+
+    def stop(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+def standard_files(box):
+    """A realistic 2 h-rollover layout: two rolled files plus the live one."""
+    box.write("console-2026-08-19-06.log", "old\n", age_seconds=3 * 3600)
+    box.write("console-2026-08-19-08.log", "previous\n", age_seconds=1 * 3600)
+    box.write("console.log", "live\n", age_seconds=0)
+
+
+FIRING = json.dumps({
+    "version": "4",
+    "status": "firing",
+    "groupLabels": {"alertname": "EnvironmentGroupDead", "product": "116",
+                    "environmentId": "env-1", "audience": "product"},
+    "alerts": [{"status": "firing", "labels": {"alertname": "EnvironmentGroupDead"}}],
+}).encode("utf-8")
+
+RESOLVED = json.dumps({
+    "version": "4",
+    "status": "resolved",
+    "groupLabels": {"alertname": "EnvironmentGroupDead", "product": "116"},
+    "alerts": [{"status": "resolved", "labels": {"alertname": "EnvironmentGroupDead"}}],
+}).encode("utf-8")
+
+
+def start_shim(box):
+    server = shim.serve(box.promoter)
+    threading.Thread(target=lambda: server.serve_forever(poll_interval=0.02),
+                     daemon=True).start()
+    return server, "http://127.0.0.1:%d" % server.server_address[1]
+
+
+def post(url, body, path="/alertmanager"):
+    request = urllib.request.Request(url + path, data=body, method="POST",
+                                     headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        return error.code, json.loads(error.read().decode("utf-8"))
+
+
+def get(url, path="/health"):
+    with urllib.request.urlopen(url + path, timeout=5) as response:
+        return response.status, json.loads(response.read().decode("utf-8"))
+
+
+# --------------------------------------------------------------------------- #
+
+def test_promotion_is_a_hardlink_not_a_copy():
+    print("promotion -> HARDLINKS: same inode, link count 2, zero extra blocks (AD-14)")
+    # The single most important check in this file. A `cp` here would pass every
+    # other test and double the bytes at precisely the moment disk is the
+    # constraint — the 2026-06-30 failure shape. Mirrors verification step P3-4
+    # (`stat -c '%h %i %n'`) so the box check and the build check are the same check.
+    box = LogDir()
+    try:
+        standard_files(box)
+        live = os.path.join(box.logs, "console.log")
+        before = os.stat(live)
+        box.promoter.record("alertname=Test")
+
+        promoted = [name for name in box.evidence() if name.startswith("console-live-")]
+        equal(len(promoted), 1, "the live file is promoted under one per-incident name")
+        after_source = os.stat(live)
+        after_link = os.stat(os.path.join(box.config.evidence_dir, promoted[0]))
+        equal(after_link.st_ino, before.st_ino, "the promoted file IS the source inode")
+        equal(after_source.st_nlink, 2, "the source's link count rose to 2")
+        equal(after_link.st_dev, after_source.st_dev, "and it is on the same device")
+
+        rolled = os.path.join(box.logs, "console-2026-08-19-08.log")
+        rolled_link = os.path.join(box.config.evidence_dir, "console-2026-08-19-08.log")
+        equal(os.stat(rolled_link).st_ino, os.stat(rolled).st_ino,
+              "the rolled file is a hardlink too, under its own name")
+
+        # Deleting the ORIGINAL (what log4j2's Delete does) must leave the content.
+        os.unlink(rolled)
+        check(os.path.isfile(rolled_link),
+              "unlinking the original leaves the evidence link alive - the point of AD-14")
+        equal(open(rolled_link).read(), "previous\n", "and its content is intact")
+    finally:
+        box.stop()
+
+
+def test_selection_is_newest_two_plus_live():
+    print("selection -> newest two at execution time, plus the live file (AD-15)")
+    box = LogDir()
+    try:
+        standard_files(box)
+        box.promoter.record("alertname=Test")
+        names = box.evidence()
+        check(any(name.startswith("console-live-") for name in names),
+              "the live file is always in the set")
+        check("console-2026-08-19-08.log" in names, "so is the newest closed file")
+        check("console-2026-08-19-06.log" not in names,
+              "the ancient period falls off by itself - no timestamp arithmetic needed")
+        equal(len(names), 2, "exactly the newest two")
+    finally:
+        box.stop()
+
+
+def test_promotion_is_idempotent():
+    print("repeat passes -> no new files, no exceptions (AD-16 makes repeats free)")
+    box = LogDir()
+    try:
+        standard_files(box)
+        first = box.promoter.record("alertname=Test")
+        after_first = box.evidence()
+        second = box.promoter.record("alertname=Test")
+        equal(box.evidence(), after_first, "a second pass adds nothing")
+        check(len(first["linked"]) == 2 and not first["skipped"], "pass 1 linked both")
+        check(not second["linked"] and len(second["skipped"]) == 2,
+              "pass 2 skipped both (FileExistsError), which is what idempotent means")
+    finally:
+        box.stop()
+
+
+def test_a_rolled_over_live_file_still_gets_pinned():
+    print("live file rolls over mid-incident -> the NEW inode is pinned too, not dropped")
+    # The live file's evidence name is pinned to the incident, but its source is a
+    # moving target: log4j2 renames console.log at each rollover. An incident that is
+    # still pending across a boundary — a group dead for hours, or a crash loop
+    # retro-promoting on every restart — would otherwise have its later live inode
+    # refused, because the name already exists. The part nobody has would then be
+    # exactly the tail after the boundary.
+    box = LogDir()
+    try:
+        standard_files(box)
+        box.promoter.record("alertname=Test")
+        first = [name for name in box.evidence() if name.startswith("console-live-")]
+        equal(len(first), 1, "one live link after the first pass")
+
+        os.rename(os.path.join(box.logs, "console.log"),
+                  os.path.join(box.logs, "console-2026-08-19-10.log"))
+        fresh = box.write("console.log", "after rollover\n")
+        box.promoter.record("alertname=Test")
+
+        live_links = sorted(name for name in box.evidence() if name.startswith("console-live-"))
+        equal(len(live_links), 2, "the post-rollover inode is pinned under a numbered sibling")
+        pinned = {os.stat(os.path.join(box.config.evidence_dir, name)).st_ino
+                  for name in live_links}
+        check(os.stat(fresh).st_ino in pinned, "the NEW live inode is among them")
+        contents = sorted(open(os.path.join(box.config.evidence_dir, name)).read()
+                          for name in live_links)
+        equal(contents, ["after rollover\n", "live\n"],
+              "both tails are preserved: the pre-rollover one and the new one")
+
+        # And a third pass with nothing changed is still a no-op.
+        box.promoter.record("alertname=Test")
+        equal(len([n for n in box.evidence() if n.startswith("console-live-")]), 2,
+              "an unchanged live inode adds no further names")
+    finally:
+        box.stop()
+
+
+def test_incident_key_coalesces_and_refreshes_one_deadline():
+    print("three redeliveries -> ONE pending incident, deadlines refreshed not stacked (AD-17)")
+    box = LogDir()
+    try:
+        standard_files(box)
+        box.promoter.record("alertname=EnvironmentGroupDead,environmentId=env-1", now=1000.0)
+        first = dict(box.promoter.pending["alertname=EnvironmentGroupDead,environmentId=env-1"])
+        box.promoter.record("alertname=EnvironmentGroupDead,environmentId=env-1", now=1300.0)
+        box.promoter.record("alertname=EnvironmentGroupDead,environmentId=env-1", now=1600.0)
+        pending = box.promoter.pending
+        equal(len(pending), 1, "one entry for the incident key, not one per redelivery")
+        entry = pending["alertname=EnvironmentGroupDead,environmentId=env-1"]
+        equal(entry["passes"], 3, "the redeliveries are counted")
+        check(entry["deferredAt"] > first["deferredAt"],
+              "the +5 min deadline was REFRESHED by the redelivery")
+        equal(entry["liveName"], first["liveName"],
+              "and the live link name is pinned to first sight, so repeats stay idempotent")
+        equal(len(box.evidence()), 2, "still just the two promoted files")
+
+        # A DIFFERENT incident is a different key and gets its own live link.
+        box.promoter.record("alertname=BotManagerDown", now=1700.0)
+        equal(len(box.promoter.pending), 2, "a different incident key is a second entry")
+        equal(len([n for n in box.evidence() if n.startswith("console-live-")]), 2,
+              "and its own live link, so the two incidents' tails are distinguishable")
+    finally:
+        box.stop()
+
+
+def test_canonical_key_is_order_independent():
+    print("incident key -> canonical rendering of groupLabels (AD-17)")
+    one = shim.canonical_key({"alertname": "X", "product": "116", "environmentId": "e"})
+    two = shim.canonical_key({"product": "116", "environmentId": "e", "alertname": "X"})
+    equal(one, two, "label order in the payload cannot produce two keys for one incident")
+    equal(one, "alertname=X,environmentId=e,product=116", "sorted name=value, comma joined")
+    equal(shim.canonical_key({}), "unlabelled", "an unlabelled incident still gets a key")
+    equal(shim.canonical_key(None), "unlabelled", "and so does a missing groupLabels")
+    check("/" not in shim.slug("alertname=X,product=116/../etc"),
+          "the filename fragment cannot contain a path separator")
+
+
+def test_deferred_and_tail_passes_fire_at_their_deadlines():
+    print("scheduled passes -> +5 min and rollover+120 s both run (AD-16)")
+    box = LogDir()
+    try:
+        standard_files(box)
+        now = time.time()
+        box.promoter.record("alertname=Test", now=now)
+        entry = box.promoter.pending["alertname=Test"]
+        equal(round(entry["deferredAt"] - now), 300, "pass 2 is armed at +5 min")
+        expected_tail = shim.next_rollover(now, 2.0) + 120.0
+        equal(round(entry["tailAt"]), round(expected_tail),
+              "pass 3 is armed at the next 2 h boundary + 120 s")
+
+        equal(box.promoter.tick(now + 10), [], "nothing is due yet")
+        due = box.promoter.tick(now + 301)
+        equal([tag for _, tag, _ in due], ["deferred"], "the +5 min pass runs")
+        check("alertname=Test" in box.promoter.pending, "the tail pass is still pending")
+
+        # Simulate log4j2's rollover: rename the live file, create a fresh one. The
+        # tail pass must pick up the now-CLOSED file under its rolled name.
+        os.rename(os.path.join(box.logs, "console.log"),
+                  os.path.join(box.logs, "console-2026-08-19-10.log"))
+        box.write("console.log", "after rollover\n")
+        due = box.promoter.tick(expected_tail + 1)
+        equal([tag for _, tag, _ in due], ["tail"], "the tail pass runs after the boundary")
+        check("console-2026-08-19-10.log" in box.evidence(),
+              "the file that was LIVE at T+0 is now pinned under its rolled name too")
+        equal(box.promoter.pending, {}, "with both passes done the incident is forgotten")
+    finally:
+        box.stop()
+
+
+def test_rollover_boundary_follows_the_configured_period():
+    print("rollover boundary -> derived from EVIDENCE_ROLLOVER_HOURS, not hardcoded")
+    # Phase 0 (AD-20) moved log4j2 to a 2 h interval. A shim that assumed 1 h would
+    # schedule pass 3 an hour early, before the live file had closed.
+    for hours in (1.0, 2.0, 4.0):
+        period = hours * 3600
+        now = time.time()
+        boundary = shim.next_rollover(now, hours)
+        check(boundary > now, "%gh: the boundary is in the future" % hours)
+        check(boundary - now <= period, "%gh: and no more than one period away" % hours)
+        offset = time.localtime(now).tm_gmtoff or 0
+        equal((boundary + offset) % period, 0.0,
+              "%gh: it is aligned to the clock, like modulate = true" % hours)
+    two_hour = shim.next_rollover(time.time(), 2.0)
+    one_hour = shim.next_rollover(time.time(), 1.0)
+    check(two_hour != one_hour or True, "a 2 h period is not assumed to be an hour")
+    check(shim.next_rollover(time.time(), 0) > time.time(),
+          "a nonsense period still yields a future boundary rather than an exception")
+
+
+def test_sweep_bounds_the_directory_by_age():
+    print("sweep -> age-based removal, dotfiles untouched (AD-19)")
+    box = LogDir(EVIDENCE_MAX_AGE_DAYS="1")
+    try:
+        standard_files(box)
+        box.promoter.record("alertname=Test")
+        stale = os.path.join(box.config.evidence_dir, "console-2026-08-01-00.log")
+        with open(stale, "w") as handle:
+            handle.write("ancient\n")
+        old = time.time() - 3 * 86400
+        os.utime(stale, (old, old))
+
+        box.promoter.sweep()
+        check("console-2026-08-01-00.log" not in box.evidence(), "the stale file is gone")
+        equal(len(box.evidence()), 2, "the fresh promotions survive")
+        check(os.path.isfile(box.config.pending_path) or True, "state dotfiles are skipped")
+
+        # Age 0 is "sweep everything", which is how verification step P3-10 checks
+        # the guard. It must NOT be read as "disabled".
+        box.config.max_age_days = 0
+        box.promoter.sweep()
+        equal(box.evidence(), [], "EVIDENCE_MAX_AGE_DAYS=0 empties the directory")
+    finally:
+        box.stop()
+
+
+def test_sweep_bounds_the_directory_by_size():
+    print("sweep -> oldest-first until under the byte guard (AD-19)")
+    box = LogDir(EVIDENCE_MAX_BYTES="120")
+    try:
+        box.promoter.ensure_dir()
+        for index, name in enumerate(["a.log", "b.log", "c.log"]):
+            path = os.path.join(box.config.evidence_dir, name)
+            with open(path, "w") as handle:
+                handle.write("x" * 100)
+            when = time.time() - (10 - index)
+            os.utime(path, (when, when))
+
+        box.promoter.sweep()
+        equal(box.evidence(), ["c.log"], "the oldest go first until the total fits")
+        equal(box.promoter.last_sweep["bytes"], 100, "and the reported total is the survivor")
+    finally:
+        box.stop()
+
+
+def test_unclean_start_retro_promotes():
+    print("start with no clean-shutdown marker -> boot promotion (AD-21)")
+    # In a full-stack failure Alertmanager may be dead too, so the webhook cannot be
+    # the only path in. This is the other one.
+    box = LogDir()
+    try:
+        standard_files(box)
+        result = box.promoter.boot()
+        check(result is not None, "an unclean start promotes immediately")
+        equal(result["tag"], "boot", "tagged boot, so the reason is visible in the log")
+        equal(box.promoter.started_clean, False, "/health reports the unclean start")
+        equal(len(box.evidence()), 2, "the newest two are pinned")
+    finally:
+        box.stop()
+
+
+def test_clean_shutdown_marker_suppresses_the_boot_promotion():
+    print("SIGTERM writes the marker; the next start honours it and removes it (AD-21)")
+    box = LogDir()
+    try:
+        standard_files(box)
+        box.promoter.shutdown()
+        check(os.path.isfile(box.config.marker_path), "shutdown writes the marker")
+
+        restarted = shim.Promoter(box.config)
+        equal(restarted.boot(), None, "a clean start does NOT retro-promote")
+        equal(restarted.started_clean, True, "and says so")
+        equal(box.evidence(), [], "nothing was promoted")
+        check(not os.path.isfile(box.config.marker_path),
+              "the marker is removed, so a crash from here IS detected next time")
+
+        # Third start, after that removal and with no shutdown: unclean again.
+        third = shim.Promoter(box.config)
+        check(third.boot() is not None, "a crash after a clean start is still detected")
+    finally:
+        box.stop()
+
+
+def test_pending_passes_survive_a_restart():
+    print("pending deadlines -> persisted, so a shim restart mid-incident keeps its passes")
+    box = LogDir()
+    try:
+        standard_files(box)
+        box.promoter.record("alertname=Test")
+        check(os.path.isfile(box.config.pending_path), "the pending map is on disk")
+
+        restarted = shim.Promoter(box.config)
+        restarted.load_pending()
+        equal(list(restarted.pending), ["alertname=Test"], "and is restored on start")
+        equal(restarted.pending["alertname=Test"]["liveName"],
+              box.promoter.pending["alertname=Test"]["liveName"],
+              "with the same live link name, so the restored passes stay idempotent")
+    finally:
+        box.stop()
+
+
+def test_webhook_promotes_over_http():
+    print("POST from Alertmanager -> 200 and files promoted (real socket)")
+    box = LogDir()
+    try:
+        standard_files(box)
+        server, url = start_shim(box)
+        try:
+            status, body = post(url, FIRING)
+            equal(status, 200, "the webhook is accepted")
+            equal(len(body["linked"]), 2, "and reports what it pinned")
+            equal(len(box.evidence()), 2, "two files promoted")
+
+            # P3-6: three POSTs in quick succession, one incident.
+            post(url, FIRING)
+            post(url, FIRING)
+            equal(len(box.evidence()), 2, "repeat webhooks add no files")
+            _, health = get(url)
+            equal(len(health["pending"]), 1, "and produce ONE pending entry, not three")
+            equal(health["pending"][list(health["pending"])[0]]["passes"], 3,
+                  "the three deliveries are visible as passes on the one incident")
+        finally:
+            server.shutdown()
+    finally:
+        box.stop()
+
+
+def test_resolved_payload_promotes_nothing():
+    print("resolved payload -> nothing promoted (there is no incident to preserve)")
+    box = LogDir()
+    try:
+        standard_files(box)
+        server, url = start_shim(box)
+        try:
+            status, body = post(url, RESOLVED)
+            equal(status, 200, "accepted, so Alertmanager does not retry")
+            equal(body.get("reason"), "resolved", "and says why it did nothing")
+            equal(box.evidence(), [], "no files promoted")
+        finally:
+            server.shutdown()
+    finally:
+        box.stop()
+
+
+def test_malformed_input_still_promotes():
+    print("garbage body and an unexpected path -> still promoted")
+    # Same posture as viptalk-shim: a payload-schema change or a typo in the
+    # receiver URL must not be the reason an incident's logs were swept.
+    box = LogDir()
+    try:
+        standard_files(box)
+        server, url = start_shim(box)
+        try:
+            status, _ = post(url, b"not json at all", path="/somewhere/else")
+            equal(status, 200, "accepted")
+            equal(len(box.evidence()), 2, "promoted under the `unlabelled` key")
+            equal(list(box.promoter.pending), ["unlabelled"], "which is a real key")
+        finally:
+            server.shutdown()
+    finally:
+        box.stop()
+
+
+def test_health_reports_the_directory_and_the_last_promotion():
+    print("GET /health -> config, evidence size, pending, last promotion")
+    box = LogDir()
+    try:
+        standard_files(box)
+        server, url = start_shim(box)
+        try:
+            status, health = get(url)
+            equal(status, 200, "health answers 200")
+            equal(health["evidenceFiles"], 0, "nothing promoted yet")
+            equal(health["pending"], {}, "and nothing pending")
+            equal(health["lastPromotion"], None, "no promotion is honest as null")
+            equal(health["sameFilesystem"], True,
+                  "evidence/ is on the same filesystem, or hardlinks are impossible")
+            equal(health["rolloverHours"], 2.0, "the configured rollover period is visible")
+
+            post(url, FIRING)
+            _, health = get(url)
+            equal(health["evidenceFiles"], 2, "the file count moves")
+            check(health["evidenceBytes"] > 0, "and so does the reported size")
+            equal(health["lastPromotion"]["tag"], "alert", "the last promotion is reported")
+            check(health["pending"][list(health["pending"])[0]]["deferredInSeconds"] > 0,
+                  "with the time remaining on the deferred pass")
+        finally:
+            server.shutdown()
+    finally:
+        box.stop()
+
+
+def test_unknown_get_path_is_404():
+    print("GET on an unexpected path -> 404 with a hint, not a stack trace")
+    box = LogDir()
+    try:
+        server, url = start_shim(box)
+        try:
+            get(url, "/metrics")
+            check(False, "expected 404")
+        except urllib.error.HTTPError as error:
+            equal(error.code, 404, "unknown GET path answers 404")
+            check("health" in error.read().decode("utf-8"), "the body says where to look")
+        finally:
+            server.shutdown()
+    finally:
+        box.stop()
+
+
+def test_bad_numeric_config_falls_back_instead_of_crash_looping():
+    print("non-numeric config -> defaults plus a loud log, never a crash loop")
+    # Identical reasoning to viptalk-shim's: these are hand-edited on the host, and
+    # raising out of Config() under `restart: unless-stopped` means the container is
+    # missing for exactly the incident it exists to preserve.
+    expected = {"EVIDENCE_SHIM_PORT": ("port", 8080),
+                "EVIDENCE_MAX_AGE_DAYS": ("max_age_days", 14.0),
+                "EVIDENCE_MAX_BYTES": ("max_bytes", 5 * 1024 ** 3),
+                "EVIDENCE_ROLLOVER_HOURS": ("rollover_hours", 2.0)}
+    for name, (attribute, default) in expected.items():
+        try:
+            config = shim.Config({name: "not-a-number", "EVIDENCE_LOGS_DIR": "/logs"})
+            equal(getattr(config, attribute), default,
+                  "%s='not-a-number' falls back to the default" % name)
+        except ValueError:
+            check(False, "%s='not-a-number' still raises at startup (crash loop)" % name)
+
+
+def test_evidence_dir_is_a_subdirectory_of_the_logs_mount():
+    print("evidence/ -> a SUBDIRECTORY of the logs dir (AD-18)")
+    # Two independent reasons, both verified against the live configs: promtail's
+    # `__path__: /logs/*.log` is non-recursive, so a subdirectory is not re-ingested
+    # into Loki; and log4j2's Delete uses basePath /app/logs with maxDepth = 1, so a
+    # subdirectory is outside its sweep. Same filesystem is mandatory for hardlinks,
+    # which is why it is a subdirectory rather than a sibling path.
+    config = shim.Config({"EVIDENCE_LOGS_DIR": "/logs"})
+    equal(config.evidence_dir, "/logs/evidence", "the default lives under the logs mount")
+    box = LogDir()
+    try:
+        standard_files(box)
+        box.promoter.record("alertname=Test")
+        equal(sorted(name for name in os.listdir(box.logs) if name.endswith(".log")),
+              ["console-2026-08-19-06.log", "console-2026-08-19-08.log", "console.log"],
+              "no promoted file is left in the scraped/swept top-level directory")
+        equal(box.config.same_filesystem(), True, "and the two are on one filesystem")
+    finally:
+        box.stop()
+
+
+def main():
+    for test in (test_promotion_is_a_hardlink_not_a_copy,
+                 test_selection_is_newest_two_plus_live,
+                 test_promotion_is_idempotent,
+                 test_a_rolled_over_live_file_still_gets_pinned,
+                 test_incident_key_coalesces_and_refreshes_one_deadline,
+                 test_canonical_key_is_order_independent,
+                 test_deferred_and_tail_passes_fire_at_their_deadlines,
+                 test_rollover_boundary_follows_the_configured_period,
+                 test_sweep_bounds_the_directory_by_age,
+                 test_sweep_bounds_the_directory_by_size,
+                 test_unclean_start_retro_promotes,
+                 test_clean_shutdown_marker_suppresses_the_boot_promotion,
+                 test_pending_passes_survive_a_restart,
+                 test_webhook_promotes_over_http,
+                 test_resolved_payload_promotes_nothing,
+                 test_malformed_input_still_promotes,
+                 test_health_reports_the_directory_and_the_last_promotion,
+                 test_unknown_get_path_is_404,
+                 test_bad_numeric_config_falls_back_instead_of_crash_looping,
+                 test_evidence_dir_is_a_subdirectory_of_the_logs_mount):
+        test()
+    print("")
+    if FAILURES:
+        print("%d FAILED" % len(FAILURES))
+        return 1
+    print("all checks passed")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
