@@ -13,6 +13,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -211,6 +212,61 @@ class AlertmanagerRoutingTest {
         assertThat(webhook(EVIDENCE_RECEIVER).get("url").toString())
                 .as("reached over the compose network, like every other receiver here")
                 .startsWith("http://evidence-shim:");
+    }
+
+    /**
+     * Every alert rule that exists, walked against the live route tree. The three named
+     * cases above pin the three alertnames LOG_VOLUME_TIERING Phase 3 touched; this one
+     * pins the property those cases are an instance of, for alerts nobody has thought about
+     * yet.
+     * <p>
+     * The trap is asymmetric and it has now been available to bite twice: adding a
+     * {@code continue: true} child for an alertname without a trailing {@code viptalk}
+     * sibling silently removes that alert from VipTalk entirely, while Prometheus, the
+     * Alertmanager UI and every dashboard go on showing it firing. Delivery is the only
+     * thing that stops, and delivery is the only thing nobody is watching. Enumerating the
+     * rules rather than listing alertnames here means the guard covers the next rule
+     * somebody adds without anybody remembering to extend this test.
+     */
+    @Test
+    @DisplayName("EVERY alert rule in prometheus/alerts.yml still reaches VipTalk")
+    @SuppressWarnings("unchecked")
+    void everyAlertRuleStillReachesVipTalk() {
+        Path rules = Stream.of(Path.of("..", "prometheus", "alerts.yml"),
+                        Path.of("prometheus", "alerts.yml"))
+                .filter(Files::isRegularFile).findFirst().orElse(null);
+        Assumptions.assumeTrue(rules != null, "prometheus/alerts.yml not found");
+
+        Map<String, Object> parsed;
+        try (InputStream in = Files.newInputStream(rules)) {
+            parsed = (Map<String, Object>) new Yaml().load(in);
+        } catch (Exception e) {
+            throw new AssertionError("prometheus/alerts.yml is not readable YAML", e);
+        }
+
+        List<String> alertnames = new ArrayList<>();
+        for (Map<String, Object> group : (List<Map<String, Object>>) parsed.get("groups")) {
+            for (Map<String, Object> rule :
+                    (List<Map<String, Object>>) group.getOrDefault("rules", List.of())) {
+                if (rule.get("alert") != null) {
+                    alertnames.add(rule.get("alert").toString());
+                }
+            }
+        }
+        assertThat(alertnames)
+                .as("the enumeration must have found rules, or this test proves nothing")
+                .hasSizeGreaterThan(10);
+
+        Map<String, Object> route = castRoute();
+        for (String alertname : alertnames) {
+            assertThat(receiversFor(route, labels(alertname)))
+                    .as("%s no longer reaches the VipTalk receiver. A `continue: true` child "
+                            + "route CONSUMES the alert — every non-delivery route (evidence, "
+                            + "and anything added after it) needs a trailing sibling sending "
+                            + "the alert to `viptalk`, or it is silently undelivered while "
+                            + "still visibly firing everywhere else.", alertname)
+                    .contains(APP_RECEIVER);
+        }
     }
 
     @Test
