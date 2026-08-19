@@ -39,6 +39,7 @@ import com.vingame.bot.domain.game.sort.GameSorter;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
+import com.vingame.bot.infrastructure.observability.ScopedDebugEscalator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.environment.model.Environment;
@@ -98,6 +99,14 @@ public class BotGroupBehaviorService {
      * pending counters on teardown alongside {@code sessionAggregationService}.
      */
     private final GroupLifecycleAggregator groupLifecycleAggregator;
+
+    /**
+     * Auto-escalation of scoped per-group DEBUG (LOG_VOLUME_TIERING AD-12). Used here for
+     * the one trigger only this class can see — a group's {@code dead/total} rising while
+     * still under {@code bot.group.dead.threshold} — and to evict a stopped group's
+     * bookkeeping alongside the other per-group aggregators.
+     */
+    private final ScopedDebugEscalator scopedDebugEscalator;
 
     /**
      * Max number of bots to create/authenticate simultaneously.
@@ -180,7 +189,8 @@ public class BotGroupBehaviorService {
             BotFactory botFactory,
             BotMetrics botMetrics,
             SessionAggregationService sessionAggregationService,
-            GroupLifecycleAggregator groupLifecycleAggregator
+            GroupLifecycleAggregator groupLifecycleAggregator,
+            ScopedDebugEscalator scopedDebugEscalator
     ) {
         this.botGroupService = botGroupService;
         this.environmentService = environmentService;
@@ -189,6 +199,7 @@ public class BotGroupBehaviorService {
         this.botMetrics = botMetrics;
         this.sessionAggregationService = sessionAggregationService;
         this.groupLifecycleAggregator = groupLifecycleAggregator;
+        this.scopedDebugEscalator = scopedDebugEscalator;
 
         // Use virtual threads for scheduled tasks
         this.scheduler = Executors.newScheduledThreadPool(4, Thread.ofVirtual().factory());
@@ -527,6 +538,7 @@ public class BotGroupBehaviorService {
                             // before the failure, so a failed start leaks nothing (AD-8).
                             sessionAggregationService.evictGroup(failedRuntime.getGroupId());
                             groupLifecycleAggregator.evictGroup(failedRuntime.getGroupId());
+                            scopedDebugEscalator.evictGroup(failedRuntime.getGroupId());
                         } finally {
                             BotMdc.clear();
                         }
@@ -872,6 +884,7 @@ public class BotGroupBehaviorService {
         // (AD-8 group-stop hook). TTL sweep is the backstop; this reclaims on stop.
         sessionAggregationService.evictGroup(id);
         groupLifecycleAggregator.evictGroup(id);
+        scopedDebugEscalator.evictGroup(id);
 
         // Remove from runtime map
         runningGroups.remove(id);
@@ -936,6 +949,7 @@ public class BotGroupBehaviorService {
         // Drop aggregated-session entries and stop managing the group.
         sessionAggregationService.evictGroup(id);
         groupLifecycleAggregator.evictGroup(id);
+        scopedDebugEscalator.evictGroup(id);
         runningGroups.remove(id);
 
         log.info("Bot group {} stopped and logged out (cascade delete)", id);
@@ -1876,6 +1890,14 @@ public class BotGroupBehaviorService {
 
         log.debug("Group {} health — playing: {}, reconnecting: {}, dead: {}/{}",
                 runtime.getGroupId(), playing, reconnecting, dead, bots.size());
+
+        // LOG_VOLUME_TIERING AD-12: a dead ratio that is rising but still under the
+        // threshold is the last moment at which DEBUG for this group is worth anything.
+        // The escalator applies the band (half the threshold) and its own cooldown, so
+        // this sample can be handed over unconditionally on every 30 s tick.
+        if (!runtime.isGroupDead()) {
+            scopedDebugEscalator.onGroupHealth(runtime.getGroupId(), dead, bots.size());
+        }
 
         if (!runtime.isGroupDead() && (double) dead / bots.size() >= deadBotGroupThreshold) {
             handleBotGroupDeath(runtime);

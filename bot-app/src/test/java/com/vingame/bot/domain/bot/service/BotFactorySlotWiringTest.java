@@ -69,6 +69,9 @@ class BotFactorySlotWiringTest {
         return new BotFactory(clientRegistry, eventLoopGroup, botMetrics,
                 new com.vingame.bot.infrastructure.observability.SessionAggregationService(),
                 new com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator(),
+                // Scoped-debug auto-escalation is null-tolerant on every bot call site
+                // (LOG_VOLUME_TIERING AD-12); this fixture asserts wiring, not escalation.
+                (com.vingame.bot.infrastructure.observability.ScopedDebugEscalator) null,
                 strategyFactory, slotStrategyFactory);
     }
 

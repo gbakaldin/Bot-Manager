@@ -386,6 +386,18 @@ public class BettingMiniGameBot extends Bot {
         log.warn("Bot {}: no game message in {}s — triggering full reconnect",
                 getUserName(), configuration.getWatchdogTimeoutSeconds());
         if (metrics != null) metrics.incBotWatchdogExpired();
+        // LOG_VOLUME_TIERING AD-12: the first watchdog expiry is an early-warning signal —
+        // the bot is connected but the game has stopped talking to it (the silent-zombie /
+        // subscriber-pruning shape). Arm scoped DEBUG for the group NOW, while it is still
+        // running; escalating after the group is DEAD would log a group doing nothing.
+        // Wrapped because a logging aid must never be able to stop a reconnect.
+        if (scopedDebugEscalator != null) {
+            try {
+                scopedDebugEscalator.onWatchdogExpiry(configuration.getBotGroupId());
+            } catch (Exception e) {
+                log.warn("Bot {}: scoped-debug escalation failed: {}", getUserName(), e.getMessage());
+            }
+        }
         triggerFullReconnect("watchdog timeout (" + configuration.getWatchdogTimeoutSeconds() + "s without game message)");
     }
 

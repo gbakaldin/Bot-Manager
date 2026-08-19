@@ -13,6 +13,7 @@ import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.infrastructure.observability.BotMdcTagsMeterFilter;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
+import com.vingame.bot.infrastructure.observability.ScopedDebugEscalator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import io.micrometer.core.instrument.Counter;
@@ -95,6 +96,9 @@ class BotGroupBehaviorServiceRestartTest {
 
     @Mock
     private GroupLifecycleAggregator groupLifecycleAggregator;
+
+    @Mock
+    private ScopedDebugEscalator scopedDebugEscalator;
 
     @InjectMocks
     private BotGroupBehaviorService service;
@@ -406,7 +410,7 @@ class BotGroupBehaviorServiceRestartTest {
 
         BotGroupBehaviorService realMetricsService = new BotGroupBehaviorService(
                 botGroupService, environmentService, gameService, botFactory, realMetrics,
-                sessionAggregationService, groupLifecycleAggregator);
+                sessionAggregationService, groupLifecycleAggregator, scopedDebugEscalator);
         ReflectionTestUtils.setField(realMetricsService, "deadBotGroupThreshold", 0.80);
         ReflectionTestUtils.setField(realMetricsService, "botCreationParallelism", 10);
         ReflectionTestUtils.setField(realMetricsService, "watchdogTimeoutSeconds", 180L);
@@ -606,7 +610,7 @@ class BotGroupBehaviorServiceRestartTest {
 
         BotGroupBehaviorService svc = new BotGroupBehaviorService(
                 botGroupService, environmentService, gameService, botFactory, realMetrics,
-                sessionAggregationService, groupLifecycleAggregator);
+                sessionAggregationService, groupLifecycleAggregator, scopedDebugEscalator);
         ReflectionTestUtils.setField(svc, "deadBotGroupThreshold", 0.80);
         ReflectionTestUtils.setField(svc, "botCreationParallelism", 10);
         ReflectionTestUtils.setField(svc, "watchdogTimeoutSeconds", 180L);

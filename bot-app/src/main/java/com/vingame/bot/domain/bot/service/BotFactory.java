@@ -3,6 +3,7 @@ package com.vingame.bot.domain.bot.service;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
+import com.vingame.bot.infrastructure.observability.ScopedDebugEscalator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
@@ -68,6 +69,7 @@ public class BotFactory {
     private final BotMetrics botMetrics;
     private final SessionAggregationService sessionAggregator;
     private final GroupLifecycleAggregator groupLifecycleAggregator;
+    private final ScopedDebugEscalator scopedDebugEscalator;
     private final BettingStrategyFactory strategyFactory;
     private final SlotStrategyFactory slotStrategyFactory;
 
@@ -77,6 +79,7 @@ public class BotFactory {
                       BotMetrics botMetrics,
                       SessionAggregationService sessionAggregator,
                       GroupLifecycleAggregator groupLifecycleAggregator,
+                      ScopedDebugEscalator scopedDebugEscalator,
                       BettingStrategyFactory strategyFactory,
                       SlotStrategyFactory slotStrategyFactory) {
         this.clientRegistry = clientRegistry;
@@ -84,6 +87,7 @@ public class BotFactory {
         this.botMetrics = botMetrics;
         this.sessionAggregator = sessionAggregator;
         this.groupLifecycleAggregator = groupLifecycleAggregator;
+        this.scopedDebugEscalator = scopedDebugEscalator;
         this.strategyFactory = strategyFactory;
         this.slotStrategyFactory = slotStrategyFactory;
     }
@@ -194,6 +198,9 @@ public class BotFactory {
             // Must be wired BEFORE initialize(): initializeSubclass() is where the
             // per-bot "initialized" feed happens (LOG_VOLUME_TIERING tier 1).
             .setGroupLifecycleAggregator(groupLifecycleAggregator)
+            // LOG_VOLUME_TIERING AD-12: the bot's own early-warning signals (watchdog
+            // expiry, reconnect churn) arm scoped DEBUG for its group.
+            .setScopedDebugEscalator(scopedDebugEscalator)
             .initialize();
 
         // LOG_VOLUME_TIERING tier 1: DEBUG, not INFO. Not one of the five sites the

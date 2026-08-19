@@ -10,6 +10,7 @@ import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
+import com.vingame.bot.infrastructure.observability.ScopedDebugEscalator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
@@ -64,6 +65,13 @@ public abstract class Bot {
     // deposit" lines into one line per group; null-tolerant, so a fixture without
     // Spring simply gets the per-bot DEBUG lines and no aggregate.
     protected GroupLifecycleAggregator groupLifecycleAggregator;
+
+    // Auto-escalation of scoped per-group DEBUG (LOG_VOLUME_TIERING AD-12) — set via
+    // builder-style setter (BotFactory wires the singleton bean), mirroring
+    // {@code groupLifecycleAggregator}. Fed from the reconnect sites here and the
+    // watchdog site in BettingMiniGameBot; null-tolerant, so a fixture without Spring
+    // simply never escalates.
+    protected ScopedDebugEscalator scopedDebugEscalator;
 
     // Group-scoped bet coordinator — set via builder-style setter by the runtime
     // startBot loop (one instance per running group; NOT app-scoped, so it is not
@@ -204,6 +212,34 @@ public abstract class Bot {
     public Bot setGroupLifecycleAggregator(GroupLifecycleAggregator groupLifecycleAggregator) {
         this.groupLifecycleAggregator = groupLifecycleAggregator;
         return this;
+    }
+
+    /**
+     * Wire the app-scoped {@link ScopedDebugEscalator} (LOG_VOLUME_TIERING AD-12).
+     * Null-tolerant and fluent, mirroring {@link #setGroupLifecycleAggregator}. A null
+     * argument means this bot's early-warning signals never arm scoped DEBUG — the
+     * signals themselves (the WARN lines, {@code bot_reconnects_total},
+     * {@code bot_watchdog_expired_total}) are unaffected either way.
+     */
+    public Bot setScopedDebugEscalator(ScopedDebugEscalator scopedDebugEscalator) {
+        this.scopedDebugEscalator = scopedDebugEscalator;
+        return this;
+    }
+
+    /**
+     * Feed one reconnect EVENT to the auto-escalator. Called from exactly the two sites
+     * that increment {@code bot_reconnects_total}, so the metric and the escalation
+     * count the same things (AD-12). Never lets an escalation problem break a reconnect.
+     */
+    protected void notifyReconnectEscalation() {
+        if (scopedDebugEscalator == null || configuration == null) {
+            return;
+        }
+        try {
+            scopedDebugEscalator.onReconnect(configuration.getBotGroupId());
+        } catch (Exception e) {
+            log.warn("Bot {}: scoped-debug escalation failed: {}", userName, e.getMessage());
+        }
     }
 
     /**
@@ -594,6 +630,7 @@ public abstract class Bot {
         // One increment per reconnect EVENT, tagged by the originating reason.
         // Internal escalations (loop fall-through, performReauth) must not increment.
         if (metrics != null) metrics.incBotReconnect("ws-disconnect");
+        notifyReconnectEscalation();
         Thread.ofVirtual().name("reconnect-" + userName).start(mdcWrap(this::runWsReconnectLoop));
     }
 
@@ -610,6 +647,7 @@ public abstract class Bot {
         if (metrics != null) {
             metrics.incBotReconnect(normalizeReconnectReason(reason));
         }
+        notifyReconnectEscalation();
         // Unconditional (BOT_LIVENESS_SEMANTICS AD-6), like every other close site. The old
         // isOpen() guard skipped the dead-channel case and left the close to happen only
         // after performReauth() returned — an auth-gateway round trip that, in the failure
