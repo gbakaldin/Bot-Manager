@@ -26,6 +26,7 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
@@ -298,6 +299,21 @@ public class SlotMachineBot extends Bot {
     }
 
     /**
+     * The cheapest spin this bot could stake: {@code min(allowedBetValues) * numLines}.
+     * Below it there is no bet the strategy could pick that the balance covers, which is
+     * what makes "below spin cost" a state rather than a property of one roll.
+     * {@code allowedBetValues} arrives sorted ascending (AD-11); {@link Collections#min}
+     * rather than {@code get(0)} so a server that stops sorting cannot silently invert this.
+     */
+    private long minimumSpinCost() {
+        List<Long> values = allowedBetValues;
+        if (values == null || values.isEmpty() || numLines == 0) {
+            return Long.MAX_VALUE;
+        }
+        return Collections.min(values) * numLines;
+    }
+
+    /**
      * The {@code sendAsync} condition. Returns {@code false} until the subscribe
      * response has populated the server-sourced config (AD-12), while a spin is
      * in flight (AD-6), or when the balance cannot cover the staked spin
@@ -317,20 +333,37 @@ public class SlotMachineBot extends Bot {
             long chosenBet = chooseBet();
             // AD-13 balance gate: a spin stakes chosenBet on each of numLines.
             long cost = chosenBet * numLines;
-            if (expectedCurrentBalance.get() < cost) {
-                // Log the ENTRY transition only — this gate is re-evaluated every 3 s and
-                // an underfunded bot never leaves it on its own.
-                if (belowSpinCost.compareAndSet(false, true)) {
-                    log.debug("Bot {}: balance {} below spin cost {} ({} x {}) — pausing spins",
-                            getUserName(), expectedCurrentBalance.get(), cost, chosenBet, numLines);
+            long balance = expectedCurrentBalance.get();
+
+            // The LOGGED state is defined against the CHEAPEST spin the bot could make, not
+            // against the bet it happened to roll this tick. chooseBet() re-derives from the
+            // strategy every 3 s, so with a randomising strategy and a balance between
+            // min(allowedBetValues) * numLines and max(...) * numLines, consecutive ticks
+            // alternate above and below `cost` — and a transition pair defined on `cost`
+            // then emits a "pausing" AND a "resuming" line per oscillation, up to 2 lines
+            // per 3 s, i.e. worse than the ~1,200 lines/hour this replaced. Below the
+            // minimum the bot genuinely cannot spin at all, and that state is monotone in
+            // balance.
+            long floorCost = minimumSpinCost();
+            if (balance >= floorCost) {
+                // The EXIT transition, so the pause has a visible end (a deposit landed, or
+                // a win covered the next spin) rather than just going quiet.
+                if (belowSpinCost.compareAndSet(true, false)) {
+                    log.debug("Bot {}: balance {} covers spin cost floor {} again — resuming spins",
+                            getUserName(), balance, floorCost);
                 }
-                return false;
+            } else if (belowSpinCost.compareAndSet(false, true)) {
+                // The ENTRY transition only — this gate is re-evaluated every 3 s and an
+                // underfunded bot never leaves it on its own. The message keeps the literal
+                // "below spin cost" that verification step P2-4 greps for.
+                log.debug("Bot {}: balance {} below spin cost floor {} ({} x {}) — pausing spins",
+                        getUserName(), balance, floorCost, floorCost / numLines, numLines);
             }
-            // And the EXIT transition, so the pause has a visible end (a deposit landed, or
-            // a win covered the next spin) rather than just going quiet.
-            if (belowSpinCost.compareAndSet(true, false)) {
-                log.debug("Bot {}: balance {} covers spin cost {} again — resuming spins",
-                        getUserName(), expectedCurrentBalance.get(), cost);
+
+            if (balance < cost) {
+                // Skipping this tick because THIS roll is unaffordable is normal and is not
+                // worth a line: the bot is still spinning, just not at this size.
+                return false;
             }
             pendingBet.set(Optional.of(chosenBet));
             log.trace("Bot {}: parked spin bet={} ({} lines)", getUserName(), chosenBet, numLines);

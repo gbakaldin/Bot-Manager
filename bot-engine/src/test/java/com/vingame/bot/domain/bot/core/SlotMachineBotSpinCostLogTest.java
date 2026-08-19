@@ -5,6 +5,7 @@ import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.slot.SlotSubscribeResponse;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategy;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
@@ -140,7 +141,7 @@ class SlotMachineBotSpinCostLogTest {
         condition.get();
 
         assertThat(messagesContaining("below spin cost")).hasSize(1);
-        assertThat(messagesContaining("covers spin cost")).hasSize(1);
+        assertThat(messagesContaining("covers spin cost floor")).hasSize(1);
 
         // …and is spent again: the state is genuinely tracked, not latched once forever.
         seedAtomic(bot, "expectedCurrentBalance", 100L);
@@ -148,6 +149,43 @@ class SlotMachineBotSpinCostLogTest {
         condition.get();
 
         assertThat(messagesContaining("below spin cost")).hasSize(2);
+    }
+
+    @Test
+    @DisplayName("a randomising strategy over a wide bet range does NOT flip the state each tick")
+    void aRandomisingStrategyDoesNotOscillate() throws Exception {
+        // The state is "below the cost of ANY spin", not "below the cost of the bet I
+        // happened to roll this tick". chooseBet() is re-derived from the strategy on every
+        // evaluation, so a state defined on the rolled bet would, for a balance between
+        // min*lines and max*lines, alternate above/below the gate and emit a pausing AND a
+        // resuming line per oscillation — up to 2 lines per 3 s, worse than the ~1,200
+        // lines/hour this replaced.
+        subscribe(new SlotSubscribeResponse(1300, 204, winlines(25),
+                List.of(tier(100), tier(500), tier(2_000))));
+        // Alternates min / max on successive calls: the worst case for a per-roll gate.
+        AtomicLong calls = new AtomicLong();
+        seedStrategy(bot, ctxIgnored -> calls.getAndIncrement() % 2 == 0 ? 2_000L : 100L);
+
+        // 2_500 sits between the cheapest spin (100 x 25 = 2_500) and the dearest
+        // (2_000 x 25 = 50_000): every other tick is unaffordable at the rolled size.
+        seedAtomic(bot, "expectedCurrentBalance", 2_500L);
+        @SuppressWarnings("unchecked")
+        Supplier<Boolean> condition = (Supplier<Boolean>) invoke(bot, "spinCondition");
+        for (int i = 0; i < 100; i++) {
+            condition.get();
+        }
+
+        assertThat(messagesContaining("spin cost"))
+                .as("the bot can still afford the cheapest spin, so it is not paused at all")
+                .isEmpty();
+
+        // Genuinely unaffordable: below even the cheapest spin. One line, and it stays one.
+        seedAtomic(bot, "expectedCurrentBalance", 2_499L);
+        for (int i = 0; i < 100; i++) {
+            condition.get();
+        }
+        assertThat(messagesContaining("below spin cost")).hasSize(1);
+        assertThat(messagesContaining("covers spin cost floor")).isEmpty();
     }
 
     @Test
@@ -201,6 +239,17 @@ class SlotMachineBotSpinCostLogTest {
         Method m = SlotMachineBot.class.getDeclaredMethod(name);
         m.setAccessible(true);
         return m.invoke(b);
+    }
+
+    /** Replace the bot's SlotStrategy — the seam for "what if the bet size moves?". */
+    private static void seedStrategy(SlotMachineBot target, SlotStrategy strategy) {
+        try {
+            Field f = SlotMachineBot.class.getDeclaredField("strategy");
+            f.setAccessible(true);
+            f.set(target, strategy);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     private static void seed(Object target, String name, long value) {
