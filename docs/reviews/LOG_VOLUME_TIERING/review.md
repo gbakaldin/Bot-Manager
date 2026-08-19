@@ -1,424 +1,410 @@
-# Code Review — LOG_VOLUME_TIERING
+# Code Review — LOG_VOLUME_TIERING (re-review after remediation)
 
 Branch: `feature/log-volume-tiering`
-Reviewed diff: `git diff staging..feature/log-volume-tiering` (21 commits, 51 files)
+Reviewed diff: `git diff staging..feature/log-volume-tiering` (34 commits)
+Remediation delta re-reviewed: `git diff 562488d..HEAD` (11 commits, 31 files)
 
 ## Verdict
 
-CHANGES_REQUESTED
+PASS
 
-Four `bug` findings. No `security` findings. The concurrency-critical hot path
-(`ScopedDebugRegistry.isAnyEnabled()` → `ScopedDebugFilter.decide`) is otherwise
-correctly built — no allocation, no MDC copy, no map access when idle — and the
-AD deviations (Configuration-level filter attach, `blocking = true`, per-group
-rollup line) are the right calls and are correctly reasoned in the code.
+All four `bug` findings from the first pass are genuinely fixed, and the fixes are
+better than the fix shapes I proposed in three of the four cases. No `security`
+findings. Build green (`mvn -o -DskipTests install`), and the affected suites run
+green here: `ScopedDebugRegistryTest` (14), `ScopedDebugEscalatorTest` /
+`GroupLifecycleAggregatorTest` / `SlotMachineBot*Test` (45), the `bot-app` logging
+suite incl. `ScopedDebugFilterInstallationTest` + `PerBotInfoLogGuardTest` (26),
+and `evidence-shim/selftest.py` (all checks passed).
 
-The bugs cluster on one theme: **the mechanisms that are supposed to bound this
-feature's own cost (the escalation cooldown, the fast-path flag, the installer's
-attachment) each have a hole that fails in the direction of "silently wrong",
-and two of them are the exact failure modes their own javadoc says they prevent.**
+Six `smell`s and one `style` remain, all of them consequences of the remediation
+rather than survivors of the first pass. The heaviest is the third one in the
+installer — the area you flagged as likely to produce another, and it did, in the
+place you'd expect: `stop()` still does not order against the very sweeper
+re-assert that was added to fix bug 3.
+
+### Prior findings, disposition
+
+| Prior finding | Status |
+|---|---|
+| [bug] escalation re-arms forever | **Closed** — cooldown measured from expiry, defaults 15/45, duty cycle asserted |
+| [bug] `anyEnabled` lost update | **Closed** — five mutation sites under one monitor, reads still lock-free |
+| [bug] listener never removed / `isInstalled()` not a fact | **Closed** — plus the identity-scoped removal defect Dev found alongside it |
+| [bug] shim `next_deadline()` kills the scheduler | **Closed** — guard widened, deadlines coerced at three layers, `schedulerAlive` published |
+| [smell] `flushAll()` sentinel timestamp | Closed — explicit `force` flag |
+| [smell] deposit aggregate has no max age | Closed — `MAX_WINDOW_NANOS = 60s` |
+| [smell] group lines tagged with one bot's MDC | Closed — `BotMdc.GROUP_LEVEL_KEYS` |
+| [smell] slot below-spin-cost flips per tick | Closed — state defined on `minimumSpinCost()` |
+| [smell] `Promoter.pending` unbounded | Closed — `MAX_PENDING = 64`, oldest-first, counted on `/health` |
+| [smell] evidence age measures log age | Closed — `.promoted.json` sidecar |
+| [smell] `FleetRollupLogger` writes a null MDC value | Closed — `setGroupContext` skips nulls per key |
+| [smell] third log4j2 copy guarded by prose | **Withdrawn** — see Disputes |
+| [smell] `LogLevelController` accepts any group id | **Deferral accepted, with one correction** — see Disputes |
+| [style] FQN `java.util.List` in `SessionAggregationService` | Closed |
+| [style] `ReconnectWindow.startMillis` off-lock | Closed — `volatile`, with the reason on the field |
 
 ## Findings
 
-### [bug] Auto-escalation re-arms forever: a persistently sick group holds scoped DEBUG open permanently
-`bot-engine/src/main/java/com/vingame/bot/infrastructure/observability/ScopedDebugEscalator.java:78-87`,
-`bot-app/src/main/resources/application.properties` (`escalation.minutes=15`, `escalation.cooldown-minutes=15`)
+### [smell] `ScopedDebugInstaller.stop()` still does not order against the sweeper it starts, so the new re-assert can re-attach the filter *after* teardown
+`bot-app/src/main/java/com/vingame/bot/infrastructure/logging/ScopedDebugInstaller.java:120-136, 211-229`
 
-The escalation TTL and the escalation cooldown default to **the same 15 minutes**,
-so the cooldown expires at the same instant the scope does. The class javadoc
-claims the opposite:
+This is the third defect in this area, and it is created by the fix for the
+second. `stop()` runs, in this order:
 
-> "One escalation per group per cooldown (default 15 min, the same as the TTL), so
-> a flapping group expiring a watchdog every three minutes holds DEBUG open for
-> its 15 minutes and then goes quiet rather than re-arming forever."
-
-It does not go quiet. Concretely, with `bot.group.dead.threshold=0.80`:
-
-1. A group settles at `dead/total = 0.5` — deteriorating but under the death
-   threshold, so `handleBotGroupDeath` never fires and the group is never
-   evicted. `monitorHealth` calls `onGroupHealth` **every 30 s**, and 0.5 sits
-   inside the `[0.40, 0.80)` escalation band on every one of those ticks.
-2. `t=0`: escalate. Scope granted to `t=15:00`, cooldown to `t=15:00`.
-3. `t=15:00`: the registry sweeper expires the scope. At `t=15:00+30s` the next
-   health tick finds the cooldown lapsed and re-escalates. Scope to `t=30:00`.
-4. Repeat indefinitely. Duty cycle ≈ 96%, unattended, for as long as the group
-   stays half-broken.
-
-The watchdog trigger has the same shape and a more likely fuse: `CLAUDE.md`
-documents server-side subscriber pruning that leaves bots silently zombied
-(watchdog expiry every `bot.watchdog.timeout.seconds`, default 180 s) and ~230
-reconnects/bot/day on TIP prod at only 5 bots (against
-`reconnect-threshold=5` per 5 min). Any of those keeps re-arming past every
-cooldown lapse. With `max-scopes=50`, up to 50 groups can be pinned at DEBUG
-continuously, with nobody having typed a command — which is a large fraction of
-the fleet-wide DEBUG this feature exists to make impossible, on the box that
-ENOSPC'd on 2026-06-30.
-
-`ScopedDebugEscalatorTest` ("a flapping group cannot re-arm inside the cooldown,
-and can after it") asserts the re-arm at `t > cooldown` is *successful*, so the
-test encodes the behaviour rather than catching it.
-
-Fix shape: make the cooldown a *quiet period measured from scope expiry*, not
-from the last escalation — i.e. require `now - lastEscalation >= ttl + cooldown` —
-or add a per-group escalation budget (e.g. at most N escalations per rolling
-hour, then stop and WARN once). Either way the invariant to state and test is
-"an unattended group cannot be at DEBUG for more than X% of any hour", which is
-the property the javadoc already claims.
-
-### [bug] `anyEnabled` lost-update race can leave scoped DEBUG silently inert
-`bot-api/src/main/java/com/vingame/bot/common/logging/ScopedDebugRegistry.java:111, 131, 151, 182`
-
-The javadoc asserts:
-
-> "A stale `true` costs one wasted map lookup until the next sweep; a stale
-> `false` cannot happen, because it is set to `true` before the entry is published."
-
-A stale `false` can happen. `disable`, `sweepAt` and the lazy-expiry branch of
-`isEnabled` all perform a non-atomic read-modify-write —
-`expiries.remove(...)` then `anyEnabled = !expiries.isEmpty()` — and the write
-is not ordered against a concurrent `enable`. Interleaving (sweeper thread A,
-REST/escalator thread B):
-
-```
-A: expiries.remove("g1")            // map now empty
-A: reads expiries.isEmpty() -> true // about to assign false
-B: anyEnabled = true
-B: expiries.merge("g2", ...)        // map now holds g2
-A: anyEnabled = false               // <-- lost update
+```java
+if (sweeper != null) sweeper.shutdownNow();       // 1 — does NOT await termination
+if (listener != null) context().removePropertyChangeListener(listener);   // 2
+detachOwnFilter(context().getConfiguration());    // 3
+registry.clear();                                 // 4
+installed = false;                                // 5  <-- last
 ```
 
-The map holds `g2` but the fast path reads `false`, so `ScopedDebugFilter.decide`
-returns `NEUTRAL` for every event and **nothing is ever promoted for g2 for its
-entire TTL**. Nothing self-heals it: `isEnabled` short-circuits on `anyEnabled`,
-the 30 s sweep re-derives `!isEmpty()` only if it finds an *expired* entry (it
-returns early at `expiries.isEmpty()` — which is false here, so it does reassign
-`true`... but only if some entry is expired; a single non-expired entry leaves
-the flag untouched). Meanwhile `GET /api/v1/logging/debug` reports the scope as
-active, because `activeScopes()` reads the map, not the flag.
+`shutdownNow()` interrupts but does not wait, and `sweepQuietly()` blocks on
+nothing interruptible, so an in-flight sweep runs to completion concurrently with
+steps 2–5. That sweep's first act is now the re-assert added for bug 3:
 
-This window is small but it is opened by exactly the traffic pattern the feature
-is designed for: the sweeper firing every 30 s while an operator or the
-auto-escalator arms a scope during an incident. The symptom — "I enabled it, the
-API says it's on, no DEBUG lines appear" — is unfalsifiable from the outside and
-lands mid-incident.
+```java
+if (installed && !isAttached()) { log.warn(...); install(); }
+```
 
-Fix shape: serialize the flag against the map. Either compute the flag under a
-short `synchronized` block in all four mutation sites, or drop the boolean and
-have `isAnyEnabled()` read a `volatile int` size maintained atomically alongside
-the map, or re-assert `anyEnabled = true` after `merge` **and** re-check after
-each removal (`if (!expiries.isEmpty()) anyEnabled = true;` rather than an
-unconditional assignment). The last is the smallest change and closes the
-lost-update in the direction that is safe (a stale `true` is already documented
-as harmless).
+Interleave it between steps 3 and 5 and it reads `installed == true` (not cleared
+until step 5) and `isAttached() == false` (just detached at step 3), so it calls
+`install()` and **re-attaches the filter to the JVM-global `Configuration` after
+`stop()` has removed it** — bound to a registry step 4 already `clear()`ed. The
+new identity-scoped `detachOwnFilter` means the next live installer will not
+remove it (correctly — it only removes its own), so it stays there for the life of
+the JVM, pinning the dead installer, its filter and its registry. That is exactly
+the lingering-filter outcome the `stop()` comment says it exists to make
+impossible.
 
-### [bug] The log4j2 property-change listener is never removed, and `isInstalled()` does not check attachment
-`bot-app/src/main/java/com/vingame/bot/infrastructure/logging/ScopedDebugInstaller.java:104-159`
+The narrower sub-case is worse in kind, if not in probability: if the straggler
+runs *after* step 5, `install()` takes the `if (!installed)` branch and registers
+a **second** `PropertyChangeListener` on the global context that nothing will ever
+remove — the multiplying-listener shape the fix was written to close, reopened
+through the same ordering hole. The same window exists for a listener already
+executing when step 2 removes it.
 
-Two coupled defects on the install path.
+Practically the cost is small: the orphaned filter always returns `NEUTRAL`
+(cleared registry ⇒ `isAnyEnabled() == false`), so nothing misbehaves; the damage
+is one leaked object graph per hit and a per-event volatile read per orphan. In
+production there is one context and one shutdown, so this is near-unreachable; in
+the test JVM, where contexts churn, it is the plausible one.
 
-**(a) The listener outlives the bean.** `install()` registers a listener on the
-**JVM-global** `LoggerContext` (`LogManager.getContext(false)`), and `stop()`
-removes the filter and shuts the sweeper down but never calls
-`removePropertyChangeListener`. The lambda captures `this`, which captures the
-filter and the registry. Worse, `stop()` sets `installed = false`, so if the
-stale listener ever fires, `install()` takes the `if (!installed)` branch again
-and **registers a second listener** — listeners multiply across
-create/destroy cycles.
+Fix shape, in order of value: (a) set `installed = false` **first** in `stop()`,
+before removing the listener and detaching — that alone makes the sweeper's gate
+fail; (b) add a terminal `stopped` flag that `install()` checks inside the
+`installing` guard, so no post-teardown path can re-attach or re-register;
+(c) `sweeper.shutdownNow()` followed by a short `awaitTermination`. (a) and (b)
+are two lines and close it; (c) is belt-and-braces.
 
-Consequences, in ascending order of how much they matter:
+Worth stating as an invariant somewhere the next reader will hit it: *after
+`stop()` returns, no code path may call `install()` on this instance.* Both bugs
+in this class so far have been violations of an invariant that was described in
+prose and enforced nowhere.
 
-- Every stale installer's `install()` starts with `removeExistingFilters(...)`,
-  which removes *any* `ScopedDebugFilter` — including the live one belonging to
-  the current Spring context — and attaches its own, which is bound to a
-  registry that `stop()` already `clear()`ed. The live context then has
-  `installed == true`, `isAttached() == false`, and a filter that will never
-  promote anything. `POST /api/v1/logging/debug/{id}` answers 200 and changes
-  nothing, which is the failure the class javadoc names as the reason the
-  "armed" INFO line exists.
-- In the test suite (Surefire reuses the fork, and several new tests spin
-  Spring contexts with different `logging.level.*` / `logging.config`
-  properties), this is a cross-context interference source and a plausible
-  future flake.
-- In production a single context makes it latent — no `monitorInterval` is set
-  in either `log4j2.properties`, so nothing reconfigures spontaneously. It
-  becomes live the moment anything triggers a `reconfigure()` (a `logging.config`
-  change, an actuator-driven restart, devtools).
+### [smell] A cap-refused escalation still burns the cooldown slot — and the fix quadrupled the penalty
+`bot-engine/src/main/java/com/vingame/bot/infrastructure/observability/ScopedDebugEscalator.java:204-222`
 
-**(b) `isInstalled()` returns a flag, not a fact.** It returns the `installed`
-boolean, which is only ever set by a successful `install()` and cleared by
-`stop()`. `isAttached()` — which asks the real question — exists and is used
-only by the listener. `ScopedDebugStatusDTO.enabled` documents itself as
-"master switch AND the filter actually being attached", which is not what it
-carries. The `installing` CAS guard compounds this: a genuine concurrent
-re-install request is *silently dropped* (returns without retrying), and there
-is no periodic re-check, so a lost re-install is permanent detachment that
-`/api/v1/logging/debug` reports as healthy.
+`escalate()` claims the cooldown slot *before* it knows whether the registry will
+grant a scope:
 
-Fix shape: keep a field for the registered listener and remove it in `stop()`;
-make `isInstalled()` return `installed && isAttached()`; and have the existing
-30 s sweeper re-assert attachment (`if (!isAttached()) install();`) so a dropped
-re-install self-heals within one sweep instead of never.
+```java
+lastEscalation.compute(botGroupId, (id, previous) -> { ... won.set(true); return now; });
+if (!won.get()) return false;
+enforceCap(lastEscalation);
+Optional<Instant> expiry = registry.enable(botGroupId, ttl);
+if (expiry.isEmpty()) { log.warn("...the registry is at its concurrent-scope cap of {}"); return false; }
+```
 
-### [bug] `evidence-shim`: an exception in `next_deadline()` silently kills the scheduler thread
-`evidence-shim/shim.py:745-754`
+On the refusal path `lastEscalation` keeps `now`, so a group that was refused
+because `maxScopes` was momentarily full is suppressed for the full re-arm
+interval — which this pass raised from 15 minutes to **60**. During the
+fleet-wide incident that filled the cap (the scenario the cap exists for), slots
+free up as the first wave's TTLs lapse, but the groups that were turned away in
+the first minute cannot try again for an hour. The escalator ends up systematically
+favouring whichever groups happened to arrive first.
+
+Two smaller things on the same lines: `enforceCap` runs after a slot is claimed but
+before the grant, so a refused escalation can also evict a real entry; and the
+`log.warn` hard-codes "the registry is at its concurrent-scope cap of {}" as the
+only explanation for `Optional.empty()`, which is wrong for the other two refusal
+reasons — a blank group id, and a non-positive TTL from
+`escalation.minutes<=0`. Someone who zeroes that property to disable escalation
+(rather than using `escalation.enabled=false`) gets a WARN per trigger blaming the
+cap.
+
+Fix shape: roll the claim back on refusal (`lastEscalation.remove(botGroupId, now)`
+when `expiry.isEmpty()`), and have the WARN report `registry.activeScopes().size()`
+vs `getMaxScopes()` so the message can be falsified.
+
+### [smell] `evictGroup` resets the quiet period, so a restart cycle can slip the 25% duty-cycle bound
+`ScopedDebugEscalator.java:171-178`, `BotGroupBehaviorService` teardown paths
+
+The new bound — "an unattended group cannot hold scoped DEBUG for more than
+`ttl/(ttl+cooldown)` of any window" — rests entirely on `lastEscalation` being
+sticky. `evictGroup` clears it, and it is called on every path that drops a group
+from `runningGroups`, including `stop`, which `restart` routes through. A group
+that is being restarted more often than once an hour (a scheduled restart, an
+`ActivationScheduler` window flapping, a DEAD-runtime reclaim loop) therefore gets
+its quiet period zeroed on each cycle and can re-escalate on the first watchdog
+expiry after each start. Note the registry scope is *not* cleared by `evictGroup`,
+so consecutive escalations merge-extend rather than replace: a group restarting
+every ten minutes can hold a scope continuously.
+
+The class javadoc states the bound unconditionally ("whatever it flaps"), and
+`unattendedGroupCannotExceedItsDutyCycle` proves it only for a group that is never
+evicted. This is not a large hole — restart cadences are usually much longer than
+an hour — but it is the one input that makes the stated invariant false, and it is
+untested.
+
+Fix shape: either keep `lastEscalation` across eviction (it is a bounded map with
+its own 2,000-entry cap, so retaining it costs nothing and the group id is stable
+across restarts), or state in the javadoc that the bound holds per continuous run
+and add the eviction case to the duty-cycle test.
+
+### [smell] The evidence sidecar prune is racy against a concurrent promotion
+`evidence-shim/shim.py:789-797` (`forget_promoted`), `:737-786` (`sweep`)
+
+`sweep()` computes `keep` from an `evidence_files()` snapshot and then does:
 
 ```python
-while not stop.is_set():
-    try:
-        promoter.tick()
-    except Exception as error:  # noqa: BLE001 - a bad pass must not kill the timer
-        log("ERROR scheduled pass failed: %s: %s" % (type(error).__name__, error))
-    timeout = max(1.0, min(30.0, promoter.next_deadline() - time.time()))
-    promoter.wake.wait(timeout)
+def forget_promoted(self, keep):
+    surviving = {os.path.basename(path) for _, _, path in keep}
+    stale = [name for name in self.promoted_at if name not in surviving]
 ```
 
-`tick()` is guarded; `next_deadline()` — one line later, outside the `try` — is
-not. It calls `min()` over the values pulled straight out of `self.pending`, and
-`load_pending()` accepts any dict that merely has a truthy `liveName`:
+`promote()` — and therefore `sweep()` — runs on both the webhook thread and the
+scheduler thread, and nothing serialises them. If thread B hardlinks a new file
+and stamps it after thread A took its `evidence_files()` snapshot, that name is
+absent from A's `surviving` set and A deletes B's just-written record. The file
+survives, but its age reverts to the mtime fallback — which is precisely the
+"effective retention is `MAX_AGE - age_at_promotion`" behaviour the sidecar was
+added to eliminate, silently and only for the file that raced. Alertmanager
+redelivery during an incident (webhook) overlapping a deferred pass (scheduler) is
+the ordinary way to produce that overlap.
 
-```python
-self.pending = {key: entry for key, entry in loaded.items()
-                if isinstance(entry, dict) and entry.get("liveName")}
+Fix shape: prune on absence from the filesystem rather than absence from a stale
+snapshot — `stale = [name for name in self.promoted_at if not os.path.exists(os.path.join(evidence_dir, name))]`.
+That is correct under any interleaving and is the same cost.
+
+### [smell] `/health` reports `schedulerAlive` but the only thing that reads `/health` cannot see it
+`evidence-shim/shim.py:893-897`, `docker-compose.yml:306-312`
+
+The stated purpose of the new field is "so a dead timer is visible not inferred"
+(selftest name), and it is honest about the state. But `do_GET` answers **200
+unconditionally**, and the sole automated consumer is the compose healthcheck,
+which does `urlopen(...).read()` and inspects nothing:
+
+```yaml
+test: ["CMD", "python", "-c",
+       "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3).read()"]
 ```
 
-A `.pending.json` whose `deferredAt`/`tailAt` is anything other than a number —
-a hand-edit on the box, a schema change between shim versions, a file written by
-a future version and read by a rolled-back one — makes `min()` raise
-`TypeError: '<' not supported between 'str' and 'float'`. The scheduler is a
-`daemon=True` thread with no supervision, so it dies, the traceback goes to
-stderr among the container logs, and the process **keeps serving HTTP and keeps
-returning 200**. From then on:
+So a dead scheduler still shows a healthy container under `restart: unless-stopped`,
+and the field is only visible to someone who already suspected the problem and
+curl'd the container by hand — which is the state the fix set out to leave behind.
+(The paths that kill the thread are now closed, so this is defence in depth, not a
+live gap.)
 
-- pass 2 (+5 min) and pass 3 (rollover + 120 s) never run for any incident — the
-  post-incident tail, which is the whole point of AD-16, is never pinned;
-- the hourly sweep never runs, so `logs/evidence/` grows without bound, which is
-  precisely the "the fix for unbounded growth is itself unbounded growth" that
-  AD-19 exists to prevent, on the box that died of a full disk;
-- `/health` cannot report it — it shows `pending` entries with
-  `deferredInSeconds` drifting ever more negative, and the healthcheck still
-  passes.
+`viptalk-shim` is the precedent for "200 + honest body", and following it is
+defensible — but that shim's `/health` describes a *remote* dependency it
+deliberately does not probe, whereas this one describes a thread inside the same
+process, which it can answer definitively. Fix shape: `503` when
+`scheduler_alive() is False` (`None` — no thread wired, the selftest harness case —
+stays 200), which makes the existing healthcheck total for free.
 
-The same class of gap: `tick()` itself compares `now >= entry["deferredAt"]`, so
-a bad entry also poisons every subsequent tick even when the exception *is*
-caught, because the loop aborts on the first bad key each time.
+### [smell] `PerBotInfoLogGuardTest` is itself the kind of manual enumeration its own javadoc says comes up short
+`bot-app/src/test/java/com/vingame/bot/infrastructure/logging/PerBotInfoLogGuardTest.java:54-72, 104-108`
 
-Fix shape: move `next_deadline()` inside the `try` (with a sane fallback
-timeout), coerce and validate deadlines to `float` in `load_pending()` and drop
-entries that fail, and — cheapest of all — have `serve()`/`/health` report
-`scheduler_alive = thread.is_alive()` so a dead timer is visible instead of
-inferred.
+The test is well built where it counts — `assertThat(path).exists()` with a "this
+has moved, update the guard rather than deleting it" message, and a real
+anti-vacuity test — and it is currently complete: `grep -rn "log\.info(" bot-*/src/main/java/com/vingame/bot/domain/bot/` returns nothing. Three things
+will erode it:
 
-### [smell] `GroupLifecycleAggregator.flushAll()` can flush nothing on shutdown
-`bot-engine/src/main/java/com/vingame/bot/infrastructure/observability/GroupLifecycleAggregator.java:269-272`
+1. **`PER_BOT_CLASSES` is a hand-maintained list**, which the class javadoc itself
+   identifies as the failure mode ("that invariant has now been enumerated twice …
+   and both enumerations came up short"). The Up Down bot on the Q3 roadmap will
+   land in `domain/bot/core/` outside the list and inherit no guard. A glob over
+   `**/domain/bot/core/*.java` plus an explicit allow-list would be
+   self-maintaining and would fail *closed* on a new bot class.
+2. **The scan is `line.contains("log.info(")` over raw source**, so a comment is
+   indistinguishable from a call. These are exactly the files now carrying long
+   comments *about* the demotions ("This was INFO under BETTING_STRATEGIES AD-14…"),
+   and the first one that quotes the old call verbatim fails the build for no
+   defect. Stripping `//`-prefixed content, or requiring the match not to follow a
+   `//`, costs one line.
+3. **The bypass is invisible**: `log.atInfo().log(...)`, a differently-named logger
+   field, or a `LoggerFactory.getLogger` local all pass. Worth one sentence in the
+   javadoc so a future reader does not over-trust it.
 
-`flushAll()` fakes "everything is idle" by passing `Long.MAX_VALUE / 2` as
-`nowNanos`, and `drainIdle` then computes `nowNanos - pending.lastTouchNanos`.
-`System.nanoTime()`'s origin is unspecified and may be an arbitrary (including
-large negative) value; the JDK javadoc is explicit that only *differences between
-two nanoTime readings* are meaningful. With a negative origin, e.g.
-`lastTouchNanos = -9e18`, the subtraction overflows to a negative number, the
-`< IDLE_FLUSH_NANOS` guard passes, and every pending entry is **skipped** — the
-shutdown flush silently emits nothing, which is the exact opposite of the stated
-intent ("a group that came up seconds before a stop still deserves its one
-line"). Linux/macOS `CLOCK_MONOTONIC` makes this unlikely in practice, which is
-why it is a smell rather than a bug. Fix shape: give `drainIdle` an explicit
-`force` flag instead of a sentinel timestamp.
+`theDemotedSitesStayDemoted` matching on message fragments will also fail on an
+ordinary reword — but it fails with "…vanished from…, this guard is now proving
+nothing", which is the right posture for a pin, so that one is deliberate and
+fine.
 
-### [smell] The deposit aggregate has an idle deadline but no maximum age
-`GroupLifecycleAggregator.java:210-224, 248-266`
+### [style] The POST contract now returns an expiry that may not be the one asked for, and nothing says so
+`bot-app/src/main/java/com/vingame/bot/domain/logging/controller/LogLevelController.java:70-105`,
+`bot-app/src/main/java/com/vingame/bot/domain/logging/dto/ScopedDebugDTO.java`
 
-`recordAutoDeposit` `touch()`es the entry on every contribution and the entry is
-only emitted once it has been quiet for `IDLE_FLUSH_NANOS` (5 s). A large group
-whose bots trickle below `minBalance` more often than every 5 s — which is the
-normal shape for a group being drained by an unlucky run — never goes quiet, so
-the INFO summary line is deferred indefinitely and `amount` accumulates across
-what an operator would read as several separate deposit rounds. The
-`initializations` counter is immune because `expectInitialized` gives it a
-completion condition; the deposits counter has none by design ("a deposit round
-is inherently open-ended"), which is exactly why it needs a hard ceiling. Fix
-shape: emit when `now - firstTouch > MAX_WINDOW` (say 60 s) regardless of
-idleness, the same belt-and-braces `SessionAggregationService` applies with its
-TTL sweep behind the grace clock.
+`registry.enable` is now extend-never-shorten and returns the window *in force*.
+That is the right call and it does not break anything (see Notes), but the
+`@Operation` description still reads "for `minutes` minutes" and neither the
+description nor `ScopedDebugDTO` mentions that a shorter `minutes` on a group that
+already has a longer window returns 200 with the **longer** expiry. An operator
+who POSTs `minutes=5` to shorten a 2 h window gets a 200 and a two-hour
+`expiresAt` with no explanation, and the way to actually shorten it (DELETE, then
+POST) is not discoverable from the endpoint docs. One clause in the `description`
+and one on the DTO's `expiresAt` param.
 
-### [smell] Group-level aggregate lines are tagged with one arbitrary bot's MDC
-`GroupLifecycleAggregator.java:188-190, 217-219, 292-309`
+## Disputes
 
-`mdcSnapshot = MDC.getCopyOfContextMap()` captures the *whole* context map of
-the first contributing bot, which per `BotMdc.set` includes `botId` and
-`botUserName` alongside the group/env/product keys the javadoc names. The
-emitted line is a group-scoped fact ("47/47 bots initialized") permanently
-attributed to bot `0`. In Loki, `{botGroupId="x"} |= "bots initialized"` is
-right, but a drill-in filtered on a specific `botId` will surface a line about
-all 47 bots, and the JSON document carries a `botUserName` that had nothing to
-do with 46 of them. Fix shape: snapshot only the group-level keys
-(`botGroupId`, `environmentId`, `product`, `gameType`) rather than the whole
-map — the same set `BotMdc.setGroupContext` writes, which is what
-`FleetRollupLogger` already does correctly.
+**The escalator's cooldown maps — no dispute, and nothing to withdraw.** Confirmed:
+`MAX_TRACKED_GROUPS = 2_000` at `ScopedDebugEscalator.java:64`, enforced by
+`enforceCap` on both maps. My review never claimed otherwise — the only escalator
+findings I filed were the re-arm bug and the `startMillis` style item, and my
+`Promoter.pending` smell explicitly cited `ScopedDebugEscalator.MAX_TRACKED_GROUPS
+= 2000` as one of the three Java precedents that made `pending`'s absence stand
+out. The `volatile` fix landed and is correct, and the comment on the field
+records *why* it is volatile, which is the part that survives.
 
-### [smell] The slot below-spin-cost transition can still flip on every tick
-`bot-engine/src/main/java/com/vingame/bot/domain/bot/core/SlotMachineBot.java:318-334`
+**The third log4j2 copy — dispute withdrawn, Dev is right.**
+`Log4j2TestConfigShapeTest` closes it, and closes it better than the fix shape I
+proposed. I suggested comparing the `logger.app.*` block and the appender names;
+it instead enumerates 23 `SHAPE_KEYS` covering the whole logger/appender graph
+(including `appender.async.appenderRef.type`, the one the plan calls the most
+likely silent failure), compares them with `containsExactlyEntriesOf`, and — the
+part I would have missed — adds `everyShapeKeyIsActuallyDeclared`, because
+`containsExactlyEntriesOf` is satisfied by two identically-*missing* keys, so a
+typo in `SHAPE_KEYS` would have turned the class into a no-op. It also pins the
+intended difference positively (`theOnlyDifferenceIsTheOutputPath`) rather than
+merely excluding it. The one documented difference not in `SHAPE_KEYS` — the
+shipped `appender.console.filter.threshold` (INFO) that the test config omits — is
+correct to leave out: scoped DEBUG is promoted to the *rolling* appender that
+feeds Loki, and the INFO-capped console is a deliberate Phase 0 decision, so no
+dependent test's proof rests on it.
 
-The `belowSpinCost` state is defined against `chooseBet() * numLines`, and
-`chooseBet()` is re-derived from the strategy on **every** tick. With a
-randomising strategy over `allowedBetValues` (e.g. `RandomBetStrategy`) and a
-balance sitting between `min(allowedBetValues) * numLines` and
-`max(allowedBetValues) * numLines`, consecutive ticks alternate above/below the
-gate, and the CAS pair emits a "pausing spins" **and** a "resuming spins" line
-per oscillation — up to 2 lines per 3 s, i.e. *worse* than the ~1,200 lines/hour
-the change was written to eliminate. The state being tracked is "below the cost
-of the bet I happened to roll this tick", not "below the cost of a spin". Fix
-shape: define the gate on `min(allowedBetValues) * numLines` (the bot genuinely
-cannot spin at all below that) and keep `chosenBet` only for the message text,
-or add a hysteresis/minimum-dwell before a transition may be logged again.
+**The deferred group-id validation — deferral accepted, one of the three reasons
+does not hold.**
 
-### [smell] `Promoter.pending` is the one unbounded collection in the feature
-`evidence-shim/shim.py:276, 423-454`
+- *"A Mongo existence check would 404 for a group just deleted or on another
+  instance while its lines are still in flight."* **Holds** for the just-deleted
+  case, which is real and is the case where you most want the scope to keep
+  working. It does *not* hold for the other-instance case: the three instances run
+  isolated data, and a group this instance does not run emits no lines carrying
+  that MDC, so scoping it here consumes a slot and produces nothing — that half of
+  the argument points toward validation, not away from it.
+- *"A UUID gate would reject the short ids the registry contract uses."* **Does not
+  hold.** `BotGroup.id` is a Mongo `@Id String` and in practice a UUID
+  (`0c9a93cb-20d6-4f57-9dbc-5c315dcf52e2` in CLAUDE.md). The short ids are a test
+  convention (`g1`, `group-under-investigation`); `ScopedDebugRegistry`'s actual
+  contract is "non-null, non-blank", and nothing in production mints a short one.
+  A format gate is possible; it is just not worth it on its own.
+- *"The TTL reclaims junk scopes anyway."* **Holds** — `MAX_TTL` is 2 h and there
+  is no permanent form.
 
-Every Java map added by this branch carries an explicit cap and a documented
-anti-leak story (`ScopedDebugRegistry.DEFAULT_MAX_SCOPES = 50`,
-`GroupLifecycleAggregator.MAX_GROUPS = 2000`,
-`ScopedDebugEscalator.MAX_TRACKED_GROUPS = 2000`). `self.pending` has none. Each
-distinct `groupLabels` tuple creates an entry that lives until both its passes
-fire, is re-serialised into `.pending.json` on every webhook (O(n) write per
-POST), and mints a distinct `console-live-<slug>-<ts>.log` hardlink in
-`evidence/`. Alertmanager's grouping keeps this tiny in normal operation and the
-container publishes no host port, so this is not reachable from outside the
-compose network — but a label explosion during a bad deploy (say `gameId` leaking
-into `group_by`) is a plausible in-network way to get thousands of pending
-entries and thousands of evidence links, and the sweep bounds the bytes, not the
-inodes or the dict. Fix shape: cap `pending` at a small N (oldest-first
-eviction, mirroring `enforceCap`) and log once when the cap bites.
-
-### [smell] The evidence age guard measures log age, not incident age
-`evidence-shim/shim.py:578-616`
-
-`sweep()` compares `stat.st_mtime` against `now - max_age_days * 86400`. A
-hardlink shares the inode, so a promoted file's mtime is the *log's* last-write
-time, not the promotion time. log4j2's own `Delete` keeps rolled files for 7
-days, so the older of the "newest two" can already be up to ~7 days old at
-promotion and is swept ~7 days later — the effective evidence retention is
-`EVIDENCE_MAX_AGE_DAYS - age_at_promotion`, not the 14 days that
-`secrets.env.example` and the module docstring advertise. (The live file is
-unaffected: its mtime keeps advancing while log4j2 writes to that inode.) Fix
-shape: either record the promotion time in a sidecar/state file and sweep on
-that, or state the semantics honestly in the docstring and in
-`secrets.env.example` — "at least 7 days" is a very different promise from
-"14 days".
-
-### [smell] `FleetRollupLogger` writes a null MDC value
-`bot-app/src/main/java/com/vingame/bot/infrastructure/observability/FleetRollupLogger.java:164`
-
-`BotMdc.setGroupContext(null, envId, product)` unconditionally does
-`MDC.put(BOT_GROUP_ID, null)` (the null-guards in `setGroupContext` cover only
-`product`). Log4j2's context map tolerates it, but the environment rollup line
-then carries an explicit `botGroupId: null` field in the JSON document and an
-empty `[/…]` in the console pattern, where "the key is absent" is what is meant.
-It also means the value depends on which `ThreadContextMap` implementation is
-active. Fix shape: have `setGroupContext` skip a null `botGroupId` the way it
-already skips a null `product`, or add a group-less overload.
-
-### [smell] The twin-sync test covers two of the three log4j2 copies; the third is guarded by prose
-`bot-app/src/test/java/com/vingame/bot/infrastructure/logging/Log4j2TwinConfigTest.java`,
-`bot-app/src/test/resources/log4j2-test.properties:26-31`
-
-`Log4j2TwinConfigTest` is genuinely good — exact line-by-line body comparison
-plus two anti-vacuity assertions, so it is real insurance and not reassurance,
-*for the two files it compares*. The third copy is a different matter. Its
-header says:
-
-> "KEEP THE LOGGER SHAPE IDENTICAL to the shipped files: same logger name, same
-> additivity, same two appender NAMES … If the shape here drifts from
-> production, that test starts proving nothing."
-
-Nothing enforces that. `LoggingLevelOverrideTest` asserts the shape holds *in the
-test config*, which is the same file — so a drifting edit to
-`log4j2-test.properties` would be self-consistently green and would quietly
-invalidate AD-7's verification. This is the standing drift hazard the plan calls
-out, half-closed. Fix shape: extend `Log4j2TwinConfigTest` with a third
-assertion that the `logger.app.*` block and the two appender *names* in
-`log4j2-test.properties` match the shipped body, while explicitly permitting the
-`fileName`/`filePattern`/`bufferSize`/`strategy.max` differences and the absent
-`ThresholdFilter`. That turns two documented intentional differences into an
-allow-list and everything else into a build failure.
-
-### [smell] `LogLevelController` accepts any group id, so typos consume scope slots
-`bot-app/src/main/java/com/vingame/bot/domain/logging/controller/LogLevelController.java:76-105`
-
-`botGroupId` is passed straight to `registry.enable` with no existence check
-against `BotGroupService`. A mistyped or stale id returns 200 with an expiry up
-to 2 hours out and occupies one of the 50 scope slots for its full TTL — and
-when the cap is full, `ScopedDebugEscalator.escalate` refuses and only WARNs, so
-junk entries can starve real auto-escalation. The endpoint is unauthenticated,
-consistent with the documented posture for `/api/v1/metrics/**` and
-`/api/v1/alerts/**` and correctly deferred to the Keycloak item — but unlike
-those two, this one accumulates server-side state from unvalidated input, which
-is worth a line of validation now rather than after the auth work. Fix shape:
-404 on an unknown group id (`ResourceNotFoundException` is already imported for
-the DELETE path), or at minimum reject ids that do not look like the UUIDs the
-rest of the API uses.
-
-### [style] Fully-qualified `java.util.List` / `java.util.ArrayList` in a file that imports its collections
-`bot-engine/src/main/java/com/vingame/bot/infrastructure/observability/SessionAggregationService.java:501-518`
-
-`public java.util.List<GroupRollup> drainRollup()` and
-`new java.util.ArrayList<>(...)` in a file whose header already imports `Map`,
-`ConcurrentHashMap`, `LongAdder` and friends. Inconsistent with the file and with
-every other new class on the branch. Add the imports.
-
-### [style] `ReconnectWindow.startMillis` is read outside its own synchronization
-`ScopedDebugEscalator.java:207, 220-224, 227-247`
-
-`ReconnectWindow` synchronizes `record()` and `reset()`, then `timestampOf()`
-reads `window.startMillis` from the cap-enforcement path on another thread with
-no synchronization and no `volatile`. It is only used to order entries for
-eviction, so a stale read costs nothing, but it is an inconsistency inside a
-class that otherwise takes the lock. Either mark the field `volatile` or add a
-synchronized accessor.
+Net ruling: **accept the deferral.** The residual is availability, not
+correctness — an unauthenticated endpoint, 50 slots, a 2 h ceiling, so anything
+inside the compose network can park all 50 on junk ids and starve both operator
+enables and auto-escalation for two hours. That exposure is identical to the one I
+already accepted as correctly folded into the Spring Security + Keycloak item, and
+the first reason above is a genuine argument that a naive 404 would be worse than
+the problem. One ask: record this reasoning on the Keycloak backlog entry rather
+than leaving it only in a review thread — "authenticate this endpoint" and "stop
+unvalidated input from accumulating server-side state" are the same fix, and the
+second half is the part that gets forgotten.
 
 ## Notes
 
-- **The AD deviations are the right calls and are documented where a reader will
-  hit them.** The `Configuration`-vs-`LoggerConfig` filter attach point is the
-  standout: `Logger.PrivateConfig.filter` really does read `config.getFilter()`
-  before the level gate, and a LoggerConfig-attached filter really would have
-  installed cleanly, reported healthy and done nothing. Catching that during
-  implementation rather than in production, and then reconstructing the lost
-  blast-radius limit with `SCOPED_LOGGER_PREFIX`, is the kind of correction that
-  is worth more than the feature. Same for `blocking = true` — the AD-3 snippet
-  would have silently discarded ERROR events on a full queue.
-- **Overriding every `Filter` overload in `ScopedDebugFilter` is correct and
-  non-obvious.** `AbstractFilter` defaults each shape to `NEUTRAL`
-  independently, so a partial override is an inert filter that passes any test
-  that happens to use a covered arity. The comment saying so is exactly the
-  comment that class needed.
-- **Teardown coverage checks out.** `evictGroup` is called on all three paths
-  that remove a group from `runningGroups` (failed start at :539, `stop` at
-  :885, cascade delete at :950), and `restart` routes through `stop`, so there
-  is no path that drops a runtime while leaving aggregator or escalator state
-  behind. `handleBotGroupDeath` deliberately does not evict, which is right —
-  the group stays in `runningGroups` and `monitorHealth` guards on
-  `isGroupDead()`. The one residue is that a group armed just before death keeps
-  its scope until TTL, which is desirable.
-- **`evidence-shim/selftest.py` runs green here** (`python3 selftest.py`, all
-  checks passed) and the `EvidenceShimSelfTestRunnerTest` wrapper correctly
-  mirrors the `viptalk-shim` precedent — including the "must contain `all checks
-  passed`" anti-vacuity assertion, which is what stops a suite that exits early
-  from looking like a pass. Structure, config posture (`_number` falling back
-  loudly rather than crash-looping under `restart: unless-stopped`), failure
-  posture (502 so Alertmanager's retry stays meaningful) and logging all follow
-  `viptalk-shim`. The divergences worth naming are the two above (unbounded
-  `pending`, unguarded `next_deadline`), not the shape.
-- **The Alertmanager routing is right, and it is right for the non-obvious
-  reason.** Every `evidence` route carries `continue: true` and has a trailing
-  `viptalk` sibling, so the promotion receiver cannot consume the alert it is
-  meant to accompany — the same routing-semantics bug VIPTALK_ALERTING_V2 AD-V9
-  hit, avoided one phase later and pinned by `AlertmanagerRoutingTest`.
-- **Question for the author (not a finding):** `loki-config.yaml` raises the
-  default `retention_period` from 168 h to 720 h at the same time as the volume
-  reduction lands. The 30-day INFO retention is only affordable if Phase 1's
-  demotions deliver the projected reduction — and this is the same volume that
-  ENOSPC'd the box on 2026-06-30. Is there a verification step that measures
-  actual INFO ingest for a day at the new default *before* the 720 h horizon can
-  accumulate, or should the retention raise be staged behind that measurement?
-  Note also that any promtail stream without a `level` label (nothing today, but
-  a second scrape job would do it) inherits 720 h silently.
+- **The `anyEnabled` fix is complete and the publication order is now strictly
+  safer.** Five mutation sites, all under `mutation`: `enable` (:136-150),
+  `disable` (:167-171), the lazy-expiry branch of `isEnabled` (:189-192), `sweepAt`
+  (:217-226) and `clear` (:250-253). There is no sixth: `expiries` is `private
+  final`, and the only other touches are read-only (`activeScopes`, and
+  `sweepAt`'s pre-lock `isEmpty()` fast-out, whose worst case is a benign stale
+  `true`). The lock-free read is still correct despite the order flipping from
+  "flag then map" to "map then flag" — in fact more so: a reader that observes
+  `anyEnabled == true` now happens-after the `merge`, so the documented "stale
+  `true` costs one wasted lookup" is the only remaining race, and the stale `false`
+  is gone by construction rather than by argument. The one new cost is that the
+  lazy-expiry branch takes a monitor on the log hot path; it is bounded (only for a
+  group whose scope has expired but not yet swept, and the first thread through
+  removes the entry so the rest short-circuit on the `null` check), the critical
+  section does no I/O and no logging, and nothing logs while holding `mutation`, so
+  there is no lock-order inversion with log4j's internals. Fine as shipped, worth
+  knowing it exists.
+- **`enable()` returning the in-force expiry does not break either consumer.** The
+  controller reports what it is told and the DTO is now accurate rather than
+  aspirational. The escalator's arithmetic is untouched by it: the re-arm gate is
+  `now - lastEscalation >= ttl + cooldown`, computed from the escalation timestamp
+  and the configured `ttl`, never from the returned expiry — and since `merge` is
+  max, the granted window is never *shorter* than `ttl`, so the gate is always at
+  least as long as the scope it opened and the duty-cycle bound holds. The only
+  visible effect is that the escalation INFO line can report an operator's longer
+  expiry, which is the honest thing to print.
+- **The duty-cycle arithmetic holds at the config extremes, and alternating trigger
+  types cannot slip it.** All three triggers funnel through one `escalate()` keyed
+  on `botGroupId` alone, so watchdog / reconnect-rate / dead-ratio share a single
+  cooldown slot; there is no per-trigger key to alternate against. At the extremes:
+  `cooldown-minutes=0` degenerates to the old 100% behaviour (which is now
+  documented in `application.properties` as the thing not to do, in a comment that
+  explains the failure rather than just forbidding it); `escalation.minutes<=0`
+  fails closed, because `registry.enable` refuses a non-positive TTL — see the
+  misleading WARN under the second smell. The 25% figure is asserted directly
+  (`bound == 0.25`) rather than assumed, and the test drives four simulated hours
+  on an injected clock, so it is deterministic.
+- **No remaining path exits the shim's daemon thread.** Inside the loop only
+  `tick()` and `next_deadline()` can raise, and both are now inside the guard;
+  `stop.is_set()` and `wake.wait(timeout)` cannot, because `timeout` is provably a
+  float in `[1.0, 30.0]` on every path (initialised to `30.0` before the `try`, so
+  even a raising `next_deadline` leaves it valid). `_deadline` rejects `bool`
+  before `float` — the `isinstance(True, int)` trap — and rejects NaN via
+  `deadline == deadline`, which is the one that would otherwise poison `min()`
+  silently rather than loudly. Defence is at three layers (`load_pending` drops,
+  `next_deadline` re-coerces, `tick` degrades an unusable deadline to "due now"),
+  and the selftest exercises all three including the smuggled-past-load case. The
+  one theoretical hole left is `log()` raising inside the `except` block; that is
+  stderr and not worth code.
+- **On the 40k-round race probe: not flaky, and I would keep it — but bound it by
+  wall clock, not by iteration count.** False-failure risk is close to zero, and
+  for a structural reason rather than a lucky one: the assertion is an *invariant*
+  ("the map holds a live scope, so the fast path must say so"), not a timing
+  expectation, and after the fix it is true under every interleaving — including
+  the one where the sweeper's pre-lock `isEmpty()` fast-out fires between the
+  arming thread's internal `sweepAt` and its `merge`. The clock is simulated, both
+  threads are joined every round, and only two threads are ever live, so there is
+  no accumulation to trip a slow runner. The real cost is 80,000 platform-thread
+  creations for ~3 s of build time, and the real weakness is the opposite of
+  flakiness: the *detection power* is machine-calibrated ("40k is the count at
+  which reverting the synchronization reproduces on this machine"), so on a
+  single-vCPU CI runner the two threads may barely interleave and the probe can go
+  quietly green against a reintroduced bug. That is a false-negative risk that
+  grows silently. Consider `while (System.nanoTime() - start < 3_000_000_000L)`
+  with a minimum round count — same budget, and the round count adapts to the box
+  instead of being pinned to this one.
+- **The slot fix is a no-op in the shipped configuration, which is the right kind
+  of boring.** `SlotStrategyId.FIXED` is forced for every slot bot and
+  `FixedBetStrategy.chooseBet` returns `allowedBetValues.get(0)`, so `cost ==
+  floorCost` in production and the transition semantics are unchanged; the fix only
+  bites for `RandomBetStrategy`, which is not selectable. One deliberate divergence
+  worth knowing: `minimumSpinCost()` uses `Collections.min(values)` while the
+  strategy uses `get(0)`. If the server ever stopped sorting ascending, the floor
+  would sit *below* the bet actually chosen, and a bot between the two would
+  silently stop spinning with no "pausing spins" line at all — the reverse of the
+  oscillation this fixed. The javadoc explains the `min` choice; it does not
+  mention that consequence. Also note `minimumSpinCost()`'s `numLines == 0` guard
+  returns `Long.MAX_VALUE`, which would divide by zero in the ENTRY log line — it
+  is unreachable because `spinCondition()` returns at line 326 first, but the two
+  guards are now duplicated in a way that only stays safe by accident.
+- **`GroupLifecycleAggregator`'s three fixes landed cleanly and the injected
+  `nanoClock` is the non-obvious part.** Routing the *feed sites* through the same
+  clock as `sweepOnce(long)` is what makes the max-window test mean anything — with
+  `System.nanoTime()` at the feed sites, a test that advances the sweep clock also
+  silently advances the idle deadline it is trying to hold open, and would pass for
+  the wrong reason. The `@Autowired` no-arg constructor beside the test seam is the
+  same shape `ScopedDebugEscalator` uses and is required by `SpringBeanConstructorTest`.
+- **`BotMdc.GROUP_LEVEL_KEYS` is the right home for that list**, and having
+  `GroupLifecycleAggregator` and `FleetRollupLogger` agree on one definition of
+  "group-level" closes the drift between them rather than fixing one site. The
+  per-key null skip in `setGroupContext` is a behaviour change beyond the reported
+  finding (`environmentId` is now skipped when null too) — that is correct and
+  matches the `product` precedent, but it is worth knowing it touched every caller
+  of the 3-arg form, not just the fleet rollup.
