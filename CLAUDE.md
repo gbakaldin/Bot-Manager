@@ -61,8 +61,8 @@ every aggregated line -- keeping the tag is what makes a demotion safe.
 - **Staging sets `BOT_LOG_LEVEL=DEBUG`** in `secrets.env`/`.env`. Prod does not.
 - `POST /actuator/loggers/com.vingame.bot {"configuredLevel":"DEBUG"}` still works
   and is still the escape hatch -- but it is **global**. On a 10-environment prod
-  instance that is a **~5 GB/hour action**. Phase 2 adds scoped per-group DEBUG with
-  a TTL; until then, treat a global flip as an incident-scale decision.
+  instance that is a **~5 GB/hour action**. Reach for **scoped per-group DEBUG**
+  (`/api/v1/logging`, below) first; a global flip is an incident-scale decision.
 - Log config is bind-mounted (`logging/log4j2.properties` ->
   `/app/config/log4j2.properties`, selected by `LOGGING_CONFIG`), so a level or
   retention change is a `docker compose restart`, not a fleet redeploy. The in-jar
@@ -131,6 +131,37 @@ back on demand.
 
 `SessionAggregationServiceTest` asserts the DEBUG level explicitly, because this is
 one level constant away from being reverted by accident.
+
+### Scoped per-group DEBUG (Phase 2)
+
+One bot group's lines can be raised to DEBUG through the INFO logger, for a bounded
+time, without changing anything for any other group -- `POST
+/api/v1/logging/debug/{botGroupId}?minutes=N` (see the REST API section). This is the
+answer to "I need detail for *that* group", and it is the reason the default can be
+INFO at all.
+
+- **The TTL is mandatory** (max `bot.logging.scoped-debug.max-minutes`, default cap
+  120). There is no permanent form. The concurrent-scope cap
+  (`bot.logging.scoped-debug.max-scopes`, default 50) stops scoped DEBUG being
+  reassembled into global DEBUG one call at a time.
+- **It cannot reach TRACE.** The raw WS frame dumps stay a deliberate global
+  `/actuator/loggers` action; a scope that promoted them would be the flood again.
+- **It also arms itself** on early-warning signals, *before* a group dies (AD-12):
+  first watchdog expiry, a reconnect burst
+  (`escalation.reconnect-threshold` in `escalation.reconnect-window-minutes`), and a
+  `dead/total` crossing **half** of `bot.group.dead.threshold` while still under it.
+  Each escalation logs one INFO line -- `scoped debug escalated for group <id> --
+  trigger: ..., expires ...` -- and is rate-limited to one per group per
+  `escalation.cooldown-minutes`.
+- **Implementation note that contradicts the plan.** AD-9 says to attach the filter
+  to the `com.vingame.bot` LoggerConfig. That does not work: the filter consulted
+  *before* the level check is the **`Configuration`**'s
+  (`Logger.PrivateConfig.filter` -> `config.getFilter()`), while a LoggerConfig's own
+  filter runs only after the level gate has already dropped the event. The filter is
+  therefore installed on the `Configuration`, and `ScopedDebugFilter`'s
+  `SCOPED_LOGGER_PREFIX` keeps the blast radius to `com.vingame.bot.*` so a scoped
+  group does not also surface the Mongo driver's DEBUG.
+  `ScopedDebugFilterInstallationTest` pins the whole chain end to end.
 
 ## Package Structure
 
@@ -280,6 +311,23 @@ messenger). See `docs/plans/VIPTALK_ALERTING.md`.
   product via Mongo) → `viptalk.ops-room-id` fallback.
 - `viptalk.instance-label` is stamped into every message: prod / loadtest /
   staging run the same artifact into the same rooms.
+
+### LogLevelController - `/api/v1/logging`
+
+Scoped per-group DEBUG (LOG_VOLUME_TIERING Phase 2). See the Logging Guidelines.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/debug/{botGroupId}?minutes=N` | Raise this group to DEBUG for N minutes (default 15, cap 120) |
+| DELETE | `/debug/{botGroupId}` | Turn a scope off early (404 if there is none) |
+| GET | `/debug` | Armed?, the TTL policy, and the scopes currently open |
+
+- **The TTL is mandatory** — a request that omits `minutes` gets the configured
+  default; one that exceeds the cap is a **400, not a silent clamp**.
+- The group id is not validated against Mongo: the endpoint raises verbosity, it does
+  not address a resource, and an unknown id simply matches nothing.
+- Unauthenticated, like `/api/v1/metrics/**` and `/api/v1/alerts/**`. It cannot leak
+  data but it can generate load — folded into the Spring Security + Keycloak item.
 
 ## Core Classes
 
