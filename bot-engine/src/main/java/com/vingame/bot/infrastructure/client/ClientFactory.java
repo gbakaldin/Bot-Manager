@@ -82,7 +82,17 @@ public class ClientFactory {
                 .then(builder -> {
                     // Set shared EventLoopGroup if provided
                     if (eventLoopGroup != null) {
-                        log.info("Setting shared EventLoopGroup on client: {}", System.identityHashCode(eventLoopGroup));
+                        // DEBUG, not INFO. newClient() is called from Bot.initialize,
+                        // Bot.restart() and the re-auth path, so at INFO this fired once per
+                        // bot at start, once per bot per periodic-logout cycle and once per
+                        // reconnect — it cancelled out the demotion of `restart requested`
+                        // three frames earlier and, at the observed prod reconnect rates, was
+                        // the largest INFO class left in the app (LOG_VOLUME_TIERING tier 1).
+                        // The identity hash is constant for the life of the EventLoopGroup, so
+                        // the diagnostic ("is every client really sharing one?") is preserved
+                        // by the one-shot INFO line in NettyEventLoopConfig, which prints the
+                        // same hash once per JVM.
+                        log.debug("Setting shared EventLoopGroup on client: {}", System.identityHashCode(eventLoopGroup));
                         builder.eventLoopGroup(eventLoopGroup);
                     } else {
                         log.warn("EventLoopGroup is NULL! Each client will create its own EventLoopGroup.");

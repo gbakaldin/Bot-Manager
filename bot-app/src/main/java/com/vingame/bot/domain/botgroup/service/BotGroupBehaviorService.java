@@ -63,6 +63,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -362,6 +363,11 @@ public class BotGroupBehaviorService {
             }
             Map<String, StrategyId> strategyAssignment = StrategyAssignment.assign(
                     effectiveStrategyMix(group), botIdentifiers);
+            // LOG_VOLUME_TIERING tier 1: ONE line for the whole assignment, here where the
+            // group-level decision is actually made, replacing the per-bot INFO line that
+            // used to fire N times inside createSingleBot. The per-bot detail is still
+            // available at DEBUG (and per-group via /api/v1/logging/debug).
+            log.info("Bot group {}: strategy mix {}", id, strategyCounts(strategyAssignment));
 
             // Create runtime state
             BotGroupRuntime runtime = new BotGroupRuntime(id, group.getBotCount(),
@@ -760,13 +766,16 @@ public class BotGroupBehaviorService {
         // identity downstream (Phase 5 will read configuration.strategyId
         // in BettingMiniGameBot.initializeSubclass to build the strategy).
         StrategyId strategyId = strategyAssignment.getOrDefault(username, StrategyId.RANDOM);
-        // INFO per Architecture Decision 14 and CLAUDE.md logging guidance:
-        // group-level lifecycle, bounded — N bots = N lines at start, mirrors
-        // the "Bot starting in virtual thread" line emitted from BotGroupRuntime
-        // at the same scale. MDC (botGroupId, botIndex, gameType) is already
-        // set by createBotsInParallel's BotMdc.setGroupContext call, so this
-        // line is grep-able by group from Loki.
-        log.info("Bot {}: assigned strategy {}", username, strategyId);
+        // DEBUG. This was INFO under BETTING_STRATEGIES AD-14, whose argument was
+        // explicitly "N bots = N lines at start, mirrors the 'Bot starting in virtual
+        // thread' line emitted from BotGroupRuntime at the same scale" — LOG_VOLUME_TIERING
+        // supersedes that: INFO may not contain anything whose rate is a function of bot
+        // count, and at 30k bots those two classes were ~60k lines per fleet start. The
+        // group-level replacement is the one "strategy mix" line at the assignment site;
+        // the sibling line in BotGroupRuntime went to DEBUG in the same pass. MDC
+        // (botGroupId, botIndex, gameType) is set by createBotsInParallel, so this stays
+        // grep-able by group from Loki and reachable per-group via /api/v1/logging/debug.
+        log.debug("Bot {}: assigned strategy {}", username, strategyId);
 
         // SLOT bots always run the basic FIXED slot strategy. Strategy variety has
         // no purpose for slots (slot play is invisible to other players), so any
@@ -779,7 +788,8 @@ public class BotGroupBehaviorService {
         SlotStrategyId slotStrategyId = null;
         if (game.getGameType() == GameType.SLOT) {
             slotStrategyId = SlotStrategyId.FIXED;
-            log.info("Bot {}: assigned slot strategy {} (slot strategy is not selectable)", username, slotStrategyId);
+            // DEBUG for the same reason as the line above: one per slot bot at group start.
+            log.debug("Bot {}: assigned slot strategy {} (slot strategy is not selectable)", username, slotStrategyId);
         }
 
         BotConfiguration configuration = BotConfiguration.builder()
@@ -813,6 +823,20 @@ public class BotGroupBehaviorService {
      * intervention (Architecture Decision 7 in
      * {@code docs/plans/BETTING_STRATEGIES.md}).
      */
+    /**
+     * The assignment as a {@code {RANDOM=30, MARTINGALE=17}} histogram, for the single
+     * group-level line that replaced the per-bot "assigned strategy" INFO lines
+     * (LOG_VOLUME_TIERING tier 1). Sorted so two groups with the same mix log the same
+     * string and the line is diffable.
+     */
+    static String strategyCounts(Map<String, StrategyId> assignment) {
+        Map<String, Integer> counts = new TreeMap<>();
+        for (StrategyId strategyId : assignment.values()) {
+            counts.merge(strategyId.name(), 1, Integer::sum);
+        }
+        return counts.toString();
+    }
+
     private static List<WeightedStrategy> effectiveStrategyMix(BotGroup group) {
         List<WeightedStrategy> mix = group.getStrategyMix();
         if (mix == null || mix.isEmpty()) {
@@ -1998,10 +2022,12 @@ public class BotGroupBehaviorService {
             return;
         }
 
-        // INFO (not DEBUG) so the operator has the "why" for the subsequent
-        // `Bot {userName}: restart requested` INFO line at Bot.java:176. Without this
-        // context, the restart INFO is opaque. Per-bot but bounded — fires at most once
-        // per scheduler interval per group.
+        // INFO (not DEBUG) so the operator has the "why" for the per-bot restart that
+        // follows — that restart line is itself DEBUG since LOG_VOLUME_TIERING Phase 1
+        // (`Bot {}: restart requested`, Bot.java), which is exactly why this one stays:
+        // it is the only default-visible trace that periodic logout is doing anything.
+        // Its rate is a function of GROUPS, not bot count — at most one per scheduler
+        // interval per group — so it does not breach the tier-1 invariant.
         log.info("Periodic logout starting for bot {} in group {}",
                 bot.getUserName(), runtime.getGroupId());
 

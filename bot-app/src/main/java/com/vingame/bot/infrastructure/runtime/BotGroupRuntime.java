@@ -217,7 +217,11 @@ public class BotGroupRuntime {
                     bot.getUserName()
             );
             try {
-                log.info("Bot starting in virtual thread {}", Thread.currentThread().getName());
+                // DEBUG: one line per bot per group start, i.e. 30k lines on a fleet start.
+                // LOG_VOLUME_TIERING tier 1 — INFO may not contain anything whose rate is a
+                // function of bot count. The group-level replacement is
+                // GroupLifecycleAggregator's single "N/M bots initialized" line.
+                log.debug("Bot starting in virtual thread {}", Thread.currentThread().getName());
                 bot.start();
             } catch (Exception e) {
                 log.error("Bot failed in virtual thread {}", Thread.currentThread().getName(), e);

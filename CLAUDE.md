@@ -91,10 +91,28 @@ every aggregated line -- keeping the tag is what makes a demotion safe.
   balance fetch, HTTP request/response bodies, reconnect attempt success, per-bot
   periodic-logout completion, `Bot.restart`'s "restart requested", the per-bot
   `... initialized` and `triggering deposit` lines and BotFactory's
-  `Successfully created bot` (all four now aggregated at INFO by tier 1), the 5 s
-  `SessionAggregationService` UpdateBet running summary with its strategy-decision
-  histogram, the slot per-`(group, gameId)` window summary, **and (AD-8, see below)
-  the per-round StartGame session-entry and EndGame results summaries.**
+  `Successfully created bot` (all four now aggregated at INFO by tier 1),
+  `BotGroupRuntime`'s "Bot starting in virtual thread", `ClientFactory`'s "Setting
+  shared EventLoopGroup on client", `BotGroupBehaviorService`'s "assigned strategy"
+  / "assigned slot strategy", the 5 s `SessionAggregationService` UpdateBet running
+  summary with its strategy-decision histogram, the slot per-`(group, gameId)`
+  window summary, **and (AD-8, see below) the per-round StartGame session-entry and
+  EndGame results summaries.**
+  - The last four were **missed by two successive enumerations** of the per-bot INFO
+    sites. `ClientFactory`'s was the costly one: `newClient()` is called from
+    `Bot.initialize`, `Bot.restart()` **and** the re-auth path, so at INFO it fired
+    per bot at start, per periodic-logout cycle and per reconnect — exactly
+    cancelling the demotion of "restart requested" three frames earlier. Their
+    group-level replacements are `Bot group <id>: strategy mix {RANDOM=30, ...}`
+    (one line at the assignment site) and, for the EventLoopGroup identity, the
+    one-shot `NettyEventLoopConfig` line that prints the same hash once per JVM.
+  - This **supersedes BETTING_STRATEGIES AD-14**, which argued *for* INFO on the two
+    "assigned strategy" lines on the grounds that "N bots = N lines at start". That
+    is precisely the shape this feature removes.
+  - `PerBotInfoLogGuardTest` enforces the rule against the source: the classes whose
+    logging is per-bot in its entirety may contain no `log.info(` at all, and the
+    demoted messages above are pinned individually. Add a genuinely group-scoped
+    line to its group-level caller rather than exempting a class.
 - **WARN -- recoverable anomalies worth investigating if they persist.** Bot WS
   disconnect, watchdog expiry, partial registration result, deposit failure or
   non-200 for a single bot, periodic logout interrupted, session-cap eviction. Not
@@ -151,8 +169,17 @@ INFO at all.
   (`escalation.reconnect-threshold` in `escalation.reconnect-window-minutes`), and a
   `dead/total` crossing **half** of `bot.group.dead.threshold` while still under it.
   Each escalation logs one INFO line -- `scoped debug escalated for group <id> --
-  trigger: ..., expires ...` -- and is rate-limited to one per group per
-  `escalation.cooldown-minutes`.
+  trigger: ..., expires ...`.
+- **The escalation cooldown is a quiet period measured from scope *expiry*, not from
+  the escalation.** A group may not re-arm until `escalation.minutes +
+  escalation.cooldown-minutes` (15 + 45 by default), so the bound to reason about is
+  a **duty cycle**: an unattended group cannot hold scoped DEBUG for more than
+  `ttl / (ttl + cooldown)` = **25%** of any window, however hard it flaps. Measuring
+  the cooldown from the escalation — which the plan's wording asks for, and which
+  the first implementation did — makes it re-arm on the next 30 s health tick after
+  every expiry whenever the two values are equal, i.e. ~96% unattended DEBUG for a
+  group parked mid-band. `ScopedDebugEscalatorTest` asserts the duty cycle, not the
+  fact that a re-arm eventually succeeds.
 - **Implementation note that contradicts the plan.** AD-9 says to attach the filter
   to the `com.vingame.bot` LoggerConfig. That does not work: the filter consulted
   *before* the level check is the **`Configuration`**'s

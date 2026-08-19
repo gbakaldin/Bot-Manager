@@ -35,8 +35,15 @@ public class NettyEventLoopConfig {
 
     @Bean
     public EventLoopGroup eventLoopGroup() {
-        log.info("Creating Netty MultiThreadIoEventLoopGroup with {} threads (NioIoHandler)", eventLoopThreads);
         eventLoopGroup = new MultiThreadIoEventLoopGroup(eventLoopThreads, NioIoHandler.newFactory());
+        // The identity hash is here so the sharing question stays answerable at INFO.
+        // ClientFactory used to print it per client — per bot at start, per restart and per
+        // re-auth — which LOG_VOLUME_TIERING demoted to DEBUG. There is exactly one of these
+        // groups per JVM and its identity never changes, so one line carries the same fact:
+        // any DEBUG "Setting shared EventLoopGroup on client: N" with a different N means
+        // the sharing is broken.
+        log.info("Creating Netty MultiThreadIoEventLoopGroup with {} threads (NioIoHandler), shared instance {}",
+                eventLoopThreads, System.identityHashCode(eventLoopGroup));
         return eventLoopGroup;
     }
 
