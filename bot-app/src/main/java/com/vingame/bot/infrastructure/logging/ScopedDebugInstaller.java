@@ -56,6 +56,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * also listens for the LoggerContext's {@code config} property change and re-installs.
  * {@code ScopedDebugFilterInstallationTest} pins both halves.
  * <p>
+ * <b>Lifecycle invariant.</b> <em>After {@link #stop()} returns, no code path may call
+ * {@link #install()} on this instance.</em> Both bugs this class has produced so far were
+ * violations of that rule while it lived only in prose — a stale listener re-installing, and
+ * an in-flight sweep re-asserting attachment during teardown. It is now a fact rather than a
+ * convention: {@link #stopped} is terminal and {@code install()} refuses once it is set.
+ * <p>
  * <b>The application logger must still exist.</b> The filter promotes events for loggers
  * under {@code com.vingame.bot}; if {@code log4j2.properties} stopped declaring a
  * LoggerConfig by that exact name, the promoted events would route through root instead —
@@ -73,12 +79,34 @@ public class ScopedDebugInstaller {
     /** TTL sweep cadence. Expiry is also enforced lazily on read, so this is a backstop. */
     static final long SWEEP_INTERVAL_SECONDS = 30;
 
+    /**
+     * How long {@link #stop()} waits for an in-flight sweep to finish. A sweep does no I/O
+     * and cannot block, so this is only ever a formality — but "shutdownNow() and hope" is
+     * what let a straggler run concurrently with teardown in the first place.
+     */
+    static final long SWEEPER_SHUTDOWN_WAIT_SECONDS = 5;
+
     private final ScopedDebugRegistry registry;
     private final boolean enabled;
     private final ScopedDebugFilter filter;
 
     private ScheduledExecutorService sweeper;
     private volatile boolean installed;
+    /**
+     * Terminal: set by {@link #stop()} and never cleared, so nothing can resurrect a
+     * torn-down installer. It is what turns the lifecycle invariant in the class javadoc
+     * into an enforced fact — the {@code installed = false} ordering in {@code stop()} closes
+     * the one window we know about (an in-flight sweep between the detach and the flag
+     * clear), this closes the ones we do not, including a listener that was already executing
+     * when {@code stop()} unregistered it.
+     * <p>
+     * Residual, stated so the next reader does not over-trust it: a call that has already
+     * passed the {@code stopped} check inside {@link #install()} when {@code stop()} starts
+     * can still attach. Every production caller is shut down by {@code stop()} itself (the
+     * sweeper, the listener) or lifecycle-ordered before it ({@code start()}), so the window
+     * needs a caller that does not exist today.
+     */
+    private volatile boolean stopped;
     /** Re-entrancy guard — see {@link #install()}. */
     private final AtomicBoolean installing = new AtomicBoolean();
     /**
@@ -117,10 +145,31 @@ public class ScopedDebugInstaller {
                 SWEEP_INTERVAL_SECONDS, SWEEP_INTERVAL_SECONDS, TimeUnit.SECONDS);
     }
 
+    /**
+     * Tear down, in an order that a concurrent sweep cannot undo.
+     * <p>
+     * <b>The flags go first, and that is the whole point.</b> {@code shutdownNow()} interrupts
+     * but does not wait, and {@link #sweepQuietly()} blocks on nothing interruptible, so an
+     * in-flight sweep runs to completion alongside the steps below. Its first act is the
+     * re-assert {@code if (installed && !isAttached()) install()}. With {@code installed}
+     * cleared <em>last</em>, a sweep landing between the detach and that clear reads
+     * {@code true} / not-attached and re-attaches the filter to the JVM-global
+     * {@code Configuration} after teardown — bound to a registry already {@code clear()}ed,
+     * and un-removable, because {@link #detachOwnFilter} is identity-scoped and no other
+     * installer owns it. A straggler landing after the clear took the {@code !installed}
+     * branch instead and registered a <em>second</em> listener: the multiplying-listener shape
+     * the listener removal below exists to close, reopened through the same hole.
+     * <p>
+     * So: clear {@code installed} (the sweeper's gate fails), set {@code stopped} (no path can
+     * re-install at all), then wait for the sweeper before touching anything else.
+     */
     @PreDestroy
     void stop() {
+        installed = false;
+        stopped = true;
         if (sweeper != null) {
             sweeper.shutdownNow();
+            awaitSweeperTermination();
         }
         // Detach on shutdown so a filter instance bound to a dead context's registry can
         // never linger on the (JVM-global) LoggerContext -- and take the listener with it,
@@ -132,7 +181,18 @@ public class ScopedDebugInstaller {
         }
         detachOwnFilter(context().getConfiguration());
         registry.clear();
-        installed = false;
+    }
+
+    private void awaitSweeperTermination() {
+        try {
+            if (!sweeper.awaitTermination(SWEEPER_SHUTDOWN_WAIT_SECONDS, TimeUnit.SECONDS)) {
+                log.warn("The scoped-debug sweeper did not terminate within {}s — continuing "
+                        + "teardown; it can no longer re-install (see stop())",
+                        SWEEPER_SHUTDOWN_WAIT_SECONDS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**
@@ -144,12 +204,19 @@ public class ScopedDebugInstaller {
      * reconfiguration" listener below is invoked by our own install — without the guard
      * that is an immediate {@code StackOverflowError} at context startup, which is how this
      * was found.
+     * <p>
+     * <b>Refuses after {@link #stop()}</b>, permanently — see the lifecycle invariant on the
+     * class. The check is repeated inside the re-entrancy guard because that is where it has
+     * to hold: {@code stop()} can win the race to the outer check and still be mid-teardown.
      */
     void install() {
-        if (!installing.compareAndSet(false, true)) {
+        if (stopped || !installing.compareAndSet(false, true)) {
             return;
         }
         try {
+            if (stopped) {
+                return;
+            }
             Configuration configuration = context().getConfiguration();
             detachOwnFilter(configuration);
             filter.start();
