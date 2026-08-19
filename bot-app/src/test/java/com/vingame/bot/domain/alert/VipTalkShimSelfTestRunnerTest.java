@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.alert;
 
+import com.vingame.bot.common.testsupport.ShimSelfTest;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -23,10 +24,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * path fails the same build as a change to any Java file would.
  * <p>
  * Deterministic and network-free: the self-test binds loopback sockets on ephemeral
- * ports and stands up its own stub for {@code api.viptalk.org}. It is skipped (not
- * failed) where {@code python3} is absent, so a machine without it can still build —
- * the container that actually runs the shim is {@code python:3.12-alpine}, and its
- * presence there is asserted by {@link AlertPipelineWiringTest}.
+ * ports and stands up its own stub for {@code api.viptalk.org}.
+ * <p>
+ * <b>A missing {@code python3} FAILS the build</b> — see {@link ShimSelfTest} for why that
+ * changed from a silent skip. Opting out is possible but must be deliberate:
+ * {@code -Dshim.selftest.skip=true}.
  */
 @DisplayName("viptalk-shim/selftest.py runs green (Phase 6 out-of-band delivery)")
 class VipTalkShimSelfTestRunnerTest {
@@ -38,10 +40,11 @@ class VipTalkShimSelfTestRunnerTest {
     @Test
     @DisplayName("every check in the shim's own suite passes")
     void shimSelfTestPasses() throws IOException, InterruptedException {
+        Assumptions.assumeFalse(ShimSelfTest.optedOut(), ShimSelfTest.OPT_OUT_REASON);
         Path script = CANDIDATE_PATHS.stream().filter(Files::isRegularFile).findFirst().orElse(null);
         Assumptions.assumeTrue(script != null,
                 "viptalk-shim/selftest.py not found from " + Path.of("").toAbsolutePath());
-        Assumptions.assumeTrue(python3Available(), "python3 not on PATH");
+        ShimSelfTest.requirePython3();
 
         Process process = new ProcessBuilder("python3", script.toAbsolutePath().toString())
                 .directory(script.toAbsolutePath().getParent().toFile())
@@ -62,14 +65,5 @@ class VipTalkShimSelfTestRunnerTest {
                 .as("the suite must actually have run its checks, not exited early")
                 .contains("all checks passed")
                 .doesNotContain("  FAIL ");
-    }
-
-    private static boolean python3Available() {
-        try {
-            Process p = new ProcessBuilder("python3", "--version").redirectErrorStream(true).start();
-            return p.waitFor(30, TimeUnit.SECONDS) && p.exitValue() == 0;
-        } catch (IOException | InterruptedException e) {
-            return false;
-        }
     }
 }

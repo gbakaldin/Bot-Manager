@@ -1,5 +1,6 @@
 package com.vingame.bot.infrastructure.logging;
 
+import com.vingame.bot.common.testsupport.ShimSelfTest;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -24,9 +25,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * Deterministic and network-free: the suite builds a temporary logs directory, binds
  * loopback sockets on ephemeral ports, and checks inodes rather than mocking the
- * filesystem. Skipped (not failed) where {@code python3} is absent — the container that
- * actually runs the shim is {@code python:3.12-alpine}, and its presence there is asserted
- * by {@code AlertPipelineWiringTest}.
+ * filesystem.
+ * <p>
+ * <b>A missing {@code python3} FAILS the build.</b> It used to be an
+ * {@code Assumptions.assumeTrue}, which meant a box without python3 produced a green
+ * build having run neither shim suite — and the two Python files are the only test
+ * coverage either shim has. Opting out is possible but must be deliberate:
+ * {@code -Dshim.selftest.skip=true} (or {@code SHIM_SELFTEST_SKIP=true}). That is the
+ * difference between "we chose not to run it" and "we did not notice".
  */
 @DisplayName("evidence-shim/selftest.py runs green (LOG_VOLUME_TIERING Phase 3)")
 class EvidenceShimSelfTestRunnerTest {
@@ -38,10 +44,11 @@ class EvidenceShimSelfTestRunnerTest {
     @Test
     @DisplayName("every check in the evidence shim's own suite passes")
     void shimSelfTestPasses() throws IOException, InterruptedException {
+        Assumptions.assumeFalse(ShimSelfTest.optedOut(), ShimSelfTest.OPT_OUT_REASON);
         Path script = CANDIDATE_PATHS.stream().filter(Files::isRegularFile).findFirst().orElse(null);
         Assumptions.assumeTrue(script != null,
                 "evidence-shim/selftest.py not found from " + Path.of("").toAbsolutePath());
-        Assumptions.assumeTrue(python3Available(), "python3 not on PATH");
+        ShimSelfTest.requirePython3();
 
         Process process = new ProcessBuilder("python3", script.toAbsolutePath().toString())
                 .directory(script.toAbsolutePath().getParent().toFile())
@@ -62,14 +69,5 @@ class EvidenceShimSelfTestRunnerTest {
                 .as("the suite must actually have run its checks, not exited early")
                 .contains("all checks passed")
                 .doesNotContain("  FAIL ");
-    }
-
-    private static boolean python3Available() {
-        try {
-            Process p = new ProcessBuilder("python3", "--version").redirectErrorStream(true).start();
-            return p.waitFor(30, TimeUnit.SECONDS) && p.exitValue() == 0;
-        } catch (IOException | InterruptedException e) {
-            return false;
-        }
     }
 }
