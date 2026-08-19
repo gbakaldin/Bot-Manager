@@ -223,9 +223,9 @@ disruptor upgrade is a clean follow-up that changes no other decision here.
 **AD-4 — Under queue pressure, drop DEBUG/TRACE, never INFO+.** Set
 `log4j2.asyncQueueFullPolicy = Discard` and `log4j2.discardThreshold = DEBUG` (via
 `log4j2.component.properties` on the classpath, or `JAVA_TOOL_OPTIONS` in compose).
-Logging must never add latency to a bot thread; if the choice is "block a bot" or
-"lose a DEBUG line", lose the line. WARN/ERROR are never discarded and remain
-coupled to alerting.
+Logging must never add latency to a bot thread **for the discardable tiers**; INFO+
+blocks rather than being lost. If the choice is "block a bot" or "lose a DEBUG line",
+lose the line. WARN/ERROR are never discarded and remain coupled to alerting.
 
 **AD-5 — The ConsoleAppender is capped at INFO+ via a `ThresholdFilter`.** Every line
 is currently serialized and written twice. `docker logs` remains useful (INFO+ and
@@ -259,8 +259,12 @@ INFO class that scales with round rate (~0.7 GB/day at 300 groups) and would dwa
 tiers 1 and 2 combined. The information is not lost: it stays default-visible on
 staging (where DEBUG is the default), it is fully covered in prod by
 Prometheus/Grafana (`bot_bets_placed_total`, `bot_bet_amount_total`,
-`bot_winnings_total`), and Phase 1's tier-2 rollup carries a downsampled
-rounds-and-stake line per group. This **reverses** the current `CLAUDE.md` guideline,
+`bot_winnings_total`), and Phase 1's tier-2 rollup carries downsampled
+rounds-and-stake figures — aggregated onto each environment's line, and additionally
+per group on the detail line an unclean group already gets. It must **not** emit a
+line per group per cycle: at 300 groups that is ~1 line/s of INFO whose rate is a
+function of fleet size, which step 5 forbids and which would re-create at INFO a
+downsampled copy of what this AD demotes. This **reverses** the current `CLAUDE.md` guideline,
 which Phase 1 rewrites; it is one level constant away from being reverted.
 
 **AD-9 — The scoped-DEBUG filter is installed programmatically, not as a
@@ -268,19 +272,24 @@ which Phase 1 rewrites; it is one level constant away from being reverted.
 annotation processor never runs and a `@Plugin` filter would have no
 `Log4j2Plugins.dat` entry inside the fat jar. Instead a Spring `@Component` obtains
 `(LoggerContext) LogManager.getContext(false)`, calls
-`config.getLoggerConfig("com.vingame.bot").addFilter(filter)` and `ctx.updateLoggers()`
+`ctx.getConfiguration().addFilter(filter)` and `ctx.updateLoggers()`
 in `@PostConstruct`. No plugin registry, no `packages =` attribute, no fat-jar
 scanning. Chosen over the built-in `DynamicThresholdFilter` because that filter's
 value→level map comes from static configuration and would require a context
 reconfiguration per runtime change.
 
 **AD-10 — The filter returns `ACCEPT` for enabled groups and `NEUTRAL` for everything
-else — never `DENY`.** A LoggerConfig's filter runs *before* the level check
-(`Logger.PrivateConfig.filter` consults `config.getFilter()` first and short-circuits
-on a non-`NEUTRAL` result), which is precisely what lets an `ACCEPT` surface a DEBUG
-event through an INFO-level logger. `NEUTRAL` leaves normal level rules intact for
-every other group. The filter short-circuits on an empty registry so the steady-state
-cost is one volatile read.
+else — never `DENY`.** The **Configuration's** filter runs before the level check —
+`Logger.PrivateConfig.filter` reads `config.getFilter()` where `config` is the
+`Configuration`, not the LoggerConfig (Logger.java:542, :586 in 2.24.1). A
+LoggerConfig's own filter runs only in `LoggerConfig.log(LogEvent)`, after the level
+gate, where only a `DENY` can still matter — attached there this filter is inert. The
+filter therefore hangs off the `Configuration`, and the blast radius the single
+LoggerConfig used to provide is restored by a `com.vingame.bot` logger-name prefix
+gate in the filter itself. An `ACCEPT` ahead of the level check is precisely what lets
+a DEBUG event surface through an INFO-level logger. `NEUTRAL` leaves normal level
+rules intact for every other group. The filter short-circuits on an empty registry so
+the steady-state cost is one volatile read.
 
 **AD-11 — Scoped DEBUG over global DEBUG with fast deletion.** Global DEBUG is
 ~5.2 GB/hour and ~7,200 events/s at target scale; no retention policy makes that
@@ -380,11 +389,14 @@ No Java changes. Touches `log4j2.properties`, `loki-config.yaml`,
    appender.async.appenderRef.type = AppenderRef
    appender.async.appenderRef.ref = RollingFileAppender
    appender.async.bufferSize = 8192
-   appender.async.blocking = false
+   appender.async.blocking = true
    ```
    **Gotcha:** in the properties format a nested AppenderRef *inside an appender*
    requires the explicit `.type = AppenderRef` line (unlike a logger's appenderRef).
-   Omitting it produces a silently mis-built appender. Add
+   Omitting it produces a silently mis-built appender. `blocking = true` is
+   **not optional**. `AsyncAppender.append()` consults `asyncQueueFullPolicy` only on
+   the blocking branch; with `blocking = false` a full queue drops the event at every
+   level, ERROR included, and AD-4 has no effect. Add
    `log4j2.asyncQueueFullPolicy=Discard` / `log4j2.discardThreshold=DEBUG` via
    `bot-app/src/main/resources/log4j2.component.properties`.
 3. **Console at INFO+ (AD-5).** Add to the console appender:
@@ -482,10 +494,14 @@ No Java changes. Touches `log4j2.properties`, `loki-config.yaml`,
 2. **Filter (AD-9, AD-10).** `ScopedDebugFilter extends AbstractFilter` in `bot-api`,
    returning `NEUTRAL` immediately when `!anyEnabled`, else `ACCEPT` when
    `ThreadContext.get("botGroupId")` is enabled, else `NEUTRAL`. Never `DENY`. Use
-   `ThreadContext.get` directly — no MDC map copies on a hot path.
+   `ThreadContext.get` directly — no MDC map copies on a hot path. **It must also gate
+   on the logger name** (`com.vingame.bot` prefix): the filter hangs off the
+   `Configuration`, which is consulted for every logger in the JVM, so without the
+   prefix a scoped group's thread would surface the Mongo driver's and Netty's DEBUG
+   too.
 3. **Installer.** `@Component` in `bot-app` with `@PostConstruct`:
    `LoggerContext ctx = (LoggerContext) LogManager.getContext(false);`
-   `ctx.getConfiguration().getLoggerConfig("com.vingame.bot").addFilter(filter);`
+   `ctx.getConfiguration().addFilter(filter);`
    `ctx.updateLoggers();`. Runs after Spring Boot has initialized the logging system,
    so it is not clobbered. Plus a virtual-thread `sweep()` every 30 s.
 4. **REST surface.** New `LogLevelController` at `/api/v1/logging` in `bot-app`:
@@ -582,10 +598,18 @@ No Java changes. Touches `log4j2.properties`, `loki-config.yaml`,
 - **Loki per-stream retention can be *longer* than the global `retention_period`**,
   but the compactor only applies it on its `compaction_interval` (10 m) with a
   `retention_delete_delay` of 2 h — do not expect same-minute deletion when verifying.
-- **A filter cannot resurrect an event the *root* logger has already dropped.** The
-  Phase 2 filter must be attached to the `com.vingame.bot` LoggerConfig, which has
-  `additivity = false` and its own appenders (`log4j2.properties:9-11`), so it is
-  self-contained. Attaching it to the root instead would not work the same way.
+- **The Phase 2 filter must be attached to the `Configuration`, not to a
+  LoggerConfig.** `Logger.PrivateConfig.filter` reads `config.getFilter()` where
+  `config` is the `Configuration` (Logger.java:542, :586 in 2.24.1), and that is the
+  only filter consulted *before* the level check. A LoggerConfig's own filter runs
+  later, in `LoggerConfig.log(LogEvent)`, after the level gate has already discarded
+  the DEBUG event — attached there the filter installs cleanly, reports healthy and
+  promotes nothing. Because a `Configuration` filter is consulted for every logger in
+  the JVM, the blast radius that naming one LoggerConfig used to provide is restored
+  by a `com.vingame.bot` logger-name prefix gate inside the filter. Promoted events
+  still route through the `com.vingame.bot` LoggerConfig, which has
+  `additivity = false` and its own appenders (`log4j2.properties:9-11`), so the
+  appender set is the one this plan assumes.
 - **`/actuator/loggers` still works and still sets a *global* level.** It is not
   removed; it is the escape hatch. Operators must understand that a global
   `{"configuredLevel":"DEBUG"}` on a 10-env prod instance is now a 5 GB/hour action.
@@ -726,13 +750,22 @@ the host — reach them with `docker compose exec`.
   → expect `delta < 100` for a 7-group staging fleet (tier-1 is idle-quiet, tier-2
   contributes ~1 line per environment per 5 min plus unclean groups).
 - **P1-4 — the per-bot INFO classes are gone.**
-  `grep '"level":"INFO"' logs/console.log | grep -cE 'initialized: game=|triggering deposit|restart requested'`
+  `grep '"level":"INFO"' logs/console.log | grep -cE 'initialized: game=|triggering deposit|restart requested|Successfully created bot|Bot starting in virtual thread|assigned strategy|assigned slot strategy|Setting shared EventLoopGroup'`
   measured over a group start → expect `0`.
+  The narrow form of this step (the first three patterns only) returned `0` while four
+  more per-bot INFO sites were emitting freely, and would have passed on a broken
+  state — `ClientFactory`'s `Setting shared EventLoopGroup` in particular fires on
+  every restart and every re-auth, exactly cancelling the `restart requested`
+  demotion this step checks for. **Grep for the message set, not for the five sites
+  the Findings section happened to enumerate.** `PerBotInfoLogGuardTest` enforces the
+  same rule in the build, so P1-4 is now a confirmation rather than the only net.
 - **P1-5 — the aggregated replacements are present.** Start a group, then:
   `grep -E 'bots initialized' logs/console.log | tail -1` → expect exactly **one**
   line for that group naming the full bot count. On an auto-deposit group:
   `grep -E 'bots auto-deposited' logs/console.log | tail -1` → expect one line with a
-  count and a total.
+  count and a total. And for the per-bot strategy lines folded in the same pass:
+  `grep -E 'strategy mix' logs/console.log | tail -1` → expect exactly **one** line per
+  group start, carrying the whole `{RANDOM=n, ...}` histogram.
 - **P1-6 — tier-2 rollup is emitting.**
   `grep -E '^\{.*"message":"env ' logs/console.log | tail -3` (or
   `grep 'env .* groups=' logs/console.log | tail -3`) → expect at least one line per
