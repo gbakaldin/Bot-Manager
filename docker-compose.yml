@@ -249,6 +249,65 @@ services:
       start_period: 10s
       retries: 3
 
+  # Out-of-band retention promotion (LOG_VOLUME_TIERING Phase 3 / AD-13). Alertmanager
+  # webhooks it when something bad fires; it HARDLINKS the newest log files into
+  # ./logs/evidence/, which is outside log4j2's Delete and promtail's scrape, so an
+  # incident's logs survive while everything else keeps ageing out fast.
+  #
+  # Why a second container rather than a code path in bot-manager: the same reason as
+  # viptalk-shim above. bot-manager cannot promote its own logs when bot-manager is the
+  # thing that died, and BotManagerDown is precisely that case. It therefore shares
+  # nothing with the app — no code, no Mongo, no JVM — and deliberately has NO
+  # `depends_on: bot-manager`.
+  #
+  # A stock python image with the script bind-mounted, not a built image: the shim is
+  # stdlib-only and deploy.sh only runs `docker compose up`.
+  #
+  # It runs as ${HOST_UID}:${HOST_GID}, the same user as bot-manager, because os.link
+  # needs write+execute on the DESTINATION directory — that is the whole privilege
+  # requirement. There is still no sudo on Bot-1 and none is needed.
+  evidence-shim:
+    image: python:3.12-alpine
+    user: "${HOST_UID}:${HOST_GID}"
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["python", "-u", "/app/shim.py"]
+    environment:
+      # evidence/ escapes both sweepers, so it needs its own or the fix for unbounded
+      # growth is itself unbounded growth (AD-19). Age first, then oldest-first under
+      # the byte guard. EVIDENCE_MAX_AGE_DAYS=0 means "sweep everything" — that is how
+      # verification step P3-10 exercises the guard, not a way to disable it.
+      - EVIDENCE_MAX_AGE_DAYS=${EVIDENCE_MAX_AGE_DAYS:-14}
+      - EVIDENCE_MAX_BYTES=${EVIDENCE_MAX_BYTES:-5368709120}
+      # MUST track appender.rolling.policies.time.interval in logging/log4j2.properties
+      # (2 h since Phase 0 / AD-20). The third promotion pass runs at the next rollover
+      # boundary + 120 s, so that the file which was live when the alert fired is also
+      # pinned under its rolled name once it has closed. A wrong value here mistimes
+      # that pass; it does not lose the data, because pass 1 already pinned the live
+      # inode — but keep the two in step anyway.
+      - EVIDENCE_ROLLOVER_HOURS=${EVIDENCE_ROLLOVER_HOURS:-2}
+      # The script mount is read-only; without this python warns on every start trying
+      # to write __pycache__ next to it.
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ./evidence-shim/shim.py:/app/shim.py:ro
+      # READ-WRITE, unlike promtail's ./logs:/logs:ro — this container's entire job is
+      # to create directory entries in here. Same bind mount as bot-manager's
+      # ./logs:/app/logs, which is what puts source and destination on one filesystem;
+      # hardlinks cannot cross devices. logs/evidence/ is created by the shim itself
+      # (os.makedirs), not by deploy.sh.
+      - ./logs:/logs
+    # /health reports the resolved config, the pending incidents, the last promotion
+    # and the evidence directory's size. It never touches bot-manager and never leaves
+    # the container.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
   # Host CPU / RAM / filesystem metrics, scraped by Prometheus as job `node`.
   # VIPTALK_ALERTING_V2 Phase 5 / AD-V11.
   #

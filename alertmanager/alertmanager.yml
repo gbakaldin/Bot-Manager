@@ -56,13 +56,39 @@ route:
   # message would ever be sent, which is exactly the half AD-V9 is about. (The plan's
   # draft of this block had that shape; it is a routing-semantics bug, not a typo.)
   # The second route has no `continue`, so matching stops there.
+  # The same semantics govern the `evidence` receiver added below
+  # (LOG_VOLUME_TIERING Phase 3): it promotes the log files around an incident out
+  # of the normal retention sweep, so it must be an ADDITIONAL destination, never a
+  # replacement for the VipTalk delivery of the alert that triggered it. Every
+  # `evidence` route therefore carries `continue: true`, and every alertname routed
+  # to it has a trailing sibling sending it to `viptalk` — otherwise the evidence
+  # route would consume the alert and silently stop it reaching the rooms. That is
+  # the same bug described above, one phase later.
+  #
+  # Routes are matched in order, so the shape is: evidence first (continue), then
+  # the existing delivery routes, then a terminal viptalk sibling.
   routes:
+    - matchers:
+        - alertname = "BotManagerDown"
+      receiver: evidence
+      continue: true
     - matchers:
         - alertname = "BotManagerDown"
       receiver: viptalk-static-down
       continue: true
     - matchers:
         - alertname = "BotManagerDown"
+      receiver: viptalk
+
+    # A DEAD group never recovers on its own, and the logs explaining why it died are
+    # the ones a cheap retention is most likely to have swept by the time anyone
+    # looks. Hence evidence, plus the MANDATORY viptalk sibling.
+    - matchers:
+        - alertname = "EnvironmentGroupDead"
+      receiver: evidence
+      continue: true
+    - matchers:
+        - alertname = "EnvironmentGroupDead"
       receiver: viptalk
 
 receivers:
@@ -91,6 +117,21 @@ receivers:
         send_resolved: false
         # Same posture as the app receiver: the shim answers 502 when VipTalk did not
         # accept the message, so a retry is meaningful.
+        max_alerts: 0
+
+  # Retention promotion, not delivery: this receiver sends nothing to anybody. It
+  # tells evidence-shim to hardlink the log files around the incident into
+  # logs/evidence/, where neither log4j2's Delete nor Loki's retention can reach
+  # them (LOG_VOLUME_TIERING Phase 3 / AD-13). Every route pointing here carries
+  # `continue: true` and has a viptalk sibling — see the routing comment above.
+  - name: evidence
+    webhook_configs:
+      - url: http://evidence-shim:8080/alertmanager
+        # send_resolved: false — there is nothing to preserve about a recovery, and
+        # promoting on it would pin post-incident noise instead of the incident. The
+        # shim also ignores a payload marked resolved, so this line and the shim
+        # agree rather than one trusting the other.
+        send_resolved: false
         max_alerts: 0
 
 inhibit_rules:
