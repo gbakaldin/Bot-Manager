@@ -301,7 +301,7 @@ public class SlotMachineBot extends Bot {
     /**
      * The cheapest spin this bot could stake: {@code min(allowedBetValues) * numLines}.
      * Below it there is no bet the strategy could pick that the balance covers, which is
-     * what makes "below spin cost" a state rather than a property of one roll.
+     * what makes the paused state a state at all, rather than a property of one roll.
      * {@code allowedBetValues} arrives sorted ascending (AD-11); {@link Collections#min}
      * rather than {@code get(0)} so a server that stops sorting cannot silently invert this.
      */
@@ -354,8 +354,8 @@ public class SlotMachineBot extends Bot {
                 }
             } else if (belowSpinCost.compareAndSet(false, true)) {
                 // The ENTRY transition only — this gate is re-evaluated every 3 s and an
-                // underfunded bot never leaves it on its own. The message keeps the literal
-                // "below spin cost" that verification step P2-4 greps for.
+                // underfunded bot never leaves it on its own. The wording keeps the literal
+                // fragment that verification step P2-4 greps for — do not reword it.
                 log.debug("Bot {}: balance {} below spin cost floor {} ({} x {}) — pausing spins",
                         getUserName(), balance, floorCost, floorCost / numLines, numLines);
             }

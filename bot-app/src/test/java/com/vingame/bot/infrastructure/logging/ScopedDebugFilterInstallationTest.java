@@ -120,7 +120,7 @@ class ScopedDebugFilterInstallationTest {
         assertThat(appLoggerConfig.getName())
                 .as("the promoted lines still route through the application LoggerConfig")
                 .isEqualTo(APP_LOGGER);
-        assertThat(scopedFilters(ctx.getConfiguration().getFilter())).hasSize(1);
+        assertThat(ownFilters()).hasSize(1);
     }
 
     @Test
@@ -226,7 +226,8 @@ class ScopedDebugFilterInstallationTest {
             LoggerContext current = (LoggerContext) LogManager.getContext(false);
             assertThat(current.getConfiguration().getLoggerConfig(APP_LOGGER).getName())
                     .isEqualTo(APP_LOGGER);
-            assertThat(scopedFilters(current.getConfiguration().getFilter()))
+            assertThat(current.getConfiguration()).isSameAs(ctx.getConfiguration());
+            assertThat(ownFilters())
                     .as("the level override must not drop the scoped-debug filter")
                     .hasSize(1);
 
@@ -245,7 +246,9 @@ class ScopedDebugFilterInstallationTest {
         installer.install();
         installer.install();
 
-        assertThat(scopedFilters(ctx.getConfiguration().getFilter())).hasSize(1);
+        assertThat(ownFilters())
+                .as("addFilter composes rather than replaces, so a re-install must detach first")
+                .hasSize(1);
     }
 
     @Test
@@ -280,7 +283,7 @@ class ScopedDebugFilterInstallationTest {
                 .as("install() drops a concurrent request on its CAS rather than retrying; "
                         + "without this re-assert a single lost re-install is permanent")
                 .isTrue();
-        assertThat(scopedFilters(ctx.getConfiguration().getFilter())).hasSize(1);
+        assertThat(ownFilters()).hasSize(1);
     }
 
     /**
@@ -292,9 +295,25 @@ class ScopedDebugFilterInstallationTest {
      * that do not go through it, e.g. a stale installer's {@code removeExistingFilters}.)
      */
     private void detachSilently() {
-        for (Filter each : scopedFilters(ctx.getConfiguration().getFilter())) {
+        for (Filter each : ownFilters()) {
             ctx.getConfiguration().removeFilter(each);
         }
+    }
+
+    /**
+     * Occurrences of <em>this installer's own</em> filter instance on the live Configuration.
+     * Counting by type instead would count filters belonging to other cached Spring contexts'
+     * installers, which are legitimately attached in a shared test JVM and are none of this
+     * test's business.
+     */
+    private List<Filter> ownFilters() {
+        List<Filter> found = new ArrayList<>();
+        for (Filter each : scopedFilters(ctx.getConfiguration().getFilter())) {
+            if (each == installer.installedFilter()) {
+                found.add(each);
+            }
+        }
+        return found;
     }
 
     private static List<Filter> scopedFilters(Filter filter) {

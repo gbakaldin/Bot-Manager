@@ -86,12 +86,14 @@ public class ScopedDebugInstaller {
      * <p>
      * It is registered on the <b>JVM-global</b> {@code LoggerContext}, which outlives this
      * bean. Left behind, a stale listener from a torn-down context fires on the next
-     * reconfiguration and runs that dead installer's {@code install()} — which begins by
-     * stripping <em>any</em> {@code ScopedDebugFilter} from the live configuration, including
-     * the one belonging to the current Spring context, and attaches its own, bound to a
-     * registry {@code stop()} has already {@code clear()}ed. The live installer is then
-     * {@code installed == true} with {@code isAttached() == false}: every POST answers 200
-     * and promotes nothing, which is exactly the failure the "armed" line exists to rule out.
+     * reconfiguration and runs that dead installer's {@code install()}, which attaches a
+     * filter bound to a registry {@code stop()} has already {@code clear()}ed — and, before
+     * {@link #detachOwnFilter} was scoped to identity, also stripped the live context's
+     * filter on the way past, leaving it {@code installed == true} with
+     * {@code isAttached() == false}: every POST answering 200 and promoting nothing, which
+     * is exactly the failure the "armed" line exists to rule out. Worse, {@code stop()}
+     * clears {@code installed}, so a stale listener firing takes the {@code !installed}
+     * branch and registers a <em>second</em> listener: they multiply per cycle.
      */
     private volatile PropertyChangeListener reconfigurationListener;
 
@@ -128,7 +130,7 @@ public class ScopedDebugInstaller {
             context().removePropertyChangeListener(listener);
             reconfigurationListener = null;
         }
-        removeExistingFilters(context().getConfiguration());
+        detachOwnFilter(context().getConfiguration());
         registry.clear();
         installed = false;
     }
@@ -149,7 +151,7 @@ public class ScopedDebugInstaller {
         }
         try {
             Configuration configuration = context().getConfiguration();
-            removeExistingFilters(configuration);
+            detachOwnFilter(configuration);
             filter.start();
             configuration.addFilter(filter);
             context().updateLoggers();
@@ -178,6 +180,11 @@ public class ScopedDebugInstaller {
         } finally {
             installing.set(false);
         }
+    }
+
+    /** The filter instance this installer owns — the identity tests and {@link #stop()} use. */
+    Filter installedFilter() {
+        return filter;
     }
 
     /** Is our filter currently on the live Configuration? */
@@ -254,23 +261,26 @@ public class ScopedDebugInstaller {
     }
 
     /**
-     * Drop any previously attached {@link ScopedDebugFilter}. {@code addFilter} composes
-     * rather than replaces, so without this a re-install would leave a
-     * {@link CompositeFilter} holding several equivalent filters.
+     * Drop <b>this installer's own</b> filter instance. {@code addFilter} composes rather
+     * than replaces, so without this a re-install would leave a {@link CompositeFilter}
+     * holding several copies of the same filter.
+     * <p>
+     * <b>Identity, not type.</b> Removing every {@code ScopedDebugFilter} would also remove
+     * one belonging to a <em>different</em> installer on the same JVM-global
+     * {@code LoggerContext} — and because {@code updateLoggers()} fires the {@code config}
+     * property change synchronously, that other installer's listener answers by
+     * re-installing, which strips ours in turn. The loser's re-install is then dropped on
+     * its own re-entrancy CAS and it ends up {@code installed == true} with
+     * {@code isAttached() == false}: 200 from every POST, nothing promoted. Two live
+     * installers should both be attached; only a dead one's filter should go, and
+     * {@link #stop()} is what removes that.
      */
-    private void removeExistingFilters(Filterable filterable) {
+    private void detachOwnFilter(Filterable filterable) {
         if (filterable == null) {
             return;
         }
-        Filter current = filterable.getFilter();
-        if (current instanceof ScopedDebugFilter) {
-            filterable.removeFilter(current);
-        } else if (current instanceof CompositeFilter composite) {
-            for (Filter each : composite.getFiltersArray()) {
-                if (each instanceof ScopedDebugFilter) {
-                    filterable.removeFilter(each);
-                }
-            }
-        }
+        // AbstractFilterable.removeFilter handles both the single-filter and the
+        // CompositeFilter shapes, and is a no-op when ours is not attached.
+        filterable.removeFilter(filter);
     }
 }
