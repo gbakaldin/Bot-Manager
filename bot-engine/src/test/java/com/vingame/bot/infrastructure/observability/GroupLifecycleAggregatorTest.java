@@ -17,6 +17,7 @@ import org.slf4j.MDC;
 
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -53,6 +54,13 @@ class GroupLifecycleAggregatorTest {
         }
     }
 
+    /**
+     * The aggregator's monotonic clock, so the feed sites and {@code sweepOnce} share one
+     * timeline. Without it a test that advances the sweep also advances the idle deadline it
+     * is trying to hold open, and the max-window arm is untestable.
+     */
+    private final AtomicLong nanos = new AtomicLong(1_000_000_000L);
+
     private GroupLifecycleAggregator aggregator;
     private CapturingAppender appender;
     private LoggerContext ctx;
@@ -61,7 +69,7 @@ class GroupLifecycleAggregatorTest {
 
     @BeforeEach
     void setUp() {
-        aggregator = new GroupLifecycleAggregator();
+        aggregator = new GroupLifecycleAggregator(nanos::get);
         appender = new CapturingAppender();
         appender.start();
 
@@ -145,10 +153,10 @@ class GroupLifecycleAggregatorTest {
             assertThat(emitted()).isEmpty();
 
             // Not yet idle.
-            aggregator.sweepOnce(System.nanoTime());
+            aggregator.sweepOnce(nanos.get());
             assertThat(emitted()).isEmpty();
 
-            aggregator.sweepOnce(System.nanoTime() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
+            aggregator.sweepOnce(nanos.get() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
             // "47/50" is the whole value of the expect() seam: a bare "47" reads like
             // success, "47/50" reads like three auth failures.
             assertThat(emitted()).hasSize(1);
@@ -163,7 +171,7 @@ class GroupLifecycleAggregatorTest {
                 aggregator.recordInitialized("game=Slot, gid=7, strategy=FIXED");
             });
 
-            aggregator.sweepOnce(System.nanoTime() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
+            aggregator.sweepOnce(nanos.get() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
 
             assertThat(emitted()).hasSize(1);
             assertThat(emitted().get(0)).contains("2 bots initialized").doesNotContain("/");
@@ -205,12 +213,33 @@ class GroupLifecycleAggregatorTest {
                 aggregator.recordAutoDeposit(3_500L);
             });
 
-            aggregator.sweepOnce(System.nanoTime() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
+            aggregator.sweepOnce(nanos.get() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
 
             assertThat(emitted()).hasSize(1);
             assertThat(emitted().get(0))
                     .contains("3 bots auto-deposited")
                     .contains("total 6500");
+        }
+
+        @Test
+        @DisplayName("a group that never goes quiet is still emitted, at the max window")
+        void aBusyDepositRoundIsNotDeferredForever() {
+            // recordAutoDeposit touch()es on every contribution and, unlike initializations,
+            // has no completion condition. A large group whose bots trickle below minBalance
+            // more often than every 5 s would otherwise never idle out: the line is deferred
+            // indefinitely and `amount` accumulates across what an operator reads as several
+            // separate deposit rounds.
+            for (int i = 0; i < 40; i++) {
+                withGroupMdc(GROUP, () -> aggregator.recordAutoDeposit(100L));
+                // Every step is inside the idle window, so the idle arm never fires: only
+                // the max-window arm can ever emit this entry.
+                nanos.addAndGet(GroupLifecycleAggregator.IDLE_FLUSH_NANOS / 2);
+                aggregator.sweepOnce(nanos.get());
+            }
+            assertThat(emitted())
+                    .as("the max-window arm bounds the deferral at %ds",
+                            GroupLifecycleAggregator.MAX_WINDOW_NANOS / 1_000_000_000L)
+                    .hasSize(1);
         }
     }
 
@@ -227,7 +256,7 @@ class GroupLifecycleAggregatorTest {
             // its own scheduler. Demoting/aggregating a line is only safe if the tag that
             // makes it drillable survives.
             MDC.clear();
-            aggregator.sweepOnce(System.nanoTime() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
+            aggregator.sweepOnce(nanos.get() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
 
             LogEvent event = appender.events.stream()
                     .filter(e -> e.getLevel() == Level.INFO)
@@ -240,13 +269,40 @@ class GroupLifecycleAggregatorTest {
         }
 
         @Test
+        @DisplayName("and does NOT carry the botId/botUserName of whichever bot arrived first")
+        void emittedLineIsNotTaggedWithOneArbitraryBot() {
+            MDC.put(BotMdc.BOT_GROUP_ID, GROUP);
+            MDC.put(BotMdc.ENVIRONMENT_ID, "env-1");
+            MDC.put(BotMdc.GAME_TYPE, "BETTING_MINI");
+            MDC.put(BotMdc.BOT_ID, "0");
+            MDC.put(BotMdc.BOT_USER_NAME, "authtestws0");
+            try {
+                aggregator.recordInitialized("game=BauCua");
+            } finally {
+                MDC.clear();
+            }
+            aggregator.sweepOnce(nanos.get() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
+
+            LogEvent event = appender.events.stream()
+                    .filter(e -> e.getLevel() == Level.INFO)
+                    .reduce((first, second) -> second)
+                    .orElseThrow();
+            // "47/47 bots initialized" is a fact about the GROUP. Tagged with bot 0 it would
+            // surface in a drill-in filtered on bot 0 and name a user unrelated to the other
+            // 46 -- so only the group-level keys are snapshotted.
+            assertThat(event.getContextData().<String>getValue(BotMdc.GAME_TYPE)).isEqualTo("BETTING_MINI");
+            assertThat(event.getContextData().<String>getValue(BotMdc.BOT_ID)).isNull();
+            assertThat(event.getContextData().<String>getValue(BotMdc.BOT_USER_NAME)).isNull();
+        }
+
+        @Test
         @DisplayName("a feed from a thread with no group MDC is dropped, not misattributed")
         void feedWithoutMdcIsDropped() {
             MDC.clear();
             aggregator.recordInitialized("game=BauCua");
             aggregator.recordAutoDeposit(100L);
 
-            aggregator.sweepOnce(System.nanoTime() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
+            aggregator.sweepOnce(nanos.get() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
 
             assertThat(emitted()).isEmpty();
             assertThat(aggregator.pendingSizes()).containsExactly(0, 0);
@@ -267,7 +323,7 @@ class GroupLifecycleAggregatorTest {
 
             // Eviction drops the counters rather than emitting them: a group being torn
             // down has no start to describe.
-            aggregator.sweepOnce(System.nanoTime() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
+            aggregator.sweepOnce(nanos.get() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
             assertThat(emitted()).hasSize(1); // only the initialized line from above
         }
 

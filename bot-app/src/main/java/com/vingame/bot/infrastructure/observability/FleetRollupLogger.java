@@ -160,7 +160,9 @@ public class FleetRollupLogger {
 
             // Tag the line so it is filterable by environment in Loki exactly like a
             // per-bot line. Keeping the MDC tag on aggregated lines is what makes the
-            // demotions below them safe.
+            // demotions below them safe. The null botGroupId is skipped, not written:
+            // an environment line has no group, and "botGroupId: null" in the JSON
+            // document is a different thing from the key being absent.
             BotMdc.setGroupContext(null, envId, product);
             try {
                 log.info("env {} ({}, product {}): groups={}, bots={}, connected={}, dead={}, "

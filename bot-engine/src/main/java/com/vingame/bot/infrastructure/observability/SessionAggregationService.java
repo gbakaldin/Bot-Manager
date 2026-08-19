@@ -7,7 +7,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -501,8 +503,8 @@ public class SessionAggregationService {
      * Groups with no activity in the window are absent from the result; the caller renders
      * them as zero.
      */
-    public java.util.List<GroupRollup> drainRollup() {
-        java.util.List<GroupRollup> drained = new java.util.ArrayList<>(rollup.size());
+    public List<GroupRollup> drainRollup() {
+        List<GroupRollup> drained = new ArrayList<>(rollup.size());
         for (Map.Entry<String, RollupCounters> entry : rollup.entrySet()) {
             RollupCounters counters = entry.getValue();
             long rounds = counters.rounds.sumThenReset();

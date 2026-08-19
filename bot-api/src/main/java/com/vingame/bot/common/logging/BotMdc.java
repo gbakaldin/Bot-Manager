@@ -2,6 +2,8 @@ package com.vingame.bot.common.logging;
 
 import org.slf4j.MDC;
 
+import java.util.List;
+
 /**
  * Utility for managing bot-specific MDC (Mapped Diagnostic Context) keys.
  * <p>
@@ -71,14 +73,29 @@ public final class BotMdc {
 
     /**
      * Set partial MDC context for group-level operations, additionally carrying the
-     * numeric product code (VIPTALK_ALERTING_V2 AD-V1). A null {@code product} is
-     * skipped, so this is byte-for-byte the 2-arg form.
+     * numeric product code (VIPTALK_ALERTING_V2 AD-V1).
+     * <p>
+     * A null value is <b>skipped, not written</b>, for every key. "The key is absent" and
+     * "the key is present and null" are different documents in the JSON layout and different
+     * renderings in the console pattern, and which one a null produces also depends on the
+     * active {@code ThreadContextMap} implementation. The environment-level rollup line
+     * legitimately has no {@code botGroupId}, and it should carry no such field rather than
+     * {@code "botGroupId": null}.
      */
     public static void setGroupContext(String botGroupId, String environmentId, String product) {
-        MDC.put(BOT_GROUP_ID, botGroupId);
-        MDC.put(ENVIRONMENT_ID, environmentId);
+        if (botGroupId != null) MDC.put(BOT_GROUP_ID, botGroupId);
+        if (environmentId != null) MDC.put(ENVIRONMENT_ID, environmentId);
         if (product != null) MDC.put(PRODUCT, product);
     }
+
+    /**
+     * The group-level MDC keys, in the order {@link #setGroupContext} writes them — the
+     * subset of {@link #set}'s keys that describe a <em>group</em> rather than a bot.
+     * Aggregated lines snapshot these and only these: a line about 47 bots must not carry
+     * the {@code botId} / {@code botUserName} of whichever bot happened to contribute first.
+     */
+    public static final List<String> GROUP_LEVEL_KEYS =
+            List.of(BOT_GROUP_ID, ENVIRONMENT_ID, PRODUCT, GAME_TYPE, GAME_ID, GAME_NAME);
 
     /**
      * Clear all bot-related MDC keys.

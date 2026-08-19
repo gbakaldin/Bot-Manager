@@ -5,10 +5,12 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -17,6 +19,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
  * Tier 1 of LOG_VOLUME_TIERING: folds the per-bot INFO lines emitted at group start
@@ -64,6 +68,18 @@ public class GroupLifecycleAggregator {
     /** Emit an entry once it has been idle this long. 5 s, per the plan's step 2. */
     static final long IDLE_FLUSH_NANOS = 5_000_000_000L;
 
+    /**
+     * Hard ceiling on how long an entry may be deferred by fresh contributions. The idle
+     * deadline alone is not enough for the deposits counter: {@code recordAutoDeposit}
+     * touches the entry on every contribution and has no completion condition (a deposit
+     * round is open-ended), so a large group whose bots trickle below {@code minBalance}
+     * more often than every 5 s never goes quiet — the summary is deferred indefinitely and
+     * {@code amount} silently accumulates across what an operator reads as several separate
+     * deposit rounds. 60 s is the same belt-and-braces {@code SessionAggregationService}
+     * applies behind its own grace clock.
+     */
+    static final long MAX_WINDOW_NANOS = 60_000_000_000L;
+
     /** Sweep cadence. 1 s, so the 5 s idle deadline is honoured to within a second. */
     static final long TICK_SECONDS = 1L;
 
@@ -81,6 +97,13 @@ public class GroupLifecycleAggregator {
      * carries {@code botGroupId} / {@code environmentId} / {@code product} even though it
      * may be emitted on the sweep thread, which has no MDC of its own. Keeping the tag on
      * a demoted or aggregated line is what makes the aggregation safe to reason about.
+     * <p>
+     * Only the <b>group-level</b> keys ({@link BotMdc#GROUP_LEVEL_KEYS}) are kept. Copying
+     * the whole context map would stamp a group-scoped fact — "47/47 bots initialized" —
+     * with the {@code botId} and {@code botUserName} of whichever bot contributed first: a
+     * drill-in filtered on one bot would surface a line about all 47, and the JSON document
+     * would name a user who had nothing to do with 46 of them. {@code FleetRollupLogger}
+     * already writes only these keys; this makes the two agree.
      */
     private static final class Pending {
         private final String groupId;
@@ -93,10 +116,12 @@ public class GroupLifecycleAggregator {
         private final AtomicInteger count = new AtomicInteger();
         private final AtomicLong amount = new AtomicLong();
         private volatile long lastTouchNanos;
+        private final long firstTouchNanos;
 
         private Pending(String groupId, long nowNanos) {
             this.groupId = groupId;
             this.lastTouchNanos = nowNanos;
+            this.firstTouchNanos = nowNanos;
         }
 
         private void touch(long nowNanos) {
@@ -111,7 +136,26 @@ public class GroupLifecycleAggregator {
     private final ConcurrentHashMap<String, Pending> initializations = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Pending> deposits = new ConcurrentHashMap<>();
 
+    /**
+     * Monotonic clock. Injectable so a test can drive the idle and max-window deadlines on
+     * ONE timeline: {@link #sweepOnce(long)} already takes a timestamp, and without the feed
+     * sites reading the same clock a test that advances the sweep also silently advances the
+     * idle deadline it is trying to keep open.
+     */
+    private final LongSupplier nanoClock;
+
     private volatile ScheduledExecutorService sweeper;
+
+    // Two constructors (the second is the test seam), so Spring must be told which one --
+    // SpringBeanConstructorTest fails the build otherwise, for the reason recorded there.
+    @Autowired
+    public GroupLifecycleAggregator() {
+        this(System::nanoTime);
+    }
+
+    GroupLifecycleAggregator(LongSupplier nanoClock) {
+        this.nanoClock = nanoClock;
+    }
 
     @PostConstruct
     public void startSweeper() {
@@ -136,7 +180,7 @@ public class GroupLifecycleAggregator {
     /** Scheduled entry point — never let an exception kill the fixed-rate task. */
     private void runSweep() {
         try {
-            sweepOnce(System.nanoTime());
+            sweepOnce(nanoClock.getAsLong());
         } catch (Exception e) {
             log.error("GroupLifecycleAggregator sweep error: {}", e.getMessage(), e);
         }
@@ -159,7 +203,7 @@ public class GroupLifecycleAggregator {
         if (botGroupId == null) {
             return;
         }
-        long now = System.nanoTime();
+        long now = nanoClock.getAsLong();
         Pending pending = initializations.computeIfAbsent(botGroupId, id -> new Pending(id, now));
         pending.groupName = groupName;
         pending.expected = Math.max(expected, 0);
@@ -180,13 +224,13 @@ public class GroupLifecycleAggregator {
         if (botGroupId == null) {
             return; // no group identity on this thread — the per-bot DEBUG line still stands
         }
-        long now = System.nanoTime();
+        long now = nanoClock.getAsLong();
         Pending pending = initializations.computeIfAbsent(botGroupId, id -> new Pending(id, now));
         if (pending.detail == null) {
             pending.detail = detail;
         }
         if (pending.mdcSnapshot == null) {
-            pending.mdcSnapshot = MDC.getCopyOfContextMap();
+            pending.mdcSnapshot = groupLevelMdc();
         }
         int seen = pending.count.incrementAndGet();
         pending.touch(now);
@@ -212,10 +256,10 @@ public class GroupLifecycleAggregator {
         if (botGroupId == null) {
             return;
         }
-        long now = System.nanoTime();
+        long now = nanoClock.getAsLong();
         Pending pending = deposits.computeIfAbsent(botGroupId, id -> new Pending(id, now));
         if (pending.mdcSnapshot == null) {
-            pending.mdcSnapshot = MDC.getCopyOfContextMap();
+            pending.mdcSnapshot = groupLevelMdc();
         }
         pending.count.incrementAndGet();
         pending.amount.addAndGet(amount);
@@ -241,15 +285,20 @@ public class GroupLifecycleAggregator {
      * {@code SessionAggregationService.flushOnce} uses.
      */
     void sweepOnce(long nowNanos) {
-        drainIdle(initializations, nowNanos, this::emitInitialized);
-        drainIdle(deposits, nowNanos, this::emitDeposits);
+        drainIdle(initializations, nowNanos, false, this::emitInitialized);
+        drainIdle(deposits, nowNanos, false, this::emitDeposits);
     }
 
     private void drainIdle(ConcurrentHashMap<String, Pending> map, long nowNanos,
-                           java.util.function.Consumer<Pending> emit) {
+                           boolean force, Consumer<Pending> emit) {
         for (Map.Entry<String, Pending> entry : map.entrySet()) {
             Pending pending = entry.getValue();
-            if (nowNanos - pending.lastTouchNanos < IDLE_FLUSH_NANOS) {
+            // Idle OR too old. The max-window arm is what stops an entry that is touched
+            // more often than the idle deadline from being deferred forever.
+            boolean due = force
+                    || nowNanos - pending.lastTouchNanos >= IDLE_FLUSH_NANOS
+                    || nowNanos - pending.firstTouchNanos >= MAX_WINDOW_NANOS;
+            if (!due) {
                 continue;
             }
             // Value-guarded remove: a sweep racing a concurrent increment must not drop
@@ -265,10 +314,21 @@ public class GroupLifecycleAggregator {
         }
     }
 
-    /** Emit everything pending regardless of idleness (shutdown path). */
+    /**
+     * Emit everything pending regardless of idleness (shutdown path).
+     * <p>
+     * An explicit {@code force} flag, not a sentinel {@code nowNanos}. Faking "everything is
+     * idle" with {@code Long.MAX_VALUE / 2} relies on {@code nowNanos - lastTouchNanos}
+     * being large and positive, and {@link System#nanoTime()}'s origin is unspecified — the
+     * JDK is explicit that only differences between two readings are meaningful. With a
+     * large negative origin the subtraction overflows negative, the idle guard passes, and
+     * the shutdown flush silently emits <em>nothing</em>: the exact opposite of what it is
+     * for.
+     */
     private void flushAll() {
-        drainIdle(initializations, Long.MAX_VALUE / 2, this::emitInitialized);
-        drainIdle(deposits, Long.MAX_VALUE / 2, this::emitDeposits);
+        long now = nanoClock.getAsLong();
+        drainIdle(initializations, now, true, this::emitInitialized);
+        drainIdle(deposits, now, true, this::emitDeposits);
     }
 
     private void emitInitialized(Pending pending) {
@@ -282,6 +342,21 @@ public class GroupLifecycleAggregator {
     private void emitDeposits(Pending pending) {
         withMdc(pending, () -> log.info("group {} ({}): {} bots auto-deposited, total {}",
                 pending.groupId, pending.displayName(), pending.count.get(), pending.amount.get()));
+    }
+
+    /**
+     * The calling bot's MDC narrowed to {@link BotMdc#GROUP_LEVEL_KEYS} — see {@link Pending}
+     * for why the whole map is the wrong thing to snapshot.
+     */
+    private static Map<String, String> groupLevelMdc() {
+        Map<String, String> snapshot = new LinkedHashMap<>();
+        for (String key : BotMdc.GROUP_LEVEL_KEYS) {
+            String value = MDC.get(key);
+            if (value != null) {
+                snapshot.put(key, value);
+            }
+        }
+        return snapshot;
     }
 
     /**
