@@ -248,6 +248,55 @@ class ScopedDebugFilterInstallationTest {
         assertThat(scopedFilters(ctx.getConfiguration().getFilter())).hasSize(1);
     }
 
+    @Test
+    @DisplayName("isInstalled() reports ATTACHMENT, not the fact that install() once succeeded")
+    void isInstalledReflectsAttachment() {
+        assertThat(installer.isInstalled()).isTrue();
+
+        // What a stale installer from a torn-down Spring context does on its way past: strip
+        // any ScopedDebugFilter from the live configuration. The flag stays true, so
+        // reporting the flag would have GET /api/v1/logging/debug claim `enabled: true`
+        // while every POST answered 200 and promoted nothing.
+        detachSilently();
+
+        assertThat(installer.isAttached()).isFalse();
+        assertThat(installer.isInstalled())
+                .as("the DTO documents `enabled` as the filter actually being attached")
+                .isFalse();
+
+        installer.install();
+        assertThat(installer.isInstalled()).isTrue();
+    }
+
+    @Test
+    @DisplayName("the sweeper re-asserts attachment, so a lost re-install is not permanent")
+    void sweepReattachesADetachedFilter() {
+        detachSilently();
+        assertThat(installer.isAttached()).isFalse();
+
+        installer.sweepOnce();
+
+        assertThat(installer.isAttached())
+                .as("install() drops a concurrent request on its CAS rather than retrying; "
+                        + "without this re-assert a single lost re-install is permanent")
+                .isTrue();
+        assertThat(scopedFilters(ctx.getConfiguration().getFilter())).hasSize(1);
+    }
+
+    /**
+     * Strip every {@link ScopedDebugFilter} from the live Configuration <em>without</em>
+     * calling {@code updateLoggers()} — that fires the context's {@code config} property
+     * change, which the installer's own listener answers by re-installing, so a test that
+     * called it would silently repair the very state it is trying to create. (That the
+     * listener does repair it is the point of the listener; this method models the paths
+     * that do not go through it, e.g. a stale installer's {@code removeExistingFilters}.)
+     */
+    private void detachSilently() {
+        for (Filter each : scopedFilters(ctx.getConfiguration().getFilter())) {
+            ctx.getConfiguration().removeFilter(each);
+        }
+    }
+
     private static List<Filter> scopedFilters(Filter filter) {
         List<Filter> found = new ArrayList<>();
         if (filter instanceof ScopedDebugFilter) {

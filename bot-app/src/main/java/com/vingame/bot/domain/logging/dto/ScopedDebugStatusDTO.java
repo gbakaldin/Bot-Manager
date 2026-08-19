@@ -7,8 +7,11 @@ import java.util.List;
  * is armed on this instance, the TTL policy it enforces, and the windows currently open.
  *
  * @param enabled        master switch ({@code bot.logging.scoped-debug.enabled}) AND the
- *                       filter actually being attached to the {@code com.vingame.bot}
- *                       logger. False here means a POST would raise verbosity for nobody
+ *                       filter being attached to the live log4j2 {@code Configuration} at
+ *                       the moment of the call — {@code ScopedDebugInstaller.isInstalled()}
+ *                       checks attachment rather than trusting the install flag, because a
+ *                       stale installer can detach it afterwards. False here means a POST
+ *                       would raise verbosity for nobody
  * @param defaultMinutes TTL applied when the caller names none
  * @param maxMinutes     ceiling on any single TTL (AD-11)
  * @param maxScopes      ceiling on simultaneously scoped groups — scoped DEBUG must not be

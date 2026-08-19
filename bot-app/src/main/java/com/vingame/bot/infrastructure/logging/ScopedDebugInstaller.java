@@ -15,6 +15,7 @@ import org.apache.logging.log4j.core.filter.Filterable;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.beans.PropertyChangeListener;
 import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -80,6 +81,19 @@ public class ScopedDebugInstaller {
     private volatile boolean installed;
     /** Re-entrancy guard — see {@link #install()}. */
     private final AtomicBoolean installing = new AtomicBoolean();
+    /**
+     * The reconfiguration listener, held so {@link #stop()} can remove it.
+     * <p>
+     * It is registered on the <b>JVM-global</b> {@code LoggerContext}, which outlives this
+     * bean. Left behind, a stale listener from a torn-down context fires on the next
+     * reconfiguration and runs that dead installer's {@code install()} — which begins by
+     * stripping <em>any</em> {@code ScopedDebugFilter} from the live configuration, including
+     * the one belonging to the current Spring context, and attaches its own, bound to a
+     * registry {@code stop()} has already {@code clear()}ed. The live installer is then
+     * {@code installed == true} with {@code isAttached() == false}: every POST answers 200
+     * and promotes nothing, which is exactly the failure the "armed" line exists to rule out.
+     */
+    private volatile PropertyChangeListener reconfigurationListener;
 
     public ScopedDebugInstaller(ScopedDebugRegistry registry,
                                 @Value("${bot.logging.scoped-debug.enabled:true}") boolean enabled) {
@@ -107,7 +121,13 @@ public class ScopedDebugInstaller {
             sweeper.shutdownNow();
         }
         // Detach on shutdown so a filter instance bound to a dead context's registry can
-        // never linger on the (JVM-global) LoggerContext.
+        // never linger on the (JVM-global) LoggerContext -- and take the listener with it,
+        // or the dead installer keeps a live hook into that context (see the field javadoc).
+        PropertyChangeListener listener = reconfigurationListener;
+        if (listener != null) {
+            context().removePropertyChangeListener(listener);
+            reconfigurationListener = null;
+        }
         removeExistingFilters(context().getConfiguration());
         registry.clear();
         installed = false;
@@ -140,7 +160,7 @@ public class ScopedDebugInstaller {
                 // returns 200 and changes nothing.
                 log.info("Scoped per-group DEBUG armed on logger {} (max {} concurrent scopes, sweep {}s)",
                         APP_LOGGER, registry.getMaxScopes(), SWEEP_INTERVAL_SECONDS);
-                context().addPropertyChangeListener(event -> {
+                PropertyChangeListener listener = event -> {
                     if (LoggerContext.PROPERTY_CONFIG.equals(event.getPropertyName())
                             && !isAttached()) {
                         // The configuration was rebuilt (reconfigure / config file reload):
@@ -150,7 +170,9 @@ public class ScopedDebugInstaller {
                         log.debug("Log4j2 configuration was rebuilt — re-installing the scoped-debug filter");
                         install();
                     }
-                });
+                };
+                reconfigurationListener = listener;
+                context().addPropertyChangeListener(listener);
             }
             installed = true;
         } finally {
@@ -174,8 +196,22 @@ public class ScopedDebugInstaller {
         return false;
     }
 
+    /** One sweep pass — the package-private seam so tests drive it without the 30 s wait. */
+    void sweepOnce() {
+        sweepQuietly();
+    }
+
     private void sweepQuietly() {
         try {
+            // Re-assert attachment first. install() drops a concurrent request on the
+            // `installing` CAS rather than retrying, and nothing else re-checks, so without
+            // this a single lost re-install is PERMANENT detachment that the REST surface
+            // would have to report as unarmed forever. Here it self-heals within one sweep.
+            if (installed && !isAttached()) {
+                log.warn("The scoped-debug filter is no longer attached to the log4j2 "
+                        + "configuration — re-installing");
+                install();
+            }
             List<String> expired = registry.sweep();
             for (String botGroupId : expired) {
                 log.info("scoped debug expired for group {} — back to the configured level", botGroupId);
@@ -185,9 +221,17 @@ public class ScopedDebugInstaller {
         }
     }
 
-    /** Whether the filter is currently attached — read by the REST surface and by tests. */
+    /**
+     * Whether scoped DEBUG would actually do something — read by the REST surface and by
+     * tests. Deliberately {@code installed && isAttached()} rather than the flag alone:
+     * the flag only records that an {@code install()} once succeeded, and a stale installer
+     * from another Spring context can strip this one's filter afterwards. Reporting the flag
+     * would then answer 200 to a POST that promotes nothing, and
+     * {@code ScopedDebugStatusDTO.enabled} would be documenting a guarantee it does not
+     * carry.
+     */
     public boolean isInstalled() {
-        return installed;
+        return installed && isAttached();
     }
 
     private static LoggerContext context() {
