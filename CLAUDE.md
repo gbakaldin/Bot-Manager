@@ -163,6 +163,49 @@ INFO at all.
   group does not also surface the Mongo driver's DEBUG.
   `ScopedDebugFilterInstallationTest` pins the whole chain end to end.
 
+### Evidence promotion (Phase 3)
+
+Cheap retention has exactly one failure mode: the window that mattered ages out
+before anyone reads it. `evidence-shim` -- a separate `python:3.12-alpine`
+container with `evidence-shim/shim.py` bind-mounted, no `depends_on: bot-manager`
+(the app cannot preserve its own logs when the app is what died) -- takes
+Alertmanager's webhook and **hardlinks** the newest log files into
+**`logs/evidence/`**, outside both sweepers.
+
+- **`ln`, never `cp` (AD-14).** A copy doubles the bytes exactly when disk is the
+  constraint. A hardlink costs zero blocks and still defeats log4j2's `Delete`:
+  unlink removes a *name*, not the inode. The **live `console.log` is linked too**
+  -- the link follows the original inode, so it keeps growing until rollover
+  renames the file, which is precisely the wanted post-incident tail.
+- **Newest two at execution time (AD-15)**, never arithmetic on the alert
+  timestamp -- that re-centres the window by itself at a rollover boundary.
+- **Three passes (AD-16):** immediately (the box may still be going down), at
+  +5 min (Alertmanager's `group_interval`), and at the next rollover boundary
+  + 120 s so the file that was live at T+0 is pinned after it closes. All three
+  are the same idempotent operation. **`EVIDENCE_ROLLOVER_HOURS` must track
+  `appender.rolling.policies.time.interval`** (2 h since Phase 0); the build fails
+  if they disagree.
+- **One deadline per incident key (AD-17)** -- the webhook's `groupLabels`
+  rendered canonically. Alerts carry `product`/`environmentId`/`gameId` but **not
+  `botGroupId`**, so per-group deadlines are not expressible; a deteriorating env
+  redelivering every 5 min refreshes one deadline instead of stacking timers.
+- **`logs/evidence/` is a subdirectory on purpose (AD-18).** Same filesystem is
+  mandatory for hardlinks; a subdirectory is what escapes both promtail's
+  non-recursive `__path__: /logs/*.log` (else promoted files are re-ingested into
+  Loki) and log4j2's `Delete` (`basePath /app/logs`, `maxDepth = 1`).
+  `EvidenceRetentionEscapeTest` fails the build if either changes.
+- **It sweeps itself (AD-19)** -- `EVIDENCE_MAX_AGE_DAYS` (14) then
+  `EVIDENCE_MAX_BYTES` (5 GB, oldest-first), on every pass and hourly. Without it
+  the fix for unbounded growth is unbounded growth.
+- **Unclean start retro-promotes (AD-21).** In a full-stack failure Alertmanager
+  may be dead too, so a start that finds no `logs/evidence/.clean-shutdown` marker
+  promotes immediately, tagged `boot`.
+- Alertmanager routes `BotManagerDown` and `EnvironmentGroupDead` to the
+  `evidence` receiver with `continue: true` **plus a mandatory `viptalk` sibling**
+  -- a matching child route *consumes* the alert, so an evidence route without the
+  sibling silently kills that alert's VipTalk delivery. `AlertmanagerRoutingTest`
+  guards it.
+
 ## Package Structure
 
 ```
