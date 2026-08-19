@@ -20,7 +20,8 @@ import java.util.regex.Pattern;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The Phases 5–6 delivery path spans five files that nothing else compares:
+ * The Phases 5–6 delivery path — and, since LOG_VOLUME_TIERING Phase 3, the evidence
+ * promotion path that hangs off the same webhooks — spans files that nothing else compares:
  * {@code prometheus/alerts.yml}, {@code prometheus/prometheus.yml},
  * {@code alertmanager/alertmanager.yml}, {@code docker-compose.yml} and
  * {@code viptalk-shim/shim.py}. Each is individually plausible; the failure mode is that
@@ -343,6 +344,84 @@ class AlertPipelineWiringTest {
         assertThat(environment)
                 .contains("VIPTALK_ENABLED=${VIPTALK_ENABLED:-true}")
                 .contains("VIPTALK_CUSTOMER_NOTICES_ENABLED=${VIPTALK_CUSTOMER_NOTICES_ENABLED:-true}");
+    }
+
+    // ------------------------------------------------------------- alertmanager ↔ evidence shim
+
+    @Test
+    @DisplayName("the evidence receiver URL names the compose service, on the port that shim binds")
+    @SuppressWarnings("unchecked")
+    void theEvidenceReceiverUrlMatchesTheEvidenceShimService() {
+        // Same failure mode as the viptalk-shim case above, with a quieter symptom: a
+        // receiver pointing at a service that is not there, or at a port nothing is
+        // listening on, produces no error anyone sees — it just means the logs around
+        // the next incident were swept on schedule like any others.
+        String url = null;
+        for (Map<String, Object> receiver : (List<Map<String, Object>>) alertmanager().get("receivers")) {
+            if ("evidence".equals(receiver.get("name"))) {
+                url = ((List<Map<String, Object>>) receiver.get("webhook_configs"))
+                        .get(0).get("url").toString();
+            }
+        }
+        assertThat(url).as("the evidence receiver exists").isNotNull();
+
+        Matcher m = Pattern.compile("http://([^:/]+):(\\d+)(/\\S*)?").matcher(url);
+        assertThat(m.matches()).as("receiver url %s is host:port form", url).isTrue();
+        assertThat(composeServices()).containsKey(m.group(1));
+
+        Matcher defaultPort = Pattern.compile("EVIDENCE_SHIM_PORT\"?\\s*,\\s*\"(\\d+)\"")
+                .matcher(text("evidence-shim", "shim.py"));
+        assertThat(defaultPort.find()).as("shim.py declares a default port").isTrue();
+        assertThat(m.group(2))
+                .as("Alertmanager posts to :%s but shim.py binds :%s by default and compose "
+                        + "sets no override", m.group(2), defaultPort.group(1))
+                .isEqualTo(defaultPort.group(1));
+        assertThat(composeService(m.group(1)).get("environment").toString())
+                .as("compose must not override the port out from under the receiver URL")
+                .doesNotContain("EVIDENCE_SHIM_PORT");
+    }
+
+    @Test
+    @DisplayName("the evidence shim shares nothing with bot-manager and can write into ./logs")
+    void theEvidenceShimIsIndependentAndCanWriteWhereItMustLink() {
+        Map<String, Object> shim = composeService("evidence-shim");
+        assertThat(shim)
+                .as("bot-manager cannot promote its own logs when bot-manager is the thing "
+                        + "that died — a depends_on here would recreate exactly that (AD-13)")
+                .doesNotContainKey("depends_on");
+        assertThat(shim.get("volumes").toString())
+                .as("bind-mounted script, so deploy.sh's plain `compose up` is enough")
+                .contains("./evidence-shim/shim.py:/app/shim.py");
+        // READ-WRITE, unlike promtail's ./logs:/logs:ro. os.link needs write+execute on
+        // the DESTINATION directory; a :ro mount here would fail every promotion, and
+        // the only sign would be an ERROR line nobody is tailing.
+        assertThat(shim.get("volumes").toString())
+                .as("the logs mount must be read-write — creating a directory entry in "
+                        + "logs/evidence/ is this container's entire job")
+                .contains("./logs:/logs")
+                .doesNotContain("./logs:/logs:ro");
+        assertThat(Objects.toString(shim.get("user"), ""))
+                .as("it must run as the same host user as bot-manager or it cannot write "
+                        + "into the bind-mounted logs directory (no sudo exists on Bot-1)")
+                .isEqualTo("${HOST_UID}:${HOST_GID}");
+        assertThat(shim.get("restart")).isEqualTo("unless-stopped");
+        assertThat(Objects.toString(shim.get("image"), "")).startsWith("python:3.12");
+    }
+
+    @Test
+    @DisplayName("every EVIDENCE_* variable compose passes the shim is one the shim reads")
+    void composeAndEvidenceShimAgreeOnEnvironmentVariableNames() {
+        // A typo is invisible here: the shim falls back to its default and logs nothing
+        // unusual, so a host that raised EVIDENCE_MAX_BYTES would simply not have.
+        String script = text("evidence-shim", "shim.py");
+        for (Object entry : (List<?>) composeService("evidence-shim").get("environment")) {
+            String name = entry.toString().split("=", 2)[0];
+            if (!name.startsWith("EVIDENCE_")) continue;
+            assertThat(script)
+                    .as("docker-compose.yml passes %s to evidence-shim, but shim.py never "
+                            + "reads it — the value is silently discarded", name)
+                    .contains("\"" + name + "\"");
+        }
     }
 
     @Test

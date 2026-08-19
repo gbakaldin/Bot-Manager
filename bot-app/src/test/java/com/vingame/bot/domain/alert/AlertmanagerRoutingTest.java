@@ -47,8 +47,10 @@ class AlertmanagerRoutingTest {
             Path.of("alertmanager", "alertmanager.yml"));
 
     private static final String APP_DOWN_ALERT = "BotManagerDown";
+    private static final String GROUP_DEAD_ALERT = "EnvironmentGroupDead";
     private static final String APP_RECEIVER = "viptalk";
     private static final String OUT_OF_BAND_RECEIVER = "viptalk-static-down";
+    private static final String EVIDENCE_RECEIVER = "evidence";
 
     @SuppressWarnings("unchecked")
     private static Map<String, Object> config() {
@@ -165,6 +167,50 @@ class AlertmanagerRoutingTest {
                         + "cannot say. A matching child route CONSUMES the alert, so this only "
                         + "holds if a second sibling route sends it here too (AD-V9)")
                 .contains(APP_RECEIVER);
+    }
+
+    @Test
+    @DisplayName("EnvironmentGroupDead reaches the evidence shim AND still reaches VipTalk")
+    void theGroupDeadAlertReachesEvidenceWithoutLosingItsDelivery() {
+        // LOG_VOLUME_TIERING Phase 3 / AD-14. The evidence shim is an ADDITIONAL
+        // destination — it promotes the log files around the incident out of the
+        // retention sweep and delivers nothing to anybody. Adding it as a
+        // `continue: true` child is therefore only half the change: a matching child
+        // CONSUMES the alert, so without a trailing `viptalk` sibling this route would
+        // silently stop a critical, product-routed alert reaching the product room while
+        // every dashboard still showed it firing. That is the exact bug the
+        // BotManagerDown pair above already exists to prevent, one phase later.
+        List<String> receivers = receiversFor(castRoute(), labels(GROUP_DEAD_ALERT));
+
+        assertThat(receivers)
+                .as("the logs explaining why a group died are the ones a cheap retention "
+                        + "is most likely to have swept by the time anyone looks")
+                .contains(EVIDENCE_RECEIVER);
+        assertThat(receivers)
+                .as("and the alert must STILL be delivered — evidence promotion is not a "
+                        + "delivery path, it sends nothing to anyone (AD-14)")
+                .contains(APP_RECEIVER);
+    }
+
+    @Test
+    @DisplayName("BotManagerDown reaches evidence too, on top of both delivery paths")
+    void theAppDownAlertAlsoPromotesEvidence() {
+        // The worst incident class: the app is gone, so nothing in the JVM can preserve
+        // anything, and the box may still be going down. All three receivers, in order.
+        assertThat(receiversFor(castRoute(), labels(APP_DOWN_ALERT)))
+                .containsExactly(EVIDENCE_RECEIVER, OUT_OF_BAND_RECEIVER, APP_RECEIVER);
+    }
+
+    @Test
+    @DisplayName("the evidence receiver never sends the resolved half")
+    void evidencePromotionIsNotTriggeredOnRecovery() {
+        assertThat(webhook(EVIDENCE_RECEIVER).get("send_resolved"))
+                .as("there is nothing to preserve about a recovery, and promoting on it "
+                        + "would pin post-incident noise instead of the incident")
+                .isEqualTo(false);
+        assertThat(webhook(EVIDENCE_RECEIVER).get("url").toString())
+                .as("reached over the compose network, like every other receiver here")
+                .startsWith("http://evidence-shim:");
     }
 
     @Test
