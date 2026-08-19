@@ -81,6 +81,15 @@ public class SlotMachineBot extends Bot {
     // onSpinResult() and beforeReconnect().
     private final AtomicBoolean spinInFlight = new AtomicBoolean(false);
 
+    // Below-spin-cost state (LOG_VOLUME_TIERING Phase 2, step 6). The balance gate in
+    // spinCondition() is evaluated on the fixed 3 s spin cadence, so the line it used to
+    // emit unconditionally fired ~1,200 times/hour PER underfunded bot, forever, and was
+    // the one log class in the app whose volume was independent of round rate — an
+    // unbounded spam trap. It is now emitted only on the TRANSITIONS: once on entering the
+    // below-cost state, once on leaving it. The state itself remains fully visible in
+    // metrics and in the balance lines; what is gone is the repetition.
+    private final AtomicBoolean belowSpinCost = new AtomicBoolean(false);
+
     // Park-and-pop: the scenario engine throws if the sendAsync supplier returns
     // null, so spinCondition() parks the chosen bet and spin() pops it. Mirrors
     // BettingMiniGameBot.pendingDecision.
@@ -309,9 +318,19 @@ public class SlotMachineBot extends Bot {
             // AD-13 balance gate: a spin stakes chosenBet on each of numLines.
             long cost = chosenBet * numLines;
             if (expectedCurrentBalance.get() < cost) {
-                log.debug("Bot {}: balance {} below spin cost {} ({} x {}) — skipping tick",
-                        getUserName(), expectedCurrentBalance.get(), cost, chosenBet, numLines);
+                // Log the ENTRY transition only — this gate is re-evaluated every 3 s and
+                // an underfunded bot never leaves it on its own.
+                if (belowSpinCost.compareAndSet(false, true)) {
+                    log.debug("Bot {}: balance {} below spin cost {} ({} x {}) — pausing spins",
+                            getUserName(), expectedCurrentBalance.get(), cost, chosenBet, numLines);
+                }
                 return false;
+            }
+            // And the EXIT transition, so the pause has a visible end (a deposit landed, or
+            // a win covered the next spin) rather than just going quiet.
+            if (belowSpinCost.compareAndSet(true, false)) {
+                log.debug("Bot {}: balance {} covers spin cost {} again — resuming spins",
+                        getUserName(), expectedCurrentBalance.get(), cost);
             }
             pendingBet.set(Optional.of(chosenBet));
             log.trace("Bot {}: parked spin bet={} ({} lines)", getUserName(), chosenBet, numLines);
