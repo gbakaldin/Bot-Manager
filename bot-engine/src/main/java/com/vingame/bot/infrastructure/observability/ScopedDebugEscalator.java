@@ -35,12 +35,22 @@ import java.util.function.LongSupplier;
  *       it. Half is the point at which the group is visibly deteriorating but has not yet
  *       been declared dead, which is exactly the window worth logging.</li>
  * </ol>
- * <b>Bounded by construction.</b> One escalation per group per cooldown (default 15 min, the
- * same as the TTL), so a flapping group expiring a watchdog every three minutes holds DEBUG
- * open for its 15 minutes and then goes quiet rather than re-arming forever. The registry's
- * own {@code maxScopes} cap bounds a fleet-wide incident: a bad deploy that sickens 300
- * groups at once escalates the first N and refuses the rest with a single WARN, instead of
- * quietly reconstructing fleet-wide DEBUG.
+ * <b>Bounded by construction — the cooldown is a quiet period measured from the moment the
+ * scope <em>expires</em>, not from the escalation that opened it.</b> Measuring it from the
+ * escalation is the obvious spelling and it is wrong: with a cooldown equal to the TTL the
+ * two lapse at the same instant, so a group parked mid-band (say {@code dead/total = 0.5},
+ * inside the escalation band and never declared DEAD) re-escalates on the very next 30 s
+ * health tick — a ~96% duty cycle, unattended, for as long as it stays half-broken, which is
+ * scoped DEBUG quietly becoming the fleet-wide DEBUG this feature exists to prevent. So a
+ * group may not re-arm until {@code lastEscalation + ttl + cooldown}, and the invariant that
+ * follows is the one worth stating: <b>an unattended group cannot hold scoped DEBUG for more
+ * than {@code ttl / (ttl + cooldown)} of any window</b> — 15/(15+45) = <b>25%</b> at the
+ * shipped defaults, whatever it flaps. {@code ScopedDebugEscalatorTest} asserts that ratio
+ * directly rather than asserting that a re-arm eventually succeeds.
+ * <p>
+ * The registry's own {@code maxScopes} cap bounds a fleet-wide incident on the other axis: a
+ * bad deploy that sickens 300 groups at once escalates the first N and refuses the rest with
+ * a single WARN, instead of quietly reconstructing fleet-wide DEBUG.
  * <p>
  * Every call site is null-tolerant ({@code Bot} holds this via a fluent setter, exactly like
  * {@code GroupLifecycleAggregator}), so bots built in unit tests without a Spring context
@@ -63,7 +73,12 @@ public class ScopedDebugEscalator {
     private final double deadRatioCeiling;
     private final LongSupplier clock;
 
-    /** groupId → epoch millis of the last escalation, for the cooldown. */
+    /**
+     * groupId → epoch millis of the last escalation. The re-arm gate is
+     * {@code now - lastEscalation >= ttl + cooldown}, i.e. the cooldown runs from scope
+     * <em>expiry</em>; see the class javadoc for why measuring it from the escalation itself
+     * lets a persistently sick group hold DEBUG open indefinitely.
+     */
     private final ConcurrentHashMap<String, Long> lastEscalation = new ConcurrentHashMap<>();
     /** groupId → rolling reconnect count within the current window. */
     private final ConcurrentHashMap<String, ReconnectWindow> reconnects = new ConcurrentHashMap<>();
@@ -76,7 +91,7 @@ public class ScopedDebugEscalator {
             @Value("${bot.logging.scoped-debug.enabled:true}") boolean scopedDebugEnabled,
             @Value("${bot.logging.scoped-debug.escalation.enabled:true}") boolean escalationEnabled,
             @Value("${bot.logging.scoped-debug.escalation.minutes:15}") int ttlMinutes,
-            @Value("${bot.logging.scoped-debug.escalation.cooldown-minutes:15}") int cooldownMinutes,
+            @Value("${bot.logging.scoped-debug.escalation.cooldown-minutes:45}") int cooldownMinutes,
             @Value("${bot.logging.scoped-debug.escalation.reconnect-threshold:5}") int reconnectThreshold,
             @Value("${bot.logging.scoped-debug.escalation.reconnect-window-minutes:5}") int reconnectWindowMinutes,
             @Value("${bot.group.dead.threshold:0.80}") double deadGroupThreshold) {
@@ -163,7 +178,18 @@ public class ScopedDebugEscalator {
     }
 
     /**
-     * Arm scoped DEBUG for a group, honouring the cooldown.
+     * The minimum gap between two escalations of the same group: the TTL it grants plus the
+     * quiet period that must follow the scope lapsing. Bounding the gap rather than the
+     * cooldown alone is what makes the duty cycle {@code ttl / (ttl + cooldown)} instead of
+     * ~100% whenever the two happen to be configured equal — the shipped defaults used to be,
+     * so the "cannot re-arm forever" claim was false by exactly one addition.
+     */
+    long reArmIntervalMillis() {
+        return ttl.toMillis() + cooldown.toMillis();
+    }
+
+    /**
+     * Arm scoped DEBUG for a group, honouring the re-arm interval.
      *
      * @return {@code true} if this call actually armed it
      */
@@ -172,11 +198,12 @@ public class ScopedDebugEscalator {
             return false;
         }
         long now = clock.getAsLong();
+        long reArmInterval = reArmIntervalMillis();
         // Atomic claim of the cooldown slot: two threads seeing the same expiry (a whole
         // group's watchdogs firing together is the normal case) must produce one line.
         AtomicBoolean won = new AtomicBoolean(false);
         lastEscalation.compute(botGroupId, (id, previous) -> {
-            if (previous != null && now - previous < cooldown.toMillis()) {
+            if (previous != null && now - previous < reArmInterval) {
                 return previous;
             }
             won.set(true);
@@ -225,7 +252,13 @@ public class ScopedDebugEscalator {
 
     /** A group's reconnect count over a sliding window, reset wholesale when it lapses. */
     private static final class ReconnectWindow {
-        private long startMillis;
+        /**
+         * Volatile because {@link #enforceCap} reads it from another thread to order entries
+         * for eviction, outside this class's own synchronization. A stale read only picks a
+         * slightly different victim, but a field read off-lock in a class that otherwise
+         * takes the lock should say so rather than rely on that.
+         */
+        private volatile long startMillis;
         private int count;
 
         private ReconnectWindow(long nowMillis) {

@@ -76,6 +76,17 @@ public final class ScopedDebugRegistry {
     }
 
     /**
+     * The clock-injecting seam, reachable from other modules. {@code ScopedDebugEscalator}'s
+     * tests live in {@code bot-engine} and need the registry to expire scopes on the same
+     * simulated clock the escalator runs on — without that, a test that means "the TTL
+     * lapsed" silently measures real time and can only assert the escalator's half of the
+     * behaviour. Production code uses the public constructors above.
+     */
+    public static ScopedDebugRegistry withClock(int maxScopes, LongSupplier clock) {
+        return new ScopedDebugRegistry(maxScopes, clock);
+    }
+
+    /**
      * Enable DEBUG for one group for a bounded time.
      *
      * @param botGroupId the group; {@code null}/blank is refused

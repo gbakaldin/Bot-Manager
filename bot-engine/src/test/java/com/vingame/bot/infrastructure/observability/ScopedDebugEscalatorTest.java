@@ -12,7 +12,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * LOG_VOLUME_TIERING AD-12 — detail is armed on the early-warning signals, and armed at
- * most once per group per cooldown.
+ * most once per group per {@code ttl + cooldown}.
  * <p>
  * The two failure modes this pins are opposites of each other. Escalating <em>too late</em>
  * (on DEAD) produces logs of a group that has stopped doing anything, which is why all three
@@ -20,16 +20,27 @@ import static org.assertj.core.api.Assertions.assertThat;
  * group flapping a watchdog every three minutes, or 200 bots reconnecting at once — would
  * hold DEBUG open indefinitely and reconstruct the fleet-wide DEBUG the plan exists to
  * remove, which is what the cooldown and the registry cap prevent.
+ * <p>
+ * <b>The cooldown assertion is a duty-cycle assertion.</b> An earlier version of this class
+ * asserted only that a re-arm <em>eventually succeeds</em> past the cooldown, which is true
+ * of the broken implementation too — with the cooldown measured from the escalation and equal
+ * to the TTL, "eventually" was 30 seconds after every expiry, i.e. a ~96% duty cycle. So
+ * {@link #unattendedGroupCannotExceedItsDutyCycle()} drives 4 simulated hours of a
+ * permanently sick group and measures the fraction of that time the scope was open.
  */
 @DisplayName("ScopedDebugEscalator (AD-12)")
 class ScopedDebugEscalatorTest {
 
+    private static final Duration TTL = Duration.ofMinutes(15);
+    private static final Duration COOLDOWN = Duration.ofMinutes(45);
+
     private final AtomicLong now = new AtomicLong(1_000_000L);
-    private final ScopedDebugRegistry registry = new ScopedDebugRegistry(10);
+    // Same simulated clock as the escalator, so "the TTL lapsed" is a real event here and
+    // not something the test has to fake with disable().
+    private final ScopedDebugRegistry registry = ScopedDebugRegistry.withClock(10, now::get);
 
     private ScopedDebugEscalator escalator(boolean enabled) {
-        return new ScopedDebugEscalator(registry, enabled,
-                Duration.ofMinutes(15), Duration.ofMinutes(15),
+        return new ScopedDebugEscalator(registry, enabled, TTL, COOLDOWN,
                 5, Duration.ofMinutes(5), 0.80, now::get);
     }
 
@@ -45,21 +56,57 @@ class ScopedDebugEscalatorTest {
     }
 
     @Test
-    @DisplayName("a flapping group cannot re-arm inside the cooldown, and can after it")
+    @DisplayName("the cooldown runs from scope EXPIRY, so an expired scope does not re-arm at once")
     void escalationIsRateLimited() {
         ScopedDebugEscalator escalator = escalator(true);
         escalator.onWatchdogExpiry("g1");
-        registry.disable("g1"); // simulate the TTL having lapsed
 
-        now.addAndGet(Duration.ofMinutes(14).toMillis());
+        // The scope has lapsed on its own TTL. This is the exact moment the broken version
+        // re-armed: cooldown == TTL, so both deadlines passed together.
+        now.addAndGet(TTL.toMillis() + 30_000L);
+        assertThat(registry.isEnabled("g1")).as("the TTL really has lapsed").isFalse();
         escalator.onWatchdogExpiry("g1");
         assertThat(registry.isEnabled("g1"))
-                .as("inside the 15m cooldown a repeat expiry must not re-arm")
+                .as("the cooldown is a QUIET PERIOD after expiry — no immediate re-arm")
                 .isFalse();
 
-        now.addAndGet(Duration.ofMinutes(2).toMillis());
+        // Still inside the quiet period.
+        now.addAndGet(COOLDOWN.toMillis() - 60_000L);
         escalator.onWatchdogExpiry("g1");
-        assertThat(registry.isEnabled("g1")).as("past the cooldown it may re-arm").isTrue();
+        assertThat(registry.isEnabled("g1")).as("inside the quiet period").isFalse();
+
+        // Past ttl + cooldown from the escalation.
+        now.addAndGet(120_000L);
+        escalator.onWatchdogExpiry("g1");
+        assertThat(registry.isEnabled("g1")).as("past ttl + cooldown it may re-arm").isTrue();
+    }
+
+    @Test
+    @DisplayName("an unattended, permanently sick group cannot exceed ttl/(ttl+cooldown) of any window")
+    void unattendedGroupCannotExceedItsDutyCycle() {
+        ScopedDebugEscalator escalator = escalator(true);
+
+        // A group parked at dead/total = 0.5: inside the [0.40, 0.80) escalation band on
+        // EVERY 30 s health tick and never declared DEAD. Four hours of that.
+        long tickMillis = 30_000L;
+        long ticks = Duration.ofHours(4).toMillis() / tickMillis;
+        long ticksEnabled = 0;
+        for (long i = 0; i < ticks; i++) {
+            escalator.onGroupHealth("g1", 5, 10);
+            if (registry.isEnabled("g1")) {
+                ticksEnabled++;
+            }
+            now.addAndGet(tickMillis);
+        }
+
+        double dutyCycle = (double) ticksEnabled / ticks;
+        double bound = (double) TTL.toMillis() / escalator.reArmIntervalMillis();
+        assertThat(bound).as("the configured bound is 15/(15+45)").isEqualTo(0.25);
+        assertThat(dutyCycle)
+                .as("scoped DEBUG must not become de-facto permanent DEBUG for a sick group; "
+                        + "the broken version measured ~0.96 here")
+                .isLessThanOrEqualTo(bound + 0.01);
+        assertThat(dutyCycle).as("and it must still fire at all").isGreaterThan(0.0);
     }
 
     @Nested
@@ -169,10 +216,9 @@ class ScopedDebugEscalatorTest {
     @Test
     @DisplayName("a fleet-wide incident is bounded by the registry cap, not by this class")
     void registryCapBoundsAFleetWideIncident() {
-        ScopedDebugRegistry small = new ScopedDebugRegistry(2);
+        ScopedDebugRegistry small = ScopedDebugRegistry.withClock(2, now::get);
         ScopedDebugEscalator escalator = new ScopedDebugEscalator(small, true,
-                Duration.ofMinutes(15), Duration.ofMinutes(15), 5, Duration.ofMinutes(5),
-                0.80, now::get);
+                TTL, COOLDOWN, 5, Duration.ofMinutes(5), 0.80, now::get);
 
         for (int i = 0; i < 100; i++) {
             escalator.onWatchdogExpiry("group-" + i);
