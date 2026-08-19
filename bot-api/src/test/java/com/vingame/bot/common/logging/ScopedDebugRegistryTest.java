@@ -202,4 +202,66 @@ class ScopedDebugRegistryTest {
         assertThat(registry.disable("g1")).isFalse();
         assertThat(registry.disable(null)).isFalse();
     }
+
+    @Test
+    @DisplayName("re-enabling reports the window actually in force, not the one asked for")
+    void reEnableReportsTheEffectiveWindow() {
+        ScopedDebugRegistry registry = registry(10);
+        Instant operatorWindow = registry.enable("g1", Duration.ofMinutes(30)).orElseThrow();
+
+        // An auto-escalation landing on an operator's longer window must not answer with an
+        // expiry earlier than the one the group really has -- the caller logs what it is told.
+        Instant escalationAnswer = registry.enable("g1", Duration.ofMinutes(1)).orElseThrow();
+
+        assertThat(escalationAnswer).isEqualTo(operatorWindow);
+    }
+
+    @Test
+    @DisplayName("a sweep concurrent with an enable can never leave the fast path stale-false")
+    void concurrentSweepAndEnableNeverLoseTheFlag() throws Exception {
+        // The lost update this pins: sweeper removes the last entry, reads isEmpty() == true,
+        // then an enable publishes anyEnabled = true and inserts -- and the sweeper's
+        // unconditional `anyEnabled = !isEmpty()` lands last. The map then holds a live scope
+        // while isAnyEnabled() reads false, so ScopedDebugFilter returns NEUTRAL for the
+        // whole TTL and GET /api/v1/logging/debug still reports the scope active.
+        //
+        // This is a probabilistic net, not a proof: the losing window is a few nanoseconds
+        // wide. 40k rounds is the count at which reverting the synchronization in sweepAt
+        // and enable reproduces the failure on this machine, and it costs ~3 s. The
+        // assertion itself is on a true invariant, so it can catch but never falsely fail.
+        for (int attempt = 0; attempt < 40_000; attempt++) {
+            ScopedDebugRegistry registry = registry(10);
+            registry.enable("expiring", Duration.ofMillis(1));
+            now.addAndGet(10L);
+
+            java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+            Thread sweeper = new Thread(() -> {
+                await(go);
+                registry.sweep();
+            });
+            Thread arming = new Thread(() -> {
+                await(go);
+                registry.enable("fresh", Duration.ofMinutes(15));
+            });
+            sweeper.start();
+            arming.start();
+            go.countDown();
+            sweeper.join();
+            arming.join();
+
+            assertThat(registry.activeScopes()).containsKey("fresh");
+            assertThat(registry.isAnyEnabled())
+                    .as("attempt %d: the map holds a live scope, so the fast path must say so",
+                            attempt)
+                    .isTrue();
+        }
+    }
+
+    private static void await(java.util.concurrent.CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
 }

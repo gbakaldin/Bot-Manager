@@ -55,9 +55,31 @@ public final class ScopedDebugRegistry {
     private final LongSupplier clock;
 
     /**
-     * The AD-10 fast path. Written on every mutation, read on every log call. A stale
-     * {@code true} costs one wasted map lookup until the next sweep; a stale {@code false}
-     * cannot happen, because it is set to {@code true} before the entry is published.
+     * Serializes <em>map mutation together with the {@link #anyEnabled} update</em>. Reads
+     * never take it.
+     * <p>
+     * The flag was previously maintained with a non-atomic read-modify-write —
+     * {@code expiries.remove(...)} then {@code anyEnabled = !expiries.isEmpty()} — which
+     * loses updates against a concurrent {@code enable}: a sweeper that has already
+     * observed the map empty can publish {@code false} after another thread has published
+     * {@code true} and inserted its entry. The map then holds a live scope while the fast
+     * path reads {@code false}, so the filter returns NEUTRAL for every event and the scope
+     * is <b>silently inert for its whole TTL</b> while {@code GET /api/v1/logging/debug}
+     * (which reads the map, not the flag) reports it active. That window is opened by
+     * exactly the traffic this feature is for: the 30 s sweep running while an operator or
+     * the escalator arms a scope mid-incident.
+     * <p>
+     * Mutations are rare — an operator action, an escalation, and one sweep every 30 s — so
+     * a monitor costs nothing measurable, and it is the only spelling that makes the flag
+     * and the map agree by construction rather than by argument.
+     */
+    private final Object mutation = new Object();
+
+    /**
+     * The AD-10 fast path. Written under {@link #mutation} on every map change, read
+     * lock-free on every log call. A stale {@code true} costs one wasted map lookup until
+     * the next sweep; a stale {@code false} would be a silent outage, which is why the two
+     * are updated together rather than independently.
      */
     private volatile boolean anyEnabled;
 
@@ -110,18 +132,22 @@ public final class ScopedDebugRegistry {
         }
 
         long now = clock.getAsLong();
-        // Sweep before the cap check so expired-but-unswept entries never block a new
-        // scope: the 30 s sweeper is a backstop, not the only reclaim path.
-        sweepAt(now);
-        // A re-enable of an already-scoped group extends it and must not count as new.
-        if (!expiries.containsKey(botGroupId) && expiries.size() >= maxScopes) {
-            return Optional.empty();
+        long requested = now + effective.toMillis();
+        synchronized (mutation) {
+            // Sweep before the cap check so expired-but-unswept entries never block a new
+            // scope: the 30 s sweeper is a backstop, not the only reclaim path.
+            sweepAt(now);
+            // A re-enable of an already-scoped group extends it and must not count as new.
+            if (!expiries.containsKey(botGroupId) && expiries.size() >= maxScopes) {
+                return Optional.empty();
+            }
+            // Extend-never-shorten, and report the window that is actually in force: an
+            // auto-escalation landing on an operator's longer window must not answer with
+            // an expiry earlier than the one the group really has.
+            long effectiveExpiry = expiries.merge(botGroupId, requested, Math::max);
+            anyEnabled = true;
+            return Optional.of(Instant.ofEpochMilli(effectiveExpiry));
         }
-
-        long expiryMillis = now + effective.toMillis();
-        anyEnabled = true; // publish BEFORE the entry, so the fast path can never miss it
-        expiries.merge(botGroupId, expiryMillis, Math::max);
-        return Optional.of(Instant.ofEpochMilli(expiryMillis));
     }
 
     /** Convenience for the common case. */
@@ -138,9 +164,11 @@ public final class ScopedDebugRegistry {
         if (botGroupId == null) {
             return false;
         }
-        boolean removed = expiries.remove(botGroupId) != null;
-        anyEnabled = !expiries.isEmpty();
-        return removed;
+        synchronized (mutation) {
+            boolean removed = expiries.remove(botGroupId) != null;
+            anyEnabled = !expiries.isEmpty();
+            return removed;
+        }
     }
 
     /**
@@ -158,8 +186,10 @@ public final class ScopedDebugRegistry {
         if (clock.getAsLong() >= expiry) {
             // Expire lazily as well as on the sweep, so a stopped sweeper can never leave
             // a scope on forever.
-            expiries.remove(botGroupId, expiry);
-            anyEnabled = !expiries.isEmpty();
+            synchronized (mutation) {
+                expiries.remove(botGroupId, expiry);
+                anyEnabled = !expiries.isEmpty();
+            }
             return false;
         }
         return true;
@@ -184,14 +214,16 @@ public final class ScopedDebugRegistry {
         if (expiries.isEmpty()) {
             return List.of();
         }
-        List<String> expired = new ArrayList<>();
-        for (Map.Entry<String, Long> entry : expiries.entrySet()) {
-            if (now >= entry.getValue() && expiries.remove(entry.getKey(), entry.getValue())) {
-                expired.add(entry.getKey());
+        synchronized (mutation) {
+            List<String> expired = new ArrayList<>();
+            for (Map.Entry<String, Long> entry : expiries.entrySet()) {
+                if (now >= entry.getValue() && expiries.remove(entry.getKey(), entry.getValue())) {
+                    expired.add(entry.getKey());
+                }
             }
+            anyEnabled = !expiries.isEmpty();
+            return expired;
         }
-        anyEnabled = !expiries.isEmpty();
-        return expired;
     }
 
     /**
@@ -215,7 +247,9 @@ public final class ScopedDebugRegistry {
 
     /** Drop every scope. Used by tests and by the installer on shutdown. */
     public void clear() {
-        expiries.clear();
-        anyEnabled = false;
+        synchronized (mutation) {
+            expiries.clear();
+            anyEnabled = false;
+        }
     }
 }
