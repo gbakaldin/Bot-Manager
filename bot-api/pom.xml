@@ -49,6 +49,19 @@
       <artifactId>slf4j-api</artifactId>
     </dependency>
 
+    <!-- ScopedDebugFilter extends log4j-core's AbstractFilter (LOG_VOLUME_TIERING
+         AD-9: the filter is installed programmatically because the build pins
+         annotationProcessorPaths, so a @Plugin would get no Log4j2Plugins.dat entry).
+         `provided`: log4j-core is on the runtime classpath everywhere this module
+         runs (bot-app pulls spring-boot-starter-log4j2), and a non-transitive scope
+         keeps the contract module from imposing a logging backend on its consumers.
+         It is still on this module's own test classpath, which the filter test needs. -->
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
     <dependency>
       <groupId>com.vingame</groupId>
       <artifactId>websocket-parser-core</artifactId>
