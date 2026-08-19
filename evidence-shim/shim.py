@@ -81,8 +81,11 @@ BEHAVIOUR
                     Alertmanager's retry stays meaningful. A payload marked
                     `resolved` is ignored (nothing to preserve on recovery).
   GET  /health      Resolved config, pending incidents, the outcome of the last
-                    promotion, and the evidence directory's file count and size.
-                    Never touches bot-manager, never touches the network.
+                    promotion, the evidence directory's file count and size, and
+                    `schedulerAlive` — the timer thread runs passes 2 and 3 and the
+                    hourly sweep, and its death is otherwise invisible because HTTP
+                    keeps answering 200. Never touches bot-manager, never touches
+                    the network.
 
 Deliberately permissive about the request path and the body shape, for the same
 reason viptalk-shim is: a typo in a receiver URL or an Alertmanager schema change
@@ -112,10 +115,27 @@ CLEAN_MARKER = ".clean-shutdown"
 # Scheduled passes survive a restart of this container, so a shim redeploy in the
 # middle of an incident does not silently drop pass 2 and pass 3.
 PENDING_FILE = ".pending.json"
+# basename -> epoch seconds at which we hardlinked it. A hardlink SHARES the
+# source inode, so a promoted file's mtime is the log's last-write time, not the
+# promotion time: the older of the "newest two" can already be hours or days old
+# when it is pinned, and sweeping on mtime would give it
+# `EVIDENCE_MAX_AGE_DAYS - age_at_promotion` rather than the advertised
+# EVIDENCE_MAX_AGE_DAYS. This sidecar is what makes the advertised number true.
+PROMOTED_FILE = ".promoted.json"
 
 # How many files "newest two" means (AD-15). Not an env var in docker-compose.yml
 # on purpose: it is a design constant of the window, not an operational knob.
 DEFAULT_NEWEST_COUNT = 2
+
+# Anti-leak ceiling on in-flight incident keys. Every Java map this feature added
+# carries one (ScopedDebugRegistry 50, GroupLifecycleAggregator 2000,
+# ScopedDebugEscalator 2000); `pending` was the one collection without. Each entry
+# costs an O(n) rewrite of .pending.json per webhook and a distinct
+# console-live-<slug>-<ts>.log inode, and the AD-19 sweep bounds BYTES, not inodes
+# or dict size -- so a label explosion inside the compose network (say `gameId`
+# leaking into Alertmanager's group_by) is a plausible way to mint thousands of
+# both. Alertmanager's own grouping keeps this in single digits normally.
+MAX_PENDING = 64
 
 
 def _env(name, default=""):
@@ -197,6 +217,10 @@ class Config(object):
     def pending_path(self):
         return os.path.join(self.evidence_dir, PENDING_FILE)
 
+    @property
+    def promoted_path(self):
+        return os.path.join(self.evidence_dir, PROMOTED_FILE)
+
     def same_filesystem(self):
         """True iff a hardlink from logs_dir into evidence_dir can even be attempted.
 
@@ -251,6 +275,37 @@ def slug(key):
     return safe.strip("_")[:96] or "incident"
 
 
+def _deadline(value):
+    """A persisted deadline coerced to float, or None if it is not usable.
+
+    `None` is legitimate (that pass has already run). Anything else -- a string, a
+    bool, a dict -- is rejected rather than carried, because it reaches `min()` in
+    next_deadline() and `>=` in tick(), both of which raise TypeError on it.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        deadline = float(value)
+    except (TypeError, ValueError):
+        return None
+    return deadline if deadline == deadline else None  # NaN poisons min()/comparisons
+
+
+def _sane_entry(entry):
+    """A restored pending entry, normalised — or None if it cannot be trusted."""
+    if not isinstance(entry, dict) or not entry.get("liveName"):
+        return None
+    deferred = _deadline(entry.get("deferredAt"))
+    tail = _deadline(entry.get("tailAt"))
+    if deferred is None and tail is None:
+        return None  # both passes already run (or both unusable): nothing to schedule
+    sane = dict(entry)
+    sane["deferredAt"] = deferred
+    sane["tailAt"] = tail
+    sane["firstSeenAt"] = _deadline(entry.get("firstSeenAt"))
+    return sane
+
+
 def next_rollover(now, hours):
     """The next log4j2 rollover boundary at or after `now`, in LOCAL time.
 
@@ -275,10 +330,14 @@ class Promoter(object):
         self.wake = threading.Event()
         # key -> {"slug", "liveName", "firstSeenAt", "deferredAt", "tailAt", "passes"}
         self.pending = {}
+        # basename -> epoch seconds we promoted it (see PROMOTED_FILE).
+        self.promoted_at = {}
         self.last_promotion = None
         self.last_sweep = None
         self.next_sweep = time.time() + config.sweep_interval
         self.started_clean = None
+        self.evicted_pending = 0
+        self.scheduler_thread = None
 
     # ------------------------------------------------------------------ selection
 
@@ -336,6 +395,10 @@ class Promoter(object):
                                        live_name if is_live else name)
             outcome, detail = self.link(path, destination, is_live)
             {"linked": linked, "skipped": skipped, "errors": errors}[outcome].append(detail)
+        # Stamp the PROMOTION time (not the log's mtime) so the age sweep measures
+        # how long we have held the evidence, which is what EVIDENCE_MAX_AGE_DAYS
+        # advertises. A `skipped` name already has an earlier stamp and keeps it.
+        self.remember_promoted(linked)
 
         result = {
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -448,6 +511,7 @@ class Promoter(object):
             entry["tailAt"] = next_rollover(now, self.config.rollover_hours) + self.config.tail_delay
             entry["passes"] = entry.get("passes", 0) + 1
             live_name = entry["liveName"]
+            self.enforce_pending_cap()
         result = self.promote(key, tag, live_name)
         self.save_pending()
         self.wake.set()
@@ -459,10 +523,15 @@ class Promoter(object):
         due = []
         with self.lock:
             for key, entry in list(self.pending.items()):
-                if entry.get("deferredAt") is not None and now >= entry["deferredAt"]:
+                # Coerced, not compared raw: a non-numeric deadline that survived into
+                # the dict must degrade to "run it now and be done with it", never
+                # raise out of the scheduler loop.
+                deferred = _deadline(entry.get("deferredAt"))
+                tail = _deadline(entry.get("tailAt"))
+                if entry.get("deferredAt") is not None and (deferred is None or now >= deferred):
                     entry["deferredAt"] = None
                     due.append((key, "deferred", entry["liveName"]))
-                if entry.get("tailAt") is not None and now >= entry["tailAt"]:
+                if entry.get("tailAt") is not None and (tail is None or now >= tail):
                     entry["tailAt"] = None
                     due.append((key, "tail", entry["liveName"]))
                 if entry.get("deferredAt") is None and entry.get("tailAt") is None:
@@ -478,13 +547,35 @@ class Promoter(object):
         return due
 
     def next_deadline(self):
+        """The soonest deadline. Total: an unusable entry can never poison min().
+
+        This used to sit one line outside the scheduler's try/except and to trust
+        whatever was in `self.pending`. `load_pending` now rejects unusable entries,
+        and this coerces again as a second line of defence -- between them, no
+        content of .pending.json can kill the timer thread.
+        """
         with self.lock:
-            deadlines = [value
+            deadlines = [deadline
                          for entry in self.pending.values()
-                         for value in (entry.get("deferredAt"), entry.get("tailAt"))
-                         if value is not None]
-        deadlines.append(self.next_sweep)
+                         for deadline in (_deadline(entry.get("deferredAt")),
+                                          _deadline(entry.get("tailAt")))
+                         if deadline is not None]
+        sweep = _deadline(self.next_sweep)
+        deadlines.append(sweep if sweep is not None else time.time() + self.config.sweep_interval)
         return min(deadlines)
+
+    def enforce_pending_cap(self):
+        """Bound `pending`, oldest incident first. Caller holds the lock."""
+        while len(self.pending) > MAX_PENDING:
+            oldest = min(self.pending,
+                         key=lambda key: _deadline(self.pending[key].get("firstSeenAt")) or 0.0)
+            self.pending.pop(oldest, None)
+            self.evicted_pending += 1
+            if self.evicted_pending == 1 or self.evicted_pending % 100 == 0:
+                log("WARN pending-incident cap %d exceeded - dropped the oldest key %r "
+                    "(%d dropped so far). Files already promoted are untouched; only this "
+                    "incident's remaining deferred passes are lost."
+                    % (MAX_PENDING, oldest, self.evicted_pending))
 
     # ------------------------------------------------------------------ persistence
 
@@ -493,28 +584,95 @@ class Promoter(object):
         self.ensure_dir()
         with self.lock:
             snapshot = json.dumps(self.pending)
-        temporary = self.config.pending_path + ".tmp"
-        try:
-            with open(temporary, "w") as handle:
-                handle.write(snapshot)
-            os.replace(temporary, self.config.pending_path)
-        except OSError as error:
-            log("WARN cannot persist pending passes: %s" % error)
+        self._write_atomically(self.config.pending_path, snapshot,
+                               "cannot persist pending passes")
 
     def load_pending(self):
-        try:
-            with open(self.config.pending_path) as handle:
-                loaded = json.load(handle)
-        except (OSError, ValueError):
-            return
+        loaded = self._read_json(self.config.pending_path)
         if not isinstance(loaded, dict):
             return
+        restored, rejected = {}, []
+        for key, entry in loaded.items():
+            sane = _sane_entry(entry)
+            if sane is None:
+                rejected.append(key)
+                continue
+            restored[key] = sane
         with self.lock:
-            self.pending = {key: entry for key, entry in loaded.items()
-                            if isinstance(entry, dict) and entry.get("liveName")}
+            self.pending = restored
+            self.enforce_pending_cap()
+        if rejected:
+            # A hand-edit on the box, a schema change between shim versions, or a
+            # file written by a newer version and read by a rolled-back one. Dropping
+            # the entry costs one incident's deferred passes; keeping it used to cost
+            # the scheduler thread -- min() over a str raises TypeError, the daemon
+            # dies, HTTP keeps answering 200, and passes 2/3 plus the hourly sweep
+            # never run again for ANY incident.
+            log("WARN dropped %d unusable pending entr(y|ies) from %s: %s"
+                % (len(rejected), self.config.pending_path, rejected))
         if self.pending:
             log("restored %d pending incident(s) from %s"
                 % (len(self.pending), self.config.pending_path))
+
+    # ------------------------------------------------------------- promotion times
+
+    def remember_promoted(self, names, now=None):
+        """Record when each freshly linked name was pinned, and persist."""
+        if not names:
+            return
+        now = time.time() if now is None else now
+        with self.lock:
+            for name in names:
+                self.promoted_at.setdefault(name, now)
+        self.save_promoted()
+
+    def save_promoted(self):
+        self.ensure_dir()
+        with self.lock:
+            snapshot = json.dumps(self.promoted_at)
+        self._write_atomically(self.config.promoted_path, snapshot,
+                               "cannot persist promotion times")
+
+    def load_promoted(self):
+        loaded = self._read_json(self.config.promoted_path)
+        if not isinstance(loaded, dict):
+            return
+        with self.lock:
+            self.promoted_at = {name: value for name, value in loaded.items()
+                                if isinstance(value, (int, float))
+                                and not isinstance(value, bool)}
+
+    def promotion_time(self, path, mtime):
+        """When we pinned this file, falling back to its mtime when we have no record.
+
+        The fallback is the pre-sidecar behaviour and it errs EARLY (an old log
+        promoted today looks old), which is the safe direction for a size-pressured
+        directory -- but it is why the sidecar is written on every pass rather than
+        only on the first.
+        """
+        with self.lock:
+            recorded = self.promoted_at.get(os.path.basename(path))
+        return recorded if isinstance(recorded, (int, float)) else mtime
+
+    # ------------------------------------------------------------------ io helpers
+
+    @staticmethod
+    def _read_json(path):
+        try:
+            with open(path) as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _write_atomically(path, payload, complaint):
+        temporary = path + ".tmp"
+        try:
+            with open(temporary, "w") as handle:
+                handle.write(payload)
+            os.replace(temporary, path)
+        except OSError as error:
+            log("WARN %s: %s" % (complaint, error))
 
     # ------------------------------------------------------------------ boot / shutdown
 
@@ -528,6 +686,7 @@ class Promoter(object):
         """
         self.ensure_dir()
         self.load_pending()
+        self.load_promoted()
         clean = os.path.isfile(self.config.marker_path)
         self.started_clean = clean
         if clean:
@@ -578,6 +737,15 @@ class Promoter(object):
     def sweep(self, now=None):
         """AD-19: age first, then oldest-first until under the size guard.
 
+        Age is measured from the PROMOTION, not from `st_mtime`. A hardlink shares
+        the source inode, so a promoted file's mtime is the log's last-write time:
+        log4j2 keeps rolled files for 7 days, so the older of the "newest two" can
+        already be ~7 days old when it is pinned, and sweeping on mtime would have
+        given it `EVIDENCE_MAX_AGE_DAYS - age_at_promotion` -- an effective ~7 days
+        against an advertised 14. `.promoted.json` is what makes the advertised
+        number the real one; a file with no record falls back to its mtime, which
+        errs early rather than late.
+
         Sizes are `st_size`, so a promoted file that is still live is counted in
         full even though its blocks are shared with the original. That
         over-estimates, which is the safe direction for a guard whose job is to
@@ -589,20 +757,23 @@ class Promoter(object):
         files = self.evidence_files()
         keep = []
         for mtime, size, path in files:
-            if mtime <= cutoff:
+            if self.promotion_time(path, mtime) <= cutoff:
                 if self._unlink(path):
                     removed.append(os.path.basename(path))
                     freed += size
             else:
-                keep.append((mtime, size, path))
+                keep.append((self.promotion_time(path, mtime), size, path))
+        keep.sort()  # oldest PROMOTION first, which is the order the size guard evicts in
 
         total = sum(size for _, size, _ in keep)
         while total > self.config.max_bytes and keep:
-            mtime, size, path = keep.pop(0)
+            _, size, path = keep.pop(0)
             if self._unlink(path):
                 removed.append(os.path.basename(path))
                 freed += size
             total -= size
+
+        self.forget_promoted(keep)
 
         self.last_sweep = {
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
@@ -614,6 +785,16 @@ class Promoter(object):
         if removed:
             log("sweep removed %d file(s) (%d bytes): %s" % (len(removed), freed, removed))
         return self.last_sweep
+
+    def forget_promoted(self, keep):
+        """Drop sidecar records for files that no longer exist, so it cannot grow."""
+        surviving = {os.path.basename(path) for _, _, path in keep}
+        with self.lock:
+            stale = [name for name in self.promoted_at if name not in surviving]
+            for name in stale:
+                self.promoted_at.pop(name, None)
+        if stale:
+            self.save_promoted()
 
     @staticmethod
     def _unlink(path):
@@ -642,10 +823,21 @@ class Promoter(object):
             "evidenceFiles": len(files),
             "evidenceBytes": sum(size for _, size, _ in files),
             "pending": pending,
+            "pendingCap": MAX_PENDING,
+            "pendingEvicted": self.evicted_pending,
+            # The timer thread runs passes 2 and 3 AND the hourly sweep. If it is
+            # dead, HTTP still answers 200 and /health still looks fine, so the one
+            # symptom used to be `deferredInSeconds` drifting ever more negative --
+            # which nothing alerts on. Report it directly.
+            "schedulerAlive": self.scheduler_alive(),
             "lastPromotion": last,
             "lastSweep": self.last_sweep,
         })
         return summary
+
+    def scheduler_alive(self):
+        thread = self.scheduler_thread
+        return None if thread is None else thread.is_alive()
 
 
 def _remaining(deadline):
@@ -743,15 +935,26 @@ def serve(promoter):
 
 
 def scheduler(promoter, stop):
-    """One thread, deadline-driven. Wakes early when a webhook arms a new pass."""
+    """One thread, deadline-driven. Wakes early when a webhook arms a new pass.
+
+    EVERYTHING that can raise is inside the guard, including the deadline
+    computation. It used to sit one line below the try/except, so a `.pending.json`
+    carrying a non-numeric deadline raised TypeError out of min(), killed this
+    daemon thread, and left the process serving HTTP and answering 200 while
+    passes 2 and 3 and the hourly sweep never ran again for any incident -- i.e.
+    logs/evidence/ growing without bound, AD-19's exact failure mode, on the box
+    that already died of a full disk.
+    """
     while not stop.is_set():
+        timeout = 30.0
         try:
             promoter.tick()
+            timeout = max(1.0, min(30.0, promoter.next_deadline() - time.time()))
         except Exception as error:  # noqa: BLE001 - a bad pass must not kill the timer
             log("ERROR scheduled pass failed: %s: %s" % (type(error).__name__, error))
-        timeout = max(1.0, min(30.0, promoter.next_deadline() - time.time()))
         promoter.wake.wait(timeout)
         promoter.wake.clear()
+    log("scheduler stopped")
 
 
 def main():
@@ -760,7 +963,10 @@ def main():
     server = serve(promoter)
 
     stop = threading.Event()
-    threading.Thread(target=scheduler, args=(promoter, stop), daemon=True).start()
+    timer = threading.Thread(target=scheduler, args=(promoter, stop),
+                             name="scheduler", daemon=True)
+    promoter.scheduler_thread = timer
+    timer.start()
 
     def terminate(signum, frame):  # noqa: ARG001 - signal handler signature
         log("received signal %s - shutting down" % signum)

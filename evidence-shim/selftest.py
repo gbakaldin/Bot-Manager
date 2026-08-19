@@ -605,6 +605,157 @@ def test_evidence_dir_is_a_subdirectory_of_the_logs_mount():
         box.stop()
 
 
+def test_a_poisoned_pending_file_cannot_kill_the_scheduler():
+    print("corrupt .pending.json -> entries dropped, the timer thread survives")
+    # The regression: next_deadline() sat one line OUTSIDE the scheduler's
+    # try/except and did min() over whatever load_pending() had accepted, which was
+    # any dict with a truthy liveName. A hand-edit on the box, or a file written by
+    # a newer shim and read by a rolled-back one, raised TypeError, killed the
+    # daemon thread, and left the process answering 200 forever while passes 2/3
+    # and the hourly sweep never ran again -- logs/evidence/ then grows without
+    # bound, AD-19's exact failure mode.
+    box = LogDir()
+    try:
+        standard_files(box)
+        box.promoter.ensure_dir()
+        with open(box.config.pending_path, "w") as handle:
+            json.dump({
+                "poisoned": {"liveName": "console-live-poisoned.log",
+                             "deferredAt": "not-a-number", "tailAt": None},
+                "nan": {"liveName": "console-live-nan.log",
+                        "deferredAt": float("nan"), "tailAt": None},
+                "boolean": {"liveName": "console-live-bool.log",
+                            "deferredAt": True, "tailAt": None},
+                "spent": {"liveName": "console-live-spent.log",
+                          "deferredAt": None, "tailAt": None},
+                "good": {"liveName": "console-live-good.log",
+                         "deferredAt": time.time() + 300, "tailAt": None},
+            }, handle)
+
+        restarted = shim.Promoter(box.config)
+        restarted.load_pending()
+        equal(sorted(restarted.pending), ["good"],
+              "only the entry with a usable deadline is restored")
+
+        deadline = restarted.next_deadline()
+        check(isinstance(deadline, float), "next_deadline() returns a number, never raises")
+
+        # And the second line of defence: even if something unusable reaches the
+        # dict directly, tick() must degrade to "run it now", not raise.
+        restarted.pending["smuggled"] = {"liveName": "console-live-smuggled.log",
+                                         "deferredAt": "still-not-a-number", "tailAt": None}
+        due = restarted.tick()
+        check(any(entry[0] == "smuggled" for entry in due),
+              "an unusable deadline is treated as due, not as an exception")
+        check(isinstance(restarted.next_deadline(), float),
+              "and the deadline computation is still total afterwards")
+    finally:
+        box.stop()
+
+
+def test_pending_is_capped():
+    print("pending incidents -> bounded, oldest key evicted first")
+    box = LogDir()
+    try:
+        standard_files(box)
+        for index in range(shim.MAX_PENDING + 5):
+            box.promoter.record("alertname=Flood,gameId=%d" % index)
+
+        equal(len(box.promoter.pending), shim.MAX_PENDING,
+              "the dict cannot grow without bound on a label explosion")
+        equal(box.promoter.evicted_pending, 5, "and the evictions are counted for /health")
+        check("alertname=Flood,gameId=0" not in box.promoter.pending,
+              "the OLDEST incident is the one dropped")
+        check("alertname=Flood,gameId=%d" % (shim.MAX_PENDING + 4) in box.promoter.pending,
+              "the newest is kept")
+    finally:
+        box.stop()
+
+
+def test_age_is_measured_from_the_promotion_not_the_log_mtime():
+    print("sweep age -> measured from PROMOTION, so 14 days means 14 days")
+    # A hardlink shares the source inode, so a promoted file's mtime is the LOG's
+    # last-write time. log4j2 keeps rolled files for 7 d, so the older of the
+    # "newest two" can already be days old at promotion; sweeping on mtime gave it
+    # `EVIDENCE_MAX_AGE_DAYS - age_at_promotion` rather than the advertised value.
+    box = LogDir(EVIDENCE_MAX_AGE_DAYS="14")
+    try:
+        box.write("console-2026-08-13-00.log", "six days old\n", age_seconds=6 * 86400)
+        box.write("console.log", "live\n", age_seconds=0)
+        box.promoter.record("alertname=Test")
+        equal(len(box.evidence()), 2, "both are pinned")
+
+        # 10 days after the promotion: on mtime the rolled file reads 16 days old
+        # and would be swept, four days early.
+        box.promoter.sweep(now=time.time() + 10 * 86400)
+        equal(len(box.evidence()), 2,
+              "still held at promotion+10d, even though its mtime says 16 d")
+
+        box.promoter.sweep(now=time.time() + 15 * 86400)
+        equal(box.evidence(), [], "and released at promotion+15d")
+    finally:
+        box.stop()
+
+
+def test_promotion_times_are_persisted_and_pruned():
+    print(".promoted.json -> survives a restart, and never outgrows the directory")
+    box = LogDir()
+    try:
+        standard_files(box)
+        box.promoter.record("alertname=Test")
+        check(os.path.isfile(box.config.promoted_path), "the sidecar is on disk")
+
+        restarted = shim.Promoter(box.config)
+        restarted.load_promoted()
+        equal(sorted(restarted.promoted_at), sorted(box.promoter.promoted_at),
+              "and is restored, so a shim restart does not reset every file's age")
+
+        # Ageing everything out must also drop the records, or the sidecar becomes
+        # the unbounded thing.
+        box.config.max_age_days = 0
+        box.promoter.sweep()
+        equal(box.evidence(), [], "the directory is empty")
+        equal(box.promoter.promoted_at, {}, "and so is the sidecar")
+    finally:
+        box.stop()
+
+
+def test_health_reports_whether_the_scheduler_is_alive():
+    print("GET /health -> schedulerAlive, so a dead timer is visible not inferred")
+    box = LogDir()
+    try:
+        standard_files(box)
+        server, url = start_shim(box)
+        try:
+            _, body = get(url)
+            equal(body["schedulerAlive"], None,
+                  "no timer thread wired in this harness yet - reported honestly as null")
+            equal(body["pendingCap"], shim.MAX_PENDING, "the cap is published")
+            equal(body["pendingEvicted"], 0, "and so is the eviction count")
+
+            stop = threading.Event()
+            timer = threading.Thread(target=shim.scheduler, args=(box.promoter, stop),
+                                     name="scheduler", daemon=True)
+            box.promoter.scheduler_thread = timer
+            timer.start()
+            try:
+                _, body = get(url)
+                equal(body["schedulerAlive"], True, "a running timer reports alive")
+            finally:
+                stop.set()
+                box.promoter.wake.set()
+                timer.join(timeout=5)
+
+            _, body = get(url)
+            equal(body["schedulerAlive"], False,
+                  "and a stopped one reports dead, which is what nothing could see before")
+        finally:
+            server.shutdown()
+            server.server_close()
+    finally:
+        box.stop()
+
+
 def main():
     for test in (test_promotion_is_a_hardlink_not_a_copy,
                  test_selection_is_newest_two_plus_live,
@@ -619,6 +770,11 @@ def main():
                  test_unclean_start_retro_promotes,
                  test_clean_shutdown_marker_suppresses_the_boot_promotion,
                  test_pending_passes_survive_a_restart,
+                 test_a_poisoned_pending_file_cannot_kill_the_scheduler,
+                 test_pending_is_capped,
+                 test_age_is_measured_from_the_promotion_not_the_log_mtime,
+                 test_promotion_times_are_persisted_and_pruned,
+                 test_health_reports_whether_the_scheduler_is_alive,
                  test_webhook_promotes_over_http,
                  test_resolved_payload_promotes_nothing,
                  test_malformed_input_still_promotes,

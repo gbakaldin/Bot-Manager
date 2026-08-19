@@ -275,8 +275,11 @@ services:
     environment:
       # evidence/ escapes both sweepers, so it needs its own or the fix for unbounded
       # growth is itself unbounded growth (AD-19). Age first, then oldest-first under
-      # the byte guard. EVIDENCE_MAX_AGE_DAYS=0 means "sweep everything" — that is how
-      # verification step P3-10 exercises the guard, not a way to disable it.
+      # the byte guard. Age is measured from the PROMOTION (logs/evidence/.promoted.json),
+      # not from the file's mtime — a hardlink shares the source inode, so mtime is the
+      # log's last-write time and would silently shorten this to ~7 d. And
+      # EVIDENCE_MAX_AGE_DAYS=0 means "sweep everything" — that is how verification
+      # step P3-10 exercises the guard, not a way to disable it.
       - EVIDENCE_MAX_AGE_DAYS=${EVIDENCE_MAX_AGE_DAYS:-14}
       - EVIDENCE_MAX_BYTES=${EVIDENCE_MAX_BYTES:-5368709120}
       # MUST track appender.rolling.policies.time.interval in logging/log4j2.properties
