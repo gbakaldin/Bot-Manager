@@ -243,6 +243,23 @@ the `drop` stage is committed, documented, and commented out, to be enabled only
 an instance that is provably drowning. *Flagged: this is the one place the agreed
 design is not implemented as written, and the reason is Phase 2.*
 
+**The `720h` is provisional until P0-9 measures it.** Raising `retention_period`
+168 h → 720 h is a **4.3× increase in the retained horizon**, landing in the same
+change as an *unmeasured* volume reduction — the reduction is a projection, and the
+only ingest figure anywhere in this plan is P1-3's 300-second INFO line count on a
+7-group staging fleet, which does not translate to prod Loki bytes. Two properties
+make that combination worse than it looks: Loki's store is the named volume
+`loki-data` (`docker-compose.yml:98`), i.e. the **same root filesystem** whose size
+P0-6 admits is unknown and which ENOSPC'd on 2026-06-30 taking Mongo with it; and a
+720 h horizon does not reach steady state for **30 days**, so if the projection is
+wrong the disk fills a month after the release report closed, with nothing in the
+plan able to fail first. Under the old 168 h it announced itself in a week. So the
+number ships as written — it is a policy choice, not a fitted one — but it is
+explicitly **gated on P0-9**, and the rollback is one line in the bind-mounted
+`loki/loki-config.yaml` (`720h` → `168h`, then `docker compose restart loki`): no
+rebuild, no redeploy, no application change. Do not treat the 720 h as settled
+until P0-9 has run at T+7 d.
+
 **AD-7 — Env-driven level via Spring Boot's `logging.level.*`, with a log4j2 property
 substitution as the fallback.** Try `LOGGING_LEVEL_COM_VINGAME_BOT=INFO` in compose
 first — Spring Boot's `Log4J2LoggingSystem` lists `log4j2.properties` as a standard
@@ -515,8 +532,18 @@ No Java changes. Touches `log4j2.properties`, `loki-config.yaml`,
      `bot_reconnects_total`), escalate above a configurable threshold;
    - `dead/total` crossing half of `bot.group.dead.threshold` while still under it —
      `BotGroupBehaviorService.java:1793-1802`.
-   Each escalation emits **one** INFO line naming the trigger and the expiry. Rate-limit
-   escalation to one per group per 15 min so a flapping group cannot re-arm forever.
+   Each escalation emits **one** INFO line naming the trigger and the expiry. Bound
+   re-arming with a **quiet period measured from the moment the scope expires**, not from
+   the escalation that opened it: a group may not re-arm until
+   `lastEscalation + ttl + cooldown` — 15 min TTL + 45 min cooldown at the shipped
+   defaults. *"One escalation per group per 15 min"* — i.e. one per TTL — **bounds
+   nothing**: when the cooldown equals the TTL the two lapse at the same instant, so a
+   group parked mid-band (`dead/total` inside the escalation band but still under
+   `bot.group.dead.threshold`, so never declared DEAD) re-escalates on the very next 30 s
+   health tick and holds DEBUG open ~96% of the time, unattended, for as long as it stays
+   half-broken. The bound worth stating is a **duty cycle**: an unattended group cannot
+   hold scoped DEBUG for more than `ttl / (ttl + cooldown)` = **25%** of any window,
+   however hard it flaps. See the Amendment at the bottom of this file.
 6. **Fix the unbounded spam.** `…/SlotMachineBot.java:300`: log only on the
    transition into the below-cost state (an `AtomicBoolean`), and log once on the
    transition back out. Today it fires every 3 s indefinitely.
@@ -614,9 +641,14 @@ No Java changes. Touches `log4j2.properties`, `loki-config.yaml`,
   removed; it is the escape hatch. Operators must understand that a global
   `{"configuredLevel":"DEBUG"}` on a 10-env prod instance is now a 5 GB/hour action.
   Say so in `CLAUDE.md`.
-- **Phase 2 escalation must be idempotent and rate-limited.** A flapping group firing
-  watchdog expiries every 3 minutes must not hold DEBUG open indefinitely; the
-  one-escalation-per-group-per-15-min rule in step 5 is what bounds it.
+- **Phase 2 escalation must be idempotent and rate-limited, and the cooldown must run
+  from scope *expiry*.** A flapping group firing watchdog expiries every 3 minutes must
+  not hold DEBUG open indefinitely. "One escalation per group per 15 min" does not
+  achieve that — measured from the escalation, a cooldown equal to the TTL lapses at the
+  same instant the scope does and the group re-arms on the next 30 s health tick. The
+  gate is `lastEscalation + ttl + cooldown` (15 + 45 by default), which makes the bound a
+  **duty cycle** of `ttl / (ttl + cooldown)` = 25%. Assert the duty cycle, not the fact
+  that a re-arm eventually succeeds — "eventually" is true of the broken version too.
 - **The Alertmanager routing trap is real and already bit this repo once** — see the
   comment at `alertmanager/alertmanager.yml:51-58`. A matching child route
   **consumes** the alert; `continue: true` continues to the next **sibling**, never
@@ -651,7 +683,11 @@ No Java changes. Touches `log4j2.properties`, `loki-config.yaml`,
 
 - **Prod/staging disk size is unstated.** Verification P0-6 measures it; if root is
   under ~100 GB, revisit AD-6's 30 d WARN/ERROR retention and the `14d` file age
-  before Phase 1 ships.
+  before Phase 1 ships. P0-6 measures *size*, not *growth* — on its own it cannot tell
+  you whether 720 h fits, because the volume reduction it is being weighed against is
+  a projection. **P0-9 supplies the growth rate and is the actual gate on the 720 h**
+  (see AD-6). Both are pre-ramp and both are still unmeasured; neither can be closed
+  from the diff.
 - **Promtail DEBUG `drop` stage is shipped disabled (AD-6)**, deviating from the
   agreed design because it would blind Phase 2. If the user wants it on for prod
   specifically, that needs promtail `-config.expand-env=true` plus a per-instance
@@ -727,6 +763,25 @@ the host — reach them with `docker compose exec`.
   `curl -s http://localhost:3100/ready` → expect `ready`.
   `curl -s http://localhost:3100/config | grep -A 12 retention_stream` → expect the
   two selectors with `24h` and `720h`.
+- **P0-9 — Loki growth is measured before the 720 h horizon can bind (T+24 h and
+  T+7 d, deferred — PRE-RAMP GATE, pairs with P0-6).** Nothing else in this plan can
+  fail on an over-optimistic volume projection before day 30; this is that step.
+  ```
+  docker system df -v | grep loki-data          # or: du -sb /var/lib/docker/volumes/*loki-data*/_data
+  ```
+  Record the figure at T+24 h and again at T+7 d, and take the **T+7 d minus T+24 h**
+  delta as the daily rate (T+0 to T+24 h is skewed by pre-change data still inside the
+  old 168 h window). Then:
+  - **Project 30 days**: `rate/day × 30`, plus the current size. Compare against
+    `node_filesystem_avail_bytes` from P0-6.
+  - **Gate**: if the 30-day projection exceeds **50%** of available disk, drop
+    `retention_period` back to `168h` (leave the WARN/ERROR `retention_stream` at
+    `720h` — that tier is cheap and is what an incident is reconstructed from) before
+    any ramp. This is a bind-mount edit plus `docker compose restart loki`.
+  - Also confirm the INFO tier is the one dominating: DEBUG/TRACE expire at 24 h, so by
+    T+7 d the store should be overwhelmingly INFO+WARN+ERROR. If DEBUG dominates,
+    scoped DEBUG (Phase 2) or `BOT_LOG_LEVEL` is wrong on that instance, and the
+    retention numbers are not the problem to fix first.
 - **P0-8 — the retention split actually bites (T+25 h, deferred).**
   `curl -sG 'http://localhost:3100/loki/api/v1/query_range' --data-urlencode 'query={job="bot-manager",level="DEBUG"}' --data-urlencode "start=$(date -d '30 hours ago' +%s)000000000" --data-urlencode "end=$(date -d '26 hours ago' +%s)000000000" --data-urlencode 'limit=1'`
   → expect `"result":[]`. The same query with `level=~"WARN|ERROR"` over the same
@@ -805,7 +860,17 @@ the host — reach them with `docker compose exec`.
   → expect one INFO line naming the trigger, the `botGroupId` and the expiry; and
   `curl -s http://localhost:8080/api/v1/logging/debug` → expect that group present.
 - **P2-6 — no escalation storm.** For a group that expired more than one watchdog in
-  15 minutes: the escalation line count for that group over 15 min → expect `≤ 1`.
+  15 minutes: the escalation line count for that group over 15 min → expect `≤ 1`. That
+  still holds, but **on its own it is not discriminating** — it also passes on the
+  defective one-per-TTL cooldown this plan used to describe, which re-armed every ~15 min
+  and would still show `≤ 1` in any 15-minute window. Add the check that actually bounds
+  the duty cycle: over **60 minutes** on a persistently sick group (one parked mid-band,
+  or one flapping watchdogs throughout), the escalation line count for that group →
+  expect `≤ 1`, the re-arm interval being
+  `escalation.minutes + escalation.cooldown-minutes` = 15 + 45. Cross-check by polling
+  `curl -s http://localhost:8080/api/v1/logging/debug` every minute across that hour →
+  expect the group **absent** for at least 45 of the 60 samples (the 25% duty cycle),
+  not present throughout.
 
 ### Phase 3
 
@@ -865,3 +930,67 @@ the host — reach them with `docker compose exec`.
 - **P3-12 — the guard test still passes in the build.**
   `JAVA_HOME=/Users/gleb/Library/Java/JavaVirtualMachines/openjdk-21.0.2/Contents/Home mvn -q -pl bot-app test -Dtest=AlertmanagerRoutingTest`
   → expect `BUILD SUCCESS` (run on the build machine, not the box).
+
+---
+
+## Amendment — 2026-08-19 (Compliance Architect)
+
+Two corrections, both to text that described a defect as the design. Neither changes
+what the branch shipped; both stop the plan asserting something false about it. This
+is in addition to the three amendments landed at `b98ab61` (Drift 1 `blocking`,
+Drift 2 the filter attach point, Drift 3 AD-8's "line per group"), which were
+authorised by the previous compliance pass and are confirmed landed verbatim.
+
+**A1 — Phase 2 step 5's escalation rate limit (also the matching Implementation Note,
+and verification P2-6).**
+
+*What the plan said:* "Rate-limit escalation to one per group per 15 min so a flapping
+group cannot re-arm forever."
+
+*Why it is wrong:* the stated rule does not produce the stated property. One
+escalation per 15 min **is** one per TTL, and the TTL is what the escalation grants.
+With `escalation.minutes` and `escalation.cooldown-minutes` both 15 — which is what
+"one per 15 min" specifies, and what shipped first — the cooldown lapses at the same
+instant the scope does. A group parked mid-band (`dead/total` inside the escalation
+band but under `bot.group.dead.threshold`, so never declared DEAD and never
+self-clearing) therefore re-escalates on the very next 30 s health tick, indefinitely
+and unattended: a ~96% duty cycle. Combined with `max-scopes=50` that is scoped DEBUG
+quietly reassembling the fleet-wide DEBUG this feature exists to prevent, on the box
+that ENOSPC'd on 2026-06-30. The rule as written is not merely weak, it is
+self-defeating: the tighter you set the cooldown to match the TTL, the closer the duty
+cycle gets to 100%.
+
+*What it now says:* the quiet period is measured from **scope expiry**, so the re-arm
+gate is `lastEscalation + ttl + cooldown` and the property to state is a **duty
+cycle**, `ttl / (ttl + cooldown)` = 25% at the shipped 15 + 45 defaults. P2-6 is
+extended because its `≤ 1 per 15 min` assertion, while still true, **also passed on
+the defective version** and so proved nothing; a 60-minute window and a duty-cycle
+poll are what discriminate. This matches what the branch implements
+(`ScopedDebugEscalator.reArmIntervalMillis()`, `cooldown-minutes` default 45) — the
+code was already correct and Dev correctly declined to amend the plan unilaterally.
+
+**A2 — AD-6's `720h`: staged behind a new measurement gate (P0-9), not settled.**
+
+*What was missing:* the plan raises `limits_config.retention_period` 168 h → 720 h in
+the same change as a volume reduction that is **projected, not measured**, and no
+verification step measures Loki ingest or growth. P0-6 records disk *size*; P0-8
+proves only that the DEBUG/WARN split bites at T+25 h. Neither can fail on an
+over-optimistic projection.
+
+*Why that matters here specifically:* Loki's store is the named volume `loki-data`
+(`docker-compose.yml:98`) on the same root filesystem P0-6 admits is of unknown size,
+and which filled on 2026-06-30 and took Mongo down with it. A 4.3× longer horizon does
+not reach steady state for **30 days**, so the failure would land a month after the
+release report closed — whereas under 168 h it announced itself within a week. An
+unmeasured retention increase whose failure mode is deferred past the point anyone is
+still watching is exactly the shape of the incident this plan is a response to.
+
+*What is added:* verification **P0-9** (T+24 h and T+7 d, pre-ramp, paired with P0-6):
+measure the `loki-data` volume, take the T+7 d − T+24 h delta as the daily rate,
+project 30 days against `node_filesystem_avail_bytes`, and if the projection exceeds
+50% of available disk drop `retention_period` back to `168h` while leaving the
+WARN/ERROR `retention_stream` at `720h`. AD-6 and the Open Item now say the 720 h is
+provisional pending P0-9 and name the rollback, which is one line in the bind-mounted
+`loki/loki-config.yaml` plus `docker compose restart loki` — no rebuild, no
+application change. **The shipped config is unchanged**; this closes a hole in the
+Verification section, it does not ask for different code.
