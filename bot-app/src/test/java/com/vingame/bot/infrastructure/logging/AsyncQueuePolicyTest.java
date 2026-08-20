@@ -248,6 +248,14 @@ class AsyncQueuePolicyTest {
                             + "keeps the default true — a partial trailing buffer is "
                             + "acceptable for a forensic tier and not for the alerting one")
                     .isEqualTo("false");
+            assertThat(p.getProperty("appender.detail.bufferSize"))
+                    .as("immediateFlush = false makes the exposure THE LAST <= bufferSize BYTES, "
+                            + "not 'the last few ms' — and how much time that spans is inversely "
+                            + "proportional to the log rate, so a JVM in a death spiral loses "
+                            + "minutes of exactly the lines the shim's AD-21 boot promotion is "
+                            + "about to pin. Declared rather than inherited so the bound is a "
+                            + "decision somebody made and can be found")
+                    .isEqualTo("8192");
         }
     }
 

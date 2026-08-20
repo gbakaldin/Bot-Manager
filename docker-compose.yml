@@ -311,20 +311,27 @@ services:
       - EVIDENCE_MAX_AGE_DAYS=${EVIDENCE_MAX_AGE_DAYS:-14}
       # Track 2 (logs/detail/) gets its OWN, much shorter age (LOG_VOLUME_TIERING
       # Phase 4 / AD-28). Two independent reasons: a pinned 2 h detail file is
-      # 3.4-5.1 GB at 20-30k bots against a few MB for the aggregate it
-      # accompanies, and the ws-parser library logs agency-token material at INFO,
-      # which after Phase 4 exists ONLY in this track (AD-30) -- 3 days of token
-      # material behind an incident is a defensible trade for the forensics, 14 is
-      # not. The shim reads logs/detail/ by default; EVIDENCE_DETAIL_DIR overrides
-      # it, and /health reports which directory it resolved and whether it exists.
+      # ~1.5-2.3 GB at 20-30k bots (plan Amendment B1's corrected rate) against a
+      # few MB for the aggregate it accompanies, and the ws-parser library logs
+      # agency-token material at INFO, which after Phase 4 is the only place NEW
+      # such material is written (AD-30 -- note lines already in Loki persist under
+      # its 720 h horizon; see the plan's Phase 4b pre-deploy steps). 3 days of
+      # token material behind an incident is a defensible trade for the forensics,
+      # 14 is not. The shim reads logs/detail/ by default; EVIDENCE_DETAIL_DIR
+      # overrides it, and /health reports which directory it resolved and whether
+      # it exists.
       - EVIDENCE_DETAIL_MAX_AGE_DAYS=${EVIDENCE_DETAIL_MAX_AGE_DAYS:-3}
       # 5 GB -> 12 GB with Phase 4: the old cap could not hold ONE incident's
       # detail payload at 20k bots. Under the guard, detail files are evicted
       # before aggregate files regardless of promotion time, then oldest-promotion
       # first within each class -- shedding the large, cheap-to-lose bytes rather
-      # than discarding an old incident's 7 MB timeline for a new one's 3 GB
-      # payload. At 30k bots one incident can still exceed this and partially
-      # evict its own oldest detail file; that is the P4-6 pre-ramp gate's job.
+      # than discarding an old incident's 7 MB timeline for a new one's payload.
+      # The guard counts INODES, not directory entries: every incident leaves one
+      # inode per track under two names (pass 1 pins the live file, pass 3 pins the
+      # same inode once it has rolled), and unlinking one name of a pair frees no
+      # blocks at all. If one incident ever does exceed this cap it evicts its own
+      # OLDEST detail file first, never the post-incident tail; that is the P4-6
+      # pre-ramp gate's job to prevent.
       - EVIDENCE_MAX_BYTES=${EVIDENCE_MAX_BYTES:-12884901888}
       # MUST track appender.rolling.policies.time.interval in logging/log4j2.properties
       # (2 h since Phase 0 / AD-20). The third promotion pass runs at the next rollover
