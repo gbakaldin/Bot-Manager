@@ -29,6 +29,13 @@ What is covered here:
     Phase 0 rather than a hardcoded hour;
   * the sweep (AD-19): age-based, then oldest-first under the size guard, never
     touching the dotfiles that hold this process's own state;
+  * BOTH TRACKS (Phase 4, AD-28): newest-two-plus-live selection run per track; a
+    missing /logs/detail being a silent no-op, logged errors included, so 4c is
+    safe to ship before 4a; the two sweep ages being independent; detail-first
+    eviction under the byte guard, proved with the aggregate as the OLDER file so
+    a promotion-time-only eviction would fail it; and a pre-Phase-4
+    `.pending.json` with a single `liveName` still loading rather than losing its
+    incident's scheduled passes;
   * unclean start retro-promotion and the clean-shutdown marker (AD-21), both
     directions;
   * pending deadlines surviving a restart of the process;
@@ -47,6 +54,7 @@ Run by the Maven build via bot-app's EvidenceShimSelfTestRunnerTest, so a change
 to shim.py that breaks evidence retention fails the same build as a Java change.
 """
 
+import io
 import json
 import os
 import shutil
@@ -274,12 +282,26 @@ def test_a_missing_detail_directory_is_a_no_op():
     try:
         standard_files(box)
         check(not os.path.isdir(box.config.detail_dir), "the detail directory is absent")
-        equal(box.promoter.candidates(box.config.tracks()[1]), [],
-              "the detail track simply yields nothing")
 
-        result = box.promoter.record("alertname=Test")
+        # "Says nothing" is half the claim and it is NOT covered by result["errors"]:
+        # candidates() reports an unlistable directory through shim.log(), which writes
+        # to stderr and never reaches the returned structure. Drop the isdir() guard in
+        # candidates() and every assertion below still passes while the shim logs
+        # `ERROR cannot list /logs/detail` on every pass, forever, on exactly the hosts
+        # 4c was made safe for. So the stream is captured and asserted too.
+        noise = io.StringIO()
+        stderr, sys.stderr = sys.stderr, noise
+        try:
+            equal(box.promoter.candidates(box.config.tracks()[1]), [],
+                  "the detail track simply yields nothing")
+            result = box.promoter.record("alertname=Test")
+        finally:
+            sys.stderr = stderr
+
         equal(len(result["linked"]), 2, "the aggregate track is promoted as before")
         equal(result["errors"], [], "and nothing is reported as an error")
+        check("ERROR" not in noise.getvalue(),
+              "and nothing is LOGGED as an error either (got %r)" % noise.getvalue())
         check(not os.path.isdir(box.config.detail_dir),
               "the shim does not manufacture the directory log4j2 owns")
 
@@ -388,7 +410,15 @@ def test_deferred_and_tail_passes_fire_at_their_deadlines():
     box = LogDir()
     try:
         standard_files(box)
-        now = time.time()
+        # Anchor the incident just AFTER a rollover boundary rather than at wall-clock
+        # `now`. The two deadlines are 300 s and (next boundary + 120 s) away, so with a
+        # wall clock this case fails for the ~181 s before every even hour: the
+        # `tick(now + 301)` below straddles the boundary, BOTH passes come due at once and
+        # "the +5 min pass runs" reads ['deferred', 'tail']. That is ~2.5% of all
+        # wall-clock time — a red build on the hour, for reasons that have nothing to do
+        # with the change being tested. Every deadline below is relative to this `now`, so
+        # nothing else about the case changes.
+        now = shim.next_rollover(time.time(), 2.0) + 1.0
         box.promoter.record("alertname=Test", now=now)
         entry = box.promoter.pending["alertname=Test"]
         equal(round(entry["deferredAt"] - now), 300, "pass 2 is armed at +5 min")
