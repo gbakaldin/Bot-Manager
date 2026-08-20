@@ -292,3 +292,354 @@ neither invalidates any part of the diff.
   mounted file's header — but new.
 - `BOT_LOG_LEVEL` must be set to `DEBUG` in staging's `secrets.env`/`.env`, or staging loses
   its default-visible per-bot detail.
+
+---
+---
+
+# Compliance — LOG_VOLUME_TIERING **Phase 4**
+
+*Second compliance pass, 2026-08-20. Phases 0–3 were ruled on above (PLAN_AMENDED) and are
+not re-litigated here.*
+
+Branch: `feature/log-volume-tiering` (HEAD `68cc9dd`)
+Plan reviewed: `docs/plans/LOG_VOLUME_TIERING.md`, Phase 4 as landed at `68cc9dd`
+(amended again by this pass)
+Diff reviewed: `git diff 5350b12..68cc9dd` — `a268929` (4a), `e97dcb2` (4b), `118a10b` (4c),
+`68cc9dd` (docs). 17 files, +3,410/−124.
+
+Build: `mvn -o -pl bot-app test` on JDK 21 for the logging suites — **BUILD SUCCESS**,
+61 tests, 0 failures.
+`deploy.sh` untouched by all four commits (`git log 5350b12..68cc9dd --name-only -- deploy.sh`
+is empty). The staged `TaiXiuMessages/*.js` deletions were left exactly as found.
+
+## Verdict
+
+**PLAN_AMENDED**
+
+The diff implements Phase 4 faithfully. Every one of AD-22…AD-32 is present in the tree,
+each of the four guard-test extensions is anti-vacuous (verified by mutation — see below),
+and the resulting configuration does achieve the stated goal: what reaches Loki is now only
+the aggregate tier.
+
+I amended the plan for five things, none of which asks for different code. Four are
+corrections to text that asserts something false about the system — most importantly a
+**~2.2× arithmetic error** in Phase 4's central measurement, which is wrong in the safe
+direction but would have made a *correct* P4-6 reading look like a misroute. The fifth
+rules in **Dev's favour** on the one deliberate deviation. Details in
+**Amendments to the plan (Phase 4)**.
+
+## Phase-by-phase
+
+### Phase 4a — The two-track appender split (`a268929`)
+Status: **implemented** (one deliberate deviation on step 2 — Dev is right, plan amended)
+
+- **Step 1a–1f, both shipped twins.** `logging/log4j2.properties` and
+  `bot-app/src/main/resources/log4j2.properties` carry the detail appenderRef on
+  `rootLogger` and `logger.app`, the `logger.wsparser` block, the `AsyncRolling`
+  `ThresholdFilter`, the full `appender.detail.*` / `appender.asyncdetail.*` pair, and
+  `Delete` `age` `7d → 14d`. Confirmed **byte-identical below the header fence** by direct
+  comparison as well as by `Log4j2TwinConfigTest`. Both `.type = AppenderRef` lines present.
+  The `blocking = false` inline comment required by 1f is there, in a boxed banner.
+- **Step 2, the test copy — deviated, correctly.** See Drift/ruling below.
+- **Step 3, compose.** `LOGGING_LEVEL_COM_VINGAME_WEBSOCKETPARSER=${WSPARSER_LOG_LEVEL:-INFO}`
+  present with the AD-32 comment; `WSPARSER_LOG_LEVEL` added to `secrets.env.example`.
+- **Step 4, guard tests.** All four extended as specified, including the sub-clauses that are
+  easy to skip: `AsyncQueuePolicyTest` asserts `logger.wsparser` has **no** console and **no**
+  `async` appenderRef (not merely that it has `detail`), asserts track 1 keeps
+  `JsonTemplateLayout` (`:303`), and carries the AD-25(4) reasoning inside the assertion
+  message as instructed; `Log4j2TestConfigShapeTest` adds all fourteen new graph keys to
+  `SHAPE_KEYS`; `EvidenceRetentionEscapeTest` adds the track-2 `Delete` anchoring, the
+  subdirectory assertion and the **interval-equality** assertion; `LoggingComposeWiringTest`
+  pins the new variable and its `INFO` default.
+- **Step 5, `CLAUDE.md`.** Two-track table, the AD-24 three-grep operator path, the
+  `blocking = false` warning, the "DEBUG signals are file-visible, not Grafana-visible"
+  correction, and the stale REST row fixed — Dev went further and corrected the whole
+  `BotGroupController` table; I checked it against the controller's thirteen mappings and it
+  is now accurate.
+
+**Anti-vacuity verified by mutation.** I restored the pre-Phase-4
+`logging/log4j2.properties`, `bot-app/src/main/resources/log4j2.properties`,
+`promtail-config.yml`, `docker-compose.yml` and `evidence-shim/shim.py` into the working
+tree and re-ran the five suites: **13 failures across all five classes**
+(`AsyncQueuePolicyTest` 4, `EvidenceRetentionEscapeTest` 4, `Log4j2TestConfigShapeTest` 3,
+`LoggingComposeWiringTest` 1, `LogRetentionPipelineTest` 1), then restored with
+`git checkout HEAD --`. Step 4's "each must fail on the pre-4a tree" is satisfied for all
+of them, not just asserted.
+
+### Phase 4b — promtail positions volume + Loki comments (`e97dcb2`)
+Status: **implemented**
+
+`positions.filename: /promtail-positions/positions.yaml` with the Finding 2 comment; the
+`promtail-positions` named volume declared and mounted on promtail only; `loki-config.yaml`
+comments-only with **no value changed** (verified — the diff is +23 lines, all comment);
+`LogRetentionPipelineTest.promtailPositionsSurviveARestart` pins the path **and** the mount
+together and fails on `/tmp/positions.yaml`, as step 4 required.
+
+### Phase 4c — The evidence shim promotes both tracks (`118a10b`)
+Status: **implemented**
+
+All eight sub-steps land. The three that were easiest to get wrong are right:
+- **4c.2's "a missing detail directory returns `[]`".** `candidates()` distinguishes
+  "directory absent" (silent `[]`) from "directory present but unlistable" (logged error),
+  so 4c really is safe to ship before 4a — and `test_a_missing_detail_directory_is_a_no_op`
+  additionally asserts the shim does **not** create the directory.
+- **4c.3's `load_pending` back-compat.** `_sane_entry` accepts the legacy single-`liveName`
+  string, maps it to the aggregate track, and *generates* the missing detail name the same
+  way `record()` would rather than falling back to the reused source name — which would have
+  pinned the wrong inode after a rollover.
+- **4c.4's ordering.** The sweep partitions on the `detail` filename prefix, applies the two
+  ages independently, and drains **all** detail candidates before touching any aggregate;
+  `st_size` over-estimation and the `.promoted.json` promotion-time basis are untouched, as
+  instructed.
+
+`summary()` reports `detailDir`, `detailDirPresent`, `evidenceByTrack` and
+`sourceFilesByTrack` — which is what makes P4-9's "zero means the shim is not seeing
+`logs/detail/`" answerable. `selftest.py` gains all five required cases, and
+`EvidenceRetentionEscapeTest.theShimsDetailDirectoryMatchesLog4j2s` couples the shim's
+`DETAIL` constant to `appender.detail.fileName`'s leaf.
+
+## AD-22 … AD-32: does the configuration achieve the goal?
+
+Each AD is present in the tree, and the containment chain is closed rather than merely
+plausible. The claim "only the aggregate tier reaches Loki" rests on four independent
+mechanisms, all of which I verified:
+
+1. **AD-23** — `logger.wsparser` with `additivity = false` and a single `AsyncDetail` ref
+   removes the library from the console and from track 1 at the source. Name spelled
+   exactly `com.vingame.websocketparser`, asserted in all three copies.
+2. **AD-24** — the `ThresholdFilter` sits on `AsyncRolling`, and I confirmed against
+   log4j-core 2.24.1 that this is effective *and* cheap:
+   `AppenderControl.callAppender0` (`:130-135`) calls `isFilteredByAppender(event)` **before**
+   `tryCallAppender`, so the DEBUG event is rejected before `AsyncAppender.append` offers it
+   to the 8,192-entry queue. This is also why Phase 2's `Configuration`-level `ACCEPT` cannot
+   defeat it: that beats the *level* check, not an appender filter.
+3. **AD-25(1)** — track 2 is one level below promtail's non-recursive `__path__`, guarded by
+   two tests.
+4. **AD-27** — root stays on the console and track 1, which is a deliberate, bounded
+   widening (Spring startup + third-party WARN/ERROR), and P4-4's per-logger histogram is the
+   named catch for a future chatty third-party INFO logger.
+
+**AD-25(4) is not a regression of the Phase 0 defect — verified against the sources**, since
+that was the specific risk. `AsyncAppender.start()` (`:124`) assigns
+`AsyncQueueFullPolicyFactory.create()`, which reads `log4j2.AsyncQueueFullPolicy` /
+`log4j2.DiscardThreshold` from `PropertiesUtil.getProperties()` and nothing else; the
+`AsyncAppender` builder exposes `blocking`, `bufferSize`, `includeLocation`,
+`shutdownTimeout`, `errorRef`, `ignoreExceptions`, `blockingQueueFactory` — and **no** policy
+or threshold attribute. So the discard threshold is genuinely JVM-wide and cannot
+discriminate between two `AsyncAppender`s, exactly as AD-25(4) states.
+`DiscardingAsyncQueueFullPolicy.getRoute` (`:48-61`) discards only levels *less specific
+than* the threshold, so a track-2 INFO event on a full queue under `blocking = true` would
+take `EventRoute.ENQUEUE` — a blocking put on the calling bot thread. Both halves of
+AD-25(4)'s justification hold. **Ruling: correct, not a regression.**
+
+**AD-29** — no value in `loki-config.yaml` changed; the `{level=~"DEBUG|TRACE"}` selector is
+documented in-file as a tripwire. **AD-30/AD-31/AD-32** — all present as specified.
+
+## The arithmetic of Phase 4's motivation — **does not check out**
+
+Checked against `release.md` rather than against the plan's prose, as asked. **The 98.7%
+share is right; the line *rate* built on it is ~2.2× too high.**
+
+`release.md:417-443` reports two different windows in adjacent paragraphs: the P1-3 delta is
+**2,022 INFO lines over 300 s**, and the per-logger table beneath it is "**Post-deploy** INFO
+lines by logger", closed by the prose "**59 lines over ~11 minutes**". Phase 4's Findings
+table relabels 3,385 / 1,000 / 4,402 / 59 as "lines / **300 s**" — while the 4,775 DEBUG
+figure in the same column genuinely *is* per 300 s, which is how the two windows got merged.
+
+The original is falsified directly by the release's own numbers: if ws-parser alone had
+emitted 4,402 lines in 300 s, the total INFO delta over that window could not have been
+2,022. Two independent derivations of the true rate agree to within 1%:
+`(3,385 + 1,000) / 660 s = 6.64 lines/s`, and `2,022 × (4,402/4,461) / 300 s = 6.65 lines/s`.
+Per bot: **0.0429**, not 0.0947.
+
+Everything downstream is therefore ~2.2× pessimistic — AD-26's whole table, AD-25(4)'s
+"1,893 lines/s", AD-28's "3.4–5.1 GB per pinned file" and the Goal's 6.5/65/98 GB/day. **All
+of it errs in the safe direction and no shipped value changes**, because both of track 2's
+caps are absolute — AD-26 says this itself ("the design does not depend on this estimate").
+Corrected, coverage is *better* than promised (~12 h to 20k bots, ~8.6 h at 30k, against the
+claimed 5.9/3.9 h) and AD-28's worst-case pin (~4.6 GB at 20k, ~6.9 GB at 30k) sits **inside**
+the 12 GB evidence cap at both scales rather than exceeding it.
+
+The one real consequence is operational and I amended it: **P4-6 told the releaser to expect
+`R ≈ 3,700 B/s`**, when a correctly-working staging box will read ~5,000–6,000 B/s (the
+`du` covers our own DEBUG too) and a prod-like box ~1,650 B/s. A releaser comparing a correct
+measurement against that figure could reasonably diagnose a misroute. P4-2's `> 1000`
+threshold survives on the corrected rate (~2,000 in 300 s), so no verification step actually
+breaks.
+
+Since the plan's motivating claim — "98.7% of INFO volume is the library" — is a **ratio over
+one window**, the window error cancels and Phase 4's justification is untouched.
+
+## Plan self-consistency after eleven new ADs
+
+Re-read top to bottom. **One AD contradicted another, now fixed; no others.**
+
+- **AD-4 vs AD-25(4).** AD-4 states flatly that "INFO+ blocks rather than being lost". That is
+  now true of track 1 only. AD-25(4) names AD-4, but AD-4 had no forward pointer — while AD-5
+  and AD-6 both received one — so a reader arriving at AD-4 first would conclude the shipped
+  `AsyncDetail` was Drift 1 recurring. This is precisely the failure the shipped file comment,
+  the test message and `CLAUDE.md` all try to prevent, and the plan was the one place that did
+  not. Forward note added in place.
+- **AD-14/15/16/19 vs AD-28** — no contradiction: AD-28's own heading reads "AD-14/AD-15/AD-16
+  are extended, not replaced" and it walks each one, so they are discoverable. Left alone.
+- **AD-5 vs AD-27, AD-6 vs AD-24, AD-20 vs AD-22** — each already carries an in-place note or
+  an explicit reaffirmation. Consistent.
+- **AD-8's demotion** vs Phase 4 — the session summaries are DEBUG and therefore land in track
+  2 only. `CLAUDE.md` says so explicitly. Consistent.
+
+### The superseded-step banner — count wrong, one step missing, none wrongly marked
+
+Both banners said **ten**. The Verification banner then listed **twelve**, and the Corrections
+section corrects a **thirteenth** — **P0-9**, absent from the list. Amended to thirteen with
+P0-9 added.
+
+I checked all thirteen individually: each is genuinely superseded. U-3 and P0-5 are corrected
+for reasons *independent* of Phase 4 (a pre-existing 405, and a criterion that never passed),
+which the Corrections entries say themselves — marked, but not mis-marked. And I walked every
+Phase 0–3 step that was **not** marked, to catch a still-live step wrongly banner-marked or a
+broken step wrongly left alone: **P0-3, P1-2, P1-4, P1-5, P1-6, P1-7, P2-5, P2-6** all grep
+`logs/console.log` and all read the **INFO** tier, which stays in track 1 — correctly
+unmarked. P2-5's escalation lines staying in track 1 is load-bearing for AD-24's "the pointer
+stays in Loki" contract, and it does. **P3-4 / P3-5 / P3-8** stay correct for track 1 and are
+merely narrower than P4-9 / P4-5, which supply the track-2 half. **No still-live step was
+wrongly banner-marked, and no broken step was missed.** The banner now enumerates the
+still-live `console.log` steps so the distinction is explicit.
+
+## P0-5's corrected criterion — verified correct
+
+Verified against log4j-core 2.24.1 rather than from the observation alone. For an `HOURLY`
+frequency, `PatternProcessor.getNextTime` (`:201-209`) computes the next boundary and then
+sets `nextFileTime` by `cal.add(Calendar.HOUR_OF_DAY, -1)` — **hard-coded minus one hour,
+independent of `increment`** — and `updateTime()` promotes it to `prevFileTime`, which
+`formatFileName` (`:269`, `:303`) stamps into the archive name. With `interval = 2,
+modulate = true` the boundaries are even and the names are therefore **odd**, twelve unique
+per day. The release's `console-2026-08-19-13.log` from a 14:00Z rollover is exactly this.
+The replacement criterion — one archive per track per 2 h, no duplicate names, no parity
+assertion — is correct and **would now pass on a working system**.
+
+**One clause tightened.** The replacement also asked for "mtimes on even-hour boundaries". An
+archive is created by *rename*, which preserves the mtime of its last written line, so the
+mtime lands shortly **before** the boundary — on a quiet track 1 at prod INFO, up to the
+5-minute `FleetRollupLogger` gap. Read strictly that is the same never-passes shape the step
+was corrected for. Amended to "at or shortly before the end of the period the name
+identifies".
+
+## P4-6 — is it genuinely a gate?
+
+**Yes.** It clears the bar that P1-4 and P2-6 failed. It measures an unknown (the real byte
+rate, via a `du` delta over 600 s), compares it against **absolute numeric thresholds**
+(projected per-2 h file > 5 GB, or projected per-day > 60 GB), and a failure has a **stated,
+executable consequence**: do not ramp until the `10GB` cap is lowered or
+`WSPARSER_LOG_LEVEL=WARN` is set — both bind-mount edits plus a restart. It is cross-named as
+a gate in AD-26, AD-28 and the Open Items, and it carries a recording obligation (`R` and `N`
+into the release report) that feeds the "re-run before ramping past ~5,000 bots" item. This is
+not an observation dressed as a gate.
+
+Two caveats, recorded rather than amended:
+- On the corrected B1 rate the thresholds do not bind until roughly **44,000 bots**
+  (at 30k: 2.32 GB per 2 h file, 27.8 GB/day — both comfortably inside). Even on the plan's
+  own inflated numbers it only binds at ~30k. So near-term it functions as a
+  measure-and-record obligation rather than a likely blocker. That is acceptable for a gate
+  whose job is to catch a projection being wrong, but it should not be mistaken for a check
+  that will exercise itself.
+- The remedy "lower the `10GB` cap" protects **disk**, not coverage — lowering it reduces the
+  retained window further. `WSPARSER_LOG_LEVEL=WARN` is the remedy that addresses the cause.
+  Worth knowing when the gate fires; not worth an amendment.
+
+## Drift
+
+### Drift 8 — Phase 4a step 2's "verbatim" applied to the `Delete` block (plan wrong, amended)
+
+Plan 4a step 2 said to apply 1a–1d to `log4j2-test.properties` "verbatim except" the two
+file paths. 1d hard-codes `appender.detail.strategy.delete.basePath = /app/logs/detail`, so
+"verbatim" writes an `/app` path into the one file whose entire purpose is that no appender
+in it names a container path a build machine cannot create.
+
+**Ruling: Dev is right, the plan step was wrong, and the step is amended.** Three independent
+reasons, all falsifiable:
+1. The test copy's *existing* shape already contradicts "verbatim" — track 1's retention block
+   was replaced there by `appender.rolling.strategy.max = 2` back in Phase 1, and the file's
+   own header names retention as a documented reason to differ.
+2. `Log4j2TestConfigShapeTest.SHAPE_KEYS` **deliberately excludes** the retention keys
+   ("the file's documented reason to differ"), so the plan's own guard was never going to
+   check what step 2 asked for.
+3. Dev's replacement — `appender.detail.strategy.max = 2` plus a new
+   `theTestCopyNeverNamesTheContainerPath` that walks **every** property value and rejects
+   `/app/` — rules out the class rather than the key, which is strictly stronger than the step
+   as written. `theOnlyDifferenceIsTheOutputPath` was correctly extended to enumerate the
+   second intended difference, so a *third* difference still cannot slip in unremarked.
+
+This is a plan defect, not code drift: a correct implementation of the step as written would
+have been worse than what shipped.
+
+## Out-of-scope changes
+
+None that count against the diff.
+
+- **`CLAUDE.md`'s `BotGroupController` table** was corrected more thoroughly than step 4a.5
+  asked (which named only the stale `GET /` row). Dev added `/sort-keys`,
+  `/{id}/schedule-restart`, `/{id}/health`, `/{id}/status` and fixed `PATCH /` → `PATCH /{id}`.
+  I checked all thirteen mappings against the controller: the table is now accurate and was
+  not before. In-scope-adjacent and correct.
+- **`docs/reviews/LOG_VOLUME_TIERING/release.md`** (+911) landed in `68cc9dd` alongside the
+  Phase 4 plan text. That is the Releaser's and Architect's artefact for the Phase 0–3 ship,
+  not Dev output, and it is the evidence Phase 4 is built on. Not assessed as diff scope.
+- The staged `TaiXiuMessages/*.js` deletions and the modified `deploy.sh` in the working tree
+  are **not** from this pipeline and were left exactly as found.
+
+## Observations (not drift, not blocking)
+
+- **`evidence-shim/selftest.py` is wall-clock flaky.**
+  `test_deferred_and_tail_passes_fire_at_their_deadlines` fails whenever it runs within
+  ~300 s of a 2 h rollover boundary: it advances the clock by 300 s and expects only the
+  `deferred` pass to be due, but `tail` fires at `next_rollover + 120 s`, which is under 300 s
+  away for ~4% of wall-clock time. Reproduced live (4 failures) and reproduced identically at
+  **`5350b12`**, i.e. **pre-existing and not Phase 4's**. It matters because
+  `EvidenceShimSelfTestRunnerTest` runs this suite in the build and cannot swallow a failure,
+  so ~4% of builds go red for no reason. QA/Reviewer territory; recorded here so it is not
+  mistaken for Phase 4 breakage when it next fires.
+- **`blocking = false` and the status logger.** With `blocking = false`, a full `AsyncDetail`
+  queue takes `AsyncAppender.append`'s else-branch, which calls `error(...)` **per dropped
+  event** — unlike `DiscardingAsyncQueueFullPolicy`, which warns once and then discards
+  silently. At the volumes AD-25(4) contemplates, a sustained full queue would produce
+  per-event StatusLogger output to stderr and thence to the capped docker json-file. The
+  decision is still right; the noise profile under sustained saturation is a Reviewer-level
+  detail nobody has costed.
+
+## Amendments to the plan (Phase 4)
+
+All five are in `## Amendment — 2026-08-20 (Compliance Architect, Phase 4)` at the bottom of
+`docs/plans/LOG_VOLUME_TIERING.md`, with short in-place pointers at the affected lines so a
+reader acting on those lines sees the correction. **None asks for different code and no
+shipped value changes.**
+
+- **B1 — the ws-parser line rate is derived from the wrong window (~2.2× too high).** 4,402
+  and 59 are ~11-minute counts, not 300 s; only the 4,775 DEBUG figure is per 300 s. Corrected
+  to 6.64 lines/s / 0.0429 per bot/s, with both derivations shown, a table of every downstream
+  figure and its corrected value, and an explicit statement that the 98.7% share — a ratio
+  over one window — is unaffected, as are both absolute caps. In-place notes on AD-26 and on
+  **P4-6**, whose expected `R` was the one place the error had an operational consequence.
+- **B2 — AD-4 narrowed by AD-25(4)**, with a forward pointer matching the convention already
+  used on AD-5 and AD-6, and the log4j-core 2.24.1 verification recorded so the ruling is not
+  re-opened a third time.
+- **B3 — the superseded-step banner** corrected from "ten" to thirteen, `P0-9` added to the
+  list, and the still-live `console.log` steps enumerated so the boundary is explicit.
+- **B4 — Phase 4a step 2's "verbatim"** amended to exclude the `Delete` block, ruling in
+  Dev's favour and recording the anti-`/app` test as the stronger guard.
+- **B5 — P0-5's mtime clause** tightened from "on even-hour boundaries" to "at or shortly
+  before the end of the period the name identifies", since rename preserves the last-write
+  mtime.
+
+## For the Releaser (Phase 4)
+
+- **`mkdir -p logs/detail` on the box before `docker compose up`.** The plan's deploy note.
+  If `AsyncDetail` cannot start, the JVM comes up with **no logger at all**.
+- **P4-3 and P4-5 must be run on staging with `BOT_LOG_LEVEL=DEBUG`** — on a prod-like INFO
+  instance they pass vacuously.
+- **Expect one final Loki re-ingest** on the deploy that lands 4b (no saved positions yet),
+  ~2 GB. Take P0-9's baseline *after* it settles.
+- **P4-6's expected value is amended.** A correct staging reading is ~5,000–6,000 B/s at
+  155 bots (the `du` includes our own DEBUG), not the ~3,700 the plan used to state. Do not
+  read a lower-than-expected number as a misroute — use P4-5 and P4-2 to decide that.
+- Pre-ramp gates still open and not closable from the diff: **P0-6 on `Prod-Bot`** (never
+  measured), **P0-9** (re-baselined behind 4b), **P4-6**.

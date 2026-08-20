@@ -22,7 +22,9 @@ one window that mattered.
 > logging under the *root* logger, outside everything this feature governs
 > (`docs/reviews/LOG_VOLUME_TIERING/release.md` Finding 1). **Phase 4, appended at the
 > bottom of this file, revises the appender topology Phase 0 established.** It
-> supersedes parts of AD-5 and AD-6 and rewrites ten verification steps. Read
+> supersedes parts of AD-5 and AD-6, narrows AD-4, and rewrites **thirteen**
+> verification steps (amended 2026-08-20 — it used to say "ten", which matched neither
+> the list in the Verification banner nor the Corrections section). Read
 > `## Phase 4 — Two tracks: aggregate to Loki, detail to disk` before acting on
 > anything in Phases 0–3.
 
@@ -235,6 +237,16 @@ disruptor upgrade is a clean follow-up that changes no other decision here.
 Logging must never add latency to a bot thread **for the discardable tiers**; INFO+
 blocks rather than being lost. If the choice is "block a bot" or "lose a DEBUG line",
 lose the line. WARN/ERROR are never discarded and remain coupled to alerting.
+
+> **NARROWED by Phase 4 / AD-25(4) — read before "fixing" `AsyncDetail`.** "INFO+ blocks
+> rather than being lost" is true of **track 1 only** from Phase 4 onward. Track 2
+> (`AsyncDetail`) ships `blocking = false`, so a full detail queue drops the event at
+> *every* level, INFO included. That is deliberate and this AD cannot express it:
+> `log4j2.discardThreshold` is read once, JVM-wide, by
+> `AsyncQueueFullPolicyFactory.create()` from `PropertiesUtil` — `AsyncAppender` has no
+> per-appender policy or threshold attribute — so discarding track 2's INFO would
+> discard track 1's too. See AD-25(4) for the full reasoning and
+> `AsyncQueuePolicyTest.theTwoTracksBlockDifferentlyOnPurpose` for the guard.
 
 **AD-5 — The ConsoleAppender is capped at INFO+ via a `ThresholdFilter`.** Every line
 is currently serialized and written twice. `docker logs` remains useful (INFO+ and
@@ -738,13 +750,18 @@ equivalent) unless stated. Host port for bot-manager is `8080`; Loki is `3100`;
 Prometheus is `9090`. Alertmanager, node-exporter and the shims are **not** exposed on
 the host — reach them with `docker compose exec`.
 
-> **READ FIRST — Phase 4 rewrites ten of these steps.** Once Phase 4 has shipped, the
+> **READ FIRST — Phase 4 rewrites thirteen of these steps.** Once Phase 4 has shipped, the
 > steps below that grep `logs/console.log` for DEBUG are grepping the wrong file: DEBUG
 > and TRACE move to `logs/detail/detail.log`, which is a **PatternLayout** file, not
 > JSON. The amended text for each lives in
 > **`## Phase 4 → Verification → Corrections to the Phase 0–3 steps`** at the bottom of
-> this file. Affected: **U-3, P0-2, P0-4, P0-5, P0-8, P1-3, P1-8, P2-2, P2-3, P2-4,
-> P3-3, P3-10**. Everything else stands unchanged.
+> this file. Affected: **U-3, P0-2, P0-4, P0-5, P0-8, P0-9, P1-3, P1-8, P2-2, P2-3,
+> P2-4, P3-3, P3-10** — thirteen. Everything else stands unchanged. (`P0-9` added to
+> this list 2026-08-20: it has a Corrections entry re-baselining it behind Phase 4b, and
+> was missing here.) The still-live steps that deliberately keep pointing at
+> `logs/console.log` are **P0-3, P1-2, P1-4, P1-5, P1-6, P1-7, P2-5, P2-6** — all of
+> them read the **INFO** tier, which stays in track 1; and **P3-4/P3-5/P3-8** stay
+> correct for track 1, just narrower than P4-9/P4-5, which add the track-2 half.
 
 ### Universal (every phase)
 
@@ -1293,6 +1310,18 @@ else has to change to take it later.
 the byte cap is the one that binds at scale.** The numbers, from the measured
 0.0947 ws-parser INFO lines/s/bot at ~250 B/line under `PatternLayout`:
 
+> **CORRECTED 2026-08-20 (Amendment B1 below) — the per-bot rate is ~2.2× too high.**
+> `0.0947` was obtained by dividing a **~11-minute** line count by **300 s**. The real
+> figure is **0.0429 lines/s/bot** (~6.6 lines/s at 155 bots). Every `lines/s`, `write
+> rate`, `per day` and `per 2 h file` cell in the table below is therefore ~2.2×
+> pessimistic, and the `coverage` column is pessimistic in the same proportion: the true
+> coverage is ~12 h up to 20,000 bots and **~8.6 h at 30,000**, not 5.9 h / 3.9 h, and
+> `what binds` is the **age**, not the byte cap, at 20,000. **The shipped configuration
+> is unaffected — both caps are absolute** — and the error is wholly in the safe
+> direction. The one figure that is *measured rather than derived*, and is therefore
+> untouched, is the **98.7% share**: ws-parser really is that fraction of INFO volume,
+> which is the entire justification for Phase 4.
+
 | Bots | lines/s | write rate | per day | per 2 h file | what binds | coverage |
 |---|---|---|---|---|---|---|
 | 155 (Bot-1 today) | 14.7 | 3.7 KB/s | 0.32 GB | 26 MB | age | **12 h** |
@@ -1511,6 +1540,20 @@ Touches three properties files, `docker-compose.yml`, four tests and `CLAUDE.md`
    optional**: `AsyncAppender.start()` throws when its target is unavailable, so a test
    config declaring `AsyncDetail` against `/app/logs/detail` kills every Spring-context
    test in the module. Extend the file's header to name the second intended difference.
+
+   > **AMENDED 2026-08-20 (Compliance Architect) — "verbatim" was wrong for the `Delete`
+   > block.** 1d's retention block hard-codes `basePath = /app/logs/detail`, so applying
+   > it verbatim writes a `/app` path into the one file whose entire purpose is to name
+   > no `/app` path. Track 1's own retention block was already replaced here by
+   > `appender.rolling.strategy.max = 2` for exactly this reason, so "verbatim" also
+   > contradicted the file's existing shape. **Apply 1a–1d except the
+   > `appender.detail.strategy.delete.*` block, which is replaced by
+   > `appender.detail.strategy.max = 2`** — the retention keys are the file's other
+   > documented reason to differ, and `Log4j2TestConfigShapeTest.SHAPE_KEYS` deliberately
+   > excludes them. Add a test asserting **no** property value in the test copy contains
+   > `/app/`, so the class of defect is ruled out wholesale rather than key by key
+   > (`Log4j2TestConfigShapeTest.theTestCopyNeverNamesTheContainerPath`). This is what
+   > the branch shipped and it is correct; the plan step was the thing that was wrong.
 
 3. **`docker-compose.yml`**, `bot-manager` service — add next to
    `LOGGING_LEVEL_COM_VINGAME_BOT` (`:69`):
@@ -1806,7 +1849,15 @@ The universal steps **U-1** and **U-2** are unchanged and still apply.
   echo "bytes/s=$R  per-2h-file=$(( R*7200 ))  per-day=$(( R*86400 ))"
   curl -s http://localhost:8080/api/v1/environment/ >/dev/null && echo ok
   ```
-  → expect `R` in the low **thousands** of bytes/s at 155 bots (AD-26 predicts ~3,700).
+  → expect `R` in the low **thousands** of bytes/s at 155 bots.
+  *(Amended 2026-08-20 — the old parenthetical "AD-26 predicts ~3,700" is wrong twice
+  over, and a releaser who measured correctly would have read the result as a misroute.
+  AD-26's line rate is derived from the wrong window (Amendment B1 below): ws-parser
+  alone is ~6.6 lines/s at 155 bots, ≈ **1,650 B/s**, not 3,700. And `du -sb logs/detail`
+  measures the **whole file**, which on Bot-1 staging also carries `com.vingame.bot` at
+  DEBUG — a measured ~15.9 lines/s — so the expected `R` on **staging** is
+  ≈ **5,000–6,000 B/s**, and on a prod-like INFO instance ≈ **1,650 B/s** per 155 bots.
+  Record which of the two the instance is before comparing.)*
   Record `R` and the fleet bot count `N` in the release report. Then project:
   `R × TARGET / N`. **Gate:** if the projected per-2 h file exceeds **5 GB**, or the
   projected per-day exceeds **60 GB**, do not ramp until either the `10GB` cap is
@@ -1920,9 +1971,16 @@ Once Phase 4 has shipped, replace these. Everything not listed stands unchanged.
   find logs -maxdepth 1 -name 'console-*.log' -newermt '<deploy timestamp>' -printf '%T@ %f\n' | sort -n
   find logs/detail -maxdepth 1 -name 'detail-*.log' -newermt '<deploy timestamp>' -printf '%T@ %f\n' | sort -n
   ```
-  → expect **exactly one new archive per track per 2 h**, with **mtimes on even-hour
-  boundaries** and **no two archives sharing a name**. Do not assert the parity of the
-  filename suffix. AD-20's substantive requirement is uniqueness, and it holds.
+  → expect **exactly one new archive per track per 2 h** and **no two archives sharing a
+  name**. Do not assert the parity of the filename suffix. AD-20's substantive
+  requirement is uniqueness, and it holds.
+  *(Amended 2026-08-20: the earlier wording also asked for "mtimes on even-hour
+  boundaries". An archive is produced by **rename**, which preserves the mtime of the
+  last line written into it — so its mtime lands **just before** the boundary, by up to
+  one inter-line gap. On track 1 at prod INFO that gap is the 5-minute
+  `FleetRollupLogger` cadence. Read the mtime as "inside the 2 h period the name
+  identifies, at or shortly before its end"; asserting equality with the boundary is the
+  same class of never-passes criterion this step was corrected for.)*
 - **P0-8** — the DEBUG half is now vacuous: DEBUG never reaches Loki at all, so the query
   returns empty whether or not retention works. Keep the **WARN/ERROR** half (non-empty
   over a 26–30 h old window, allowing `retention_delete_delay: 2h`) as the proof the
@@ -1963,3 +2021,136 @@ executable on the box and all have explicit pass conditions. **P4-6 is a pre-ram
 that cannot be closed from the build**, and **P4-3 and P4-5 must be run on staging with
 `BOT_LOG_LEVEL=DEBUG`** — on a prod-like INFO instance they pass vacuously and prove
 nothing.
+
+---
+
+## Amendment — 2026-08-20 (Compliance Architect, Phase 4)
+
+Five corrections. **None of them asks for different code**: the branch at `a268929` /
+`e97dcb2` / `118a10b` implements Phase 4 as specified, and every shipped value stays as
+it is. Four of the five stop the plan asserting something false about the system; the
+fifth (B4) rules in Dev's favour on the one deliberate deviation from a plan step.
+
+**B1 — the ws-parser line rate is derived from the wrong measurement window and is
+~2.2× too high.**
+
+*What the plan said:* Phase 4's Goal and its Findings table present **4,402 ws-parser
+INFO lines**, **59 `com.vingame.bot` INFO lines** and **4,775 DEBUG lines** as a single
+"300-second window", and derive **14.67 lines/s** and **0.0947 lines/s/bot**. AD-26,
+AD-25(4), AD-28, the Goal's GB/day figures and P4-6's expected `R` all rest on that
+number, as do the corresponding comments Dev copied into
+`logging/log4j2.properties`, `docker-compose.yml`, `secrets.env.example` and
+`AsyncQueuePolicyTest`'s assertion messages.
+
+*Why it is wrong:* the source, `docs/reviews/LOG_VOLUME_TIERING/release.md:417-443`,
+reports two different windows in adjacent paragraphs. Its 300-second delta is
+**`delta=2022` INFO lines over 300 s** (12:16:38Z → 12:21:38Z), and the per-logger
+breakdown beneath it is labelled "**Post-deploy** INFO lines by logger", which the same
+page's prose closes with "the feature's own INFO tier is **59 lines over ~11 minutes**".
+So 4,402 and 59 are ~11-minute counts; only the 4,775 DEBUG figure is genuinely per
+300 s — which is exactly how the two got merged into one column. The arithmetic
+falsifies the original directly: if ws-parser alone had emitted 4,402 lines in 300 s,
+the total INFO delta over that window could not have been 2,022.
+
+*The corrected figures*, cross-checked two independent ways that agree to within 1%:
+- from the ~11-minute window: (3,385 + 1,000) / 660 s = **6.64 lines/s**;
+- from the 300 s window: 2,022 total INFO, of which `com.vingame.bot` is 59/4,461 ≈ 1.3%
+  (~27 lines), leaving ≈ 1,995 ws-parser lines = **6.65 lines/s**.
+
+Per bot: **0.0429 lines/s/bot**, not 0.0947. Consequences, all in the **safe**
+direction, and none of them changing a shipped value:
+
+| Claim | As written | Corrected |
+|---|---|---|
+| AD-26 @ 20,000 bots | 1,893 lines/s, 473 KB/s, 3.4 GB per 2 h file, **byte cap binds**, 5.9 h | 858 lines/s, 214 KB/s, 1.54 GB, **age binds**, ~12 h |
+| AD-26 @ 30,000 bots | 2,840 lines/s, 710 KB/s, 5.1 GB per 2 h file, 3.9 h | 1,287 lines/s, 322 KB/s, 2.32 GB, **~8.6 h** |
+| AD-25(4) buffer headroom | 16,384 ≈ 8.6 s at 20k | ≈ 19 s at 20k — the argument is strengthened |
+| AD-28 worst-case pin | ~10.2 GB @ 20k, ~15.3 GB @ 30k (**exceeds** the 12 GB cap) | ~4.6 GB / ~6.9 GB — **inside** the cap at both scales |
+| Goal's GB/day (400 B JSON) | 6.5 / 65 / 98 at 2k / 20k / 30k | ~3.0 / ~29.7 / ~44.5 |
+| P4-2's parenthetical | "≈ 4,400 in 300 s" | ≈ 2,000; the `> 1000` threshold still passes |
+
+**What does *not* change is the thing Phase 4 rests on.** The **98.7% share** is a ratio
+of two counts taken over the *same* window, so the window error cancels: ws-parser
+really was 4,402 of 4,461 INFO lines. Phase 4's motivation, AD-23's fix and AD-24's cap
+are untouched. AD-28's detail-first eviction is likewise unchanged — it is now
+defensive rather than load-bearing at 30k, which is the right posture for a guard.
+
+The stale figures also live in shipped **comments** (`logging/log4j2.properties` and its
+twin, `docker-compose.yml`, `secrets.env.example`, `AsyncQueuePolicyTest`'s failure
+messages). Dev reproduced the plan faithfully and is not at fault; correcting them is a
+comment-only follow-up, deliberately **not** requested of this branch, since every one of
+them argues for a decision that is still correct on the smaller number.
+
+**B2 — AD-4 is narrowed by AD-25(4) and now carries a forward pointer.**
+
+AD-4 states flatly that "INFO+ blocks rather than being lost". From Phase 4 that is true
+of **track 1 only**: `AsyncDetail` ships `blocking = false`, so a full detail queue drops
+at every level, INFO included. AD-25(4) names AD-4, but AD-4 did not name AD-25(4) — and
+AD-5 and AD-6 both received exactly such forward notes, so a reader arriving at AD-4
+first would have concluded the shipped `AsyncDetail` was the Drift 1 defect recurring.
+The pointer is added in place.
+
+**Verified against the log4j-core 2.24.1 sources, because AD-25(4) inverts a defect this
+plan already ruled on.** The stated reason holds:
+`AsyncAppender.start()` (`AsyncAppender.java:124`) assigns
+`asyncQueueFullPolicy = AsyncQueueFullPolicyFactory.create()`, and that factory
+(`AsyncQueueFullPolicyFactory.java:67-111`) reads `log4j2.AsyncQueueFullPolicy` and
+`log4j2.DiscardThreshold` from `PropertiesUtil.getProperties()` alone. `AsyncAppender`'s
+builder exposes `blocking`, `bufferSize`, `includeLocation`, `shutdownTimeout`,
+`errorRef`, `ignoreExceptions` and `blockingQueueFactory` — **no policy or threshold
+attribute**. The threshold is therefore JVM-wide and cannot discriminate between two
+`AsyncAppender`s, exactly as AD-25(4) claims. `DiscardingAsyncQueueFullPolicy.getRoute`
+returns `DISCARD` only for levels less specific than the threshold, so with
+`discardThreshold = DEBUG` a track-2 INFO event on a full queue would take
+`EventRoute.ENQUEUE` — a blocking put on the calling bot thread — confirming the latency
+argument too. **This is not a regression of Drift 1.**
+
+**B3 — the superseded-step banner's count was wrong and omitted P0-9.**
+
+Both banners said Phase 4 rewrites "ten" steps; the Verification banner then listed
+**twelve** (U-3, P0-2, P0-4, P0-5, P0-8, P1-3, P1-8, P2-2, P2-3, P2-4, P3-3, P3-10) and
+the Corrections section corrects a **thirteenth**, P0-9, which was absent from the list.
+Corrected to thirteen, with P0-9 added. Each of the thirteen was checked and each really
+is superseded; **no still-live step was wrongly marked**, and the still-live steps that
+keep pointing at `logs/console.log` are enumerated in the banner so the distinction is
+explicit — they all read the INFO tier, which stays in track 1.
+
+**B4 — Phase 4a step 2's "apply 1a–1d verbatim" was wrong for the `Delete` block. Dev's
+deviation is correct and the step is amended to match.**
+
+1d hard-codes `basePath = /app/logs/detail`, so "verbatim" would have written an `/app`
+path into `log4j2-test.properties` — the one file whose entire purpose is that no
+appender in it names a container path that a build machine cannot create. It also
+contradicted the file's own existing shape: track 1's retention block had already been
+replaced there by `appender.rolling.strategy.max = 2` since Phase 1, and
+`Log4j2TestConfigShapeTest.SHAPE_KEYS` deliberately excludes the retention keys as "the
+file's documented reason to differ". Dev shipped `appender.detail.strategy.max = 2` with
+no `Delete`, and added `theTestCopyNeverNamesTheContainerPath`, which rules out the whole
+class rather than the one key. That is strictly better than the step as written.
+
+**B5 — P0-5's replacement criterion is correct, with one clause tightened.**
+
+Verified against the sources: for an `HOURLY` frequency
+(`filePattern` ending `%d{yyyy-MM-dd-HH}`), `PatternProcessor.getNextTime`
+(`PatternProcessor.java:201-209`) computes the next boundary and then sets
+`nextFileTime` by `cal.add(Calendar.HOUR_OF_DAY, -1)` — a **hard-coded minus one hour,
+independent of `increment`** — and `updateTime()` promotes that to `prevFileTime`, which
+`formatFileName` stamps into the archive name. With `interval = 2, modulate = true` the
+boundaries are even hours and the names are therefore **odd**: the release's
+`console-2026-08-19-13.log` from a 14:00Z rollover is exactly this, names stay unique
+(twelve per day), and the corrected step — one new archive per track per 2 h, no
+duplicate names, no parity assertion — passes on a working system. **One clause was
+tightened**: an archive is produced by *rename*, which preserves the mtime of its last
+written line, so its mtime lands shortly **before** the boundary (up to the 5-minute
+`FleetRollupLogger` gap on a quiet track 1). "Mtimes on even-hour boundaries" read
+strictly is the same never-passes shape this step was corrected for; it now reads "at or
+shortly before the end of the period the name identifies".
+
+**Not amended, recorded as findings only** (see
+`docs/reviews/LOG_VOLUME_TIERING/compliance.md`): P4-6 was checked and **is** a genuine
+gate — falsifiable, with a stated consequence — though on the corrected B1 rate its
+thresholds do not bind below ~44,000 bots, so near-term it functions as a
+measure-and-record obligation; and `evidence-shim/selftest.py`'s
+`test_deferred_and_tail_passes_fire_at_their_deadlines` is **wall-clock flaky**
+(it fails in the ~300 s before every 2 h boundary), which predates Phase 4 — it
+reproduces at `5350b12` — and belongs to QA rather than to this plan.
