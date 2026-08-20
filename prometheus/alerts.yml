@@ -352,6 +352,29 @@ groups:
           summary: "JVM live threads at {{ $value }}"
           description: "Sustained high thread count — the thread-leak sawtooth signature. Check reconnect churn and executor lifecycles before the JVM exhausts native threads."
 
+      # LOG_VOLUME_TIERING Phase 4 / AD-25(4). Track 2 (`AsyncDetail`) ships
+      # blocking = false, so a full queue DROPS log events at every level — INFO and
+      # WARN included — and log4j2 reports that only through DefaultErrorHandler:
+      # three stderr lines, then one per five minutes, with no count, into the capped
+      # docker json-file. Track 2 is now the sole home of wire-level forensics, so a
+      # silently lossy detail file is the exact failure the evidence design exists to
+      # prevent. This rule is what makes it visible; AsyncQueueMetrics publishes the
+      # gauges. It also covers track 1's opposite pathology for free: AsyncRolling is
+      # blocking = true, so its queue filling means BOT THREADS PARKED on a queue put.
+      # Ratio rather than an absolute, because the two buffers differ (8,192 vs 16,384)
+      # and a hard-coded number would silently stop matching if either is retuned.
+      # Fleet-wide JVM fact with no owning product, so audience: internal.
+      - alert: LogQueueSaturated
+        expr: log4j2_async_queue_remaining / log4j2_async_queue_capacity < 0.1
+        for: 5m
+        labels:
+          job: bot-manager
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "log4j2 async queue {{ $labels.appender }} is {{ $value | humanizePercentage }} free"
+          description: "The async logging queue has been near-full for 5 minutes. On AsyncDetail this means logs/detail/detail.log is missing events at every level for this window — treat it as incomplete. On AsyncRolling it means bot threads are blocking on the queue instead. Check the write rate (verification P4-6) and consider WSPARSER_LOG_LEVEL=WARN."
+
   # A4 — the host itself: storage, RAM, CPU. All `audience: internal` (requirement B2):
   # these are the fundamental facts the ops room exists for, they have no owning product,
   # and none of them carries a `public_summary` — there is no customer register for
