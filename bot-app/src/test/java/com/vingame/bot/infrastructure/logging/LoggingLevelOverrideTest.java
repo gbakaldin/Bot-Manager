@@ -4,7 +4,9 @@ import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.config.Configurator;
 import org.apache.logging.log4j.core.config.LoggerConfig;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -65,6 +67,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("AD-7 — logging.level.com.vingame.bot overrides log4j2.properties in place")
 class LoggingLevelOverrideTest {
 
+    /** The logger every assertion here is about. */
+    private static final String APP_LOGGER = "com.vingame.bot";
+
     /** The two appenders {@code log4j2.properties} attaches to {@code com.vingame.bot}. */
     private static final String CONSOLE_APPENDER = "ConsoleAppender";
     private static final String ASYNC_APPENDER = "AsyncRolling";
@@ -75,7 +80,7 @@ class LoggingLevelOverrideTest {
 
     private static LoggerConfig appLoggerConfig() {
         LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
-        return ctx.getConfiguration().getLoggerConfig("com.vingame.bot");
+        return ctx.getConfiguration().getLoggerConfig(APP_LOGGER);
     }
 
     @Test
@@ -126,6 +131,28 @@ class LoggingLevelOverrideTest {
 
         @MockitoBean
         private BotGroupRepository botGroupRepository;
+
+        /**
+         * Put the JVM-global level back where {@code log4j2-test.properties} declares it.
+         * <p>
+         * Spring Boot applies {@code logging.level.*} to the <em>process-wide</em> Log4j2
+         * {@code LoggerContext} when a context is created, and never unwinds it: the
+         * application context is cached and its logging initialisation does not re-run. So
+         * once this nested class has run, {@code com.vingame.bot} stays at DEBUG for
+         * everything that follows in the same JVM — including the outer
+         * {@code overrideMutatesTheExistingLoggerConfig}, which asserts INFO, and
+         * {@link ScopedDebugFilterInstallationTest}, whose whole proof ("an {@code ACCEPT}
+         * beats the level gate") is only meaningful with the application logger at INFO.
+         * With the default ordering the outer methods run first and nothing notices; select
+         * a different subset — {@code -Dtest='LoggingLevelOverrideTest$StagingLevelContext,
+         * LoggingLevelOverrideTest#overrideMutatesTheExistingLoggerConfig'} reproduces it —
+         * and the same assertions fail. A test that only passes in one invocation mode is a
+         * trap, so the global mutation is undone by the class that makes it.
+         */
+        @AfterEach
+        void restoreTheShippedLevel() {
+            Configurator.setLevel(APP_LOGGER, Level.INFO);
+        }
 
         @Test
         @DisplayName("the level is DEBUG and the appenders are still attached")
