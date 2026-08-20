@@ -9,7 +9,7 @@ import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvStatus
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameStatusKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GroupBalance;
-import com.vingame.bot.infrastructure.logging.AsyncQueueMetrics;
+import com.vingame.bot.infrastructure.logging.AsyncQueueMeterFixture;
 import io.micrometer.prometheusmetrics.PrometheusConfig;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
@@ -141,7 +141,7 @@ class AlertRuleMetricsTest {
         // startup, against the real LoggerContext this build runs on. LogQueueSaturated
         // reads them bare and renders {{ $labels.appender }}, so both the metric names
         // and the tag have to be in this exposition or the rule is unverifiable here.
-        new AsyncQueueMetrics(registry).track(AsyncQueueMetrics.asyncAppenderNames());
+        AsyncQueueMeterFixture.registerAgainstRunningContext(registry);
 
         scrape = registry.scrape();
     }

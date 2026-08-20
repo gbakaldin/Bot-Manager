@@ -40,15 +40,27 @@ import java.util.concurrent.atomic.AtomicLong;
  * unlabelled stderr lines rotating out of {@code docker logs}.
  * <p>
  * <b>What is measured, and what is not.</b> This samples queue occupancy; it does not count
- * dropped events, and that is a limitation of the library rather than a choice. An exact
- * count would need either a custom {@code ErrorHandler}
- * ({@code AbstractAppender.setHandler} refuses once the appender is started — verified in
- * log4j-core 2.24.1) or an {@code errorRef} appender resolved at configuration time, which
- * this project cannot register because {@code annotationProcessorPaths} is pinned and
- * log4j2's plugin processor never runs (the same constraint that shaped AD-9). Saturation
- * is the precondition for every drop, and a drop storm worth investigating is by definition
- * sustained, so a 10 s sample is a faithful detector of the failure mode even though a
- * sub-sample burst can slip between two reads.
+ * dropped events. Two mechanisms could have counted them and both are rejected on their
+ * merits, so nobody has to re-derive this:
+ * <ul>
+ *   <li>A custom {@code ErrorHandler} cannot be installed —
+ *       {@code AbstractAppender.setHandler} logs "The handler cannot be changed once the
+ *       appender is started" and <em>returns</em> (verified in log4j-core 2.24.1), so the
+ *       attempt fails silently rather than loudly.</li>
+ *   <li>{@code errorRef} <em>is</em> available — it is a plain
+ *       {@code @PluginBuilderAttribute} naming another appender in the same configuration,
+ *       resolved by {@code AsyncAppender.start()}, so no plugin registration is involved
+ *       and nothing about our pinned {@code annotationProcessorPaths} forecloses it. It is
+ *       rejected for a stronger reason: {@code logToErrorAppenderIfNecessary} calls
+ *       {@code errorAppender.callAppender(event)} <b>synchronously on the calling bot
+ *       thread</b>, so at drop-storm rates it reintroduces exactly the blocking pathology
+ *       {@code blocking = false} exists to avoid — and any target big enough to hold the
+ *       flood is either track 1 (which would push the wire-level flood straight back into
+ *       Loki and Grafana, undoing this whole feature) or a new unbounded file.</li>
+ * </ul>
+ * Saturation is the precondition for every drop, and a drop storm worth investigating is by
+ * definition sustained, so a 10 s sample is a faithful detector of the failure mode even
+ * though a sub-sample burst can slip between two reads.
  * <ul>
  *   <li>{@code log4j2_async_queue_remaining{appender}} — free slots, read live from the
  *       running configuration at scrape time, so a reconfiguration cannot leave the gauge
@@ -63,6 +75,35 @@ import java.util.concurrent.atomic.AtomicLong;
  *       {@code AsyncRolling}, whose {@code blocking = true}, it is bot threads parked on a
  *       queue put, which is the opposite pathology and equally worth seeing.</li>
  * </ul>
+ * <b>Three ways to misread these meters.</b> Each one is a way a <em>quiet</em> signal can
+ * be mistaken for a healthy one, which is the direction that costs evidence:
+ * <ol>
+ *   <li><b>They are lower bounds, not a census.</b> {@code LogQueueSaturated} carries
+ *       {@code for: 5m} over a gauge read at scrape time, so a queue that oscillates —
+ *       fills on a GC pause or an fsync stall, drains in a few hundred ms, refills — can
+ *       drop thousands of events per cycle while being observed under 10% at perhaps one
+ *       scrape in ten. The alert stays silent and {@code full_samples_total} stays at 0. A
+ *       quiet counter therefore does <b>not</b> prove a lossless window; it only means no
+ *       sustained saturation was sampled.</li>
+ *   <li><b>The counters freeze under joint saturation.</b> This class lives in
+ *       {@code com.vingame.bot.*}, so its WARN routes to {@code logger.app} →
+ *       {@code AsyncRolling}, which ships {@code blocking = true}. The usual cause of a
+ *       saturated {@code AsyncDetail} is a stalling disk, which fills <em>both</em> queues —
+ *       so the sampler thread can park inside its own WARN and stop advancing
+ *       {@code pressure_samples_total} / {@code full_samples_total} for the worst of the
+ *       incident. Both counters are incremented <em>before</em> the WARN, so the sample in
+ *       hand is never lost, only the ones the block prevents. The gauges keep working (the
+ *       scrape thread reads the queue directly) and are the signal of record there.</li>
+ *   <li><b>"The appender is gone" reads as perfect health.</b> The {@code -1} sentinel on
+ *       both gauges makes {@code remaining / capacity} equal {@code 1}, which is the
+ *       healthiest possible value for a ratio alert, and {@link #sample(long)} skips an
+ *       unresolvable appender so no counter moves either. A deploy that silently loses the
+ *       detail track — a wrong config bind-mounted, the in-jar fallback active, a Spring
+ *       {@code setLogLevel} against a name that does not exist — is caught at build time by
+ *       {@code ShippedLog4j2ConfigRoutingTest}, but nothing here pages on it at runtime.
+ *       Check {@code log4j2_async_queue_capacity < 0} by hand before concluding a quiet
+ *       {@code AsyncDetail} is a healthy one.</li>
+ * </ol>
  * The WARN line exists alongside the counters for the reason the finding names: metrics are
  * scraped, but the engineer reading {@code detail.log} afterwards needs to know the file
  * has holes in it. It is emitted at most once per {@value #WARN_INTERVAL_MINUTES} minutes
@@ -132,13 +173,14 @@ public class AsyncQueueMetrics {
 
     /**
      * Register the meters for a set of appenders and start counting against them,
-     * without the scheduler. Public for tests only: {@code AlertRuleMetricsTest} has to
-     * render the exact exposition production produces before it can check
-     * {@code LogQueueSaturated} against it, and the logging tests drive
-     * {@link #sample(long)} / {@link #record} deterministically rather than waiting on a
-     * scheduler.
+     * without the scheduler. Package-private, like {@code InfoGaugeRefresher}'s
+     * {@code registerInfoGauges} one package over, which this class otherwise copies: it
+     * mutates a singleton's state and has exactly one production caller. Tests drive it —
+     * and {@link #sample(long)} / {@link #record} — from beside it; the cross-package
+     * alert fixture reaches it through {@code AsyncQueueMeterFixture} in this package
+     * rather than by widening the API.
      */
-    public void track(List<String> appenders) {
+    void track(List<String> appenders) {
         appenders.forEach(this::registerMeters);
         tracked = appenders;
     }
@@ -262,7 +304,7 @@ public class AsyncQueueMetrics {
         return found instanceof AsyncAppender async ? Optional.of(async) : Optional.empty();
     }
 
-    public static List<String> asyncAppenderNames() {
+    static List<String> asyncAppenderNames() {
         return context().getConfiguration().getAppenders().values().stream()
                 .filter(AsyncAppender.class::isInstance)
                 .map(Appender::getName)
