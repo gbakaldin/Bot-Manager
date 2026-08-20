@@ -94,7 +94,17 @@ class LogDir(object):
         self.promoter = shim.Promoter(self.config)
 
     def write(self, name, content="line\n", age_seconds=0):
-        path = os.path.join(self.logs, name)
+        return self._write(self.logs, name, content, age_seconds)
+
+    def write_detail(self, name, content="detail line\n", age_seconds=0):
+        """A track-2 file. Its directory is created lazily, exactly as log4j2 does."""
+        directory = os.path.join(self.logs, "detail")
+        os.makedirs(directory, exist_ok=True)
+        return self._write(directory, name, content, age_seconds)
+
+    @staticmethod
+    def _write(directory, name, content, age_seconds):
+        path = os.path.join(directory, name)
         with open(path, "w") as handle:
             handle.write(content)
         when = time.time() - age_seconds
@@ -113,10 +123,22 @@ class LogDir(object):
 
 
 def standard_files(box):
-    """A realistic 2 h-rollover layout: two rolled files plus the live one."""
+    """A realistic 2 h-rollover layout: two rolled files plus the live one.
+
+    Track 1 only, and deliberately so: it is also the layout of a host that has this
+    shim but not yet the log4j2 two-track change, which must behave exactly as the
+    single-track shim did.
+    """
     box.write("console-2026-08-19-06.log", "old\n", age_seconds=3 * 3600)
     box.write("console-2026-08-19-08.log", "previous\n", age_seconds=1 * 3600)
     box.write("console.log", "live\n", age_seconds=0)
+
+
+def standard_detail_files(box):
+    """The track-2 half of the same layout, on the same rollover boundaries."""
+    box.write_detail("detail-2026-08-19-06.log", "old detail\n", age_seconds=3 * 3600)
+    box.write_detail("detail-2026-08-19-08.log", "previous detail\n", age_seconds=1 * 3600)
+    box.write_detail("detail.log", "live detail\n", age_seconds=0)
 
 
 FIRING = json.dumps({
@@ -211,6 +233,62 @@ def test_selection_is_newest_two_plus_live():
         box.stop()
 
 
+def test_selection_runs_per_track():
+    print("two tracks -> newest two PLUS live, independently for each (AD-28)")
+    # Track 1 alone is the incident timeline with no per-bot behaviour; track 2 alone
+    # is per-bot behaviour with no timeline. Promoting both costs nothing at promotion
+    # time (hardlinks) and is what makes the pinned set self-explanatory.
+    box = LogDir()
+    try:
+        standard_files(box)
+        standard_detail_files(box)
+        box.promoter.record("alertname=Test")
+        names = box.evidence()
+
+        equal(len(names), 4, "newest two per track: two closed files and two live links")
+        check("console-2026-08-19-08.log" in names, "track 1's newest closed file")
+        check("detail-2026-08-19-08.log" in names, "track 2's newest closed file")
+        check(any(name.startswith("console-live-") for name in names), "track 1's live file")
+        check(any(name.startswith("detail-live-") for name in names), "track 2's live file")
+        check("console-2026-08-19-06.log" not in names and
+              "detail-2026-08-19-06.log" not in names,
+              "and each track's ancient period falls off by itself")
+
+        # Still hardlinks, on the track where the bytes actually matter: a promoted
+        # detail file is 3.4-5.1 GB at 20-30k bots, so a copy here is the 2026-06-30
+        # failure shape at its worst.
+        live_detail = os.path.join(box.logs, "detail", "detail.log")
+        promoted = [name for name in names if name.startswith("detail-live-")][0]
+        equal(os.stat(os.path.join(box.config.evidence_dir, promoted)).st_ino,
+              os.stat(live_detail).st_ino, "the promoted detail file IS the source inode")
+    finally:
+        box.stop()
+
+
+def test_a_missing_detail_directory_is_a_no_op():
+    print("no /logs/detail -> promotion works and says nothing (4c is safe before 4a)")
+    # This shim can ship before the log4j2 change that creates the directory. On such
+    # a host it must behave EXACTLY as the single-track shim did — not error, not warn
+    # on every pass, and not create a directory the application is supposed to own.
+    box = LogDir()
+    try:
+        standard_files(box)
+        check(not os.path.isdir(box.config.detail_dir), "the detail directory is absent")
+        equal(box.promoter.candidates(box.config.tracks()[1]), [],
+              "the detail track simply yields nothing")
+
+        result = box.promoter.record("alertname=Test")
+        equal(len(result["linked"]), 2, "the aggregate track is promoted as before")
+        equal(result["errors"], [], "and nothing is reported as an error")
+        check(not os.path.isdir(box.config.detail_dir),
+              "the shim does not manufacture the directory log4j2 owns")
+
+        equal(box.promoter.summary()["detailDirPresent"], False,
+              "/health says so, which is how P4-9 tells 'absent' from 'not seen'")
+    finally:
+        box.stop()
+
+
 def test_promotion_is_idempotent():
     print("repeat passes -> no new files, no exceptions (AD-16 makes repeats free)")
     box = LogDir()
@@ -280,8 +358,8 @@ def test_incident_key_coalesces_and_refreshes_one_deadline():
         equal(entry["passes"], 3, "the redeliveries are counted")
         check(entry["deferredAt"] > first["deferredAt"],
               "the +5 min deadline was REFRESHED by the redelivery")
-        equal(entry["liveName"], first["liveName"],
-              "and the live link name is pinned to first sight, so repeats stay idempotent")
+        equal(entry["liveNames"], first["liveNames"],
+              "and the live link names are pinned to first sight, so repeats stay idempotent")
         equal(len(box.evidence()), 2, "still just the two promoted files")
 
         # A DIFFERENT incident is a different key and gets its own live link.
@@ -402,6 +480,97 @@ def test_sweep_bounds_the_directory_by_size():
         box.stop()
 
 
+def test_the_two_sweep_ages_are_independent():
+    print("sweep -> detail ages out at its own, much shorter age (AD-28)")
+    # One age cannot express "keep the timeline for a fortnight, the payload for a
+    # long weekend", and the payload is both the expensive half (3.4-5.1 GB a file at
+    # 20-30k bots) and the half carrying ws-parser's agency-token material (AD-30).
+    box = LogDir(EVIDENCE_MAX_AGE_DAYS="14", EVIDENCE_DETAIL_MAX_AGE_DAYS="3")
+    try:
+        standard_files(box)
+        standard_detail_files(box)
+        box.promoter.record("alertname=Test", now=time.time())
+        equal(len(box.evidence()), 4, "both tracks pinned")
+
+        # Five days on: past the detail age, nowhere near the aggregate age.
+        box.promoter.sweep(now=time.time() + 5 * 86400)
+        remaining = box.evidence()
+        equal([name for name in remaining if name.startswith("detail")], [],
+              "every detail file is released at promotion + 5 d")
+        equal(len([name for name in remaining if name.startswith("console")]), 2,
+              "and the aggregates — the incident timeline — are untouched")
+
+        box.promoter.sweep(now=time.time() + 15 * 86400)
+        equal(box.evidence(), [], "the aggregates go at their own 14 d")
+    finally:
+        box.stop()
+
+
+def test_the_byte_guard_evicts_detail_before_aggregates():
+    print("byte guard -> ALL detail candidates go before ANY aggregate (AD-28)")
+    # The ordering is the whole point. Under one pool ordered purely by promotion
+    # time, a new incident's 3 GB payload evicts an old incident's 7 MB timeline —
+    # shedding the irreplaceable cheap bytes and keeping the expensive ones. Here the
+    # aggregate is deliberately the OLDER file, so a promotion-time-only eviction
+    # would take it and this test would fail.
+    box = LogDir(EVIDENCE_MAX_BYTES="150")
+    try:
+        box.promoter.ensure_dir()
+        old_aggregate = os.path.join(box.config.evidence_dir, "console-2026-08-19-08.log")
+        with open(old_aggregate, "w") as handle:
+            handle.write("x" * 100)
+        new_detail = os.path.join(box.config.evidence_dir, "detail-2026-08-19-08.log")
+        with open(new_detail, "w") as handle:
+            handle.write("y" * 100)
+        now = time.time()
+        box.promoter.promoted_at["console-2026-08-19-08.log"] = now - 10_000
+        box.promoter.promoted_at["detail-2026-08-19-08.log"] = now
+
+        box.promoter.sweep(now=now)
+        equal(box.evidence(), ["console-2026-08-19-08.log"],
+              "the NEWER detail file is evicted and the OLDER aggregate survives")
+        equal(box.promoter.last_sweep["remainingDetail"], 0,
+              "and the sweep reports the detail class it shed")
+    finally:
+        box.stop()
+
+
+def test_load_pending_accepts_a_pre_phase_four_entry():
+    print("legacy .pending.json -> the single liveName is read, passes are not lost")
+    # A shim restart mid-incident reads a file the PREVIOUS version wrote. Rejecting
+    # the old single-`liveName` shape would drop that incident's scheduled passes
+    # during the incident — the one moment this process exists for.
+    box = LogDir()
+    try:
+        standard_files(box)
+        standard_detail_files(box)
+        box.promoter.ensure_dir()
+        legacy = "console-live-alertname_Legacy-20260819T120000Z.log"
+        with open(box.config.pending_path, "w") as handle:
+            json.dump({"alertname=Legacy": {"slug": "alertname_Legacy",
+                                            "firstSeenAt": time.time(),
+                                            "liveName": legacy,
+                                            "deferredAt": time.time() + 300,
+                                            "tailAt": None,
+                                            "passes": 1}}, handle)
+
+        restarted = shim.Promoter(box.config)
+        restarted.load_pending()
+        equal(list(restarted.pending), ["alertname=Legacy"], "the entry survives the upgrade")
+        entry = restarted.pending["alertname=Legacy"]
+        equal(entry["liveNames"]["aggregate"], legacy,
+              "the old name is read as the aggregate track's, so its passes stay idempotent")
+        check(entry["liveNames"].get("detail", "").startswith("detail-live-"),
+              "and the detail track gets a generated per-incident name rather than none")
+
+        due = restarted.tick(time.time() + 400)
+        equal([tag for _, tag, _ in due], ["deferred"], "its deferred pass still runs")
+        check(any(name.startswith("detail-live-") for name in box.evidence()),
+              "and that pass promotes the detail track too")
+    finally:
+        box.stop()
+
+
 def test_unclean_start_retro_promotes():
     print("start with no clean-shutdown marker -> boot promotion (AD-21)")
     # In a full-stack failure Alertmanager may be dead too, so the webhook cannot be
@@ -451,9 +620,9 @@ def test_pending_passes_survive_a_restart():
         restarted = shim.Promoter(box.config)
         restarted.load_pending()
         equal(list(restarted.pending), ["alertname=Test"], "and is restored on start")
-        equal(restarted.pending["alertname=Test"]["liveName"],
-              box.promoter.pending["alertname=Test"]["liveName"],
-              "with the same live link name, so the restored passes stay idempotent")
+        equal(restarted.pending["alertname=Test"]["liveNames"],
+              box.promoter.pending["alertname=Test"]["liveNames"],
+              "with the same live link names, so the restored passes stay idempotent")
     finally:
         box.stop()
 
@@ -573,7 +742,11 @@ def test_bad_numeric_config_falls_back_instead_of_crash_looping():
     # missing for exactly the incident it exists to preserve.
     expected = {"EVIDENCE_SHIM_PORT": ("port", 8080),
                 "EVIDENCE_MAX_AGE_DAYS": ("max_age_days", 14.0),
-                "EVIDENCE_MAX_BYTES": ("max_bytes", 5 * 1024 ** 3),
+                "EVIDENCE_DETAIL_MAX_AGE_DAYS": ("detail_max_age_days", 3.0),
+                # 5 GB -> 12 GB with Phase 4 (AD-28): a pinned 2 h DETAIL file is
+                # 3.4-5.1 GB at 20-30k bots, so the old cap could not hold one
+                # incident's payload at all.
+                "EVIDENCE_MAX_BYTES": ("max_bytes", 12 * 1024 ** 3),
                 "EVIDENCE_ROLLOVER_HOURS": ("rollover_hours", 2.0)}
     for name, (attribute, default) in expected.items():
         try:
@@ -759,6 +932,11 @@ def test_health_reports_whether_the_scheduler_is_alive():
 def main():
     for test in (test_promotion_is_a_hardlink_not_a_copy,
                  test_selection_is_newest_two_plus_live,
+                 test_selection_runs_per_track,
+                 test_a_missing_detail_directory_is_a_no_op,
+                 test_the_two_sweep_ages_are_independent,
+                 test_the_byte_guard_evicts_detail_before_aggregates,
+                 test_load_pending_accepts_a_pre_phase_four_entry,
                  test_promotion_is_idempotent,
                  test_a_rolled_over_live_file_still_gets_pinned,
                  test_incident_key_coalesces_and_refreshes_one_deadline,

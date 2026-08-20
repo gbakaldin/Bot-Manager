@@ -267,6 +267,10 @@ Alertmanager's webhook and **hardlinks** the newest log files into
   renames the file, which is precisely the wanted post-incident tail.
 - **Newest two at execution time (AD-15)**, never arithmetic on the alert
   timestamp -- that re-centres the window by itself at a rollover boundary.
+  **Per track since Phase 4 (AD-28)**: six names, at most three inodes each for
+  `console*` and `detail*`. Both tracks roll on the same boundary, so one tail
+  pass still closes both live files. A **missing `logs/detail/` is a no-op**, not
+  an error -- the shim predates nothing and degrades to its old behaviour.
 - **Three passes (AD-16):** immediately (the box may still be going down), at
   +5 min (Alertmanager's `group_interval`), and at the next rollover boundary
   + 120 s so the file that was live at T+0 is pinned after it closes. All three
@@ -282,9 +286,17 @@ Alertmanager's webhook and **hardlinks** the newest log files into
   non-recursive `__path__: /logs/*.log` (else promoted files are re-ingested into
   Loki) and log4j2's `Delete` (`basePath /app/logs`, `maxDepth = 1`).
   `EvidenceRetentionEscapeTest` fails the build if either changes.
-- **It sweeps itself (AD-19)** -- `EVIDENCE_MAX_AGE_DAYS` (14) then
-  `EVIDENCE_MAX_BYTES` (5 GB, oldest-first), on every pass and hourly. Without it
-  the fix for unbounded growth is unbounded growth.
+- **It sweeps itself (AD-19, AD-28)** -- **two ages**: `EVIDENCE_MAX_AGE_DAYS`
+  (14) for the aggregate track and `EVIDENCE_DETAIL_MAX_AGE_DAYS` (**3**) for the
+  detail track, then `EVIDENCE_MAX_BYTES` (**12 GB**), on every pass and hourly.
+  Under the byte guard **detail files are evicted before aggregate files**
+  whatever their promotion times, then oldest-promotion first within each class:
+  a pinned 2 h detail file is 3.4-5.1 GB at 20-30k bots, so the alternative sheds
+  an old incident's 7 MB timeline to make room for a new incident's payload. The
+  3 d detail age is also chosen against the aggregate's 14 because ws-parser logs
+  **agency-token material** at INFO, and after Phase 4 the detail track is the
+  only place it exists (AD-30) -- contained, not fixed; the fix is in the library.
+  Without any of this the fix for unbounded growth is unbounded growth.
 - **Unclean start retro-promotes (AD-21).** In a full-stack failure Alertmanager
   may be dead too, so a start that finds no `logs/evidence/.clean-shutdown` marker
   promotes immediately, tagged `boot`.

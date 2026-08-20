@@ -230,4 +230,39 @@ class EvidenceRetentionEscapeTest {
                 .doesNotContain("shutil.copy")
                 .doesNotContain("copyfile");
     }
+
+    @Test
+    @DisplayName("the shim looks for track 2 in the directory log4j2 actually writes it to")
+    void theShimsDetailDirectoryMatchesLog4j2s() {
+        // Same class of coupling as EVIDENCE_ROLLOVER_HOURS above, and the same silent
+        // failure: a shim pointed at the wrong subdirectory keeps working, keeps
+        // answering 200, and keeps promoting — only the half of the evidence that
+        // forensics actually reads line by line is quietly missing from every incident.
+        // The count on /health is what would show it, and nobody reads that until it is
+        // too late to re-run the incident.
+        Matcher fileName = Pattern
+                .compile("appender\\.detail\\.fileName\\s*=\\s*(\\S+)")
+                .matcher(text("logging", "log4j2.properties"));
+        assertThat(fileName.find()).as("log4j2.properties declares track 2's file").isTrue();
+
+        String path = fileName.group(1);
+        String directory = path.substring(0, path.lastIndexOf('/'));
+        String leaf = directory.substring(directory.lastIndexOf('/') + 1);
+
+        Matcher shimDefault = Pattern
+                .compile("os\\.path\\.join\\(self\\.logs_dir,\\s*([A-Z_]+|\"[^\"]+\")\\)")
+                .matcher(text("evidence-shim", "shim.py"));
+        assertThat(shimDefault.find())
+                .as("shim.py must derive its detail directory from the logs mount — a "
+                        + "different filesystem makes every hardlink fail with EXDEV")
+                .isTrue();
+
+        // The shim joins logs_dir with the DETAIL constant, whose value is the leaf of
+        // log4j2's path. Assert the constant rather than the join, so the two spellings
+        // are compared and not merely both present.
+        assertThat(text("evidence-shim", "shim.py"))
+                .as("log4j2 writes track 2 to .../%s/, so the shim's DETAIL constant must "
+                        + "be exactly %s", leaf, leaf)
+                .contains("DETAIL = \"" + leaf + "\"");
+    }
 }

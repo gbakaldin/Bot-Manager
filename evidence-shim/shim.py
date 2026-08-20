@@ -38,14 +38,45 @@ keeps growing until log4j2 renames that file at rollover and creates a fresh
 one — which captures precisely the post-incident tail and then stops. That is by
 construction, not luck.
 
-NEWEST TWO AT EXECUTION TIME (AD-15)
-------------------------------------
+TWO TRACKS (Phase 4, AD-28)
+---------------------------
+Phase 4 split the application's output in two, and this process promotes BOTH:
+
+  aggregate  /logs/console.log + /logs/console-*.log — JSON, INFO+ only, the
+             only track Loki ingests. Tiny. It is the incident TIMELINE: the
+             fleet rollup, the group lifecycle lines, the scoped-debug
+             escalation record.
+  detail     /logs/detail/detail.log + /logs/detail/detail-*.log — PatternLayout,
+             the ws-parser library in full plus every DEBUG/TRACE line, never in
+             Loki, swept locally at 12 h or 10 GB. It is what forensics actually
+             reads line by line.
+
+Neither is sufficient alone: without the aggregate you have no timeline, without
+the detail you have no per-bot behaviour. The aggregate costs nothing to pin.
+The detail does NOT — a pinned 2 h detail file is 3.4–5.1 GB at 20–30k bots and
+those blocks cannot be reclaimed until the last name is unlinked, which is why
+the byte guard evicts detail files before aggregate ones and why they get their
+own, much shorter age (`EVIDENCE_DETAIL_MAX_AGE_DAYS`, 3 d against the
+aggregate's 14). It is also why 3 days is the right number for a second reason:
+the ws-parser library logs agency-token material at INFO, which after Phase 4
+exists only in the detail track (AD-30).
+
+A MISSING DETAIL DIRECTORY IS A NO-OP, NOT AN ERROR. That is deliberate: this
+file can ship before the log4j2 change that creates `/logs/detail/`, and until
+then it behaves exactly as it did before.
+
+NEWEST TWO AT EXECUTION TIME, PER TRACK (AD-15)
+-----------------------------------------------
 Files are chosen by mtime at the moment a pass runs, never by arithmetic on the
 alert's timestamp. This re-centres the window automatically: an incident at
 minute 118 of a 2 h period yields a previous file holding 58 min of normal
 operation plus 2 min of the incident, and a live file holding the rest, with the
 ancient period falling off by itself. Timestamp arithmetic would need clock-skew
 handling and would still pick the wrong file at a rollover boundary.
+
+The rule runs independently per track, so a pass pins six names and at most
+three inodes per track. Both tracks roll on the SAME log4j2 boundary (AD-22),
+which is what lets one tail pass close both live files — no second timer.
 
 THREE PASSES, ALL THE SAME OPERATION (AD-16)
 --------------------------------------------
@@ -94,6 +125,7 @@ must not be the reason an incident's logs were swept.
 Self-test: `python3 evidence-shim/selftest.py` (no network, no containers).
 """
 
+import collections
 import fnmatch
 import json
 import os
@@ -103,11 +135,29 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# The live file log4j2 writes to, and the glob covering it plus its rolled
-# siblings (`console-%d{yyyy-MM-dd-HH}.log`). Kept in step with
-# logging/log4j2.properties -- if that filePattern changes, this changes.
-LIVE_NAME = "console.log"
-LOG_GLOB = "console*.log"
+# One entry per output track (Phase 4 / AD-28). `glob` covers a track's live file
+# AND its rolled siblings; `live_template` is the per-incident name the live file
+# is linked under, stamped with (slug, first-seen UTC timestamp). Kept in step
+# with logging/log4j2.properties -- if either filePattern changes, this changes.
+Track = collections.namedtuple("Track", "name directory glob live_name live_template")
+
+AGGREGATE = "aggregate"
+DETAIL = "detail"
+
+# The per-incident name each track's LIVE file is linked under. One source of
+# truth: `record()` stamps them onto a new incident, and `load_pending` fills
+# them in for an entry written by a shim that only knew about one track.
+LIVE_TEMPLATES = {
+    AGGREGATE: "console-live-%s-%s.log",
+    DETAIL: "detail-live-%s-%s.log",
+}
+
+# How an evidence file is classified back into its track during the sweep. Both
+# `detail-<date>.log` (rolled) and `detail-live-<slug>-<ts>.log` (promoted live)
+# start with it; every aggregate name starts with `console`. Filename prefix
+# rather than a sidecar map on purpose: the classification must still be right
+# for a file promoted by an older shim, or by a hand-run `ln`.
+DETAIL_PREFIX = "detail"
 
 # Written on SIGTERM, removed on start. Its ABSENCE at start is what tells us the
 # previous run died rather than stopped (AD-21).
@@ -173,6 +223,12 @@ class Config(object):
         # (reported by `sameFilesystem` on /health rather than discovered later).
         self.logs_dir = get("EVIDENCE_LOGS_DIR", "/logs")
         self.evidence_dir = get("EVIDENCE_DIR") or os.path.join(self.logs_dir, "evidence")
+        # Track 2's directory (Phase 4 / AD-25). A SUBDIRECTORY of logs_dir, which is
+        # what keeps it out of Loki -- promtail's __path__: /logs/*.log is
+        # non-recursive. It is created by log4j2's FileManager, not by this process:
+        # if it is absent, this shim treats the track as empty rather than
+        # manufacturing a directory the app is supposed to own.
+        self.detail_dir = get("EVIDENCE_DETAIL_DIR") or os.path.join(self.logs_dir, DETAIL)
         self.port = _number("EVIDENCE_SHIM_PORT", get("EVIDENCE_SHIM_PORT", "8080"), 8080, int)
 
         # AD-19: evidence/ escapes both sweepers, so it needs its own or the fix for
@@ -181,9 +237,17 @@ class Config(object):
         # everything" (it is how the guard is verified), not "disabled".
         self.max_age_days = _number("EVIDENCE_MAX_AGE_DAYS",
                                     get("EVIDENCE_MAX_AGE_DAYS", "14"), 14.0, float)
+        # Detail files get their own, much shorter age (AD-28). Two reasons, both
+        # sufficient: a pinned 2 h detail file is 3.4-5.1 GB at 20-30k bots against a
+        # few MB for the aggregate it accompanies, and the ws-parser library logs
+        # agency-token material at INFO, which after Phase 4 lives only in this track
+        # (AD-30). Independent of max_age_days on purpose -- one age cannot express
+        # "keep the timeline for a fortnight, the payload for a long weekend".
+        self.detail_max_age_days = _number("EVIDENCE_DETAIL_MAX_AGE_DAYS",
+                                           get("EVIDENCE_DETAIL_MAX_AGE_DAYS", "3"), 3.0, float)
         self.max_bytes = _number("EVIDENCE_MAX_BYTES",
-                                 get("EVIDENCE_MAX_BYTES", str(5 * 1024 ** 3)),
-                                 5 * 1024 ** 3, int)
+                                 get("EVIDENCE_MAX_BYTES", str(12 * 1024 ** 3)),
+                                 12 * 1024 ** 3, int)
         self.sweep_interval = _number("EVIDENCE_SWEEP_INTERVAL_SECONDS",
                                       get("EVIDENCE_SWEEP_INTERVAL_SECONDS", "3600"),
                                       3600.0, float)
@@ -208,6 +272,21 @@ class Config(object):
         self.newest_count = _number("EVIDENCE_NEWEST_COUNT",
                                     get("EVIDENCE_NEWEST_COUNT", str(DEFAULT_NEWEST_COUNT)),
                                     DEFAULT_NEWEST_COUNT, int)
+
+    def tracks(self):
+        """The output tracks to promote, in the order they are reported (AD-28).
+
+        Resolved from config rather than being module constants because the detail
+        directory is overridable and because a track is (directory, glob, live name)
+        together -- splitting them was how the pre-Phase-4 shim ended up hardcoded to
+        one track without anything noticing.
+        """
+        return (
+            Track(AGGREGATE, self.logs_dir, "console*.log", "console.log",
+                  LIVE_TEMPLATES[AGGREGATE]),
+            Track(DETAIL, self.detail_dir, "detail*.log", "detail.log",
+                  LIVE_TEMPLATES[DETAIL]),
+        )
 
     @property
     def marker_path(self):
@@ -236,9 +315,14 @@ class Config(object):
     def summary(self):
         return {
             "logsDir": self.logs_dir,
+            # Published so "the shim is not seeing track 2" is answerable from
+            # /health rather than by reasoning about a zero file count (P4-9).
+            "detailDir": self.detail_dir,
+            "detailDirPresent": os.path.isdir(self.detail_dir),
             "evidenceDir": self.evidence_dir,
             "sameFilesystem": self.same_filesystem(),
             "maxAgeDays": self.max_age_days,
+            "detailMaxAgeDays": self.detail_max_age_days,
             "maxBytes": self.max_bytes,
             "sweepIntervalSeconds": self.sweep_interval,
             "rolloverHours": self.rollover_hours,
@@ -291,9 +375,41 @@ def _deadline(value):
     return deadline if deadline == deadline else None  # NaN poisons min()/comparisons
 
 
-def _sane_entry(entry):
+def live_names_for(slug_value, when):
+    """The live-link name for every track, stamped from FIRST sight of the incident.
+
+    Stable across the incident's three passes, which is what makes the repeats of
+    AD-16 free: passes 2 and 3 hit FileExistsError on the same names and skip.
+    """
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(when))
+    return {name: template % (slug_value, stamp)
+            for name, template in LIVE_TEMPLATES.items()}
+
+
+def _live_names(value):
+    """Normalise a pending entry's live-link names to {track: filename}.
+
+    Phase 4 turned one `liveName` string into a `liveNames` map, and a shim restart
+    in the middle of an incident reads a file the PREVIOUS version wrote. Rejecting
+    the old shape there would drop that incident's scheduled passes -- during the
+    incident, which is the one moment this process exists for -- so the legacy
+    string is accepted and read as the aggregate track's name.
+    """
+    if isinstance(value, dict):
+        return {name: stored for name, stored in value.items()
+                if isinstance(stored, str) and stored}
+    if isinstance(value, str) and value:
+        return {AGGREGATE: value}
+    return {}
+
+
+def _sane_entry(key, entry):
     """A restored pending entry, normalised — or None if it cannot be trusted."""
-    if not isinstance(entry, dict) or not entry.get("liveName"):
+    if not isinstance(entry, dict):
+        return None
+    names = _live_names(entry.get("liveNames")
+                        if entry.get("liveNames") is not None else entry.get("liveName"))
+    if not names and not entry.get("slug"):
         return None
     deferred = _deadline(entry.get("deferredAt"))
     tail = _deadline(entry.get("tailAt"))
@@ -302,7 +418,18 @@ def _sane_entry(entry):
     sane = dict(entry)
     sane["deferredAt"] = deferred
     sane["tailAt"] = tail
-    sane["firstSeenAt"] = _deadline(entry.get("firstSeenAt"))
+    first_seen = _deadline(entry.get("firstSeenAt"))
+    sane["firstSeenAt"] = first_seen
+    # Any track the stored entry does not name -- always the detail track for an
+    # entry written before Phase 4 -- gets a name generated the same way record()
+    # would have, so the restored passes pin it under a per-incident name rather
+    # than under the reused source name.
+    generated = live_names_for(entry.get("slug") or slug(key),
+                               first_seen if first_seen is not None else time.time())
+    for track_name, generated_name in generated.items():
+        names.setdefault(track_name, generated_name)
+    sane["liveNames"] = names
+    sane.pop("liveName", None)
     return sane
 
 
@@ -328,7 +455,7 @@ class Promoter(object):
         self.config = config
         self.lock = threading.RLock()
         self.wake = threading.Event()
-        # key -> {"slug", "liveName", "firstSeenAt", "deferredAt", "tailAt", "passes"}
+        # key -> {"slug", "liveNames", "firstSeenAt", "deferredAt", "tailAt", "passes"}
         self.pending = {}
         # basename -> epoch seconds we promoted it (see PROMOTED_FILE).
         self.promoted_at = {}
@@ -341,17 +468,25 @@ class Promoter(object):
 
     # ------------------------------------------------------------------ selection
 
-    def candidates(self):
-        """`console*.log` in logs_dir, newest first. Never recurses, never raises."""
-        directory = self.config.logs_dir
+    def candidates(self, track):
+        """One track's files, newest first. Never recurses, never raises.
+
+        A track whose directory does not exist yields nothing and says nothing: this
+        file is safe to deploy before the log4j2 change that creates `/logs/detail/`,
+        and on such a host it behaves exactly as the single-track shim did. Only a
+        directory that EXISTS and cannot be listed is an error.
+        """
+        directory = track.directory
         try:
             names = os.listdir(directory)
         except OSError as error:
+            if not os.path.isdir(directory):
+                return []
             log("ERROR cannot list %s: %s" % (directory, error))
             return []
         found = []
         for name in names:
-            if not fnmatch.fnmatch(name, LOG_GLOB):
+            if not fnmatch.fnmatch(name, track.glob):
                 continue
             path = os.path.join(directory, name)
             try:
@@ -367,34 +502,51 @@ class Promoter(object):
         found.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
         return found
 
-    def selection(self):
-        """The newest N plus the live file (AD-15). Returns [(name, path, is_live)]."""
-        found = self.candidates()
+    def selection(self, track):
+        """One track's newest N plus its live file (AD-15).
+
+        Returns [(name, path, is_live)]. Run per track and unioned by the caller, so
+        a pass pins at most `newest_count + 1` inodes PER TRACK -- six names for two
+        tracks at the shipped settings.
+        """
+        found = self.candidates(track)
         chosen = found[:max(1, self.config.newest_count)]
-        live = os.path.join(self.config.logs_dir, LIVE_NAME)
+        live = os.path.join(track.directory, track.live_name)
         if os.path.isfile(live) and not any(entry[2] == live for entry in chosen):
-            chosen.append((0, LIVE_NAME, live))
+            chosen.append((0, track.live_name, live))
         return [(name, path, path == live) for _, name, path in chosen]
 
     # ------------------------------------------------------------------ promotion
 
-    def promote(self, key, tag, live_name):
-        """One pass: hardlink the selection into evidence/, then sweep. Idempotent.
+    def promote(self, key, tag, live_names):
+        """One pass over EVERY track: hardlink into evidence/, then sweep. Idempotent.
 
-        The live file is linked under `live_name`, which is stable for the incident
-        key -- its SOURCE name (`console.log`) is reused across incidents and across
-        rollovers, so linking it under its own name would either collide or, worse,
-        silently pin the wrong inode. A stable per-incident name makes the repeat
-        passes of AD-16 free: the second and third attempts hit FileExistsError and
-        skip.
+        Each track's live file is linked under its own `live_names[track]`, which is
+        stable for the incident key -- a live file's SOURCE name (`console.log`,
+        `detail.log`) is reused across incidents and across rollovers, so linking it
+        under its own name would either collide or, worse, silently pin the wrong
+        inode. A stable per-incident name makes the repeat passes of AD-16 free: the
+        second and third attempts hit FileExistsError and skip.
+
+        A track with no files -- an absent `/logs/detail/` on a host that has not
+        taken the log4j2 change yet -- contributes nothing and is not an error.
         """
         self.ensure_dir()
+        live_names = _live_names(live_names)
+        # Degenerate path only (a caller that named no track, which record() and
+        # load_pending both make impossible): generate rather than fall back to the
+        # SOURCE name, which is reused across incidents and would pin the wrong
+        # inode on the next rollover.
+        for track_name, generated in live_names_for(slug(key), time.time()).items():
+            live_names.setdefault(track_name, generated)
         linked, skipped, errors = [], [], []
-        for name, path, is_live in self.selection():
-            destination = os.path.join(self.config.evidence_dir,
-                                       live_name if is_live else name)
-            outcome, detail = self.link(path, destination, is_live)
-            {"linked": linked, "skipped": skipped, "errors": errors}[outcome].append(detail)
+        for track in self.config.tracks():
+            for name, path, is_live in self.selection(track):
+                destination = os.path.join(
+                    self.config.evidence_dir,
+                    live_names[track.name] if is_live else name)
+                outcome, detail = self.link(path, destination, is_live)
+                {"linked": linked, "skipped": skipped, "errors": errors}[outcome].append(detail)
         # Stamp the PROMOTION time (not the log's mtime) so the age sweep measures
         # how long we have held the evidence, which is what EVIDENCE_MAX_AGE_DAYS
         # advertises. A `skipped` name already has an earlier stamp and keeps it.
@@ -499,9 +651,9 @@ class Promoter(object):
                     "slug": slug(key),
                     "firstSeenAt": now,
                     # Timestamped from FIRST sight, so every pass for this incident
-                    # links the live file under one name and the repeats are no-ops.
-                    "liveName": "console-live-%s-%s.log"
-                                % (slug(key), time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now))),
+                    # links each track's live file under one name and the repeats are
+                    # no-ops. One name PER TRACK since Phase 4 (AD-28).
+                    "liveNames": live_names_for(slug(key), now),
                     "passes": 0,
                 }
                 self.pending[key] = entry
@@ -510,9 +662,9 @@ class Promoter(object):
             entry["deferredAt"] = now + self.config.deferred_delay
             entry["tailAt"] = next_rollover(now, self.config.rollover_hours) + self.config.tail_delay
             entry["passes"] = entry.get("passes", 0) + 1
-            live_name = entry["liveName"]
+            live_names = dict(entry["liveNames"])
             self.enforce_pending_cap()
-        result = self.promote(key, tag, live_name)
+        result = self.promote(key, tag, live_names)
         self.save_pending()
         self.wake.set()
         return result
@@ -528,16 +680,17 @@ class Promoter(object):
                 # raise out of the scheduler loop.
                 deferred = _deadline(entry.get("deferredAt"))
                 tail = _deadline(entry.get("tailAt"))
+                names = _live_names(entry.get("liveNames"))
                 if entry.get("deferredAt") is not None and (deferred is None or now >= deferred):
                     entry["deferredAt"] = None
-                    due.append((key, "deferred", entry["liveName"]))
+                    due.append((key, "deferred", names))
                 if entry.get("tailAt") is not None and (tail is None or now >= tail):
                     entry["tailAt"] = None
-                    due.append((key, "tail", entry["liveName"]))
+                    due.append((key, "tail", names))
                 if entry.get("deferredAt") is None and entry.get("tailAt") is None:
                     self.pending.pop(key, None)
-        for key, tag, live_name in due:
-            self.promote(key, tag, live_name)
+        for key, tag, live_names in due:
+            self.promote(key, tag, live_names)
         if now >= self.next_sweep:
             self.next_sweep = now + self.config.sweep_interval
             if not due:
@@ -593,7 +746,7 @@ class Promoter(object):
             return
         restored, rejected = {}, []
         for key, entry in loaded.items():
-            sane = _sane_entry(entry)
+            sane = _sane_entry(key, entry)
             if sane is None:
                 rejected.append(key)
                 continue
@@ -734,8 +887,20 @@ class Promoter(object):
         found.sort()
         return found
 
+    @staticmethod
+    def is_detail(path):
+        """Which track a promoted file came from, decided by its filename prefix.
+
+        `detail-<date>.log` and `detail-live-<slug>-<ts>.log` both match; every
+        aggregate name starts with `console`. A prefix rather than a sidecar lookup
+        so the classification is still right for a file promoted by an older shim or
+        linked by hand -- and so that misclassifying cannot silently make a 3 GB
+        file immortal.
+        """
+        return os.path.basename(path).startswith(DETAIL_PREFIX)
+
     def sweep(self, now=None):
-        """AD-19: age first, then oldest-first until under the size guard.
+        """AD-19/AD-28: two ages, then detail-first eviction under the size guard.
 
         Age is measured from the PROMOTION, not from `st_mtime`. A hardlink shares
         the source inode, so a promoted file's mtime is the log's last-write time:
@@ -750,36 +915,57 @@ class Promoter(object):
         full even though its blocks are shared with the original. That
         over-estimates, which is the safe direction for a guard whose job is to
         stop this directory becoming the new unbounded thing.
+
+        TWO AGES AND AN ORDERED BYTE GUARD (AD-28). Detail files are 3.4-5.1 GB
+        apiece at 20-30k bots and hold the ws-parser token material; aggregates are
+        a few MB and hold the timeline. So detail gets `detail_max_age_days` (3),
+        aggregates keep `max_age_days` (14), and under the byte cap EVERY detail
+        candidate is evicted, oldest-promotion first, before ANY aggregate is
+        touched. The alternative -- one pool ordered purely by promotion time --
+        discards an old incident's 7 MB timeline to make room for a new incident's
+        3 GB payload, which is exactly backwards: it sheds the irreplaceable cheap
+        bytes and keeps the expensive ones.
         """
         now = time.time() if now is None else now
         removed, freed = [], 0
-        cutoff = now - self.config.max_age_days * 86400.0
+        cutoff = {
+            True: now - self.config.detail_max_age_days * 86400.0,
+            False: now - self.config.max_age_days * 86400.0,
+        }
         files = self.evidence_files()
-        keep = []
+        keep = {True: [], False: []}
         for mtime, size, path in files:
-            if self.promotion_time(path, mtime) <= cutoff:
+            detail = self.is_detail(path)
+            promoted = self.promotion_time(path, mtime)
+            if promoted <= cutoff[detail]:
                 if self._unlink(path):
                     removed.append(os.path.basename(path))
                     freed += size
             else:
-                keep.append((self.promotion_time(path, mtime), size, path))
-        keep.sort()  # oldest PROMOTION first, which is the order the size guard evicts in
+                keep[detail].append((promoted, size, path))
+        # Oldest PROMOTION first within each class, which is the order the size guard
+        # evicts in -- detail first, then aggregates.
+        keep[True].sort()
+        keep[False].sort()
 
-        total = sum(size for _, size, _ in keep)
-        while total > self.config.max_bytes and keep:
-            _, size, path = keep.pop(0)
-            if self._unlink(path):
-                removed.append(os.path.basename(path))
-                freed += size
-            total -= size
+        total = sum(size for entries in keep.values() for _, size, _ in entries)
+        for detail in (True, False):
+            while total > self.config.max_bytes and keep[detail]:
+                _, size, path = keep[detail].pop(0)
+                if self._unlink(path):
+                    removed.append(os.path.basename(path))
+                    freed += size
+                total -= size
 
-        self.forget_promoted(keep)
+        surviving = keep[True] + keep[False]
+        self.forget_promoted(surviving)
 
         self.last_sweep = {
             "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
             "removed": removed,
             "freedBytes": freed,
-            "remaining": len(keep),
+            "remaining": len(surviving),
+            "remainingDetail": len(keep[True]),
             "bytes": total,
         }
         if removed:
@@ -818,10 +1004,23 @@ class Promoter(object):
                        for key, entry in self.pending.items()}
             last = self.last_promotion
         summary = self.config.summary()
+        # Per-track, because "is the detail track being seen at all?" is the first
+        # question a Phase 4 misconfiguration raises, and a single total cannot
+        # answer it (P4-9). A zero detail count with a healthy aggregate count means
+        # EVIDENCE_DETAIL_DIR is wrong or /logs/detail/ does not exist.
+        by_track = {AGGREGATE: [0, 0], DETAIL: [0, 0]}
+        for _, size, path in files:
+            counter = by_track[DETAIL if self.is_detail(path) else AGGREGATE]
+            counter[0] += 1
+            counter[1] += size
         summary.update({
             "startedClean": self.started_clean,
             "evidenceFiles": len(files),
             "evidenceBytes": sum(size for _, size, _ in files),
+            "evidenceByTrack": {name: {"files": counter[0], "bytes": counter[1]}
+                                for name, counter in by_track.items()},
+            "sourceFilesByTrack": {track.name: len(self.candidates(track))
+                                   for track in self.config.tracks()},
             "pending": pending,
             "pendingCap": MAX_PENDING,
             "pendingEvicted": self.evicted_pending,
