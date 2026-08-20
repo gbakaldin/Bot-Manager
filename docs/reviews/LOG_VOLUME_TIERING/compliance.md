@@ -643,3 +643,340 @@ shipped value changes.**
   read a lower-than-expected number as a misroute — use P4-5 and P4-2 to decide that.
 - Pre-ramp gates still open and not closable from the diff: **P0-6 on `Prod-Bot`** (never
   measured), **P0-9** (re-baselined behind 4b), **P4-6**.
+
+---
+---
+
+# Compliance — LOG_VOLUME_TIERING **Phase 4, remediation re-verification**
+
+*Third compliance pass, 2026-08-20. Phases 0–3 (PLAN_AMENDED) and the first Phase 4 pass
+(PLAN_AMENDED) are ruled on above and are not re-litigated.*
+
+Branch: `feature/log-volume-tiering` (HEAD `3718a45`)
+Plan reviewed: `docs/plans/LOG_VOLUME_TIERING.md` — **Dev's own amendments at `3718a45`**,
+plus this pass's amendments
+Diff reviewed: `git diff 68cc9dd..3718a45` — `588b664` (shim inode accounting), `e03029f`
+(`AsyncQueueMetrics` + `LogQueueSaturated`), `f8bfd17` (alert-rule test), `74b0455` (config
+comments + `bufferSize`), `3718a45` (plan/CLAUDE.md/promtail comments). 17 files,
++2,653/−117.
+
+Build: `mvn -o -pl bot-app test` on JDK 21 — **BUILD SUCCESS**, exit 0. The six suites that
+carry this pass's changes: `AlertRuleMetricsTest` 7, `AsyncQueueMetricsTest` 6,
+`ShippedLog4j2ConfigRoutingTest` 7, `AsyncQueuePolicyTest` 8, `Log4j2TwinConfigTest` 3,
+`Log4j2TestConfigShapeTest` 5 — 36 tests, 0 failures, 0 skipped.
+`deploy.sh` is untouched by all five commits. The staged `TaiXiuMessages/*.js` deletions
+were left exactly as found.
+
+## Verdict
+
+**PLAN_AMENDED**
+
+The code in the remediation range is faithful and I am asking for **no code change**. The
+work was in the plan, and the brief's instruction to assume a fourth contradiction was
+correct — I found three, one of them serious:
+
+- **Step 0c would have taken Loki down.** It instructs a config key that does not exist in
+  the block it names, in an image where Loki parses config strictly. Verified against
+  `grafana/loki:3.3.2`. It was also unnecessary, and its one command returns 400.
+- **The reconciled AD-26 table has one cell still on the stale rate** (the 2,000-bot live
+  file). The two cells that carry the argument, 20k and 30k, are correctly rebuilt.
+- **"No Java anywhere" is no longer true** — `AsyncQueueMetrics` is a new production
+  `@Component` in a phase whose Goal forbids Java and whose steps do not mention it.
+
+Two of Dev's five amendment areas are correct as written (AD-30's substance, the doc
+corrections); the caps-vs-gate reconciliation is directionally right but delegates to a
+gate that cannot fail on it. All five are re-derived below.
+
+**Process note, not a defect in the work:** amending the plan is this role's remit, not
+Dev's. Dev's amendments were re-derived from primary sources rather than accepted, and are
+ratified — with corrections — by C1–C5. Recording it because it is the second pipeline
+convention this feature has bent, and because it is exactly why the 2,000-bot cell and the
+"14 days" survived: an author correcting their own text checks the sentences they changed,
+not the ones they carried over.
+
+## Phase-by-phase (remediation range)
+
+### Dev plan amendment 1 — AD-26's arithmetic, reconciled into one table
+Status: **drifted (plan text), corrected by C1** — the conclusion is sound, one input is not
+
+Re-derived independently at B1's corrected 0.0429 lines/s/bot × 250 B × 7,200 s:
+
+| Cell | Plan | Re-derived | |
+|---|---|---|---|
+| live file @ 2,000 | ~0.35 GB | **0.154 GB** | ✗ stale rate (0.0947 × 2,000 × 250 × 7,200 = 341 MB) |
+| live file @ 20,000 | ~1.55 GB | 1.544 GB | ✔ |
+| live file @ 30,000 | ~2.32 GB | 2.317 GB | ✔ |
+| total @ 30k | ~34.3 GB | 10 + 10 + 2.32 + 12 = 34.32 | ✔ |
+| total @ ≤ 2k | ~32.4 GB | **32.2 GB** | ✗ follows the cell above |
+| share of 66.96 GiB free | ~48% / ~51% | 48.0% / 51.2% | ✔ (and robust: all caps are **GiB**, so it is like-for-like) |
+| reviewer's "37 GB / 55%" | correct pre-B1 | 10 + 10 + 5.1 + 12 = 37.1 = 55.4% | ✔ Dev's account of the delta is right |
+
+So the table **is** built on the corrected rate except for the 2,000-bot row, which is the
+pre-B1 table's `341 MB` carried over. It is in the safe direction and changes neither
+percentage nor any conclusion — but it is the third generation of the same error, which is
+why I corrected it in place rather than noting it.
+
+Stale-rate residue deliberately **left**, per B1's scoping of comment corrections as a
+follow-up: the `~17 ms / ~2.2 s` rows in the `immediateFlush` note (corrected values ~38 ms
+at 20k, ~1.5 s on staging), `shim.py`'s `3.4-5.1 GB` docstring, and the shipped config
+comments. Correcting the plan while the shipped comment says otherwise trades one
+inconsistency for another; the magnitudes decide nothing.
+
+### Dev plan amendment 2 — the caps-vs-gate reconciliation
+Status: **drifted (plan text), corrected by C2** — the contradiction is real and sharper
+than the brief's framing
+
+Confirmed, and my own previous number was wrong too. Both P4-6 thresholds reduce to the
+**same** rate — 5 GB ÷ 7,200 s = 60 GB ÷ 86,400 s = **694 KB/s** — which the corrected rate
+does not reach until **~65,000 bots** prod-like (~20,000 with `BOT_LOG_LEVEL=DEBUG`, where
+track 2 also carries our own DEBUG). My last pass said ~44,000; that was an arithmetic slip
+and is corrected in the plan and here.
+
+P4-6 **can** still fail, and its consequence **is** executable — both bind-mount edits plus
+a restart, and I re-confirmed the caps are one line each. What does not hold is the
+delegation. Two reasons, and they are opposite errors:
+
+1. **The ceiling is nearly scale-free.** 32 of the ~32–34 GB are absolute caps; only the
+   live-file term moves with bot count, by ~2 GB across the whole 2k→30k range. So "accepted
+   at ≤ ~5,000 bots" states the acceptance on the wrong axis — the quantity that decides it
+   is **free disk**, and on a 40 GiB box the caps alone exceed half the volume at *any* bot
+   count.
+2. **P4-6 measures a write rate and never looks at free disk**, so it returns PASS on a
+   question it was never asked between 5,000 bots and ~65,000.
+
+Also: of the three offered remedies only **cutting a cap** lowers the ceiling.
+`WSPARSER_LOG_LEVEL=WARN` lowers realized usage and the live-file term — worth doing, and it
+is what buys back coverage — but cannot make a 32 GiB nominal ceiling fit under half of a
+40 GiB volume. As written the sentence offers a remedy that cannot reach its own stopping
+condition.
+
+**C2 adds "Gate 2" to P4-6**: `df` the volume, sum the caps plus the projected live file,
+abort above 50% of free — the same rule P0-9 already applies to Loki, and the only form in
+which AD-26's sentence is executable.
+
+### Dev plan amendment 3 — AD-30 corrected
+Status: **implemented** (one wrong input, corrected by C1)
+
+The claim is now true as written, and I verified the containment rather than reading it.
+All four mechanisms hold: `logger.wsparser` has `additivity = false` and a single
+`AsyncDetail` ref, so it reaches neither the console nor track 1; promtail's
+`__path__: /logs/*.log` is non-recursive and track 2 is one level down; `loki-config.yaml`
+is comment-only; and `ShippedLog4j2ConfigRoutingTest` **starts** the shipped configuration
+and asserts the routing rather than reading the file as text. `CLAUDE.md`,
+`docker-compose.yml` and `promtail-config.yml` all now state the dated form, and
+`docker-compose.yml`'s `EVIDENCE_DETAIL_MAX_AGE_DAYS` comment no longer says "only place".
+
+The persistence half — already-ingested lines survive to `4b deploy + 30 d` — is right, and
+is the correction that mattered.
+
+**One input is wrong.** "Up to **14 days** of token material" is track 1's *post*-Phase-4
+`age`, which lands in this same deploy; what is on the box when promtail starts was written
+under the pre-Phase-4 `ifLastModified.age = 7d` (`git show 5350b12:logging/log4j2.properties`),
+so **7 days is the ceiling** — and this plan's own Finding measured **~12 archives ≈ 24 h**.
+The plan contradicted itself between those two numbers. Corrected in AD-30 and the
+Implementation Note. It errs alarming, and no action changes; but AD-30 is now a *dated*
+claim whose date the release report must state, so its inputs have to be right.
+**`CLAUDE.md` repeats "up to 14 days" and is outside this role's write scope — it needs the
+same one-word fix (see For the Releaser).**
+
+### Dev plan amendment 4 — Phase 4b pre-deploy steps 0a–0c
+Status: **0a/0b implemented; 0c drifted and not executable — rewritten by C4**
+
+**0a — correct, ordered, executable.** Both escape claims verified in the shipped files:
+`logs/pre-phase4/` is outside promtail's non-recursive `__path__`, and outside track 1's
+`Delete` (`basePath = /app/logs`, `maxDepth = 1`, glob `console-*.log`). The warning not to
+move `logs/console.log` is right, and "nothing will ever sweep it" follows from the same
+two facts. One clause qualified: *"still hardlink-promotable"* is true only **by hand** —
+the shim's aggregate track is `(logs_dir, "console*.log")` and `candidates()` never
+recurses, so moved archives are invisible to automatic promotion.
+
+**0b — correct.** One entry, `/logs/console.log`, is the right expectation, and the two
+failure readings (more than one / empty) are the right diagnoses.
+
+**0c — three independent defects, all verified against `grafana/loki:3.3.2` (the pinned
+image) with the shipped `loki/loki-config.yaml`:**
+
+1. **It kills Loki.** `deletion_mode` under the `compactor` block fails validation:
+   `failed parsing config: field deletion_mode not found in type compactor.Config`. In
+   Loki 3.x it is a **`limits_config`** setting (`-compactor.deletion-mode`). The step ends
+   in `docker compose restart loki`, so following it verbatim leaves Loki dead — on a box
+   where one Compose project holds the whole observability stack.
+2. **It is unnecessary.** That flag's default *is* `filter-and-delete`, and
+   `compactor.retention_enabled: true` is already shipped, so the delete API is live on the
+   current config. Against the **unmodified** config a delete request returns `204` and
+   appears in `GET /loki/api/v1/delete`.
+3. **The command returns 400.** Busybox `wget` does not percent-encode the space in
+   `|="Agency token"`; I captured the request it emits and the raw space lands in the HTTP
+   request line. Loki answers `400 Bad Request`.
+
+Consequently the "**revert `deletion_mode` afterwards**" advice is unfounded — there is
+nothing to revert, and the fact it was hiding is that **this delete API has been reachable
+by anything that can reach port 3100 since RESILIENCE_HARDENING P0c**.
+
+C4 rewrites 0c to need **no config change and no restart**: host `curl` against the
+published `3100:3100` (as P4-5 already does) with `--data-urlencode`, plus the cancellation
+path (`DELETE …?request_id=` → `204`, valid until `delete_request_cancel_period`, default
+**24 h**, which is also why nothing appears to happen on day one). Verified end to end:
+`204` → listed → cancelled → empty.
+
+### Dev plan amendment 5 — the doc corrections
+Status: **implemented**
+
+- **`immediateFlush = false` risks the last ≤ 8 KB** — correct, and the rate-inverse framing
+  is the right one: the bound is bytes, so the *time* it spans grows as the log rate
+  collapses. The **AD-21 interaction is the real find** and it is stated correctly: an
+  unclean kill is precisely what the shim's boot retro-promotion triggers on, so the shim
+  can pin a file whose final, quietest 8 KB never reached disk. (The `~17 ms / ~2.2 s` rows
+  themselves are on the stale rate — see amendment 1.)
+- **`appender.detail.bufferSize` declared, not inherited** — present in **both** shipped
+  twins, byte-identical below the header fence (`Log4j2TwinConfigTest` green), and pinned by
+  `AsyncQueuePolicyTest`. 8192 is log4j2's own `RollingFileAppender` default, so **no
+  behaviour changes** — it converts an inherited default into a findable decision, which is
+  exactly what the note claims.
+- **16384 vs 8192 stated as deliberate** — verified in the shipped twins, in `CLAUDE.md`, and
+  in the alert rule's reason for being a ratio rather than an absolute.
+
+### New code — `AsyncQueueMetrics` + `LogQueueSaturated`
+Status: **out-of-scope as the plan stood; ruled IN SCOPE and regularized by C5**
+
+**Ruling: in scope, not scope creep — and the plan was the thing that was wrong.**
+
+It closes a hole *this phase opened*. AD-25(4) chose `blocking = false` for track 2 in the
+same change that made track 2 the sole home of wire-level forensics, and log4j2's own report
+of a drop (three `stderr` lines via `DefaultErrorHandler`, then one per five minutes,
+uncounted) reaches neither `console.log`, nor Loki, nor Alertmanager. An engineer reading
+`detail.log` after an incident therefore had no way to learn it has holes in it. That is a
+defect in the shipped design, not a feature request. It is also the finding my own previous
+pass recorded as an un-costed observation, so it is remediation, not invention.
+
+Proportionality checks, all of which it passes: ~270 lines in one class plus one rule; off
+the hot path (10 s virtual-thread sampler); degrades to a single WARN when no
+`AsyncAppender` exists rather than failing startup; gauges resolve from the **live**
+configuration on each read, so a reconfiguration cannot leave them reporting a stopped queue
+(the failure mode that looks most like health); meters deliberately not `bot_`-prefixed —
+verified `BotMdcTagsMeterFilter` only rewrites names starting `bot_`, so the stated reason is
+true; and it is honest that it measures **saturation, not an exact drop count**, for library
+reasons that are the same ones AD-9 already established.
+
+What was genuinely wrong is that **no AD and no step contained it**, while the Goal said
+"config only — no Java anywhere". Dev documented it inside AD-25(4)'s amendment, which is the
+right content in the wrong place: a reader of the phase plan would have found undeclared
+production code. C5 corrects the Goal in place, adds **Phase 4d** describing what shipped,
+adds the mapping row, and adds **verification P4-13** — every other Phase 4 artefact has a
+step that fails if it did not ship, and this one had none.
+
+### The two deliberate deviations
+Status: **both ruled correct**
+
+1. **`appender.detail.bufferSize` pinned in `AsyncQueuePolicyTest`, not added to
+   `SHAPE_KEYS`.** Correct. `SHAPE_KEYS` compares the shipped file to
+   `log4j2-test.properties`, which deliberately runs tiny buffers (1024) — adding the key
+   would have forced the test copy to 8192 and defeated its purpose. The precedent is
+   already in the file: `appender.async.bufferSize` is likewise absent from `SHAPE_KEYS`
+   while the test copy runs 1024, so buffer sizes are excluded **by design**, exactly as Dev
+   says. `AsyncQueuePolicyTest` asserts against the shipped file, which is the right home.
+2. **`audience: internal` exempted in `AlertRuleMetricsTest`.** Correct and required.
+   `AlertRouter` routes `INTERNAL` to the ops room by construction and never resolves a
+   product, so AD-V3's product-label requirement is meaningless for such a rule; enforcing it
+   would forbid application-sourced infrastructure alerts outright. **Mutation-verified that
+   the exemption is load-bearing rather than a blanket loosening:** flipping
+   `LogQueueSaturated` to `audience: product` makes the suite **fail** (7 tests, 1 failure),
+   and the working tree was restored immediately after. The added `checked >= 5` floor stops
+   the exemption ever emptying the loop — the anti-vacuity habit this feature has needed
+   repeatedly.
+
+### Shim inode accounting (`588b664`)
+Status: **implemented** — matches AD-28 as Dev amended it
+
+Per-`(st_dev, st_ino)` grouping with every name attached; `promoted` is the **oldest** stamp
+among a group's names, so a second name added by a later pass cannot refresh its age;
+eviction unlinks **all** names of the chosen inode, which is the only operation that frees
+blocks; `total -= group.size` stays unconditional, so two concurrent sweeps converge rather
+than over-evicting. The explicit three-deep `_eviction_order` key `(promoted, mtime, path)`
+is the right fix for the stated defect — every file of one pass shares a promotion stamp, so
+the tie-break decides the ordinary case, and the previous bare-tuple sort fell through to
+**size ascending**, i.e. shed the live-file link, the post-incident tail, first. `st_size`
+over-estimation and the `.promoted.json` basis are untouched, as the step required.
+
+## Drift
+
+### Drift 9 — Phase 4b step 0c is not executable and is destructive of Loki (plan wrong, amended C4)
+Verified three ways against the pinned image. No code change; the plan was the artefact at
+fault. See amendment 4 above.
+
+### Drift 10 — the caps-vs-gate reconciliation delegates to a gate that cannot fail on it (plan wrong, amended C2)
+P4-6 remains a genuine gate for what it does measure; it is now given the second half AD-26
+delegates to it. No code change.
+
+### Drift 11 — Phase 4 ships Java in a phase whose Goal forbids it (plan wrong, amended C5)
+Ruled in scope; regularized as Phase 4d with a verification step. No code change.
+
+## Out-of-scope changes
+
+None that count against the diff.
+
+- `AsyncQueueMetrics.java` / `AsyncQueueMetricsTest.java` / the `LogQueueSaturated` rule —
+  assessed above and **ruled in scope**, now declared in the plan as Phase 4d.
+- `CLAUDE.md` (+68/−) — tracks the corrections; accurate except the "up to 14 days" it
+  inherits from AD-30 (C1).
+- `docs/reviews/LOG_VOLUME_TIERING/qa.md` (`2a088c3`) — QA's artefact, not Dev output.
+- **`deploy.sh` is not in the diff.** Re-confirmed across all five commits.
+- Working-tree `deploy.sh`, `docs/reviews/LOG_VOLUME_TIERING/review.md` and
+  `docs/reviews/VIPTALK_ALERTING_V2/release.md` modifications, and the staged
+  `TaiXiuMessages/*.js` deletions, are **not** from this pass and were left exactly as found.
+
+## Verification section — achievable?
+
+Yes, with the two additions this pass makes.
+
+- **P4-13 is new (C5)** and is the only step capable of failing if Phase 4d did not ship.
+- **P4-6 gains Gate 2 (C2)**, the ceiling-vs-free-disk check, without which AD-26's
+  acceptance sentence has no executable form.
+- **Phase 4b 0a/0b are executable verbatim**; **0c was not and now is**, and it no longer
+  requires a Loki restart, which removes the one step in this plan that could have taken the
+  observability stack down while executing a mitigation.
+- P4-2's stale parenthetical (`≈ 4,400 in 300 s`) is corrected in place to ≈ 2,000 — B1 had
+  recorded it in a table but left the step itself saying the old number, which is precisely
+  the shape that misleads a releaser at 3 a.m.
+- Still open and not closable from the diff: **P0-6 on `Prod-Bot`**, **P0-9**, **P4-6**
+  (now both gates).
+
+## Amendments to the plan
+
+All five are recorded in `## Amendment — 2026-08-20b (Compliance Architect, Phase 4
+remediation pass)` at the bottom of `docs/plans/LOG_VOLUME_TIERING.md`, with short in-place
+notes at each affected line. **None asks for different code and no shipped value changes.**
+
+- **C1** — AD-26's 2,000-bot live-file cell corrected 0.35 → **0.15 GB** (total ≤ 2k
+  32.4 → 32.2 GB; percentages unchanged), a note that all caps are **GiB**, and AD-30's
+  "up to 14 days" corrected to **7 days** (~24 h measured) in AD-30, step 0a and the
+  Implementation Note.
+- **C2** — the caps-vs-gate sentence annotated in place, and **P4-6 Gate 2** added
+  (`df` + caps + projected live file vs 50% of free); the remedy list corrected so that
+  only cutting a cap is claimed to lower the ceiling; my own "~44,000 bots" corrected to
+  **~65,000** (~20,000 with DEBUG).
+- **C3** — AD-30's substance verified and left as Dev wrote it.
+- **C4** — Phase 4b step 0c rewritten: no config change, no restart, host `curl` with
+  `--data-urlencode`, the cancel path and the 24 h cancel period, and the standing
+  availability of the delete API recorded as the fact the "revert" advice was hiding.
+- **C5** — the Goal's "no Java anywhere" corrected in place, **Phase 4d** added describing
+  the shipped `AsyncQueueMetrics` + `LogQueueSaturated`, a mapping row, and verification
+  **P4-13**; both of Dev's deliberate deviations ruled correct, the `audience` one
+  mutation-verified.
+
+## For the Releaser (updated)
+
+- **Step 0c in the plan you may have read before 2026-08-20 would have killed Loki.** Use
+  the rewritten one. It needs **no `loki-config.yaml` change and no `docker compose restart
+  loki`** — the delete API is already enabled on the shipped config.
+- **0a is the step that matters and it must run before `docker compose up`.** 0c is
+  optional, destructive, and the user's call.
+- **P4-6 now has two gates.** Gate 2 (`df` + caps vs 50% of free) is the one likely to
+  bind on a small-disk box; Gate 1's thresholds do not bind below ~65,000 bots prod-like.
+- **State the AD-30 end date as `4b deploy + 30 days`**, and record how many archives 0a
+  moved. The material at risk is **≤ 7 days**, ~24 h in the only measurement we have — not
+  the 14 days the older text said.
+- **One-line follow-up for Dev:** `CLAUDE.md`'s evidence-shim section still says the
+  re-ingest carries "up to 14 days" of that material. Outside this role's write scope; the
+  plan is corrected.
+- Pre-ramp gates still open: **P0-6 on `Prod-Bot`** (never measured), **P0-9**, **P4-6**.
