@@ -9,6 +9,7 @@ import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvStatus
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameStatusKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GroupBalance;
+import com.vingame.bot.infrastructure.logging.AsyncQueueMetrics;
 import io.micrometer.prometheusmetrics.PrometheusConfig;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
 import org.junit.jupiter.api.AfterEach;
@@ -85,7 +86,15 @@ class AlertRuleMetricsTest {
     private PrometheusMeterRegistry registry;
     private String scrape;
 
-    private record Rule(String name, String expr, Map<String, Object> annotations) {}
+    private record Rule(String name, String expr, Map<String, Object> annotations,
+                        Map<String, Object> labels) {
+
+        /** AD-V4: an absent audience defaults to internal. */
+        String audience() {
+            return labels == null ? "internal"
+                    : Objects.toString(labels.getOrDefault("audience", "internal"));
+        }
+    }
 
     @BeforeEach
     void setUp() {
@@ -128,6 +137,12 @@ class AlertRuleMetricsTest {
         metrics.incVerifyToken(false);
         MDC.clear();
 
+        // --- the log4j2 queue meters, registered exactly as AsyncQueueMetrics does at
+        // startup, against the real LoggerContext this build runs on. LogQueueSaturated
+        // reads them bare and renders {{ $labels.appender }}, so both the metric names
+        // and the tag have to be in this exposition or the rule is unverifiable here.
+        new AsyncQueueMetrics(registry).track(AsyncQueueMetrics.asyncAppenderNames());
+
         scrape = registry.scrape();
     }
 
@@ -155,7 +170,8 @@ class AlertRuleMetricsTest {
                 if (rule.get("alert") == null) continue;
                 rules.add(new Rule(rule.get("alert").toString(),
                         Objects.toString(rule.get("expr"), ""),
-                        (Map<String, Object>) rule.get("annotations")));
+                        (Map<String, Object>) rule.get("annotations"),
+                        (Map<String, Object>) rule.get("labels")));
             }
         }
         assertThat(rules).isNotEmpty();
@@ -257,11 +273,21 @@ class AlertRuleMetricsTest {
         // AD-V3: the room is chosen from the alert's `product` label (or `environmentId`
         // resolved via Mongo). A rule that aggregates those away lands in the ops room
         // tagged as a misroute — for every product, forever, with no other symptom.
+        //
+        // `audience: internal` rules are exempt, and the exemption is the AD, not a
+        // loosening: an internal alert goes to the ops room by construction and is never
+        // resolved to a product, so demanding a product label on it would forbid
+        // application-sourced infrastructure alerts outright. Until LogQueueSaturated
+        // every internal rule happened to read an EXTERNAL metric (jvm_*, node_*) and was
+        // skipped one line below, which is why this never had to be stated.
+        int checked = 0;
         for (Rule rule : rules()) {
             Set<String> kept = preservedLabels(rule.expr());
             List<String> appMetrics = metricNames(rule.expr()).stream()
                     .filter(m -> !isExternal(m)).toList();
             if (appMetrics.isEmpty()) continue;
+            if ("internal".equals(rule.audience())) continue;
+            checked++;
 
             if (kept != null) {
                 assertThat(kept)
@@ -277,6 +303,11 @@ class AlertRuleMetricsTest {
                 }
             }
         }
+        assertThat(checked)
+                .as("the audience exemption must not be able to empty this test — if every "
+                        + "product-routed rule stopped reading an application metric, the "
+                        + "loop above would pass by doing nothing")
+                .isGreaterThanOrEqualTo(5);
     }
 
     @Test

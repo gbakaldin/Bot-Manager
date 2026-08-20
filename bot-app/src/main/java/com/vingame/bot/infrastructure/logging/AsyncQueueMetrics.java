@@ -132,10 +132,13 @@ public class AsyncQueueMetrics {
 
     /**
      * Register the meters for a set of appenders and start counting against them,
-     * without the scheduler. Package-private so tests drive {@link #sample(long)} and
-     * {@link #record} deterministically.
+     * without the scheduler. Public for tests only: {@code AlertRuleMetricsTest} has to
+     * render the exact exposition production produces before it can check
+     * {@code LogQueueSaturated} against it, and the logging tests drive
+     * {@link #sample(long)} / {@link #record} deterministically rather than waiting on a
+     * scheduler.
      */
-    void track(List<String> appenders) {
+    public void track(List<String> appenders) {
         appenders.forEach(this::registerMeters);
         tracked = appenders;
     }
@@ -259,7 +262,7 @@ public class AsyncQueueMetrics {
         return found instanceof AsyncAppender async ? Optional.of(async) : Optional.empty();
     }
 
-    static List<String> asyncAppenderNames() {
+    public static List<String> asyncAppenderNames() {
         return context().getConfiguration().getAppenders().values().stream()
                 .filter(AsyncAppender.class::isInstance)
                 .map(Appender::getName)
