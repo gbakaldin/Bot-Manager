@@ -41,10 +41,15 @@ taking Mongo with it).
 
 ### Two tracks: what lands where (Phase 4)
 
-Phases 0-3 made `com.vingame.bot` cheap and the release measured it -- **59 INFO
-lines in 300 s** on a 155-bot fleet. Over the same window
-`com.vingame.websocketparser` emitted **4,402**: per bot, at INFO, under the *root*
-logger, i.e. **98.7% of INFO volume**, outside every level this file governs. So the
+Phases 0-3 made `com.vingame.bot` cheap and the release measured it: over one
+~11-minute window on a 155-bot fleet our own loggers emitted **59** INFO lines and
+`com.vingame.websocketparser` emitted **4,402** -- per bot, at INFO, under the
+*root* logger, i.e. **98.7% of INFO volume**, outside every level this file
+governs. (The *ratio* is the measured fact and is what justifies the split. The
+per-second rates first derived from it were ~2.2x too high, because that
+~11-minute count was divided by 300 s; plan Amendment B1 corrects them to
+~6.6 lines/s at 155 bots, ~0.043/s/bot. Everything downstream was therefore
+pessimistic, which is the safe direction, and no shipped cap changed.) So the
 output is split in two, both rolling on the same 2 h modulated boundary:
 
 | | Track 1 "main" | Track 2 "detail" |
@@ -77,10 +82,29 @@ output is split in two, both rolling on the same 2 h modulated boundary:
 - **`appender.asyncdetail.blocking = false` is deliberate and is the opposite of
   track 1's `true`.** It looks like the AD-3/AD-4 defect an earlier pass fixed and
   it is not: `log4j2.discardThreshold` is JVM-wide, so it cannot discard track 2's
-  INFO without discarding track 1's, and track 2 carries ~1,893 lines/s at INFO at
-  20k bots -- under `blocking = true` that parks a bot thread on a queue wait.
-  Track 1 keeps `blocking = true` so its INFO+ signal is never lost.
-  `AsyncQueuePolicyTest` asserts the pair together.
+  INFO without discarding track 1's, and track 2 carries the highest-volume tier in
+  the system at INFO -- under `blocking = true` that parks a bot thread on a queue
+  wait. Track 1 keeps `blocking = true` so its INFO+ signal is never lost.
+  `AsyncQueuePolicyTest` asserts the pair together. **The buffers are different
+  numbers on purpose**: track 1 `bufferSize = 8192`, track 2 `16384`.
+- **A full track-2 queue drops events at every level, and that is now counted.**
+  log4j2 reports it only through `DefaultErrorHandler` -- three messages, then one
+  per five minutes, with no count, on stderr, so it reaches neither `console.log`
+  nor Loki nor the detail file it is about. `AsyncQueueMetrics` publishes
+  `log4j2_async_queue_remaining` / `_capacity` /
+  `_pressure_samples_total` / `_full_samples_total` per appender and emits a
+  throttled WARN carrying the running totals on **track 1**; the
+  `LogQueueSaturated` rule alerts on the ratio. If that alert fires for
+  `AsyncDetail`, **treat `logs/detail/detail.log` as incomplete for the window**
+  (for `AsyncRolling` it means the opposite: bot threads parked on a queue put).
+- **`appender.detail.immediateFlush = false` risks the last <= 8 KB, not "the last
+  few ms".** The bound is bytes (`appender.detail.bufferSize`, declared explicitly
+  so it is a decision), and how much *time* 8 KB spans is inversely proportional to
+  the log rate: ~17 ms at 20k bots, ~2 s on a quiet staging box, **minutes in a JVM
+  whose log rate is collapsing**. That last case interacts with AD-21: an unclean
+  kill is exactly what the shim's boot retro-promotion triggers on, so it can pin a
+  detail file whose final, most diagnostic 8 KB never reached disk. Track 1 keeps
+  `immediateFlush = true` and has no such gap.
 - **The DEBUG-tier signals this file calls default-visible are now file-visible, not
   Grafana-visible** -- the 5 s `UpdateBet` aggregate with its strategy-decision
   histogram and the per-round session summaries (AD-8) live in track 2 on the box.
@@ -291,12 +315,28 @@ Alertmanager's webhook and **hardlinks** the newest log files into
   detail track, then `EVIDENCE_MAX_BYTES` (**12 GB**), on every pass and hourly.
   Under the byte guard **detail files are evicted before aggregate files**
   whatever their promotion times, then oldest-promotion first within each class:
-  a pinned 2 h detail file is 3.4-5.1 GB at 20-30k bots, so the alternative sheds
-  an old incident's 7 MB timeline to make room for a new incident's payload. The
-  3 d detail age is also chosen against the aggregate's 14 because ws-parser logs
-  **agency-token material** at INFO, and after Phase 4 the detail track is the
-  only place it exists (AD-30) -- contained, not fixed; the fix is in the library.
-  Without any of this the fix for unbounded growth is unbounded growth.
+  a pinned 2 h detail file is ~1.5-2.3 GB at 20-30k bots, so the alternative sheds
+  an old incident's 7 MB timeline to make room for a new incident's payload.
+  **The guard counts inodes, not names, and evicting one unlinks all of its
+  names.** Every incident leaves one inode per track under two names (pass 1 pins
+  the live file, pass 3 pins the same inode under its rolled name), so per-name
+  accounting inflated an incident's footprint by a whole detail file and
+  "freeing" a duplicate name freed nothing at all. Within a pass, every file
+  carries the same promotion stamp, so the order falls to the log's own mtime --
+  closed archives go before the still-growing live tail, which is the one file
+  that cannot be reconstructed.
+- **Age-out is not the same as containment (AD-30, corrected).** The 3 d detail age
+  is chosen against the aggregate's 14 partly because ws-parser logs
+  **agency-token material** at INFO. After Phase 4 no *new* token material reaches
+  Loki, `docker logs` or Grafana -- but AD-30's original claim that it then "exists
+  in exactly one place" is **false for up to 30 days after the deploy**: Loki's
+  `retention_period` is `720h`, so every ws-parser INFO line ingested *before*
+  Phase 4 stays queryable until then. Phase 4b's one-time promtail re-ingest makes
+  that worse unless the pre-deploy step in the plan's Phase 4b is run -- it re-reads
+  the retained pre-Phase-4 `console-*.log` archives from byte 0 and re-ingests up to
+  14 days of that material **with a fresh 720 h clock**. Contained, not fixed; the
+  fix is in the library. Without any of this the fix for unbounded growth is
+  unbounded growth.
 - **Unclean start retro-promotes (AD-21).** In a full-stack failure Alertmanager
   may be dead too, so a start that finds no `logs/evidence/.clean-shutdown` marker
   promotes immediately, tagged `boot`.

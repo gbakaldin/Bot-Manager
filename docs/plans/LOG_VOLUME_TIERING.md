@@ -1293,6 +1293,23 @@ else has to change to take it later.
    current within milliseconds and the per-event flush syscall is gone. The exposure is
    a partial trailing buffer lost on `SIGKILL` — acceptable for a best-effort forensic
    tier, unacceptable for track 1, which keeps the default `true`.
+
+   > **CORRECTED 2026-08-20 (Dev, remediation) — the exposure is the last ≤ 8 KB, not
+   > "the last few ms".** The bound is *bytes*, from `RollingFileAppender`'s
+   > `bufferedIo = true` / `bufferSize`, and how much **time** those bytes span is
+   > inversely proportional to the log rate: ~17 ms at 20k bots (1,893 lines/s),
+   > ~2.2 s on a 155-bot staging box, and **minutes in a JVM whose log rate is
+   > collapsing** — bot threads blocked, native threads exhausted, the 2026-06-30
+   > shape. That last row is the one that matters, because **it interacts with
+   > AD-21**: an unclean kill is precisely what the shim's boot retro-promotion
+   > triggers on, so the shim can pin a detail file whose final 8 KB — the quietest,
+   > most diagnostic part, written while the box was dying — never reached the disk.
+   > `appender.detail.bufferSize = 8192` is now **declared** in both shipped twins
+   > (it was an inherited log4j2 default nobody had chosen) and asserted by
+   > `AsyncQueuePolicyTest`, so the bound is a decision that can be found and
+   > changed. Nothing else about the decision changes: the mechanism is correct,
+   > rollover still closes and flushes the file, and pass 3 still reads a complete
+   > archive.
 4. **`blocking = false` on `AsyncDetail`, against `blocking = true` on `AsyncRolling`.**
    This is the one place Phase 4 deliberately inverts a Phase 0 decision, and the reason
    is that AD-4's discard policy cannot express it. `log4j2.discardThreshold = DEBUG` is
@@ -1303,8 +1320,33 @@ else has to change to take it later.
    the back door. `blocking = false` makes a full detail queue drop the event at every
    level, which for a best-effort forensic tier is exactly right; track 1 keeps
    `blocking = true` so its INFO+ signal is never lost. Buffer 16,384 (≈8.6 s of backlog
-   at 20k bots) to absorb GC pauses without dropping. `includeLocation` stays at its
+   at 20k bots — track 1's is 8,192; the two numbers are **not** the same and both are
+   deliberate) to absorb GC pauses without dropping. `includeLocation` stays at its
    default `false` — location capture on 1,900 events/s would be ruinous.
+
+   > **AMENDED 2026-08-20 (Dev, remediation) — the drop is now countable.** The
+   > decision stands, but "with only a status-logger note" was more generous than what
+   > log4j2 actually does: the non-blocking branch calls `error(...)` →
+   > `DefaultErrorHandler.acquirePermit()`, which allows **three** messages and then
+   > **one per five minutes**, carries no count and no level breakdown, and writes to
+   > `System.err` — into the capped docker json-file, never into `console.log`, never
+   > into Loki, never into the detail file it is reporting on, and invisible to
+   > Alertmanager. Since track 2 is now the sole home of wire-level forensics, that
+   > means an engineer can read `detail.log` after an incident with no way to know it
+   > has holes in it. `AsyncQueueMetrics` (`bot-app/…/infrastructure/logging/`) closes
+   > it: gauges `log4j2_async_queue_remaining` / `_capacity` resolved from the live
+   > configuration on every read, counters `log4j2_async_queue_pressure_samples_total`
+   > / `_full_samples_total`, a WARN throttled to one per five minutes per appender
+   > carrying the running totals **on track 1** (so it reaches Loki), and the
+   > `LogQueueSaturated` rule in `prometheus/alerts.yml`. It measures **saturation, not
+   > an exact drop count**, and that is a library limit rather than a choice: a custom
+   > `ErrorHandler` is refused after the appender starts
+   > (`AbstractAppender.setHandler`, verified against log4j-core 2.24.1) and an
+   > `errorRef` appender must be resolvable at configuration time, which this project
+   > cannot register for the same reason AD-9 exists. Saturation is the precondition
+   > for every drop and a drop storm worth investigating is sustained, so a 10 s sample
+   > is a faithful detector. The same gauge covers track 1's opposite pathology — a
+   > full `AsyncRolling` queue means bot threads parked on a put.
 
 **AD-26 — Track 2's retention is 12 hours OR 10 GB accumulated, whichever binds first;
 the byte cap is the one that binds at scale.** The numbers, from the measured
@@ -1352,6 +1394,35 @@ step 5 deferred that "only after P0-6 establishes the disk size", P0-6 has now r
 ~5,000 bots on one box, or on any box with under 100 GB of disk, re-run P4-6 and
 re-derive.** Both caps are one line each in bind-mounted files.
 
+> **RECONCILED 2026-08-20 (Dev, remediation) — the 32 GB above omits the live files,
+> and the shipped config says so.** `ifAccumulatedFileSize` counts the **archives**
+> only (the `detail-*.log` glob excludes `detail.log`), which is why
+> `logging/log4j2.properties` carries its own caveat. The two documents therefore
+> stated two different ceilings and neither referenced the other. Reconciled, on
+> Amendment B1's corrected rate:
+>
+> | Component | Cap | Live file on top | Ceiling |
+> |---|---|---|---|
+> | track 1 (`console.log`) | 10 GB archives | negligible — INFO-only, < 250 MB total | ~10 GB (never binds) |
+> | track 2 (`detail.log`) | 10 GB archives | ≤ one 2 h file: ~0.35 GB at 2k, ~1.55 GB at 20k, ~2.32 GB at 30k | **~10.4–12.3 GB** |
+> | `logs/evidence/` | 12 GB | — | 12 GB |
+> | **Total** | | | **~32.4 GB (≤ 2k bots) … ~34.3 GB (30k)** |
+>
+> Against Bot-1's 66.96 GiB free that is **~48% at small scale and ~51% at 30k
+> bots** — i.e. it crosses, at the top of the range, the "abort if the projection
+> exceeds 50% of available disk" line P0-9 applies to Loki in this same plan. Two
+> things pull the real figure back down and both should be read as mitigation, not as
+> licence: evidence entries are **hardlinks of these same inodes**, so their bytes are
+> double-counted against `logs/` for as long as log4j2 still names them; and track 1's
+> 10 GB is unreachable at INFO-only. **The caps and the gate now agree as follows: the
+> ceiling is accepted at ≤ ~5,000 bots on a Bot-1-sized disk, and above that P4-6 is
+> the gate — re-measure, and cut a cap (track 2's `10GB`, or evidence's `12GB`) or set
+> `WSPARSER_LOG_LEVEL=WARN` until the reconciled ceiling is under half of measured
+> free disk.** The reviewer's arithmetic that produced "37 GB / ~55%" was correct
+> against the pre-B1 numbers (a 5.1 GB live file at 30k); B1 corrects that live file
+> to ~2.32 GB, which is where the difference comes from. `Prod-Bot`'s disk is **still
+> unmeasured** (Open Items), so none of this is established there.
+
 **AD-27 — The console carries track 1 and nothing else.** It keeps AD-5's INFO+
 `ThresholdFilter` and keeps its `rootLogger` and `logger.app` refs, but ws-parser no
 longer reaches it (AD-23), so `docker logs bot-manager` becomes: our own group-level
@@ -1392,6 +1463,22 @@ eviction. AD-14/AD-15/AD-16 are extended, not replaced.**
   discarding an old incident's 7 MB timeline to make room for a new incident's 3 GB
   payload. Track membership is decided by the `detail` filename prefix.
 
+  > **CLARIFIED 2026-08-20 (Dev, remediation) — the guard counts inodes and the
+  > intra-class order needs a stated tie-break.** Both were wrong in the shipped
+  > code and both are consequences of facts this AD already states. (i) This same
+  > bullet's "≤ 3 inodes per track" and AD-16's "pass 3 only ever adds a second name
+  > for it" mean **one inode carries two names on every incident** — so per-name byte
+  > accounting inflated one incident's real ~4.6 GB pin at 20k bots by a whole detail
+  > file, and unlinking one name of a pair freed *zero* blocks while crediting the
+  > guard with the full `st_size`. Accounting is now per `(st_dev, st_ino)`, a group's
+  > promotion time is the oldest of its names, and evicting a group unlinks **all** of
+  > them. (ii) "Oldest-promotion first" does not by itself order a single pass, because
+  > every file a pass pins carries the same stamp; the tie-break must therefore be
+  > stated, and it is the log's own **mtime**, which puts the closed archives ahead of
+  > the still-growing live-file link. Sorting on size — which is what an unstated
+  > tie-break decayed into — evicts the post-incident tail first, i.e. exactly what
+  > pass 3 exists to capture.
+
 **AD-29 — Loki keeps `retention_period: 720h`; the `{level=~"DEBUG|TRACE"}`
 `retention_stream` stays as an inert tripwire; P0-9 is re-baselined and repurposed.** No
 value in `loki/loki-config.yaml` changes.
@@ -1420,14 +1507,41 @@ value in `loki/loki-config.yaml` changes.
 **AD-30 — Agency-token material is accepted in track 2, bounded there, and fixed
 upstream later.** Today `User <bot>: Agency token: <n>-<id>` is written at INFO into
 `console.log`, shipped to Loki and retained 720 h, and echoed to `docker logs`. After
-Phase 4 it exists in exactly one place: a plain-text file on the box, swept at 12 h or
-10 GB, readable only by whoever can already read `logs/` (which has always contained
-everything). It is **never** in Loki, Grafana or `docker logs`. Evidence promotion is
+Phase 4 **no new token material is written anywhere but** one plain-text file on the
+box, swept at 12 h or 10 GB, readable only by whoever can already read `logs/` (which
+has always contained everything). No **newly written** line reaches Loki, Grafana or
+`docker logs`. Evidence promotion is
 the one path that extends it, and **`EVIDENCE_DETAIL_MAX_AGE_DAYS = 3` (AD-28) is
 deliberately chosen against the aggregate's 14 d partly for this reason** — 3 days of
 token material behind an incident is a defensible trade for the forensics. This is a
 strict and large improvement over the shipped state; it is **not a fix**. The fix is in
 the library — see Open Items.
+
+> **CORRECTED 2026-08-20 (Dev, remediation) — "it exists in exactly one place" was
+> false, and stays false for up to 30 days after the deploy.** Two things, and they
+> compound:
+>
+> 1. **Already-ingested lines do not go away.** `loki/loki-config.yaml` keeps
+>    `retention_period: 720h` and AD-29 deliberately changes nothing there, so every
+>    ws-parser INFO line Loki took **before** this deploy — token material included —
+>    stays queryable in Grafana for **up to 30 days after Phase 4 lands**. The
+>    containment is effective for *new* writes on deploy day and for the *store* only
+>    at deploy + 30 d.
+> 2. **Phase 4b re-ingests more of it, once, on purpose.** The positions volume means
+>    promtail has no saved offsets on its first start, so it re-reads the ~12 retained
+>    pre-Phase-4 `console-*.log` archives from byte 0. Those archives are full of
+>    ws-parser INFO. Left alone, the deploy that *introduces* this containment
+>    simultaneously pushes up to 14 days of token material back into Loki **with a
+>    fresh 720 h clock on it** — i.e. it moves the end date out, from
+>    `deploy + 30 d` to `deploy + 30 d` measured from the re-ingest.
+>
+> No new party gains access — same Loki, same Grafana viewers — so this is a false
+> *claim* rather than a new exposure, and that is exactly why it matters: someone
+> reading AD-30 could widen Grafana access, or skip a purge, on the strength of it.
+> **The executable mitigation is Phase 4b steps 0a–0c below**; it is a pre-deploy
+> step, not prose, because it only works if it happens *before* `docker compose up`.
+> The end date to state in the release report is **the 4b deploy date + 30 days**,
+> and 0a is what stops that clock being reset.
 
 **AD-31 — promtail's positions file moves to a named volume.** `positions.filename`
 becomes `/promtail-positions/positions.yaml`, backed by a new named volume
@@ -1616,6 +1730,58 @@ and `evidence-shim/`.
 
 ### Phase 4b — promtail positions volume + Loki comments (config only, no Java)
 
+> **Steps 0a–0c run ON THE BOX, BEFORE `docker compose up`, on the deploy that lands
+> 4b.** They are the executable half of AD-30's correction: without them this deploy
+> re-ingests up to 14 days of pre-Phase-4 `console-*.log` — ws-parser INFO, agency-token
+> material included — into Loki with a fresh 720 h clock. They are ordered, each is one
+> command, and 0a is the one that matters.
+
+0. **Pre-deploy, in this order, from the compose directory (`/home/sgame/bot-java` on
+   Bot-1):**
+
+   a. **Move the pre-Phase-4 archives out of promtail's reach before promtail starts.**
+      They are still readable, still hardlink-promotable, and no longer re-ingestible:
+      ```bash
+      mkdir -p logs/pre-phase4
+      mv logs/console-*.log logs/pre-phase4/ 2>/dev/null || true
+      ls -l logs/pre-phase4/ | tail -5      # record the count in the release report
+      ```
+      `logs/pre-phase4/` is a **subdirectory**, so it escapes promtail's non-recursive
+      `__path__: /logs/*.log` for the same reason `logs/evidence/` and `logs/detail/` do,
+      and it escapes track 1's `Delete` (`basePath /app/logs`, `maxDepth = 1`) for the
+      same reason — which also means **nothing will ever sweep it**. Delete it by hand
+      once the incident window it covers is past, or `rm -rf logs/pre-phase4` here
+      instead of `mv` if nobody needs those two weeks of history. Do **not** move
+      `logs/console.log` itself: the JVM holds it open, and it is track 1's live file.
+
+   b. **Bring the stack up**, then confirm promtail read only the live file:
+      ```bash
+      docker compose up -d
+      sleep 60
+      docker compose exec promtail cat /promtail-positions/positions.yaml
+      ```
+      → expect **one** entry, `/logs/console.log`. More than one means 0a did not run or
+      ran after promtail started; an *empty* file means the volume is not mounted.
+
+   c. **Optional, and only if the already-ingested material is judged worth removing.**
+      This is the one action that shortens the existing 30-day exposure rather than
+      merely not extending it; it needs a Loki config change and is therefore a
+      deliberate, separately-approved step, not part of the routine deploy. In
+      `loki/loki-config.yaml`'s `compactor` block set
+      `deletion_mode: filter-and-delete`, `docker compose restart loki`, then:
+      ```bash
+      docker compose exec loki wget -qO- --post-data='' \
+        'http://127.0.0.1:3100/loki/api/v1/delete?query={job="bot-manager"}|="Agency token"&start=<RFC3339>&end=<RFC3339>'
+      docker compose exec loki wget -qO- 'http://127.0.0.1:3100/loki/api/v1/delete'   # verify
+      ```
+      Deletion is processed by the compactor after `delete_request_cancel_period`, so
+      it is not immediate. **Revert `deletion_mode` afterwards** — leaving the delete API
+      enabled is a standing way to lose log data by accident.
+
+   If 0a is skipped, say so explicitly in the release report and state the resulting end
+   date (**re-ingest date + 30 days**), because AD-30's corrected claim is dated and the
+   date is the whole content of it.
+
 1. `/Users/gleb/IdeaProjects/Bot/promtail-config.yml:5-6` —
    `positions.filename: /promtail-positions/positions.yaml`, with a comment naming the
    bug (Finding 2: +2.2 GB into `loki-data` in 17 minutes per redeploy) and stating that
@@ -1655,6 +1821,15 @@ and `evidence-shim/`.
    the rest; then, under `EVIDENCE_MAX_BYTES`, evict **all detail candidates
    oldest-promotion-first before touching any aggregate** (AD-28). Keep `st_size`
    over-estimation and the `.promoted.json` promotion-time basis exactly as they are.
+
+   > **AMENDED 2026-08-20 (Dev, remediation) — group by inode, and state the
+   > tie-break.** `st_size` and the `.promoted.json` basis are unchanged as instructed,
+   > but the *unit* is now `(st_dev, st_ino)` rather than the directory entry, and the
+   > intra-class order is the explicit key `(promotion, mtime, path)`. Both corrections
+   > follow from AD-16 and are argued in AD-28's own bullet above. Eviction unlinks
+   > every name of the chosen inode, because that is the only thing that frees blocks,
+   > and `total` is still decremented unconditionally so two concurrent sweeps still
+   > converge rather than over-evicting.
 5. `summary()` — report per-track file counts and bytes, and both ages, so `/health`
    shows at a glance whether the detail track is being seen at all.
 6. `/Users/gleb/IdeaProjects/Bot/docker-compose.yml`, `evidence-shim` service:
@@ -1707,8 +1882,11 @@ and `evidence-shim/`.
   assertion added to `EvidenceRetentionEscapeTest` is the guard.
 - **`ifAccumulatedFileSize` counts the archives, not the live file.** log4j2's `Delete`
   glob is `detail-*.log`, which excludes `detail.log`. At 30k bots the live file adds up
-  to another 5.1 GB on top of the 10 GB cap before it rolls. Budget 15 GB, not 10, for
-  track 2 at that scale.
+  to another ~2.3 GB on top of the 10 GB cap before it rolls (Amendment B1's corrected
+  rate; the figure here used to say 5.1 GB and therefore "budget 15 GB"). Budget
+  **~12.3 GB, not 10**, for track 2 at that scale — and see AD-26's reconciled
+  whole-disk ceiling, which is the number that actually has to clear the 50%-of-free
+  line.
 - **PatternLayout renders MDC as `[groupId/botId/gameType]`, not as JSON fields.** Every
   Phase 0–3 verification grep that reaches for `"botGroupId":"<GID>"` must become
   `[<GID>/` when pointed at track 2. This is the single most likely way the Releaser
@@ -1719,9 +1897,13 @@ and `evidence-shim/`.
 - **`immediateFlush = false` means `wc -l logs/detail/detail.log` lags the true count by
   up to one batch.** Harmless for the verification steps as written (they measure deltas
   over 300 s), misleading if anyone tries to assert an exact count.
-- **The first deploy of 4b still re-ingests once.** There are no saved positions yet, so
-  promtail reads every retained archive from byte 0 one last time. Expect ~2 GB into
-  `loki-data`, then never again. **Take P0-9's baseline after that settles**, not
+- **The first deploy of 4b re-ingests once *unless step 0a runs*.** There are no saved
+  positions yet, so promtail would read every retained archive from byte 0 one last
+  time — ~2 GB into `loki-data`, and, because those archives are pre-Phase-4 ws-parser
+  INFO, up to 14 days of agency-token material re-dated under the 720 h horizon
+  (AD-30, corrected). **Phase 4b step 0a moves the archives into `logs/pre-phase4/`
+  before `docker compose up`, which prevents it entirely.** If 0a is skipped, expect
+  the ~2 GB, then never again — and **take P0-9's baseline after that settles**, not
   before.
 - **Deleting `logs/detail/` by hand while the app runs will not free space** — the JVM
   holds the open file descriptor for `detail.log`, and evidence hardlinks hold the
@@ -1745,7 +1927,11 @@ and `evidence-shim/`.
 - **The agency-token log line is not fixed, only contained (AD-30).** The real fix is in
   `websocket-parser-core` — stop logging token material, or log a fingerprint. Note the
   library publishes jars from uncommitted trees, so this needs the source located first.
-  Not in this plan.
+  Not in this plan. **And containment is dated, not immediate**: lines already in Loki
+  persist under the 720 h horizon until `4b deploy + 30 d`, Phase 4b step 0a is what
+  stops that clock being reset by the one-time re-ingest, and step 0c (a Loki delete
+  request, which needs `deletion_mode: filter-and-delete`) is the only thing that
+  shortens it. Whether to run 0c is a judgement call for the user, not a default.
 - **The ANSI escapes are not fixed either**, only rendered harmless by track 2's
   `PatternLayout`. If track 2 ever needs to be JSON, this comes back.
 - **AD-24's narrow exception (`com.vingame.bot` DEBUG to Loki at 24 h) is costed and

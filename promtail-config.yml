@@ -17,6 +17,16 @@ positions:
   # named volume in docker-compose.yml is mounted here and nowhere else.
   # LogRetentionPipelineTest fails the build if this directory stops being a
   # mount target on the promtail service.
+  #
+  # THE ONE-TIME RE-INGEST ON THE DEPLOY THAT LANDS THIS IS NOT AUTOMATIC, IT IS
+  # PREVENTED BY A PRE-DEPLOY STEP. There are no saved positions yet, so promtail
+  # would read every retained pre-Phase-4 console-*.log from byte 0 -- and those
+  # archives are full of ws-parser INFO, which carries agency-token material and
+  # would land back in Loki under a fresh 720 h clock (AD-30, corrected). Run
+  # step 0a of the plan's Phase 4b BEFORE `docker compose up`:
+  #   mkdir -p logs/pre-phase4 && mv logs/console-*.log logs/pre-phase4/
+  # then check this file has exactly one entry, /logs/console.log. Take P0-9's
+  # baseline after that.
   filename: /promtail-positions/positions.yaml
 
 clients:
