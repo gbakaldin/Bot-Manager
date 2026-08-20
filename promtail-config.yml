@@ -3,7 +3,21 @@ server:
   grpc_listen_port: 0
 
 positions:
-  filename: /tmp/positions.yaml
+  # MUST be inside a volume (LOG_VOLUME_TIERING Phase 4b / AD-31). This used to be
+  # /tmp/positions.yaml, and nothing mounted /tmp: every `docker compose down`
+  # discarded the read offsets, so promtail re-read all ~12 retained
+  # console-*.log archives from byte 0 on the next start. Measured after one
+  # deploy: loki-data 1.02 GB -> 3.24 GB in 17 minutes, with Loki logging both
+  # `timestamp too old` rejections and accepted duplicates. Under the 720 h
+  # retention horizon that garbage now persists 4.3x longer, and it invalidates
+  # P0-9's growth measurement outright.
+  #
+  # /tmp is deliberately NOT what gets mounted -- shadowing a container's /tmp is
+  # a wider blast radius than the problem warrants. The `promtail-positions`
+  # named volume in docker-compose.yml is mounted here and nowhere else.
+  # LogRetentionPipelineTest fails the build if this directory stops being a
+  # mount target on the promtail service.
+  filename: /promtail-positions/positions.yaml
 
 clients:
   - url: http://loki:3100/loki/api/v1/push

@@ -201,6 +201,55 @@ class LogRetentionPipelineTest {
     }
 
     @Test
+    @DisplayName("promtail's positions file lives in a volume, so a redeploy does not re-ingest")
+    void promtailPositionsSurviveARestart() {
+        // LOG_VOLUME_TIERING Phase 4b / AD-31. positions.filename was /tmp/positions.yaml
+        // and nothing mounted /tmp, so every `docker compose down` threw away the read
+        // offsets and promtail re-read all ~12 retained console-*.log archives from byte
+        // 0. Measured after one deploy: loki-data 1.02 GB -> 3.24 GB in 17 minutes, with
+        // Loki logging both `timestamp too old` rejections and accepted duplicates.
+        //
+        // The failure is entirely silent from the app's side, it recurs on EVERY deploy,
+        // and under the 720 h horizon the garbage now persists 4.3x longer than it used
+        // to. It also invalidates P0-9's growth measurement, which is the gate on that
+        // horizon. So the two halves — the path and the mount — are pinned together;
+        // either one alone looks perfectly fine.
+        Map<String, Object> positions = map(yaml("promtail-config.yml"), "positions");
+        String filename = Objects.toString(positions.get("filename"), "");
+        assertThat(filename).as("promtail must declare a positions file").isNotEmpty();
+
+        String directory = filename.substring(0, filename.lastIndexOf('/'));
+        assertThat(directory)
+                .as("a positions file in /tmp is not persisted by anything; mounting a "
+                        + "container's /tmp would be a wider blast radius than the problem "
+                        + "warrants, so it gets its own directory")
+                .isNotEqualTo("/tmp");
+
+        assertThat(promtailMounts())
+                .as("promtail-config.yml writes its offsets to %s, so docker-compose.yml has "
+                        + "to mount a volume there. Without it the file is written into the "
+                        + "container's writable layer and discarded on every `compose down`, "
+                        + "and Loki re-ingests every retained archive on the next start.",
+                        directory)
+                .anyMatch(target -> target.equals(directory) || target.equals(filename));
+    }
+
+    /** Every mount TARGET on the promtail service, as compose short syntax. */
+    @SuppressWarnings("unchecked")
+    private static List<String> promtailMounts() {
+        Map<String, Object> services = map(yaml("docker-compose.yml"), "services");
+        Map<String, Object> promtail = map(services, "promtail");
+        List<String> targets = new ArrayList<>();
+        for (Object entry : (List<Object>) promtail.getOrDefault("volumes", List.of())) {
+            String[] parts = Objects.toString(entry).split(":");
+            if (parts.length >= 2) {
+                targets.add(parts[1]);
+            }
+        }
+        return targets;
+    }
+
+    @Test
     @DisplayName("promtail scrapes the logs root only, so logs/evidence/ stays out of Loki")
     void promtailScrapesOnlyTheTopLevel() {
         // The structural half of EvidenceRetentionEscapeTest's textual check: that test

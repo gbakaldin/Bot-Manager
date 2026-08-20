@@ -124,6 +124,15 @@ services:
     volumes:
       - ./logs:/logs:ro
       - ./promtail-config.yml:/etc/promtail/config.yml:ro
+      # Read offsets must survive `docker compose down` (LOG_VOLUME_TIERING
+      # AD-31). Without this volume promtail restarted with an empty positions
+      # file and re-ingested every retained archive from byte 0 -- measured at
+      # +2.2 GB into loki-data in 17 minutes after a single deploy. The path here
+      # must match `positions.filename` in promtail-config.yml.
+      #
+      # Expect ONE final re-ingest on the deploy that lands this: there are no
+      # saved positions yet. Take P0-9's growth baseline after it settles.
+      - promtail-positions:/promtail-positions
     command: -config.file=/etc/promtail/config.yml
     depends_on:
       - loki
@@ -369,6 +378,9 @@ services:
 volumes:
   mongo-data:
   loki-data:
+  # promtail's read offsets (LOG_VOLUME_TIERING AD-31). Small, but the only thing
+  # standing between a redeploy and re-ingesting every retained archive into Loki.
+  promtail-positions:
   grafana-data:
   prometheus-data:
   alertmanager-data:

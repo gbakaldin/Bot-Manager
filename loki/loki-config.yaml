@@ -50,6 +50,29 @@ schema_config:
 # Retention is enforced by the compactor on its compaction_interval (10 m) and
 # after retention_delete_delay (2 h), so do not expect same-minute deletion when
 # verifying.
+#
+# PHASE 4 RE-EXAMINED THESE NUMBERS AND CHANGED NONE OF THEM (AD-29). What changed
+# is what reaches Loki at all: since the two-track split, promtail ingests ONLY
+# track 1 (logs/console.log), which is capped at INFO+ by a ThresholdFilter on the
+# AsyncRolling appender. Track 2 (logs/detail/detail.log) carries the ws-parser
+# library and every DEBUG/TRACE line and is never scraped.
+#
+#   * 720h stays, and is now cheap. The 1.016 GB measured at a 168 h horizon was
+#     ~99% ws-parser and DEBUG; what remains projects to roughly 7 MB/day at
+#     staging scale and ~2 GB at a 30-day steady state even allowing 10x for a
+#     busier fleet, against 66.96 GiB free on Bot-1. P0-9's "abort if the 30-day
+#     projection exceeds 50% of available disk" gate is unchanged and still
+#     governs -- a projection is still a projection.
+#   * The {level=~"DEBUG|TRACE"} selector below now matches NOTHING, and that is
+#     precisely why it stays: it is a TRIPWIRE, not an active policy. The only
+#     ways a DEBUG line can reach Loki now are someone removing the
+#     ThresholdFilter or repointing promtail at logs/detail/ -- both silent, and
+#     both would otherwise dump the highest-volume tier in the system into a 720 h
+#     horizon. This selector degrades that to 24 h. It costs nothing to keep.
+#   * It is also the switch AD-24's costed exception would need: shipping
+#     com.vingame.bot DEBUG to Loki at 24 h is one line in the bind-mounted
+#     log4j2.properties (`appender.async.filter.threshold.level = debug`) plus
+#     BOT_LOG_LEVEL=INFO on staging, and nothing here would have to change.
 limits_config:
   retention_period: 720h
   retention_stream:
