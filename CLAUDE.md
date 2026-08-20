@@ -97,6 +97,13 @@ output is split in two, both rolling on the same 2 h modulated boundary:
   `LogQueueSaturated` rule alerts on the ratio. If that alert fires for
   `AsyncDetail`, **treat `logs/detail/detail.log` as incomplete for the window**
   (for `AsyncRolling` it means the opposite: bot threads parked on a queue put).
+  **The converse does not hold** -- these are lower bounds. A silent rule proves
+  only that no *sustained* saturation was sampled: `for: 5m` over a scrape-time
+  gauge can miss an oscillating drop storm entirely, the sampler's own WARN rides
+  `AsyncRolling` (`blocking = true`) so a stalling disk can freeze the counters
+  exactly when they matter, and a *vanished* appender reports `-1/-1 = 1`, the
+  healthiest reading there is. The three misreadings are spelled out on the rule
+  in `prometheus/alerts.yml` and in `AsyncQueueMetrics`' javadoc.
 - **`appender.detail.immediateFlush = false` risks the last <= 8 KB, not "the last
   few ms".** The bound is bytes (`appender.detail.bufferSize`, declared explicitly
   so it is a decision), and how much *time* 8 KB spans is inversely proportional to
@@ -333,10 +340,12 @@ Alertmanager's webhook and **hardlinks** the newest log files into
   `retention_period` is `720h`, so every ws-parser INFO line ingested *before*
   Phase 4 stays queryable until then. Phase 4b's one-time promtail re-ingest makes
   that worse unless the pre-deploy step in the plan's Phase 4b is run -- it re-reads
-  the retained pre-Phase-4 `console-*.log` archives from byte 0 and re-ingests up to
-  14 days of that material **with a fresh 720 h clock**. Contained, not fixed; the
-  fix is in the library. Without any of this the fix for unbounded growth is
-  unbounded growth.
+  the retained pre-Phase-4 `console-*.log` archives from byte 0 and re-ingests that
+  material **with a fresh 720 h clock**. The re-ingested window is **at most 7 days**
+  -- those archives were written under the *pre*-Phase-4 `ifLastModified.age = 7d`,
+  not the 14 d this phase raises track 1 to -- and the only measurement taken on the
+  box found ~12 archives ≈ **24 h**. Contained, not fixed; the fix is in the library.
+  Without any of this the fix for unbounded growth is unbounded growth.
 - **Unclean start retro-promotes (AD-21).** In a full-stack failure Alertmanager
   may be dead too, so a start that finds no `logs/evidence/.clean-shutdown` marker
   promotes immediately, tagged `boot`.
