@@ -67,6 +67,25 @@ services:
       # log4j2.properties, mutating the existing LoggerConfig in place -- the
       # additivity=false and both appenderRefs of that logger survive.
       - LOGGING_LEVEL_COM_VINGAME_BOT=${BOT_LOG_LEVEL:-INFO}
+      # Level for the WebSocket Parser library (LOG_VOLUME_TIERING Phase 4,
+      # AD-32). Since Phase 4 this logger has its own LoggerConfig with
+      # additivity = false, routed to track 2 (logs/detail/detail.log) alone --
+      # it was 98.7% of INFO volume under the root logger and therefore of
+      # everything Loki ingested.
+      #
+      # INFO is the design: it is what the 14.67 lines/s measurement and every
+      # retention projection in AD-26 are built on, and it is the per-bot
+      # connection/auth narrative that root-caused the PING-before-AUTH
+      # regression. WARN is the DISK ESCAPE HATCH -- it removes ~99% of track 2's
+      # volume, and on a box where disk binds before a ramp it is
+      # `WSPARSER_LOG_LEVEL=WARN` in secrets.env plus a restart, no rebuild.
+      #
+      # The logger name in log4j2.properties MUST stay exactly
+      # `com.vingame.websocketparser`: Spring Boot's setLogLevel mutates a
+      # LoggerConfig that exists by exact name IN PLACE, but against a name that
+      # does not exist it creates a fresh one with NO appenders -- which would
+      # silently delete the detail track.
+      - LOGGING_LEVEL_COM_VINGAME_WEBSOCKETPARSER=${WSPARSER_LOG_LEVEL:-INFO}
     depends_on:
       mongo:
         condition: service_healthy

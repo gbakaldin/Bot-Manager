@@ -33,12 +33,59 @@ The main entry point is `com.vingame.bot.Starter` (Spring Boot application).
 ## Logging Guidelines
 
 Normative levels for `com.vingame.bot.*`, restructured by
-`docs/plans/LOG_VOLUME_TIERING.md` (Phase 1) around a **tier model**. The target is
-~10 prod environments x 2-3k bots each, where the previous shape projected to
-**46-124 GB/day** against a 10 GB accumulated-file cap on a box that has already
-died once on ENOSPC (2026-06-30, taking Mongo with it).
+`docs/plans/LOG_VOLUME_TIERING.md` (Phase 1) around a **tier model**, and split
+across **two output tracks** by Phase 4. The target is ~10 prod environments x 2-3k
+bots each, where the previous shape projected to **46-124 GB/day** against a 10 GB
+accumulated-file cap on a box that has already died once on ENOSPC (2026-06-30,
+taking Mongo with it).
 
-**The rule that decides every level question:**
+### Two tracks: what lands where (Phase 4)
+
+Phases 0-3 made `com.vingame.bot` cheap and the release measured it -- **59 INFO
+lines in 300 s** on a 155-bot fleet. Over the same window
+`com.vingame.websocketparser` emitted **4,402**: per bot, at INFO, under the *root*
+logger, i.e. **98.7% of INFO volume**, outside every level this file governs. So the
+output is split in two, both rolling on the same 2 h modulated boundary:
+
+| | Track 1 "main" | Track 2 "detail" |
+|---|---|---|
+| File | `logs/console.log` | `logs/detail/detail.log` |
+| Layout | JSON (`JsonTemplateLayout`) | `PatternLayout` |
+| Carries | `com.vingame.bot` **INFO+** and non-ws-parser root INFO+ | ws-parser in full, **all** our DEBUG/TRACE, plus a self-contained copy of the above |
+| Loki / Grafana | **yes -- the only thing promtail ships** | **never** |
+| Retention | 14 d or 10 GB | **12 h or 10 GB** |
+| Read it | Grafana / Loki | on the box, or `logs/evidence/` after an alert |
+
+- **Only track 1 reaches Loki, and it is capped at INFO+** by a `ThresholdFilter` on
+  the `AsyncRolling` appender (AD-24). No DEBUG or TRACE line reaches Loki by any
+  path -- including Phase 2's scoped-debug `ACCEPT`, which beats the *level* check
+  but not an appender's own filter.
+- **Track 2 stays out of Loki because it is a subdirectory.** promtail's
+  `__path__: /logs/*.log` is non-recursive -- the same escape `logs/evidence/` uses.
+  That is the entire mechanism; there is no filter behind it.
+- **`docker logs bot-manager` no longer carries the ws-parser `AUTH [...]` flood.**
+  Some operators used it as a liveness signal; the replacements are the ws-parser
+  narrative in `logs/detail/detail.log` and `bot_messages_total` in Prometheus. Not
+  a regression. Spring's startup lines and all third-party WARN/ERROR are still
+  there (AD-27) -- the releaser's smoke test depends on that.
+- **`WSPARSER_LOG_LEVEL` is the disk escape hatch** (compose passes
+  `LOGGING_LEVEL_COM_VINGAME_WEBSOCKETPARSER=${WSPARSER_LOG_LEVEL:-INFO}`). `WARN`
+  removes ~99% of track 2's volume with a restart and no rebuild. **Do not rename
+  the `com.vingame.websocketparser` logger** in `log4j2.properties`: Spring Boot's
+  `setLogLevel` against a name that does not exist creates a fresh appender-less
+  LoggerConfig and silently deletes track 2.
+- **`appender.asyncdetail.blocking = false` is deliberate and is the opposite of
+  track 1's `true`.** It looks like the AD-3/AD-4 defect an earlier pass fixed and
+  it is not: `log4j2.discardThreshold` is JVM-wide, so it cannot discard track 2's
+  INFO without discarding track 1's, and track 2 carries ~1,893 lines/s at INFO at
+  20k bots -- under `blocking = true` that parks a bot thread on a queue wait.
+  Track 1 keeps `blocking = true` so its INFO+ signal is never lost.
+  `AsyncQueuePolicyTest` asserts the pair together.
+- **The DEBUG-tier signals this file calls default-visible are now file-visible, not
+  Grafana-visible** -- the 5 s `UpdateBet` aggregate with its strategy-decision
+  histogram and the per-round session summaries (AD-8) live in track 2 on the box.
+
+**The rule that decides every level question is unchanged:**
 
 > **INFO must not contain anything whose rate is a function of bot count or round
 > rate.** If a line fires once per bot, once per round, or once per message, it is
@@ -55,10 +102,13 @@ every aggregated line -- keeping the tag is what makes a demotion safe.
 - **Change it without a rebuild:** `LOGGING_LEVEL_COM_VINGAME_BOT`, passed by
   compose as `${BOT_LOG_LEVEL:-INFO}`. Spring Boot applies `logging.level.*` over
   `log4j2.properties` and mutates the existing `com.vingame.bot` LoggerConfig in
-  place, preserving `additivity=false` and both appenderRefs. Verified in the build
-  by `LoggingLevelOverrideTest` -- **do not rename that logger**, or the override
-  silently starts creating a fresh appender-less LoggerConfig instead.
+  place, preserving `additivity=false` and all three appenderRefs. Verified in the
+  build by `LoggingLevelOverrideTest` -- **do not rename that logger**, or the
+  override silently starts creating a fresh appender-less LoggerConfig instead.
 - **Staging sets `BOT_LOG_LEVEL=DEBUG`** in `secrets.env`/`.env`. Prod does not.
+  Since Phase 4 that DEBUG lands in **track 2 only**: the `ThresholdFilter` on
+  `AsyncRolling` keeps `console.log`, and therefore Loki, at INFO+ whatever the
+  logger level says. The same is true of a global `/actuator/loggers` flip.
 - `POST /actuator/loggers/com.vingame.bot {"configuredLevel":"DEBUG"}` still works
   and is still the escape hatch -- but it is **global**. On a 10-environment prod
   instance that is a **~5 GB/hour action**. Reach for **scoped per-group DEBUG**
@@ -164,6 +214,17 @@ INFO at all.
   reassembled into global DEBUG one call at a time.
 - **It cannot reach TRACE.** The raw WS frame dumps stay a deliberate global
   `/actuator/loggers` action; a scope that promoted them would be the flood again.
+- **How a scoped session is read since Phase 4 (AD-24).** Grafana tells you *that* a
+  drill-in exists -- the arming and escalation lines are `com.vingame.bot` INFO, so
+  they are in track 1 and in Loki. The **payload is on the box**, in track 2, where
+  the MDC renders as `[botGroupId/botId/gameType]` and **not** as JSON fields:
+  ```bash
+  grep "\[<GROUP_ID>/" logs/detail/detail.log | tail -400          # live file
+  grep -h "\[<GROUP_ID>/" logs/detail/detail-*.log | tail -400     # rolled siblings
+  grep -h "\[<GROUP_ID>/" logs/evidence/detail-*.log               # if an alert pinned it
+  ```
+  Any older instruction to grep `"botGroupId":"<GID>"` in `console.log` is stale.
+  Note `%-5level` pads to five characters, so prefer `grep -E ' (DEBUG|TRACE) '`.
 - **It also arms itself** on early-warning signals, *before* a group dies (AD-12):
   first watchdog expiry, a reconnect burst
   (`escalation.reconnect-threshold` in `escalation.reconnect-window-minutes`), and a
@@ -331,14 +392,22 @@ mapper.registerSubtypes(messageTypes.getTypeRegistrations(offset, game.isMd5()))
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/{id}` | Find bot group by ID |
-| GET | `/` | List all bot groups |
-| POST | `/filter/` | Filter bot groups |
+| GET | `/sort-keys` | Sortable field names for the filter body |
+| POST | `/{envId}/filter` | Filter/list an environment's bot groups |
 | POST | `/` | Create new bot group |
-| PATCH | `/` | Update bot group |
+| PATCH | `/{id}` | Update bot group |
 | DELETE | `/{id}` | Delete bot group |
 | POST | `/{id}/start` | Start all bots in group |
 | POST | `/{id}/stop` | Stop all bots in group |
 | POST | `/{id}/restart` | Restart all bots in group |
+| POST | `/{id}/schedule-restart` | Schedule a restart |
+| GET | `/{id}/health` | Per-group bot health (public-facing UI feature) |
+| GET | `/{id}/status` | Target vs actual status |
+
+There is **no `GET /api/v1/bot-group/`** and no `POST /filter/` — listing is
+`POST /{envId}/filter` with a JSON body, and the old rows in this table returned
+**405** (found by LOG_VOLUME_TIERING's release verification, which used one of them
+as a smoke test).
 
 ### EnvironmentController - `/api/v1/environment`
 

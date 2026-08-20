@@ -87,10 +87,41 @@ class Log4j2TestConfigShapeTest {
             "appender.async.appenderRef.type",
             "appender.async.appenderRef.ref",
             "appender.async.blocking",
+            // AD-24. The one filter that keeps DEBUG out of Loki. It is on the ASYNC
+            // wrapper, not the rolling file, so the event is rejected before it takes a
+            // queue slot; the test copy carries it so the build exercises the spelling.
+            "appender.async.filter.threshold.type",
+            "appender.async.filter.threshold.level",
+            "appender.async.filter.threshold.onMatch",
+            "appender.async.filter.threshold.onMismatch",
             "appender.rolling.policies.type",
             "appender.rolling.policies.time.type",
             "appender.rolling.policies.time.interval",
-            "appender.rolling.policies.time.modulate");
+            "appender.rolling.policies.time.modulate",
+            // ---- Phase 4: track 2, and the loggers that reach it (AD-22 .. AD-27) ----
+            // Forgetting any of these in the test copy does not produce a nice failure:
+            // AsyncAppender.start() throws when its target is unavailable, so every
+            // Spring-context test in the module dies with ExceptionInInitializerError
+            // before its first assertion, looking like a Spring problem.
+            "rootLogger.appenderRef.detail.ref",
+            "logger.app.appenderRef.detail.ref",
+            "logger.wsparser.name",
+            "logger.wsparser.level",
+            "logger.wsparser.additivity",
+            "logger.wsparser.appenderRef.detail.ref",
+            "appender.detail.type",
+            "appender.detail.name",
+            "appender.detail.layout.type",
+            "appender.detail.policies.time.interval",
+            "appender.detail.policies.time.modulate",
+            "appender.asyncdetail.type",
+            "appender.asyncdetail.name",
+            "appender.asyncdetail.appenderRef.type",
+            "appender.asyncdetail.appenderRef.ref",
+            // Deliberately the OPPOSITE of appender.async.blocking above (AD-25(4)).
+            // Pinned here so the two files cannot drift apart on the single setting most
+            // likely to be "corrected" by a reader who remembers Phase 0's Drift 1.
+            "appender.asyncdetail.blocking");
 
     private static Path resolve(List<Path> candidates, String what) {
         Path path = candidates.stream().filter(Files::isRegularFile).findFirst().orElse(null);
@@ -161,7 +192,7 @@ class Log4j2TestConfigShapeTest {
     }
 
     @Test
-    @DisplayName("the one intended difference is where the rolling file is written")
+    @DisplayName("the two intended differences are where each track's file is written")
     void theOnlyDifferenceIsTheOutputPath() {
         Properties shipped = load(resolve(IN_JAR_CANDIDATES, "log4j2.properties"));
         Properties test = load(resolve(TEST_CANDIDATES, "log4j2-test.properties"));
@@ -176,5 +207,40 @@ class Log4j2TestConfigShapeTest {
         assertThat(test.getProperty("appender.rolling.filePattern"))
                 .isNotNull()
                 .doesNotStartWith("/app/");
+
+        // The SECOND intended difference, added by Phase 4. Track 2 is a second
+        // AsyncAppender with a second unavailable-off-box target, so it has exactly the
+        // same "kills the whole module" property as track 1 — enumerated here rather
+        // than merely tolerated, so a third difference cannot slip in unremarked.
+        assertThat(shipped.getProperty("appender.detail.fileName"))
+                .isEqualTo("/app/logs/detail/detail.log");
+        assertThat(test.getProperty("appender.detail.fileName"))
+                .as("track 2's file must be redirected off /app for the same reason track 1's "
+                        + "is, or AsyncDetail.start() throws and every Spring-context test in "
+                        + "bot-app dies with ExceptionInInitializerError")
+                .isNotNull()
+                .doesNotStartWith("/app/");
+        assertThat(test.getProperty("appender.detail.filePattern"))
+                .isNotNull()
+                .doesNotStartWith("/app/");
+    }
+
+    @Test
+    @DisplayName("nothing in the test copy names /app — that is the failure this file prevents")
+    void theTestCopyNeverNamesTheContainerPath() {
+        Properties test = load(resolve(TEST_CANDIDATES, "log4j2-test.properties"));
+
+        // The retention keys are the file's other documented reason to differ (the
+        // shipped Delete blocks are anchored under /app/logs and /app/logs/detail and are
+        // replaced here by a small `max`). A stray /app path anywhere else is the same
+        // class of defect as the two fileNames above, so it is ruled out wholesale
+        // rather than key by key.
+        for (String key : test.stringPropertyNames()) {
+            assertThat(test.getProperty(key))
+                    .as("%s points into the container filesystem; a build machine cannot "
+                            + "create /app and an appender that cannot start takes the module "
+                            + "down", key)
+                    .doesNotContain("/app/");
+        }
     }
 }

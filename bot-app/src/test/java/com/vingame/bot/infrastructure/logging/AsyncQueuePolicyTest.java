@@ -39,8 +39,21 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       the DEBUG it deliberately enabled), which is precisely why nothing in the running
  *       test suite would notice it disappearing.</li>
  * </ol>
+ * <p>
+ * <b>Phase 4 adds a second track and a fourth setting.</b> AD-22 .. AD-27 split the output
+ * into track 1 ({@code console.log}, JSON, INFO+, the only thing Loki ingests) and track 2
+ * ({@code logs/detail/detail.log}, PatternLayout, the ws-parser library in full plus all our
+ * DEBUG/TRACE, never in Loki). Three more things now have to agree and none of them fails
+ * loudly either: that {@code com.vingame.websocketparser} really is pulled out of the root
+ * logger with {@code additivity = false} (without it, 98.7% of INFO volume walks straight
+ * back into Loki); that the {@code ThresholdFilter} on {@code AsyncRolling} is present, at
+ * {@code info}, with {@code onMismatch = DENY} (the single assertion that keeps DEBUG out of
+ * Loki, including Phase 2's scoped-debug {@code ACCEPT}, which bypasses the level check but
+ * not an appender filter); and that {@code AsyncDetail} is {@code blocking = false} while
+ * {@code AsyncRolling} is {@code blocking = true} — a deliberate pair, asserted together so
+ * that "fixing" one reads as breaking the other.
  */
-@DisplayName("AD-3/AD-4/AD-5 — the async queue policy and the console threshold hold together")
+@DisplayName("AD-3/AD-4/AD-5/AD-23/AD-24/AD-25 — the two-track appender graph holds together")
 class AsyncQueuePolicyTest {
 
     private static final List<List<Path>> TWINS = List.of(
@@ -89,6 +102,152 @@ class AsyncQueuePolicyTest {
                     .as("and so must com.vingame.bot — this is the logger every bot thread uses, "
                             + "and the whole point is that it never waits on a disk write")
                     .isEqualTo(async);
+        }
+    }
+
+    @Test
+    @DisplayName("three loggers, and only ws-parser is routed to track 2 alone (AD-23/AD-27)")
+    void theThreeLoggersAreWiredToTheTracksPhaseFourIntends() {
+        for (List<Path> twin : TWINS) {
+            Properties p = load(twin, "log4j2.properties");
+            String asyncDetail = p.getProperty("appender.asyncdetail.name");
+
+            assertThat(asyncDetail)
+                    .as("track 2's async wrapper must be declared")
+                    .isEqualTo("AsyncDetail");
+
+            // Root and com.vingame.bot keep the console and track 1 (AD-27: losing Spring's
+            // startup lines would break the releaser's smoke test, and losing third-party
+            // ERROR would blind operators) and gain track 2, so the detail file is
+            // self-contained.
+            for (String logger : List.of("rootLogger", "logger.app")) {
+                assertThat(p.getProperty(logger + ".appenderRef.console.ref"))
+                        .as("%s must keep the console", logger).isEqualTo("ConsoleAppender");
+                assertThat(p.getProperty(logger + ".appenderRef.async.ref"))
+                        .as("%s must keep track 1", logger).isEqualTo("AsyncRolling");
+                assertThat(p.getProperty(logger + ".appenderRef.detail.ref"))
+                        .as("%s must ALSO reach track 2 — AD-27 makes the detail file "
+                                + "self-contained, so an incident can be read from one file "
+                                + "without cross-referencing console.log", logger)
+                        .isEqualTo(asyncDetail);
+            }
+
+            assertThat(p.getProperty("logger.wsparser.name"))
+                    .as("the library's package root, spelled EXACTLY. Spring Boot's setLogLevel "
+                            + "mutates a LoggerConfig that exists by exact name in place; "
+                            + "against a name that does not exist it creates a fresh one with "
+                            + "NO appenders, silently deleting the detail track (AD-23)")
+                    .isEqualTo("com.vingame.websocketparser");
+            assertThat(p.getProperty("logger.wsparser.level"))
+                    .as("AD-32: INFO is the design, and it is what every projection in AD-26 is "
+                            + "built on. WARN is the escape hatch, delivered by "
+                            + "WSPARSER_LOG_LEVEL, not by editing this")
+                    .isEqualTo("info");
+            assertThat(p.getProperty("logger.wsparser.additivity"))
+                    .as("this is the whole mechanical fix for Phase 4's Finding 1. With "
+                            + "additivity = true the library's 14.67 lines/s go to track 2 AND "
+                            + "still propagate to root — i.e. back into console.log and back "
+                            + "into Loki, which is 98.7% of INFO volume and the reason Phase 4 "
+                            + "exists")
+                    .isEqualTo("false");
+            assertThat(p.getProperty("logger.wsparser.appenderRef.detail.ref"))
+                    .isEqualTo(asyncDetail);
+            assertThat(p.getProperty("logger.wsparser.appenderRef.console.ref"))
+                    .as("ws-parser must NOT reach the console: `docker logs bot-manager` is "
+                            + "capped at 50m x 5 and the AUTH flood would dominate it")
+                    .isNull();
+            assertThat(p.getProperty("logger.wsparser.appenderRef.async.ref"))
+                    .as("and it must NOT reach track 1, which is the only thing Loki ingests")
+                    .isNull();
+
+            assertThat(p.getProperty("appender.asyncdetail.appenderRef.type"))
+                    .as("same trap as AsyncRolling's, second appender: without the explicit "
+                            + "type line log4j-core 2.24.1 throws at context start and the JVM "
+                            + "never gets a logger at all")
+                    .isEqualTo("AppenderRef");
+            assertThat(p.getProperty("appender.asyncdetail.appenderRef.ref"))
+                    .isEqualTo(p.getProperty("appender.detail.name"));
+        }
+    }
+
+    @Test
+    @DisplayName("blocking is true on track 1 and false on track 2 — a deliberate pair (AD-25)")
+    void theTwoTracksBlockDifferentlyOnPurpose() {
+        for (List<Path> twin : TWINS) {
+            Properties p = load(twin, "log4j2.properties");
+
+            assertThat(p.getProperty("appender.async.blocking"))
+                    .as("track 1 carries INFO+ only, and INFO+ is what Alertmanager and Loki "
+                            + "are wired to. It must block rather than lose a line (AD-4).")
+                    .isEqualTo("true");
+            assertThat(p.getProperty("appender.asyncdetail.blocking"))
+                    .as("""
+                            THIS IS NOT THE AD-3/AD-4 DEFECT AND MUST NOT BE "FIXED" TO true.
+                            AD-25(4): log4j2.discardThreshold is a JVM-WIDE property, so it \
+                            cannot discard track 2's INFO without also discarding track 1's — \
+                            AD-4's policy simply cannot express what track 2 needs. Track 2 \
+                            carries the highest-volume tier in the system (~1,893 lines/s at \
+                            20k bots) at INFO; under blocking = true a full detail queue would \
+                            park a BOT THREAD on a queue wait, which is precisely the latency \
+                            AD-4 exists to prevent, reintroduced through the back door. Track \
+                            2 is a best-effort forensic tier: dropping on a full queue is \
+                            right for it, and track 1 above is what must never drop.""")
+                    .isEqualTo("false");
+        }
+    }
+
+    @Test
+    @DisplayName("track 1 is capped at INFO+, which is what keeps DEBUG out of Loki (AD-24)")
+    void trackOneIsCappedAtInfo() {
+        for (List<Path> twin : TWINS) {
+            Properties p = load(twin, "log4j2.properties");
+
+            assertThat(p.getProperty("appender.async.filter.threshold.type"))
+                    .as("the single assertion that keeps DEBUG and TRACE out of Loki by every "
+                            + "path. Note it must be on the ASYNC WRAPPER, not on "
+                            + "RollingFileAppender: here the event is rejected before it "
+                            + "consumes a slot in the 8,192-entry queue")
+                    .isEqualTo("ThresholdFilter");
+            assertThat(p.getProperty("appender.async.filter.threshold.level")).isEqualTo("info");
+            assertThat(p.getProperty("appender.async.filter.threshold.onMatch"))
+                    .as("NEUTRAL, not ACCEPT — an ACCEPT would bypass any other filter on the "
+                            + "path")
+                    .isEqualTo("NEUTRAL");
+            assertThat(p.getProperty("appender.async.filter.threshold.onMismatch"))
+                    .as("DENY is the half that does the work. Phase 2's scoped-debug filter "
+                            + "returns ACCEPT to beat the LEVEL check, but an appender's own "
+                            + "filter still runs (AppenderControl.callAppender0 calls "
+                            + "isFiltered before append) — measured on the box: 0 DEBUG lines "
+                            + "on the filtered path against 14,310 on the unfiltered one")
+                    .isEqualTo("DENY");
+        }
+    }
+
+    @Test
+    @DisplayName("track 2 is a pattern file, track 1 stays JSON (AD-25)")
+    void theTwoTracksUseTheLayoutsTheirConsumersNeed() {
+        for (List<Path> twin : TWINS) {
+            Properties p = load(twin, "log4j2.properties");
+
+            assertThat(p.getProperty("appender.detail.layout.type"))
+                    .as("nothing parses track 2 — not promtail, not Loki, not Grafana. JSON "
+                            + "costs ~400 B/line against ~250 B for a pattern line, i.e. ~38% "
+                            + "of track 2's bytes for nothing, and it would drag the "
+                            + "ws-parser ANSI escapes back into a structured `message` field "
+                            + "where they are corruption rather than colour")
+                    .isEqualTo("PatternLayout");
+            assertThat(p.getProperty("appender.detail.layout.pattern"))
+                    .as("%%c keeps the FULL logger name so a misroute between the two tracks is "
+                            + "greppable, and the MDC triple is what a per-group drill-in "
+                            + "greps for as [groupId/botId/gameType]")
+                    .contains("%c")
+                    .contains("%X{botGroupId}");
+            assertThat(p.getProperty("appender.detail.immediateFlush"))
+                    .as("AD-25(3): log4j2 flushes at endOfBatch, so the file is current within "
+                            + "milliseconds anyway and the per-event syscall is gone. Track 1 "
+                            + "keeps the default true — a partial trailing buffer is "
+                            + "acceptable for a forensic tier and not for the alerting one")
+                    .isEqualTo("false");
         }
     }
 

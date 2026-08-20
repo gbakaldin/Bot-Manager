@@ -98,6 +98,95 @@ class EvidenceRetentionEscapeTest {
     }
 
     @Test
+    @DisplayName("track 2's own Delete is anchored where it cannot reach logs/ or evidence/")
+    void theDetailDeleteCannotReachAnythingButItsOwnArchives() {
+        // Phase 4 / AD-25(1). logs/detail/ escapes promtail and track 1's sweeper for the
+        // same reason logs/evidence/ does — but it brings a SECOND sweeper into the logs
+        // mount, and that one has to be boxed in just as tightly. Raise its basePath to
+        // /app/logs, or its maxDepth above 1, and a sweeper whose glob is `detail-*.log`
+        // starts walking the directory holding the promoted evidence.
+        for (String[] file : List.of(new String[]{"logging", "log4j2.properties"},
+                new String[]{"bot-app", "src", "main", "resources", "log4j2.properties"})) {
+            String properties = text(file);
+            String where = String.join("/", file);
+            assertThat(properties)
+                    .as("%s: track 2's Delete must stay anchored INSIDE logs/detail. At "
+                            + "/app/logs it would walk the same directory tree track 1's "
+                            + "sweeper does, next to logs/evidence/", where)
+                    .contains("appender.detail.strategy.delete.basePath = /app/logs/detail");
+            assertThat(properties)
+                    .as("%s: maxDepth = 1 keeps it off any subdirectory of logs/detail — the "
+                            + "same guard track 1's Delete has, for the same reason", where)
+                    .contains("appender.detail.strategy.delete.maxDepth = 1");
+            assertThat(properties)
+                    .as("%s: and the glob keeps it off the live detail.log as well as off "
+                            + "anything named console-*", where)
+                    .contains("appender.detail.strategy.delete.ifFileName.glob = detail-*.log");
+        }
+    }
+
+    @Test
+    @DisplayName("track 2 is written to a SUBDIRECTORY, which is the only thing keeping it out of Loki")
+    void theDetailTrackLivesBelowTheScrapedDirectory() {
+        // There is no filter, no drop stage and no Loki-side rule keeping track 2 out of
+        // Loki: the entire mechanism is that promtail's __path__ matches one level only
+        // (asserted above) and detail.log is one level down. Move it up to
+        // /app/logs/detail.log and promtail ingests ~1,900 lines/s at 20k bots into a
+        // 720 h retention horizon — silently, and at the highest-volume tier in the system.
+        for (String[] file : List.of(new String[]{"logging", "log4j2.properties"},
+                new String[]{"bot-app", "src", "main", "resources", "log4j2.properties"})) {
+            String where = String.join("/", file);
+            Matcher fileName = Pattern
+                    .compile("appender\\.detail\\.fileName\\s*=\\s*(\\S+)")
+                    .matcher(text(file));
+            assertThat(fileName.find()).as("%s declares track 2's file", where).isTrue();
+
+            String path = fileName.group(1);
+            assertThat(path)
+                    .as("%s: track 2 must live under the logs mount (hardlinks for evidence "
+                            + "promotion cannot cross filesystems)", where)
+                    .startsWith("/app/logs/");
+            assertThat(path.substring("/app/logs/".length()))
+                    .as("%s: and it must be in a SUBDIRECTORY of it. promtail's "
+                            + "__path__: /logs/*.log is non-recursive, and that is the whole "
+                            + "of what keeps track 2 out of Loki (AD-25(1))", where)
+                    .contains("/");
+        }
+    }
+
+    @Test
+    @DisplayName("both tracks roll on the same boundary, which the shim's single tail pass assumes")
+    void theTwoTracksShareOneRolloverBoundary() {
+        // AD-22 makes "one rollover interval" a requirement rather than a coincidence:
+        // AD-28's promotion runs ONE tail pass at the next boundary + 120 s and expects it
+        // to close BOTH live files. Split the intervals and the tail pass fires while one
+        // track's live file is still open — the post-incident tail of the track that
+        // actually holds the per-bot detail is then the part nobody has.
+        for (String[] file : List.of(new String[]{"logging", "log4j2.properties"},
+                new String[]{"bot-app", "src", "main", "resources", "log4j2.properties"})) {
+            String properties = text(file);
+            String where = String.join("/", file);
+            String track1 = intervalOf(properties, "rolling", where);
+            String track2 = intervalOf(properties, "detail", where);
+
+            assertThat(track2)
+                    .as("%s: track 1 rolls every %s h and track 2 every %s h. AD-16's single "
+                            + "tail pass can only close both live files if there is one "
+                            + "boundary (AD-22).", where, track1, track2)
+                    .isEqualTo(track1);
+        }
+    }
+
+    private static String intervalOf(String properties, String appender, String where) {
+        Matcher matcher = Pattern
+                .compile("appender\\." + appender + "\\.policies\\.time\\.interval\\s*=\\s*(\\d+)")
+                .matcher(properties);
+        assertThat(matcher.find())
+                .as("%s declares a rollover interval for appender.%s", where, appender).isTrue();
+        return matcher.group(1);
+    }
+
+    @Test
     @DisplayName("the shim's rollover period is the one log4j2 actually rolls on")
     void theShimRolloverPeriodMatchesLog4j2() {
         Matcher interval = Pattern

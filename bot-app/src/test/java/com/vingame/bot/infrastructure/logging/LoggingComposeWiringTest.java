@@ -121,6 +121,25 @@ class LoggingComposeWiringTest {
     }
 
     @Test
+    @DisplayName("the ws-parser level is passed too, and defaults to INFO (AD-32)")
+    void theLibraryLevelComesFromTheEnvironmentAndDefaultsToInfo() {
+        // Phase 4's escape hatch. Track 2 is bounded by the log4j2 caps, but on a box where
+        // disk binds before a ramp, WSPARSER_LOG_LEVEL=WARN removes ~99% of its volume with
+        // a restart and no rebuild. Absent from compose, that variable is a line in
+        // secrets.env that nothing reads — and the only remaining lever is a redeploy.
+        //
+        // INFO is the default on purpose: it is the level the 14.67 lines/s measurement and
+        // every retention projection in AD-26 are built on, and it is the per-bot
+        // connection/auth narrative that root-caused the PING-before-AUTH regression.
+        assertThat(valueOf("LOGGING_LEVEL_COM_VINGAME_WEBSOCKETPARSER"))
+                .as("compose must pass the library level through, defaulting to INFO. The "
+                        + "logger name is also load-bearing: Spring Boot's setLogLevel against "
+                        + "a name that does not exist in log4j2.properties creates a fresh "
+                        + "LoggerConfig with NO appenders, silently deleting the detail track.")
+                .isEqualTo("${WSPARSER_LOG_LEVEL:-INFO}");
+    }
+
+    @Test
     @DisplayName("the logs bind mount is unchanged and read-write, since evidence/ lives inside it")
     void theLogsMountStillGivesTheShimSomewhereToLink() {
         // Hardlinks cannot cross devices. logs/evidence/ is a subdirectory of the same
