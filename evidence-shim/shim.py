@@ -144,6 +144,12 @@ Track = collections.namedtuple("Track", "name directory glob live_name live_temp
 AGGREGATE = "aggregate"
 DETAIL = "detail"
 
+# One set of blocks in evidence/, with every name that points at it. Evidence
+# entries are hardlinks and one inode routinely carries two names (AD-16: pass 1
+# pins the live file, pass 3 pins the same inode under its rolled name), so the
+# byte guard has to count inodes, not directory entries -- see `inode_groups()`.
+InodeGroup = collections.namedtuple("InodeGroup", "promoted mtime size detail paths")
+
 # The per-incident name each track's LIVE file is linked under. One source of
 # truth: `record()` stamps them onto a new incident, and `load_pending` fills
 # them in for an entry written by a shim that only knew about one track.
@@ -186,6 +192,29 @@ DEFAULT_NEWEST_COUNT = 2
 # leaking into Alertmanager's group_by) is a plausible way to mint thousands of
 # both. Alertmanager's own grouping keeps this in single digits normally.
 MAX_PENDING = 64
+
+
+def _eviction_order(group):
+    """The order the byte guard sheds evidence in: oldest promotion first.
+
+    Explicit, and explicitly three-deep, because the tie-break is where this went
+    wrong. `remember_promoted` stamps ONE `time.time()` per pass, so every file a
+    pass pins carries an identical promotion time and the tie-break is not an edge
+    case -- it decides the ordinary case. Sorting the bare tuple made it fall
+    through to `size` ascending, which picks the SMALLEST file of the pass: normally
+    the live-file link, i.e. the post-incident tail, the one file pass 3 exists to
+    capture and the only one that cannot be reconstructed once log4j2 has swept its
+    rolled sibling.
+
+      1. `promoted` -- AD-28's stated rule, "oldest-promotion first within each
+         class". Unchanged.
+      2. `mtime` -- the log's own last-write time, which for equal promotion stamps
+         orders the closed archives (last written before the boundary) ahead of the
+         still-growing live file. Content age, not file size.
+      3. `paths[0]` -- unique per group, so the order is total and two runs over the
+         same directory always evict the same file.
+    """
+    return (group.promoted, group.mtime, group.paths[0])
 
 
 def _env(name, default=""):
@@ -867,7 +896,17 @@ class Promoter(object):
     # ------------------------------------------------------------------ sweep
 
     def evidence_files(self):
-        """(mtime, size, path) for every non-dotfile in evidence/, oldest first."""
+        """(mtime, size, path, inode-key) for every non-dotfile in evidence/, oldest first.
+
+        `inode` is `(st_dev, st_ino)` and it is not decoration. Evidence entries are
+        HARDLINKS, and AD-16 guarantees that at least one inode per track carries
+        TWO names on every incident: pass 1 pins the live file as
+        `detail-live-<slug>-<ts>.log`, and pass 3 pins the SAME inode again under
+        its now-rolled name `detail-<date>.log`. Anything that accounts for bytes
+        per NAME therefore double-counts the most expensive file in the directory,
+        and anything that "frees" one name of a pair frees no blocks at all. See
+        `sweep()`.
+        """
         try:
             names = os.listdir(self.config.evidence_dir)
         except OSError:
@@ -883,9 +922,46 @@ class Promoter(object):
                 continue
             if not os.path.isfile(path):
                 continue
-            found.append((stat.st_mtime, stat.st_size, path))
+            found.append((stat.st_mtime, stat.st_size, path, (stat.st_dev, stat.st_ino)))
         found.sort()
         return found
+
+    def inode_groups(self, files=None):
+        """Collapse evidence entries onto the blocks they actually occupy.
+
+        One `InodeGroup` per distinct `(st_dev, st_ino)`, carrying EVERY name that
+        points at it. This is the unit both the byte guard and `/health` count in:
+        a group's `size` is one lot of bytes however many names it has, and
+        evicting it means unlinking all of them, because that is the only thing
+        that returns blocks to the filesystem.
+
+        `promoted` is the OLDEST promotion stamp among the group's names — the
+        moment we first decided this inode was evidence — so a second name added by
+        a later pass neither refreshes its age nor moves it down the eviction order.
+        `detail` is true if ANY name is a detail name; the two tracks are separate
+        files so a mixed group cannot arise, and if one somehow did, the shorter age
+        and the earlier eviction are the safe reading.
+        """
+        files = self.evidence_files() if files is None else files
+        collected = {}
+        for mtime, size, path, key in files:
+            group = collected.get(key)
+            if group is None:
+                collected[key] = {"promoted": self.promotion_time(path, mtime),
+                                  "mtime": mtime, "size": size,
+                                  "detail": self.is_detail(path), "paths": [path]}
+                continue
+            group["promoted"] = min(group["promoted"], self.promotion_time(path, mtime))
+            group["mtime"] = min(group["mtime"], mtime)
+            group["size"] = max(group["size"], size)
+            group["detail"] = group["detail"] or self.is_detail(path)
+            group["paths"].append(path)
+        groups = [InodeGroup(promoted=group["promoted"], mtime=group["mtime"],
+                             size=group["size"], detail=group["detail"],
+                             paths=sorted(group["paths"]))
+                  for group in collected.values()]
+        groups.sort(key=_eviction_order)
+        return groups
 
     @staticmethod
     def is_detail(path):
@@ -911,20 +987,34 @@ class Promoter(object):
         number the real one; a file with no record falls back to its mtime, which
         errs early rather than late.
 
-        Sizes are `st_size`, so a promoted file that is still live is counted in
-        full even though its blocks are shared with the original. That
-        over-estimates, which is the safe direction for a guard whose job is to
-        stop this directory becoming the new unbounded thing.
+        THE UNIT OF ACCOUNTING IS THE INODE, NOT THE DIRECTORY ENTRY. Evidence
+        entries are hardlinks, and AD-16 guarantees that at least one inode per
+        track carries two names on every incident -- pass 1 pins the live file,
+        pass 3 pins the same inode again under its rolled name. Counting names
+        would inflate one incident's real ~10.2 GB pin at 20k bots to ~13.6 GB and
+        start evicting where the plan says it should not; worse, "freeing" one name
+        of a pair returns ZERO blocks to the filesystem while crediting the guard
+        with the whole `st_size`, so it under-shoots the cap, sweeps again, and
+        eventually sheds twice the names the pressure called for. So the guard
+        counts `inode_groups()` and evicting a group unlinks every one of its names
+        -- the only operation that actually frees anything.
+
+        Sizes are still `st_size`, so an evidence file whose SOURCE is still live is
+        counted in full even though its blocks are shared with the log directory.
+        That over-estimates, which is the safe direction: those blocks genuinely
+        cannot be reclaimed while log4j2 holds them. Two evidence names for one
+        evidence inode is a different thing and is NOT the safe direction, which is
+        what the grouping fixes.
 
         TWO AGES AND AN ORDERED BYTE GUARD (AD-28). Detail files are 3.4-5.1 GB
         apiece at 20-30k bots and hold the ws-parser token material; aggregates are
         a few MB and hold the timeline. So detail gets `detail_max_age_days` (3),
         aggregates keep `max_age_days` (14), and under the byte cap EVERY detail
-        candidate is evicted, oldest-promotion first, before ANY aggregate is
-        touched. The alternative -- one pool ordered purely by promotion time --
-        discards an old incident's 7 MB timeline to make room for a new incident's
-        3 GB payload, which is exactly backwards: it sheds the irreplaceable cheap
-        bytes and keeps the expensive ones.
+        candidate is evicted, oldest-promotion first (`_eviction_order`), before ANY
+        aggregate is touched. The alternative -- one pool ordered purely by
+        promotion time -- discards an old incident's 7 MB timeline to make room for
+        a new incident's 3 GB payload, which is exactly backwards: it sheds the
+        irreplaceable cheap bytes and keeps the expensive ones.
         """
         now = time.time() if now is None else now
         removed, freed = [], 0
@@ -932,32 +1022,32 @@ class Promoter(object):
             True: now - self.config.detail_max_age_days * 86400.0,
             False: now - self.config.max_age_days * 86400.0,
         }
-        files = self.evidence_files()
         keep = {True: [], False: []}
-        for mtime, size, path in files:
-            detail = self.is_detail(path)
-            promoted = self.promotion_time(path, mtime)
-            if promoted <= cutoff[detail]:
-                if self._unlink(path):
-                    removed.append(os.path.basename(path))
-                    freed += size
+        for group in self.inode_groups():
+            if group.promoted <= cutoff[group.detail]:
+                if self._unlink_group(group, removed):
+                    freed += group.size
             else:
-                keep[detail].append((promoted, size, path))
-        # Oldest PROMOTION first within each class, which is the order the size guard
-        # evicts in -- detail first, then aggregates.
-        keep[True].sort()
-        keep[False].sort()
+                keep[group.detail].append(group)
+        # Oldest PROMOTION first within each class -- detail first, then aggregates.
+        # The key is explicit because every file of one pass shares a promotion
+        # stamp, so the tie-break decides the ordinary case: see `_eviction_order`.
+        keep[True].sort(key=_eviction_order)
+        keep[False].sort(key=_eviction_order)
 
-        total = sum(size for entries in keep.values() for _, size, _ in entries)
+        total = sum(group.size for groups in keep.values() for group in groups)
         for detail in (True, False):
             while total > self.config.max_bytes and keep[detail]:
-                _, size, path = keep[detail].pop(0)
-                if self._unlink(path):
-                    removed.append(os.path.basename(path))
-                    freed += size
-                total -= size
+                group = keep[detail].pop(0)
+                if self._unlink_group(group, removed):
+                    freed += group.size
+                # Unconditional, as it has always been: a failed unlink must not
+                # loop, and a concurrent sweep that already removed these names has
+                # already accounted for the same bytes, so both runs converge.
+                total -= group.size
 
-        surviving = keep[True] + keep[False]
+        surviving = [path for detail in (True, False)
+                     for group in keep[detail] for path in group.paths]
         self.forget_promoted(surviving)
 
         self.last_sweep = {
@@ -965,16 +1055,30 @@ class Promoter(object):
             "removed": removed,
             "freedBytes": freed,
             "remaining": len(surviving),
-            "remainingDetail": len(keep[True]),
+            "remainingDetail": sum(len(group.paths) for group in keep[True]),
             "bytes": total,
         }
         if removed:
             log("sweep removed %d file(s) (%d bytes): %s" % (len(removed), freed, removed))
         return self.last_sweep
 
-    def forget_promoted(self, keep):
+    def _unlink_group(self, group, removed):
+        """Unlink every name of one inode; True if any of them went.
+
+        All-or-nothing on the inode, because unlinking one name of a pair frees no
+        blocks -- the whole point of grouping. Names already gone (a concurrent
+        sweep got there first) are not an error and are not reported as removed.
+        """
+        gone = False
+        for path in group.paths:
+            if self._unlink(path):
+                removed.append(os.path.basename(path))
+                gone = True
+        return gone
+
+    def forget_promoted(self, surviving_paths):
         """Drop sidecar records for files that no longer exist, so it cannot grow."""
-        surviving = {os.path.basename(path) for _, _, path in keep}
+        surviving = {os.path.basename(path) for path in surviving_paths}
         with self.lock:
             stale = [name for name in self.promoted_at if name not in surviving]
             for name in stale:
@@ -987,6 +1091,11 @@ class Promoter(object):
         try:
             os.unlink(path)
             return True
+        except FileNotFoundError:
+            # Already gone. Two sweeps can run at once (webhook thread + scheduler)
+            # and both evict the same prefix deterministically, so this is the
+            # ordinary outcome of the race, not a fault worth a WARN.
+            return False
         except OSError as error:
             log("WARN cannot remove %s: %s" % (path, error))
             return False
@@ -1008,15 +1117,21 @@ class Promoter(object):
         # question a Phase 4 misconfiguration raises, and a single total cannot
         # answer it (P4-9). A zero detail count with a healthy aggregate count means
         # EVIDENCE_DETAIL_DIR is wrong or /logs/detail/ does not exist.
+        #
+        # `files` counts NAMES, `bytes` counts BLOCKS: one inode under two names
+        # (the ordinary post-pass-3 state, AD-16) is two files and one lot of bytes.
+        # Reported the same way the byte guard counts, so `evidenceBytes` and
+        # EVIDENCE_MAX_BYTES are comparable on sight.
+        groups = self.inode_groups(files)
         by_track = {AGGREGATE: [0, 0], DETAIL: [0, 0]}
-        for _, size, path in files:
-            counter = by_track[DETAIL if self.is_detail(path) else AGGREGATE]
-            counter[0] += 1
-            counter[1] += size
+        for group in groups:
+            counter = by_track[DETAIL if group.detail else AGGREGATE]
+            counter[0] += len(group.paths)
+            counter[1] += group.size
         summary.update({
             "startedClean": self.started_clean,
             "evidenceFiles": len(files),
-            "evidenceBytes": sum(size for _, size, _ in files),
+            "evidenceBytes": sum(group.size for group in groups),
             "evidenceByTrack": {name: {"files": counter[0], "bytes": counter[1]}
                                 for name, counter in by_track.items()},
             "sourceFilesByTrack": {track.name: len(self.candidates(track))

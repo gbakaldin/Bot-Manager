@@ -36,6 +36,13 @@ What is covered here:
     a promotion-time-only eviction would fail it; and a pre-Phase-4
     `.pending.json` with a single `liveName` still loading rather than losing its
     incident's scheduled passes;
+  * the byte guard's ACCOUNTING UNIT: one inode is one lot of bytes however many
+    names point at it (the ordinary post-pass-3 state, AD-16), and evicting it
+    unlinks all of them — because unlinking one name of a pair frees nothing;
+  * the byte guard's ORDER within a pass: every file a pass pins shares one
+    promotion stamp, so the tie-break is the ordinary case, and it must order by
+    the log's own mtime — oldest archive first, live tail last — rather than
+    falling through to file size and shedding the post-incident tail first;
   * unclean start retro-promotion and the clean-shutdown marker (AD-21), both
     directions;
   * pending deadlines surviving a restart of the process;
@@ -565,6 +572,83 @@ def test_the_byte_guard_evicts_detail_before_aggregates():
         box.stop()
 
 
+def test_the_byte_guard_counts_an_inode_once_however_many_names_it_has():
+    print("byte guard -> one inode is one lot of bytes, and evicting it takes every name")
+    # AD-16 guarantees this shape on EVERY incident: pass 1 pins the live file as
+    # detail-live-<slug>-<ts>.log, pass 3 pins the SAME inode again under its rolled
+    # name. Counting directory entries turned one incident's real ~10.2 GB pin at
+    # 20k bots into ~13.6 GB and evicted where the plan says it must not — and then
+    # compounded, because unlinking one name of a pair frees ZERO blocks while the
+    # guard credits itself the whole st_size and sweeps again.
+    box = LogDir(EVIDENCE_MAX_BYTES="1500")
+    try:
+        box.promoter.ensure_dir()
+        rolled = os.path.join(box.config.evidence_dir, "detail-2026-08-19-08.log")
+        with open(rolled, "w") as handle:
+            handle.write("y" * 1000)
+        live = os.path.join(box.config.evidence_dir, "detail-live-x-20260819T090000Z.log")
+        os.link(rolled, live)
+        now = time.time()
+        box.promoter.remember_promoted([os.path.basename(rolled), os.path.basename(live)],
+                                       now=now)
+
+        groups = box.promoter.inode_groups()
+        equal(len(groups), 1, "two names on one inode collapse to ONE accounting unit")
+        equal(groups[0].size, 1000,
+              "counted once, not twice — 1000 bytes on disk are 1000 bytes to the guard")
+        equal(sorted(os.path.basename(path) for path in groups[0].paths),
+              ["detail-2026-08-19-08.log", "detail-live-x-20260819T090000Z.log"],
+              "and the group carries both names, because both must go to free anything")
+
+        # 1000 bytes against a 1500-byte cap: nothing to do. Under the per-name
+        # count this read as 2000 and evicted a file the plan says it should keep.
+        box.promoter.sweep(now=now)
+        equal(len(box.evidence()), 2, "under the cap, so the incident's files stay put")
+        equal(box.promoter.last_sweep["bytes"], 1000, "and the reported total is the inode")
+
+        # Now put it genuinely over: eviction must unlink BOTH names, because
+        # removing one returns no blocks at all.
+        box.config.max_bytes = 500
+        result = box.promoter.sweep(now=now)
+        equal(box.evidence(), [], "over the cap, every name of the inode is unlinked")
+        equal(result["freedBytes"], 1000,
+              "and the freed figure is the blocks, not the sum of the names")
+    finally:
+        box.stop()
+
+
+def test_same_pass_eviction_takes_the_oldest_file_not_the_smallest():
+    print("byte guard -> oldest-promotion first, and the tie-break is not the file size")
+    # remember_promoted stamps ONE time.time() per pass, so every file a pass pins
+    # shares a promotion time and the tie-break decides the ORDINARY case. A bare
+    # .sort() on (promoted, size, path) fell through to size ascending and evicted
+    # the SMALLEST file of the pass — normally the live-file link, i.e. the
+    # post-incident tail, the one file pass 3 exists to capture and the only one
+    # that cannot be reconstructed once log4j2 has swept its rolled sibling.
+    box = LogDir(EVIDENCE_MAX_BYTES="1100")
+    try:
+        box.promoter.ensure_dir()
+        now = time.time()
+        layout = (("detail-2026-08-19-06.log", 500, 2 * 3600),
+                  ("detail-2026-08-19-08.log", 500, 1 * 3600),
+                  ("detail-live-x-20260819T090000Z.log", 200, 0))
+        for name, size, age in layout:
+            path = os.path.join(box.config.evidence_dir, name)
+            with open(path, "w") as handle:
+                handle.write("y" * size)
+            os.utime(path, (now - age, now - age))
+        box.promoter.remember_promoted([name for name, _, _ in layout], now=now)
+
+        result = box.promoter.sweep(now=now)
+        equal(result["removed"], ["detail-2026-08-19-06.log"],
+              "the OLDEST archive goes — 500 bytes of the cheapest, most stale content")
+        check("detail-live-x-20260819T090000Z.log" in box.evidence(),
+              "and the live tail is the last detail file standing, as AD-28, "
+              "docker-compose.yml and CLAUDE.md all say")
+    finally:
+        box.stop()
+
+
 def test_load_pending_accepts_a_pre_phase_four_entry():
     print("legacy .pending.json -> the single liveName is read, passes are not lost")
     # A shim restart mid-incident reads a file the PREVIOUS version wrote. Rejecting
@@ -966,6 +1050,8 @@ def main():
                  test_a_missing_detail_directory_is_a_no_op,
                  test_the_two_sweep_ages_are_independent,
                  test_the_byte_guard_evicts_detail_before_aggregates,
+                 test_the_byte_guard_counts_an_inode_once_however_many_names_it_has,
+                 test_same_pass_eviction_takes_the_oldest_file_not_the_smallest,
                  test_load_pending_accepts_a_pre_phase_four_entry,
                  test_promotion_is_idempotent,
                  test_a_rolled_over_live_file_still_gets_pinned,
