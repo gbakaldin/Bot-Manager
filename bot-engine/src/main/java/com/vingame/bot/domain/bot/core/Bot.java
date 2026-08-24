@@ -284,6 +284,12 @@ public abstract class Bot {
         // client.connect() returns; if the snapshot were captured later, those early
         // callbacks would see a null snapshot and silently skip MDC propagation.
         this.mdcSnapshot = MDC.getCopyOfContextMap();
+        // Materialise the round-outcome counters at zero while the MDC is populated,
+        // so a group that never settles a round reports 0 instead of vanishing from
+        // /actuator/prometheus entirely. Group-scoped tags, so this is five series
+        // per group and a map lookup for every bot after the first. See
+        // BotMetrics#preRegisterOutcomeCounters for why the distinction matters.
+        if (metrics != null) metrics.preRegisterOutcomeCounters();
         try {
             log.debug("Initializing bot {}", userName);
 

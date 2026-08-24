@@ -256,6 +256,66 @@ public class BotMetrics {
     }
 
     /**
+     * Create the round-outcome counters at <b>zero</b> for the current MDC tag set,
+     * without incrementing them. Called once per bot from {@code Bot.initialize()};
+     * the registry interns by {@code name + tags} and the tags are group-scoped, so
+     * this costs <b>five time series per group</b> — not per bot — and every call
+     * after the first for a given group is a map lookup.
+     * <p>
+     * <b>Why this exists.</b> Micrometer only exposes a counter once something has
+     * incremented it, so a group that has never settled a round emits <i>no series
+     * at all</i> rather than a series reading {@code 0}. Those two states are
+     * operationally opposite and were indistinguishable from the outside: on
+     * 2026-08-24 staging had four groups running for three days with
+     * {@code bot_bets_placed_total}, {@code bot_bet_amount_total},
+     * {@code bot_winnings_total} and {@code bot_auto_deposits_total} <i>entirely
+     * absent</i> from {@code /actuator/prometheus}, which reads identically to the
+     * metrics never having been wired up. Telling the difference took reading this
+     * source. The real cause was upstream — no {@code EndGame} frame ever arrived,
+     * and all three bet/winnings counters are fed exclusively from
+     * {@code BettingMiniGameBot.onEndGame} / {@code SlotMachineBot}'s spin result —
+     * but nothing in the metrics said so.
+     * <p>
+     * Pre-registering makes the absence expressible: the dashboard panels that read
+     * these four counters render {@code 0} instead of <i>No data</i> (only some of
+     * them carry an {@code or vector(0)}), a plain
+     * {@code rate(bot_bets_placed_total[30m]) == 0} becomes a usable expression, and
+     * an operator reading {@code /actuator/prometheus} can tell a quiet group from an
+     * unwired one without opening this file.
+     * <p>
+     * It is <b>not</b> what makes alerting on the condition possible — {@code
+     * GameNoRounds} in {@code prometheus/alerts.yml} is {@code unless}-shaped and so
+     * already treats an absent series as "no rounds". The gap that rule does have is
+     * a different one, and pre-registration does not close it either: it keys on
+     * {@code bot_messages_total{cmd=~"startGame|spin"}}, so a game that starts rounds
+     * and never settles them is invisible to it. That is the live 2026-08-24 state of
+     * the {@code 116} Xoc Dia group — 203,079 {@code startGame}, zero {@code
+     * endGame}.
+     * <p>
+     * This also repairs the premise of LOG_VOLUME_TIERING AD-8, which demoted the
+     * per-round session summaries INFO&rarr;DEBUG on the stated grounds that "prod
+     * covers the same facts with {@code bot_bets_placed_total} /
+     * {@code bot_bet_amount_total} / {@code bot_winnings_total}". A series that
+     * never materialises covers nothing.
+     * <p>
+     * Scope is deliberately the four counters observed empty. Notably <b>not</b>
+     * included are {@code bot_jackpots_total} / {@code bot_jackpot_amount_total}
+     * (permanently zero for the many games that have no jackpot, where a zero
+     * series reads as a broken feature rather than a quiet one) and
+     * {@code bot_messages_total} (its {@code cmd} values are game-type-specific —
+     * pre-registering {@code startGame}/{@code endGame} for a SLOT group would
+     * assert traffic that game never produces).
+     */
+    public void preRegisterOutcomeCounters() {
+        Tags tags = mdcTags();
+        Counter.builder(BOT_BETS_PLACED_TOTAL).tags(tags).register(registry);
+        Counter.builder(BOT_BET_AMOUNT_TOTAL).tags(tags).register(registry);
+        Counter.builder(BOT_WINNINGS_TOTAL).tags(tags).register(registry);
+        Counter.builder(BOT_AUTO_DEPOSITS_TOTAL).tag("outcome", "success").tags(tags).register(registry);
+        Counter.builder(BOT_AUTO_DEPOSITS_TOTAL).tag("outcome", "failure").tags(tags).register(registry);
+    }
+
+    /**
      * Per-bot jackpot: increments {@code bot_jackpots_total} by 1 (count of
      * jackpot-winning rounds) AND {@code bot_jackpot_amount_total} by
      * {@code amount} (sum of jackpot value won). Same per-bot tag shape.

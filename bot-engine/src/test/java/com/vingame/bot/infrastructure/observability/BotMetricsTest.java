@@ -652,4 +652,79 @@ class BotMetricsTest {
         assertThat(c.count()).isEqualTo(1.0);
     }
 
+    /* ----- Pre-registration of the round-outcome counters ----- */
+
+    @Test
+    void preRegisterOutcomeCounters_materialisesTheFourEmptyCountersAtZero() {
+        // The defect this guards: Micrometer exposes nothing until a counter is
+        // incremented, so a group that never settles a round is indistinguishable
+        // from one whose metrics were never wired. Observed on staging 2026-08-24.
+        setBotMdc();
+        metrics.preRegisterOutcomeCounters();
+
+        assertOutcomeCounterIsZero(BotMetrics.BOT_BETS_PLACED_TOTAL, null);
+        assertOutcomeCounterIsZero(BotMetrics.BOT_BET_AMOUNT_TOTAL, null);
+        assertOutcomeCounterIsZero(BotMetrics.BOT_WINNINGS_TOTAL, null);
+        assertOutcomeCounterIsZero(BotMetrics.BOT_AUTO_DEPOSITS_TOTAL, "success");
+        assertOutcomeCounterIsZero(BotMetrics.BOT_AUTO_DEPOSITS_TOTAL, "failure");
+    }
+
+    private void assertOutcomeCounterIsZero(String name, String outcome) {
+        var search = registry.find(name)
+                .tag(BotMdc.BOT_GROUP_ID, GROUP_ID)
+                .tag(BotMdc.ENVIRONMENT_ID, ENV_ID)
+                .tag(BotMdc.PRODUCT, PRODUCT)
+                .tag(BotMdc.GAME_TYPE, GAME_TYPE)
+                .tag(BotMdc.GAME_ID, GAME_ID)
+                .tag(BotMdc.GAME_NAME, GAME_NAME);
+        if (outcome != null) search = search.tag("outcome", outcome);
+
+        Counter c = search.counter();
+        assertThat(c).as("counter %s (outcome=%s) exists after pre-registration", name, outcome)
+                .isNotNull();
+        assertThat(c.count()).as("counter %s starts at zero, not one", name).isEqualTo(0.0);
+    }
+
+    @Test
+    void preRegisterOutcomeCounters_doesNotDisturbSubsequentIncrements() {
+        // Pre-registration must return the same interned Counter the increment
+        // path uses, otherwise the first real bet would be lost.
+        setBotMdc();
+        metrics.preRegisterOutcomeCounters();
+        metrics.incBetsPlaced(3, 900L);
+        metrics.incBotWinnings(250L);
+
+        assertThat(registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter().count()).isEqualTo(3.0);
+        assertThat(registry.find(BotMetrics.BOT_BET_AMOUNT_TOTAL).counter().count()).isEqualTo(900.0);
+        assertThat(registry.find(BotMetrics.BOT_WINNINGS_TOTAL).counter().count()).isEqualTo(250.0);
+    }
+
+    @Test
+    void preRegisterOutcomeCounters_isIdempotentAcrossBotsOfTheSameGroup() {
+        // Called once per bot from Bot.initialize(); the tags are group-scoped, so
+        // N bots in a group must produce one series each, not N. This is the whole
+        // reason the cost is per-group rather than per-bot.
+        setBotMdc();
+        for (int i = 0; i < 50; i++) {
+            metrics.preRegisterOutcomeCounters();
+        }
+
+        assertThat(registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counters()).hasSize(1);
+        assertThat(registry.find(BotMetrics.BOT_AUTO_DEPOSITS_TOTAL).counters()).hasSize(2);
+        assertThat(registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counter().count()).isEqualTo(0.0);
+    }
+
+    @Test
+    void preRegisterOutcomeCounters_separatesGroupsIntoDistinctSeries() {
+        setBotMdc();
+        metrics.preRegisterOutcomeCounters();
+
+        MDC.put(BotMdc.BOT_GROUP_ID, "group-def");
+        metrics.preRegisterOutcomeCounters();
+
+        assertThat(registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL).counters()).hasSize(2);
+        assertThat(registry.find(BotMetrics.BOT_BETS_PLACED_TOTAL)
+                .tag(BotMdc.BOT_GROUP_ID, "group-def").counter()).isNotNull();
+    }
+
 }
