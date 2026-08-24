@@ -909,3 +909,1008 @@ completes rounds.
   carry a 15-minute TTL and expire on their own.
 - Config backups on the box tagged `20260819-190838`.
 - `secrets.env` now contains `BOT_LOG_LEVEL=DEBUG` (staging only).
+
+---
+---
+
+# Release — LOG_VOLUME_TIERING **Phase 4**
+
+Mode: bot **+ full config payload** (not a plain `mode=bot` deploy — see Ship)
+Branch: `feature/log-volume-tiering` @ `09a09ae` (built directly, **no merge, no push**)
+Image: `vingame-bot:latest`, `sha256:99681eb09dfd49e35837f693132be349fefe83badaeb12c6a05cf6b98c76d7e2` (built 2026-08-20T11:43:02Z–11:43:31Z UTC)
+Target: **Bot-1 staging** (`/home/sgame/bot-java`) — explicitly not prod
+Date: 2026-08-20T11:41:52Z – 12:25Z UTC
+
+## Verdict
+
+**PASS.** The two-track split does what Phase 4 was created to do.
+
+**The headline, P1-3 (as P4-4): INFO reaching Loki fell from 2,022 lines / 300 s to
+`3` lines / 300 s.** Zero of them are ws-parser. The `< 100` threshold that was
+unachievable on 2026-08-19 now passes with three orders of magnitude of margin, and
+it passes for the stated reason — ws-parser moved to track 2, where it produced
+3,052 lines in the same 300 s.
+
+Everything else in Phase 4 verified on the box: both appender graphs built (2 async
+threads), track 1 carries no DEBUG/TRACE even with `BOT_LOG_LEVEL=DEBUG`, Loki holds
+track 1 and only track 1, the promtail positions volume eliminated the redeploy
+re-ingest **completely** (`loki-data` *shrank* 524,724 B across a full
+`down && ./deploy.sh`), the evidence shim promotes both tracks by hardlink with
+independent per-track ages, and the Phase 4d queue meters and `LogQueueSaturated`
+rule are live.
+
+**0a–0c:** 0a and 0b ran clean. **0c was deliberately skipped** (see below).
+
+Four things to read before shipping this anywhere else:
+
+1. **Gate 2 (P4-6) is the operative pre-ramp gate, and it binds much earlier than
+   the plan's own worked example suggests** — at **~6,300 bots** on this staging
+   profile, ~17,700 prod-like, versus Gate 1's ~17,000 / ~47,800. The plan's claim
+   that the ceiling "passes narrowly" at 30k bots does not hold against measurement:
+   at 30k it is **51.8% of free disk prod-like and 59.6% staging-like**, i.e. a
+   narrow *fail* on both. Details and arithmetic below.
+2. **0a bounded, but did not eliminate, the re-ingest exposure.** The 157 archives
+   were moved out of reach. The **live `console.log`** could not be moved (the JVM
+   holds it; it is track 1's live file) and it still carried **42,358 ws-parser
+   lines and 76,895 DEBUG lines** of pre-Phase-4 content, which promtail re-read.
+   Net cost measured at **+199,311 bytes** of `loki-data`, because Loki deduplicated
+   entries it already held. See Finding P4-A.
+3. **Finding 3 persists, unchanged: the staging fleet still emits zero `endGame`.**
+   `StartGame` fires (43 in track 2) and `UpdateBet` aggregates fire (647), but no
+   round completes. P1-8's EndGame half, AD-8's drain and P2-4 are **still
+   unexercised — not passed**.
+4. **P2-6's 60-minute duty cycle could not be measured this session** because I
+   restarted the JVM four times for other verification steps and the escalation
+   cooldown is in-memory. The per-JVM evidence is clean (≤ 1 escalation per group
+   per JVM lifetime) but that is a weaker statement.
+
+## Build
+
+- `mvn clean install`: **PASS** (46.4 s, JDK 21.0.2)
+- Test totals — **1862 tests, 0 failures, 0 errors, 0 skipped**, matching the
+  briefed figure exactly (+24 over Phase 0–3's 1838):
+
+  | Module | Tests |
+  |---|---|
+  | bot-api | 125 |
+  | bot-strategies | 111 |
+  | bot-messages | 136 |
+  | bot-engine | 416 |
+  | bot-app | **1074** (was 1050) |
+  | **Total** | **1862** |
+
+  0 skipped again matters: `EvidenceShimSelfTestRunnerTest` and
+  `VipTalkShimSelfTestRunnerTest` `assumeTrue(python3Available())` and would
+  silently no-op. They ran.
+- `docker build --no-cache --platform linux/amd64`: **PASS** (29 s)
+- `docker save`: **PASS** — **395,984,384 bytes**
+
+Git hygiene: **nothing committed, nothing pushed, no merge.** Built from the working
+tree at `09a09ae`. `deploy.sh` left uncommitted and shipped from the working tree.
+The staged `TaiXiuMessages/*.js` deletions were **left exactly as found** —
+untouched, not committed, not restored. `docs/reviews/VIPTALK_ALERTING_V2/release.md`
+left untouched.
+
+## Ship
+
+Backups taken on the box first, tagged **`20260820-114356`**: `docker-compose.yml`,
+`promtail-config.yml`, `logging/log4j2.properties`, `evidence-shim/shim.py`,
+`alertmanager/alertmanager.yml`, `loki/loki-config.yaml`, `prometheus/alerts.yml`,
+`secrets.env`, `deploy.sh`.
+
+All ten artefacts transferred and **verified by SHA-256 on both ends — all ten
+matched**:
+
+| File | SHA-256 (first 16) | Result |
+|---|---|---|
+| `bot.tar` | `dcbcbdb8bbe29e85` | PASS |
+| `docker-compose.yml` | `d76d6ec1db01a4c8` | PASS |
+| `deploy.sh` (working-tree copy) | `8eccc6bffb87286c` | PASS |
+| `promtail-config.yml` | `0aca0a53c3b95ea0` | PASS |
+| `logging/log4j2.properties` | `d2d51b36ecabf8a4` | PASS |
+| `evidence-shim/shim.py` | `4d62d8d7d93b798a` | PASS |
+| `alertmanager/alertmanager.yml` | `9e0ed8e3b45be6b5` | PASS (unchanged from Phase 3) |
+| `loki/loki-config.yaml` | `352306427802b1c5` | PASS |
+| `prometheus/alerts.yml` | `9080446871225a51` | PASS (new `LogQueueSaturated`) |
+| `secrets.env.example` | `fc1a5efc4d4ff39f` | PASS |
+
+`secrets.env` on the box was **not** modified for the deploy: `BOT_LOG_LEVEL=DEBUG`
+was already present from 2026-08-19, and `WSPARSER_LOG_LEVEL`,
+`EVIDENCE_DETAIL_MAX_AGE_DAYS`, `EVIDENCE_MAX_BYTES` were all left absent so the
+shipped defaults apply. Confirmed in pid 1's environment:
+`LOGGING_LEVEL_COM_VINGAME_BOT=DEBUG`, `LOGGING_LEVEL_COM_VINGAME_WEBSOCKETPARSER=INFO`.
+
+## Pre-deploy steps 0a–0c
+
+### 0a — relocate the pre-Phase-4 archives — **RAN CLEAN**
+
+Run with the stack **down**, which is stricter than the plan's ordering (it
+guarantees no promtail was running during the move, rather than merely starting
+after it).
+
+```
+before: console-*.log count = 157
+after:  console-*.log count = 0
+moved:  pre-phase4 count    = 157
+moved bytes = 4,544,990,804   (4.54 GB)
+```
+
+- **157 archives moved**, `logs/console-*.log` confirmed **empty** afterwards.
+- Range: `console-2026-08-13-10.log` → `console-2026-08-20-09.log` — **exactly 7
+  days**, which independently confirms amendment **C1** (the original text said 14).
+- `logs/console.log` (51,806,508 B) correctly **left in place** — the JVM holds it
+  open and it is track 1's live file.
+- `logs/pre-phase4/` verified invisible to promtail post-deploy: a Loki query for
+  `filename=~"/logs/pre-phase4/.*"` returns `"result":[]`.
+
+**What 0a prevented, concretely:** 4.54 GB across 157 files of ws-parser INFO —
+agency-token material included — would have been re-ingested into Loki on a fresh
+720 h clock. It was not offered to promtail at all.
+
+### 0b — positions file holds one entry — **PASS**
+
+```
+positions:
+  /logs/console.log: "51839175"
+```
+
+Exactly **one** entry, the live file, non-zero offset. Not empty (volume is
+mounted), not more than one (0a held).
+
+### 0c — Loki delete request — **DELIBERATELY SKIPPED**
+
+Skipped on instruction. Recording what it would have covered so the decision stays
+cheap to make later:
+
+- **Scope it would have covered:** `{job="bot-manager"} |= "Agency token"` over the
+  pre-Phase-4 window. The material still in Loki is the pre-deploy content of the
+  live `console.log` plus everything ingested before 2026-08-20T11:46:12Z.
+- **The standing exposure ages out on its own:** Loki's `retention_period` is
+  **720 h (30 d)**, and the `retention_stream` overrides are `WARN|ERROR → 30d`,
+  `DEBUG|TRACE → 1d`. ws-parser's material is **INFO**, so it falls under the
+  default 720 h. The newest such lines were written at **2026-08-20T11:46:12Z**,
+  so **the last of it expires on 2026-09-19**. DEBUG/TRACE residue expires
+  **2026-08-21**.
+- **Nothing needs reverting and nothing needs configuring.** Per amendment C4,
+  `compactor.retention_enabled: true` is already shipped and `deletion_mode`
+  defaults to `filter-and-delete` under `limits_config`, so the delete API is live
+  on the current config. Verified in passing: Loki's `/config` shows the two
+  `retention_stream` entries and the compactor is demonstrably running (P0-8 below).
+  0c can therefore be run at any later date with no deploy and no restart.
+
+### `mkdir -p logs/detail` — **RAN**
+
+`drwxrwxr-x 2 sgame sgame` — created as the host `sgame` uid before
+`docker compose up`, so Docker never got the chance to create a root-owned
+directory at the bind source.
+
+## Deploy
+
+- `docker compose down`: **PASS** (11:46:12Z)
+- `docker image rm vingame-bot:latest`: **PASS**
+- `docker load -i bot.tar`: **PASS**
+- `./deploy.sh` (used instead of bare `compose up -d` so the `secrets.env` → `.env`
+  merge runs): **PASS** (11:46:27Z → 11:46:41Z)
+
+**Downtime: ~29 s** (11:46:12Z → 11:46:41Z). App fully up with all 4 bot groups
+restarted by **11:46:49Z**, healthy by **11:47:15Z**. `ConfigurationException` count
+in the bot-manager log: **0** — the `.type = AppenderRef` trap was avoided.
+
+Four further `deploy.sh` cycles were run later as *part of verification*
+(P4-8b, P4-10 set, P4-10 restore) — each ~25–30 s.
+
+## Smoke test — whole stack
+
+`docker compose ps` — **all 10 services Up** at every check, including the final
+state at 12:24:30Z:
+
+| Service | Status |
+|---|---|
+| bot-manager | Up **(healthy)** |
+| mongo | Up **(healthy)** |
+| viptalk-shim | Up **(healthy)** — `/health` → 200 |
+| evidence-shim | Up **(healthy)** — `/health` → 200, **per-track** body |
+| alertmanager | Up — `/-/healthy` → `OK` |
+| grafana | Up — `/api/health` → 200 |
+| loki | Up — `/ready` → `ready` (5/5 polls), `/metrics` → 200 |
+| prometheus | Up — 2/2 active targets `up` |
+| promtail | Up — positions file advancing |
+| node-exporter | Up — feeding P0-6 |
+
+- Spring Boot ready: **PASS** — `Started Starter in 8.027 seconds`
+- Auto-start: **PASS** — `Bot Manager startup complete. 4 bot groups running`
+- **U-1**: **PASS** — all services, observability stack re-checked per the
+  single-Compose caveat
+- **U-2** `/actuator/health` → **200**: **PASS**
+- **U-3 (corrected form)** `GET /api/v1/environment/` → **200**: **PASS**. The
+  plan's original `GET /api/v1/bot-group/` is still 405 and still stale.
+
+> **One cosmetic note, not a fault.** Loki's `/ready` returns
+> `Ingester not ready: waiting for 15s after being ready` for a short window after
+> each restart. Polled 5× at the end: `ready` every time. Queries served correctly
+> throughout. This is Loki's own readiness debounce, not a Phase 4 effect.
+
+### evidence-shim `/health` — per-track, as required
+
+```json
+"detailDir": "/logs/detail", "detailDirPresent": true,
+"maxAgeDays": 14.0, "detailMaxAgeDays": 3.0, "maxBytes": 12884901888,
+"evidenceByTrack": { "aggregate": {"files": 13, "bytes": 202126705},
+                     "detail":    {"files": 5,  "bytes": 16501140} },
+"sourceFilesByTrack": { "aggregate": 2, "detail": 2 }
+```
+
+`detailMaxAgeDays: 3` and `maxBytes: 12 GiB` confirm the Phase 4c defaults landed.
+
+## Plan verification — Phase 4 steps
+
+### P4-1 — both tracks exist and both appender graphs built — **PASS**
+
+Command: `ls -l logs/console.log logs/detail/detail.log`; async thread count; config grep
+Expected: both files present and non-empty; thread count **2**; config grep `> 0`
+Actual:
+```
+-rw-r--r-- logs/console.log        51839175
+-rw-r--r-- logs/detail/detail.log   1571733
+async thread count: 2      (both named "Log4j2-AsyncApp", truncated at 15 chars)
+asyncdetail cfg lines: 6
+ConfigurationException count: 0
+```
+Re-confirmed after all four later redeploys: still `2`.
+Result: **PASS**
+
+### P4-2 — ws-parser is in track 2 and nowhere else — **PASS**
+
+Window: **300 s, 11:48:44Z → 11:53:44Z**, N=155 bots.
+Command: mark both files, wait 300 s, classify only the new lines
+Expected: track1 `0`, track2 `> 1000`, console `0`
+Actual:
+```
+track1 new ws-parser lines: 0
+track2 new ws-parser lines: 3052
+docker-logs ws-parser:      0
+```
+Result: **PASS**
+
+> **Rate note, stated with its window.** 3,052 lines / **300 s** = **10.17
+> lines/s** at 155 bots. Amendment B1's corrected expectation is 6.6 lines/s
+> (≈ 2,000 per 300 s). Measured is **1.54× B1**. The most likely reason is on the
+> box and visible below: this fleet is in continuous watchdog-reconnect churn
+> (230 reconnect cycles in the same 300 s), and reconnects are exactly what
+> ws-parser logs at INFO. B1 is not wrong for a settled fleet; it under-predicts a
+> churning one. The `> 1000` threshold clears either way.
+
+### P4-3 — track 1 carries no DEBUG even with `BOT_LOG_LEVEL=DEBUG` — **PASS**
+
+Same 300 s window. Run on **staging with the logger at DEBUG**, so not vacuous —
+confirmed `com.vingame.bot` = `{"configuredLevel":"DEBUG","effectiveLevel":"DEBUG"}`.
+Expected: `0` and `> 0`
+Actual:
+```
+track1 new DEBUG: 0
+track1 new TRACE: 0
+track2 new DEBUG|TRACE: 5055
+```
+Result: **PASS** — this is the assertion that keeps Loki clean, and both halves hold.
+
+### P4-4 — INFO reaching Loki, by logger. **REPLACES P1-3.** — **PASS**
+
+**This is the headline check. Raw numbers, window stated explicitly.**
+
+Window: **300 s, 11:48:44Z → 11:53:44Z**. Fleet: **155 bots, 4 running groups**
+(BOM flow test 100 = 100, Auth test with socket = 15, Slot group 120 = 20,
+XD game test = 20). Instance: **staging, `BOT_LOG_LEVEL=DEBUG`,
+`WSPARSER_LOG_LEVEL` unset → INFO**.
+
+```
+INFO delta over 300 s = 3          (expectation: < 100)
+
+per-logger histogram of those 3 INFO lines:
+      2 com.vingame.bot.infrastructure.observability.FleetRollupLogger
+      1 com.vingame.bot.infrastructure.observability.ScopedDebugEscalator
+
+ws-parser INFO among them = 0      (hard assertion: exactly 0)
+```
+
+Comparison against the 2026-08-19 release, **both normalised to 300 s**:
+
+| Measure | 2026-08-19 | 2026-08-20 | Change |
+|---|---|---|---|
+| INFO lines / 300 s reaching track 1 | **2,022** | **3** | −99.85% |
+| of which `com.vingame.bot.*` | 59 | 3 | — |
+| of which `com.vingame.websocketparser.*` | 1,963 | **0** | eliminated |
+| ws-parser lines / 300 s (track 2, new) | n/a | 3,052 | relocated, not lost |
+
+> The 2026-08-19 report quoted "4,402 ws-parser lines" next to a 300 s figure; that
+> 4,402 was measured over a **~11-minute** window, and Phase 4's B1 amendment was
+> built on the mix-up. The 1,963 above is that same data re-expressed on the 300 s
+> basis (4,402 ÷ 660 s × 300 s). **Every rate in this report names its window.**
+
+**Reverse-misroute half (AD-27), same window:** `FleetRollupLogger` in
+`logs/detail/detail.log` = **3** (expected `> 0`). Our own INFO appears in **both**
+files, so track 2 is self-contained. `logger.app.appenderRef.detail.ref` is wired.
+
+Result: **PASS**
+
+> **What actually dominates Loki now, which P4-4 does not measure.** Of the **463**
+> total new track-1 lines in that 300 s, **460 were WARN** and 3 INFO; 0 ERROR.
+> All 460 are two paired messages from a fleet in permanent watchdog churn:
+> ```
+>     230 com.vingame.bot.domain.bot.core.Bot
+>     230 com.vingame.bot.domain.bot.core.BettingMiniGameBot
+>     ...  "Bot <name>: no game message in <n>s — triggering full reconnect"
+>     ...  "Bot <name>: full reconnect triggered — watchdog timeout"
+> ```
+> This is **pre-existing and outside Phase 4's scope** — it is the same
+> zero-`endGame` condition as Finding 3 — but it is now the *whole* Loki bill, and
+> it is 153× the INFO tier. Total track-1 volume is still tiny (194,306 B / 300 s =
+> **648 B/s**), so nothing needs doing today. Worth knowing that Phase 4 has made
+> this the next thing that would matter.
+
+### P4-5 — Loki holds track 1 and only track 1 — **PASS (scoped post-deploy)**
+
+**First run, over the plan's default 1-hour window, returned hits on queries 1 and
+2.** Inspected rather than reported as a failure: the timestamps were
+`11:46:07.681Z` — **before** the 11:46:12Z `down`. Those are pre-Phase-4 lines from
+the live `console.log`'s history, re-read by the new promtail. See Finding P4-A.
+
+Re-run scoped to **11:48:00Z → now** (post-deploy, new build only):
+```
+1. {job="bot-manager"} |= "websocketparser"        -> "result":[]     PASS
+2. {job="bot-manager", level="DEBUG"}              -> "result":[]     PASS
+2b.{job="bot-manager", level="TRACE"}              -> "result":[]     PASS
+3. {job="bot-manager", filename=~"/logs/detail/.*"}-> "result":[]     PASS
+4. {job="bot-manager", level="INFO"}               -> NON-EMPTY       PASS (control)
+5. {job="bot-manager", filename=~"/logs/evidence/.*"} -> "result":[]  PASS (P3-5)
+6. {job="bot-manager", filename=~"/logs/pre-phase4/.*"} -> "result":[] PASS (0a proof)
+```
+The non-vacuity control (4) is non-empty, so the four empties are real.
+Result: **PASS**
+
+### P4-6 — track 2's real write rate — **PRE-RAMP GATE, MEASURED, PASSES NOW**
+
+Window: **600 s, 11:55:48Z → 12:05:48Z**. **N = 155 bots.**
+Instance profile: **staging** — `BOT_LOG_LEVEL=DEBUG`, `WSPARSER_LOG_LEVEL=INFO`.
+The plan requires this be recorded before comparing: staging expects
+≈ 5,000–6,000 B/s, prod-like INFO ≈ 1,650 B/s.
+
+```
+track2 delta = 3,791,033 B over 600 s
+R = 6,318 B/s
+per-2h-file = 45,489,600 B   (43.38 MiB)
+per-day     = 545,875,200 B  (520.6 MiB)
+API control: /api/v1/environment/ -> 200
+```
+
+**R = 6,318 B/s is just above the plan's 5,000–6,000 staging band**, consistent
+with the same reconnect churn that lifted P4-2 to 1.54× B1. Not a misroute: P4-5
+proves nothing is being written to the wrong track.
+
+> Track 1's rate could **not** be taken from this window — `console.log` rolled over
+> mid-window, so the naive delta is negative (−86,403 B/s). Use the 300 s window
+> figure instead: **194,306 B / 300 s = 648 B/s** (55,987,200 B/day, 53.4 MiB/day).
+
+**Gate 1 (write rate) — does not bind.**
+
+| Threshold | Value | Factor over measured | Binds at |
+|---|---|---|---|
+| per-2h file > 5 GB | 45.49 MB now | 109.9× | **~17,036 bots** |
+| per-day > 60 GB | 545.9 MB now | 109.9× | **~17,036 bots** |
+
+Both thresholds reduce to the same rate — **6,318 × 109.9 = 694,300 B/s ≈ 694 KB/s**
+— which **confirms compliance's correction exactly**. Prod-like INFO: ws-parser is
+3,052 of 8,570 track-2 lines (35.6%), so ≈ 2,249 B/s → Gate 1 binds at
+**~47,800 bots**. (Compliance projected ~65,000 prod-like / ~20,000 with DEBUG;
+measured is stricter on both because this fleet's churn inflates ws-parser.)
+**Gate 1: PASS, not binding.**
+
+**Gate 2 (reconciled ceiling vs this box's free disk) — added by C2, run as asked.**
+
+```
+df -B1 --output=avail .  ->  72,412,446,720 B  = 67.44 GiB free
+ceiling = 10 GiB (track 1 cap) + 10 GiB (track 2 archive cap)
+        + 12 GiB (evidence, EVIDENCE_MAX_BYTES=12884901888)
+        + one projected live 2 h detail file
+```
+
+| Scale | live 2 h detail file | Ceiling | % of free | Gate |
+|---|---|---|---|---|
+| **155 bots (now)** | 43.38 MiB | **32.04 GiB** | **47.5%** | **PASS** |
+| 6,293 bots (staging profile) | 1.72 GiB | 33.72 GiB | 50.0% | **binds here** |
+| 17,678 bots (prod INFO profile) | 1.72 GiB | 33.72 GiB | 50.0% | **binds here** |
+| 30,000 bots, prod INFO | 2.92 GiB | 34.92 GiB | **51.8%** | **FAIL** |
+| 30,000 bots, staging DEBUG | 8.20 GiB | 40.20 GiB | **59.6%** | **FAIL** |
+
+**Gate 2 passes today at 47.5% and is the binding gate — it trips ~2.7× earlier
+than Gate 1.** That is exactly why C2 added it.
+
+> **Correction candidate for the plan.** P4-6's Gate 2 text says the ceiling is
+> "~34.3 GiB at 30k, i.e. 48–51%: it passes, and it passes narrowly at the top".
+> Against measurement it is **51.8% prod-like and 59.6% staging-like at 30k** — a
+> narrow **fail**, not a narrow pass. The 155-bot end of the plan's range is
+> confirmed (32.04 vs the plan's ~32.2 GiB); it is the 30k end that is optimistic,
+> because the plan's live-file term (~2.3 GiB) is derived from B1's rate and the
+> measured rate is higher. Remedy is unchanged and cheap: **cut a cap** (track 2's
+> `10GB` and/or evidence's `12GB`, one line each in bind-mounted files). Note again
+> that `WSPARSER_LOG_LEVEL=WARN` lowers *realized* usage and the live-file term but
+> **not** the nominal ceiling.
+>
+> `Prod-Bot` remains **unmeasured** (P0-6 never run there), so this gate is
+> **unevaluated on prod**.
+
+### P4-7 — track 2's retention is anchored where it cannot reach anything else — **PASS**
+
+```
+appender.detail.strategy.delete.basePath = /app/logs/detail
+appender.detail.strategy.delete.maxDepth = 1
+appender.detail.strategy.delete.ifFileName.glob = detail-*.log
+appender.detail.strategy.delete.ifAny.ifLastModified.age = 12h
+appender.detail.strategy.delete.ifAny.ifAccumulatedFileSize.exceeds = 10GB
+```
+All five as specified. Track 1's `Delete` confirmed at **`age = 14d`** (AD-26's
+7d → 14d landed). Both rollover intervals confirmed **equal** (`interval = 2`,
+`modulate = true` on both), which AD-22 and AD-28 depend on.
+
+Archive count after the first boundary: **1** (expected 1; steady state ≤ 7 needs
+12 h and cannot be reached in this session). Track 1 archive count: **1** — 0a
+emptied that directory, so this is a fresh, correct start.
+Result: **PASS** (the ≤ 7 steady state remains unobservable within one session)
+
+### P4-8 — promtail no longer re-ingests on restart (AD-31) — **PASS, both halves**
+
+**Half 1 — `docker compose restart promtail`** (11:58:50Z, +180 s):
+```
+positions before: /logs/console.log: "52133468"     (non-zero, as required)
+loki-data before: 454,886,612
+loki-data after:  468,453,529
+growth = 13,566,917 B  (12.9 MiB, expected < 50 MB)      PASS
+"timestamp too old" count: 0                             PASS
+positions after:  /logs/console.log: "52229997"    (advanced, not reset)
+```
+
+**Half 2 — full `docker compose down && ./deploy.sh`** (12:07:02Z → 12:07:25Z), which
+the plan calls "the case that actually bit":
+```
+loki-data before: 511,366,863
+loki-data after:  510,842,139
+growth = -524,724 B      i.e. loki-data SHRANK                PASS
+"timestamp too old" count: 0                                  PASS
+positions after:
+  /logs/console-2026-08-20-11.log: "52229997"
+  /logs/console.log: "644917"        (carried forward, NOT reset to 0)
+```
+
+Against Finding 2's **+2.2 GB in 17 minutes per redeploy**, the redeploy re-ingest
+is **gone**. Result: **PASS**
+
+### P4-9 — evidence promotes both tracks, still by hardlink — **PASS**
+
+First run (11:56:07Z) gave console = 7, **detail = 1** against a `≥ 2` expectation.
+Diagnosed rather than reported as a failure: `sourceFilesByTrack` was
+`{aggregate: 1, detail: 1}` — only the live file existed on each track, because 0a
+had just emptied the console archives and track 2's first rollover had not happened.
+"Newest two" of one file is one file. Correct behaviour.
+
+Re-run at 12:13:23Z, after the 12:00Z rollover gave each track an archive:
+```
+console files in evidence: 10     (>= 2)   PASS
+detail files in evidence:   4     (>= 2)   PASS
+sourceFilesByTrack: {aggregate: 2, detail: 2}
+
+hardlink proof:
+  3 8700777 logs/detail/detail.log
+  3 8700777 logs/evidence/detail-live-...P49Recheck...log     same inode, nlink 3
+  3 138610388 logs/console.log
+  3 138610388 logs/evidence/console-live-...log               same inode
+```
+`/health` reports a **non-zero per-track detail count**. No copies anywhere — the
+3 GB-per-file disk-doubling failure mode is not live.
+Result: **PASS**
+
+### P4-10 — the two evidence ages are independent (AD-28) — **PASS**
+
+Set `EVIDENCE_DETAIL_MAX_AGE_DAYS=0` in `secrets.env`, `./deploy.sh`, confirmed the
+shim picked it up (`maxAgeDays 14.0 detailMaxAgeDays 0.0`), triggered a sweep via a
+promotion:
+```
+detail files:   4 -> 0        (expected 0)                    PASS
+console files: 10 -> 12       (expected unchanged and > 0)    PASS
+
+lastSweep.removed = [ "detail-2026-08-20-11.log",
+                      "detail-live-alertname_P410Sweep-...log" ]
+freedBytes = 12,525,661 ; remaining = 12 ; remainingDetail = 0
+```
+The sweep removed **only** detail files. The aggregate count rose to 12 because the
+triggering promotion added two aggregate links — it was not swept. This is the step
+P3-10's single-age form cannot prove.
+
+`secrets.env` **restored** and redeployed; shim re-confirmed at
+`maxAgeDays 14.0 detailMaxAgeDays 3.0 maxBytes 12884901888`.
+Result: **PASS**
+
+> **Checked because AD-16 made it worth checking:** the shim's eviction "unlinks
+> every name of the chosen inode". It does **not** reach back into the source
+> directories. After the sweep, `logs/detail/detail-2026-08-20-11.log` is still
+> present with `nlink 2`, and `logs/console-2026-08-20-11.log` with `nlink 3`. The
+> unlink is correctly scoped to `logs/evidence/`.
+
+### P4-11 — the new scoped-DEBUG operator path (AD-24) — **PASS**
+
+```
+POST /api/v1/logging/debug/ab81f9e6-...?minutes=5   -> HTTP 200
+   {"botGroupId":"ab81f9e6-...","expiresAt":"2026-08-20T12:01:48.345Z"}
+
+after 70 s:
+  detail payload  grep "[<GID>/" logs/detail/detail.log  -> 12,225      (> 0)  PASS
+  console pointer grep "scoped debug"  logs/console.log  ->      9      (> 0)  PASS
+  Loki  {job="bot-manager"} |= "scoped debug"            -> NON-EMPTY          PASS
+```
+Pointer line in Loki, verbatim: `"logger":"com.vingame.bot.domain.logging.controller.LogLevelController"`,
+`"message":"scoped debug enabled for group ab81f9e6-... by operator request"`.
+
+**AD-24's contract holds end to end: Grafana tells you a drill-in exists and when;
+the box holds the 12,225-line payload.** PatternLayout MDC renders as
+`[40fa3749-.../15/BETTING_MINI]`, as designed.
+Result: **PASS**
+
+### P4-12 — `docker logs` is clean — **PASS**
+
+```
+docker compose logs --since 5m bot-manager | grep -cE 'websocketparser|Agency token|ANSI'  -> 0
+docker compose logs --since 30m bot-manager | grep -cE 'Started Starter|bot groups running' -> 2
+```
+No library flood, no token material, no ANSI on stdout; Spring startup and the
+auto-start summary still visible (AD-27's reason for keeping root wired to console).
+Re-confirmed at the end of the session: still **0**.
+Result: **PASS**
+
+### P4-13 — the queue meters exist and the alert can read them — **PASS**
+
+```
+log4j2_async_queue_capacity{appender="AsyncDetail"}   16384.0
+log4j2_async_queue_capacity{appender="AsyncRolling"}   8192.0
+log4j2_async_queue_remaining{appender="AsyncDetail"}  16384.0
+log4j2_async_queue_remaining{appender="AsyncRolling"}  8192.0
+log4j2_async_queue_full_samples_total{AsyncDetail}         0.0
+log4j2_async_queue_full_samples_total{AsyncRolling}        0.0
+log4j2_async_queue_pressure_samples_total{AsyncDetail}     0.0
+log4j2_async_queue_pressure_samples_total{AsyncRolling}    0.0
+
+Prometheus rules matching LogQueueSaturated: 1
+"Logging-queue metrics started" in bot-manager log:  1
+```
+- Four gauge lines, both appenders. **No `-1`**, so both appenders are in the
+  running configuration — P4-1's assertion confirmed from the other side.
+- **`capacity` 8192 on AsyncRolling and 16384 on AsyncDetail** confirms the
+  deliberate pair AD-25(4) describes.
+- Counters at `0` — the expected healthy reading, non-vacuous because they are
+  registered eagerly.
+- Rule loaded and `"state":"inactive"`, query
+  `log4j2_async_queue_remaining / log4j2_async_queue_capacity < 0.1`, `for: 5m`,
+  labels `audience: internal`, `severity: warning`.
+- `amtool config routes test alertname=LogQueueSaturated` → **`viptalk`** (ops room
+  via AD-V3, correct for an `audience: internal` rule).
+- Throttled WARN never fired: `grep -c 'async logging queue' logs/console.log` = 0,
+  consistent with zero saturation samples.
+Result: **PASS**
+
+## Plan verification — corrected Phase 0–3 steps
+
+### P0-5 (corrected form) — one archive per track per 2 h, names unique — **PASS**
+
+**This is the step that "fails forever on a working system" in its original form.
+On the corrected form it passes.**
+
+The 12:00Z boundary produced exactly one archive on each track:
+```
+track 1: console-2026-08-20-11.log   52,229,997 B   mtime 11:59:29Z
+track 2: detail-2026-08-20-11.log     5,541,988 B   mtime 11:59:59Z
+duplicate names, track 1: 0
+duplicate names, track 2: 0
+```
+- **Suffix is `-11`, i.e. odd**, for a rollover at 12:00Z — `rollover − 1 h`,
+  exactly as the correction states. The original "even hour" criterion would have
+  failed here on a perfectly working system.
+- **Both mtimes land just *before* the boundary** (11:59:29Z and 11:59:59Z), which
+  confirms the 2026-08-20 amendment about rename preserving the last-write mtime.
+  Track 1's is 30 s earlier than track 2's precisely because track 1 is now sparse.
+- Names unique on both tracks. **AD-20's substantive requirement holds.**
+Result: **PASS**
+
+> Track 1 did not roll at the instant of the boundary — at 12:00:25Z there was still
+> no archive, and it appeared shortly after. This is `TimeBasedTriggeringPolicy`
+> firing on the *next event*, and track 1 now emits ~1.5 lines/s. Expected, not a
+> fault, but worth knowing: **the quieter track 1 gets, the more its rollover lags
+> the boundary.**
+
+### P0-9 — Loki growth baseline — **RE-ESTABLISHED CLEANLY**
+
+The 2026-08-19 baseline was corrupted by the redeploy re-ingest. With the positions
+volume in place (P4-8), that mechanism is gone and a clean baseline is possible.
+
+**The new T+0 is `loki-data` = 457,543,926 B, taken 2026-08-20T12:25Z**, which is
+**39 minutes after this deploy's single re-ingest began (11:46Z) and after it had
+demonstrably settled** — the P4-8b cycle at 12:07Z proved no further re-ingest
+occurs, and three later `deploy.sh` cycles produced none.
+
+| Metric | Pre-deploy 11:43:56Z | Post re-ingest 12:11:25Z | **T+0 (settled) 12:25Z** |
+|---|---|---|---|
+| `loki-data` | 457,344,615 | 510,842,139 | **457,543,926** |
+| `logs/` total | 4,595,603,047 | 4,608,463,752 | 4,614,696,460 |
+| `logs/detail/` | (did not exist) | 10,592,773 | 16,501,196 |
+| `logs/evidence/` | 148,934,396 | 212,402,616 | 218,635,324 |
+| `logs/pre-phase4/` | (did not exist) | 4,544,990,804 | 4,544,990,804 |
+| Root available | 72,140,201,984 | 72,375,488,512 | 72,412,446,720 |
+| Root used | 33% | 33% | 33% |
+
+**Net `loki-data` change across the entire deploy: +199,311 bytes.** Compare
+**+2,224,683,015 B** on 2026-08-19.
+
+> **On the compactor, as asked.** `loki-data` was **453.6 MB** (`docker system df`)
+> at the start of this session, down from the **3.24 GB** left by the last deploy —
+> the compactor had been reclaiming all day. It **does not distort this baseline**:
+> the pre-deploy reading (457.3 MB) and the settled T+0 (457.5 MB) are taken on the
+> same already-reclaimed store 41 minutes apart and agree to within 0.04%. The T+0
+> above is a settled figure, not a mid-reclaim one.
+>
+> That near-zero net is also **why** the re-ingest was so cheap: promtail re-read
+> content Loki already held, and Loki **deduplicated** the identical entries. The
+> intermediate 510.8 MB reading at 12:11Z is the pre-dedup/pre-compaction peak.
+
+Expected magnitude per the plan is now **single-digit MB/day**. Track 1 writes
+648 B/s = **53.4 MiB/day** raw; after Loki's compression the store should grow well
+under that. **The T+24 h and T+7 d readings remain the live gate**, and the 50%-of-
+available-disk abort is unchanged. A figure an order of magnitude above expectation
+should be investigated as a misroute (re-run P4-5) before being treated as disk.
+
+### P0-6 — disk headroom (PRE-RAMP GATE) — **PASS**
+
+```
+node_filesystem_size_bytes{mountpoint="/"}  = 107,362,627,584   (100 GiB)
+node_filesystem_avail_bytes{mountpoint="/"} =  72,375,431,168   (67.41 GiB)
+df -h /: /dev/nvme0n1p1  100G  33G  68G  33% /
+```
+Both Prometheus results non-empty and agreeing with `df`. Available is **up** from
+66.96 GiB on 2026-08-19 (Loki compaction). Host disk rules are not blind.
+Result: **PASS**
+
+### P0-7 — Loki accepted the retention split — **PASS**
+
+`/ready` → `ready` (5/5 polls). `/config`:
+```
+retention_stream:
+- period: 30d   priority: 1   selector: '{level=~"WARN|ERROR"}'
+- period: 1d    priority: 1   selector: '{level=~"DEBUG|TRACE"}'
+```
+`1d` and `30d` are `24h` and `720h` rendered in different units — the plan's expected
+values. Result: **PASS**
+
+### P0-8 — the retention split actually bites — **PASS (WARN/ERROR half)**
+
+Window 26–30 h old:
+```
+{job="bot-manager",level=~"WARN|ERROR"} -> NON-EMPTY
+   (from /logs/console-2026-08-19-10.log, ts 1787134318141000000)
+{job="bot-manager",level="DEBUG"}       -> "result":[]
+```
+The WARN/ERROR half is the proof the compactor runs and the 30 d tier is retained.
+The DEBUG half is **vacuous by design now** (DEBUG never reaches Loki at all) and is
+recorded only for completeness; the real DEBUG assertion is P4-5. Result: **PASS**
+
+### P0-3 — no events lost, files growing — **PASS**
+
+`console.log` 959 lines and `detail.log` 22,499 lines and both advancing at every
+check; final sizes 966,878 B and 10,959,152 B. Result: **PASS**
+
+### P1-1 — the env-driven level took (AD-7 gate) — **PASS**
+
+```
+com.vingame.bot             -> {"configuredLevel":"DEBUG","effectiveLevel":"DEBUG"}
+com.vingame.websocketparser -> {"configuredLevel":"INFO","effectiveLevel":"INFO"}
+```
+Both `LOGGING_LEVEL_*` routes work. The second is new in Phase 4 and is the AD-32
+escape hatch — it resolves, so `logger.wsparser` was **not** renamed and did not
+silently become an appender-less LoggerConfig. Result: **PASS**
+
+### P1-2 — appenders survived the level override — **PASS**
+
+`/actuator/loggers/com.vingame.bot` → 200, and `grep -c '"level":"INFO"'
+logs/console.log` grew **84 → 86 over 60 s**. The file appender is still attached.
+Result: **PASS**
+
+### P1-3 — **replaced by P4-4.** See above. **PASS** (3 / 300 s vs `< 100`).
+
+### P1-4 — the per-bot INFO classes are gone — **PASS**
+
+Full message-set grep (all eight patterns, not the narrow three), over the 300 s
+window scoped to post-deploy lines only:
+```
+0
+```
+Result: **PASS**. Scoped to the window, so the 2026-08-19 caveat about
+`console.log` spanning deployments does not apply.
+
+### P1-5 — the aggregated replacements are present — **PARTIAL PASS**
+
+```
+"bots initialized" -> GroupLifecycleAggregator: "group 2bf237bd-... (Slot group 120): ..."   PASS
+"strategy mix"     -> BotGroupBehaviorService: "Bot group 2bf237bd-...: strategy mix {RANDOM=20}"  PASS
+"bots auto-deposited" -> (no line)
+```
+The auto-deposit line is **N/A, not failed**: no auto-deposit group started during
+the session. The plan scopes that half to "on an auto-deposit group".
+
+### P1-6 — tier-2 rollup is emitting — **PASS**
+
+`FleetRollupLogger` lines for both running environments within the last 6 minutes
+(12:06:49Z, 12:12:33Z ×2, thread `fleet-rollup-logger`). Result: **PASS**
+
+### P1-7 — tier-2 is quiet about healthy groups — **PASS**
+
+`grep -cE 'group .* playing=' logs/console.log` → **0**. Result: **PASS**
+
+### P1-8 (corrected) — session summaries demoted — **PASS on the half that can run**
+
+```
+INFO half:  grep '"level":"INFO"' logs/console.log | grep -c 'session'  -> 0     PASS
+DEBUG half (moved to track 2): grep -c 'session' detail.log             -> 3,916 PASS
+```
+**The EndGame half remains unexercisable** — see Finding 3 below. Not marked passed.
+
+### P2-1 — enable a scope — **PASS** (200 + `expiresAt`; GID listed). Covered under P4-11.
+
+### P2-2 (corrected) — DEBUG flows for that group — **PASS on the half that is meaningful**
+
+```
+tail -5000 detail.log | grep ' (DEBUG|TRACE) ' | grep -c  "[<GID>/"  -> 2,423
+tail -5000 detail.log | grep ' (DEBUG|TRACE) ' | grep -vc "[<GID>/"  ->   674
+```
+The first half passes. **The exclusion half is meaningless on this instance** and
+the plan says so: with `BOT_LOG_LEVEL=DEBUG` every group emits DEBUG legitimately,
+so the 674 are expected, not a leak. Only a prod-like INFO instance can test it.
+
+### P2-3 (corrected) — the TTL expires — **PASS, with a caveat**
+
+The manual scope set at 11:56:48Z with `expiresAt 12:01:48.345Z` is **gone**: at
+12:16:02Z that expiry is absent from `/api/v1/logging/debug`.
+
+**Caveat worth stating plainly:** the same GID *is* present again, with a **different,
+later** expiry (`12:30:13.807Z`) from a **different trigger** — a fresh
+auto-escalation at 12:15:13.807Z. On a fleet in permanent watchdog churn the
+escalator re-arms groups continuously, so "GID absent from the list" is not a clean
+assertion here. Expiry of the *specific* scope is confirmed; a clean run needs a
+quiet fleet.
+
+### P2-4 (corrected) — the spin-cost spam is bounded — **UNEXERCISED**
+
+```
+grep -c 'below spin cost' logs/detail/detail.log (+ archives) -> 0
+grep -c 'below spin cost' logs/console.log                    -> 0
+```
+No bot fell below spin cost in this session. **Unexercised, not passed** — the same
+status as 2026-08-19.
+
+### P2-5 — auto-escalation fires — **PASS, on genuine triggers, unforced**
+
+Six escalations across the session, all from real triggers (`reconnect-ws-*` and
+`watchdog-*` threads), naming the group and the trigger, at INFO in track 1:
+```
+11:46:48.345Z  ab81f9e6-...  reconnect-ws-bomflowtest33
+11:49:52.282Z  7a3716ed-...  watchdog-authtestws97810
+12:07:32.132Z  ab81f9e6-...  reconnect-ws-bomflowtest2
+12:10:35.906Z  7a3716ed-...  watchdog-authtestws97812
+12:14:05.731Z  40fa3749-...  reconnect-ws-xdt3st24
+12:14:06.071Z  ab81f9e6-...  reconnect-ws-bomflowtest1
+12:15:13.315Z  40fa3749-...  reconnect-ws-xdt3st25
+12:15:13.807Z  ab81f9e6-...  reconnect-ws-bomflowtest15
+```
+Result: **PASS**
+
+### P2-6 — no escalation storm / the 25% duty cycle — **NOT MEASURABLE THIS SESSION**
+
+At first reading this looks like a violation: group `ab81f9e6` escalated **3 times in
+30 minutes** against a documented re-arm interval of
+`escalation.minutes + cooldown-minutes` = 15 + 45 = **60 minutes**.
+
+It is not. Correlating against JVM starts:
+
+| Escalation | JVM start |
+|---|---|
+| 11:46:48Z (ab81f9e6), 11:49:52Z (7a3716ed) | JVM 1 (11:46) |
+| 12:07:32Z (ab81f9e6), 12:10:35Z (7a3716ed) | JVM 2 (`Started Starter` 12:07:33Z) |
+| 12:14:05Z (40fa3749), 12:14:06Z (ab81f9e6) | JVM 3 (12:14:07Z) |
+| 12:15:13Z (40fa3749), 12:15:13Z (ab81f9e6) | JVM 4 (12:15:15Z) |
+
+**Exactly ≤ 1 escalation per group per JVM lifetime.** The cooldown is in-memory and
+resets on restart, and **I restarted the JVM four times** for P4-8b and P4-10. The
+duty cycle is therefore **unmeasured**, not failed — measuring it needs 60
+uninterrupted minutes. The per-JVM behaviour is consistent with a working cooldown.
+
+### P3-1 — the shim is up and healthy — **PASS**
+`Up (healthy)`; `/health` → 200 with the full per-track body quoted above.
+
+### P3-2 — the evidence dir exists and is writable — **PASS**
+`drwxr-xr-x sgame sgame`, same uid:gid as `logs/console.log`; `sameFilesystem: true`.
+
+### P3-3 / P4-9 — a synthetic alert promotes files — **PASS** (superseded by P4-9).
+
+### P3-4 — HARDLINKS, not copies — **PASS** (inode + nlink proof under P4-9).
+
+### P3-5 — promoted files are not re-ingested by promtail — **PASS**
+`{job="bot-manager", filename=~"/logs/evidence/.*"}` → `"result":[]`.
+
+### P3-6 — promotion is idempotent and coalesced — **PASS**
+
+Three rapid identical POSTs under key
+`alertname=IdemTest,environmentId=idem-env,product=116`:
+```
+evidence file count: 14 -> 16     (+2 = one console-live + one detail-live, not +6)
+pending entries for that key: exactly 1, with "passes": 3
+```
+Result: **PASS** — and this is the two-track version of the check: +2, one per track.
+
+### P3-7 — the deferred pass runs — **PASS**
+`lastPromotion` at 12:20:34Z with `"tag": "deferred"` for the IdemTest key, `linked: []`
+and four entries in `skipped` (already-pinned names), `errors: []`. No duplicate names.
+
+### P3-8 — promoted files survive log4j2's `Delete` — **PASS**
+Two names present in `logs/evidence/` and absent from `logs/`:
+`console-2026-08-19-11.log`, `console-2026-08-19-13.log`. (Their absence from
+`logs/` is now also partly due to 0a, which does not weaken the check — the
+hardlinks kept the *content* alive either way.)
+
+### P3-9 — unclean start retro-promotes (AD-21) — **PASS, observed naturally**
+A `boot`-tagged pending entry with `"passes": 2` appeared across the redeploys, and
+`startedClean` read `false` after the kill-and-restart cycles. Boot-tagged promotions
+present in `logs/evidence/` (`console-live-boot-20260820T121348Z.log`,
+`detail-live-boot-20260820T121348Z.log`) — **both tracks**.
+
+### P3-10 — **superseded by P4-10.** PASS.
+
+### P3-11 — Alertmanager routing is intact (AD-14) — **PASS**
+```
+EnvironmentGroupDead   -> evidence,viptalk
+BotManagerDown         -> evidence,viptalk-static-down,viptalk
+EnvironmentSocketDown  -> viptalk
+LogQueueSaturated      -> viptalk            (new, audience: internal -> ops room)
+```
+
+### P3-12 — the guard test passes in the build — **PASS** (part of the 1862, run on the build machine).
+
+## Findings
+
+### Finding P4-A — 0a bounds the re-ingest exposure but cannot eliminate it
+
+**The live `logs/console.log` cannot be moved by 0a** (the JVM holds it open; it is
+track 1's live file, and the plan explicitly forbids moving it). At deploy time it
+was **51,806,508 B** of *pre-Phase-4* output and it contained:
+
+```
+com.vingame.websocketparser lines: 42,358
+"level":"DEBUG" lines:            76,895
+```
+
+The new promtail, with a fresh positions volume, re-read that file from offset 0.
+This is why P4-5's first run returned hits with pre-11:46:12Z timestamps.
+
+**Severity is low, and measured rather than assumed:**
+
+- **Net `loki-data` cost: +199,311 bytes** across the whole deploy, because Loki
+  deduplicated entries it already held from before the deploy. Nothing meaningfully
+  new was stored, and `timestamp too old` was `0` throughout.
+- The DEBUG residue expires on the **1 d** `retention_stream` — **2026-08-21**.
+- The ws-parser INFO residue falls under the default **720 h** — **2026-09-19**.
+- **0a prevented the large case entirely**: 4.54 GB across 157 files was never
+  offered to promtail.
+
+**This is a one-time event.** P4-8b proves subsequent redeploys re-ingest nothing.
+
+*Optional follow-up, not done:* if the residue matters, 0c would remove it, and
+per amendment C4 it needs no config change and no restart.
+
+### Finding P4-B — Gate 2 is stricter than the plan's worked example
+
+Covered in full under P4-6. Short form: the plan's "48–51%, passes narrowly at 30k"
+is **51.8% prod-like / 59.6% staging-like at 30k** against measurement — a narrow
+fail. It passes comfortably at today's 155 bots (47.5%). Remedy is a one-line cap
+cut in a bind-mounted file.
+
+### Finding 3 (carried forward, unchanged) — the fleet completes no rounds
+
+**Zero `endGame` messages across both tracks for the entire session**, exactly as on
+2026-08-19. This is not a Phase 4 effect and Phase 4 does not touch it.
+
+```
+track1 endGame (any case):                0
+track2 endGame (any case, incl. archives): 0
+track1 "EndGame results" summaries:        0
+track1 "StartGame" summaries:              0
+track2 StartGame lines:                   43
+track2 UpdateBet 5 s aggregates:         647
+track2 session lines:                  3,916
+```
+
+Rounds **start** and **update** but never **complete**. Consequences, stated plainly
+rather than marked passed:
+
+- **P1-8's EndGame half — still unexercisable.**
+- **AD-8's compensating `rounds`/`staked` drain — still unexercised**, because it is
+  driven off EndGame.
+- **P2-4 — still unexercised** (0 bots below spin cost).
+- **P1-4 — this one did run and passed** (0 per-bot INFO lines), so it is not in this
+  list.
+
+It also explains the 460 WARN/300 s watchdog churn that is now the bulk of Loki's
+intake, and the ws-parser rate running 1.54× B1.
+
+## Expected behaviour changes — sanity-checked, all as predicted
+
+| Predicted | Observed |
+|---|---|
+| `logs/detail/` appears and grows fast | Yes — 0 → 16.5 MB in 38 min; 6,318 B/s vs track 1's 648 B/s (**9.75×**) |
+| `docker logs` quieter | Yes — P4-12 noise count 0 |
+| Loki quieter | Yes — INFO 2,022 → 3 per 300 s; net `loki-data` +199 KB vs +2.22 GB |
+| Scoped per-group DEBUG no longer visible in Grafana (AD-6 reversed by AD-24) | Yes — pointer reaches Loki (P4-11), 12,225-line payload is box-only |
+| One promtail re-ingest on this deploy only | Yes — and P4-8b proves it does not recur |
+
+None of these were treated as regressions.
+
+## Verdict
+
+**PASS**
+
+- Smoke: **PASS** (all 10 services, including the observability stack and both shims)
+- Phase 4 steps P4-1 … P4-13: **13 of 13 PASS**
+- Corrected Phase 0–3 steps run: **21 attempted — 18 PASS, 3 could not be exercised**
+  (P2-4 unexercised, P1-8's EndGame half unexercisable, P2-6 unmeasurable this
+  session), **0 FAIL**
+- Pre-deploy 0a: **RAN CLEAN** (157 archives / 4.54 GB relocated, source dir empty)
+- Pre-deploy 0b: **PASS** (one positions entry)
+- Pre-deploy 0c: **SKIPPED by instruction**; standing exposure ages out 2026-09-19
+
+## State left on the box
+
+- 10 containers up; bot-manager, mongo, viptalk-shim, evidence-shim healthy.
+- 4 bot groups running (155 bots), same as before the deploy.
+- **`logs/pre-phase4/` holds 157 files / 4.54 GB and nothing will ever sweep it** —
+  not promtail, not log4j2's `Delete` (both are non-recursive / `maxDepth 1`), not
+  the evidence shim (`candidates()` does not recurse). Per the plan this is
+  deliberate. **Delete it by hand once the window it covers is past**; it is the
+  single largest item in `logs/`. Promote by hand first if an incident inside
+  2026-08-13 → 2026-08-20 is still open: `ln logs/pre-phase4/<f> logs/evidence/<f>`.
+- `logs/detail/` holds the live `detail.log` plus `detail-2026-08-20-11.log`.
+- `logs/evidence/` holds **18 promoted hardlinks** (218.6 MB by `du`, but AD-19:
+  hardlinks double-count against live files), of which **13 aggregate / 5 detail**.
+  **Several are synthetic-test artefacts** from this session under the keys
+  `P49Recheck`, `P410Sweep`, `IdemTest` and `EnvironmentGroupDead/test-env`. Harmless
+  (hardlinks consume no extra blocks) and they age out on the 14 d / 3 d sweeps, but
+  delete them if a clean evidence dir is wanted.
+- Scoped-DEBUG scopes may still be live from genuine auto-escalations; all carry a
+  15-minute TTL and expire on their own.
+- Config backups on the box tagged **`20260820-114356`** (plus the older
+  `20260819-190838` set).
+- `secrets.env` **restored to its pre-session content** after P4-10 — verified
+  `EVIDENCE_DETAIL_MAX_AGE_DAYS` absent, `BOT_LOG_LEVEL=DEBUG` present.
+- Helper scripts left in `/tmp` on the box (`win300.sh`, `p46.sh`, `p48.sh`,
+  `p48b.sh`, `p411.sh`, `final.sh`, `gid.txt`, `secrets.env.p410bak`) — `/tmp`, so
+  self-clearing.
+
+## Notes for the plan / docs (no code implications)
+
+1. **P4-6 Gate 2's 30k worked example is optimistic** — see Finding P4-B. The
+   155-bot end (~32.2 GiB) is confirmed; the 30k end should read ~34.9 GiB / 51.8%
+   prod-like, i.e. binding.
+2. **P4-9's `≥ 2` per track has a start-up precondition** worth stating: it needs at
+   least one closed archive per track, so it cannot pass on the first deploy after
+   0a until the first rollover boundary. Suggest "≥ 2 per track once each track has
+   an archive; otherwise ≥ 1 and `sourceFilesByTrack` = 1".
+3. **P2-3's "GID absent" assertion is not clean on a churning fleet** — the
+   escalator re-arms the same group with a new expiry. Suggest asserting the
+   *specific* `expiresAt` is gone rather than the GID.
+4. **P2-6 needs 60 uninterrupted minutes** and is therefore incompatible with a
+   verification run that redeploys for other steps. Suggest scheduling it last, or
+   on a separate day.
+5. **P0-5's corrected form works** — recorded here as confirmation, since the
+   previous release could only report that the original form was wrong.
+6. **U-3 is still stale** in the plan and in `CLAUDE.md`'s REST table
+   (`GET /api/v1/bot-group/` → 405). Unchanged from the 2026-08-19 note.
