@@ -216,6 +216,10 @@ public class BotGroupRuntime {
                     config.getGame().getName(),
                     bot.getUserName()
             );
+            // PLUGIN_HOT_RELOAD AD-11 — same resolution Bot.initialize() uses, for the
+            // same reason the product label is resolved once: two sites labelling the
+            // same bot with two versions would split its lines across a drain.
+            BotMdc.setPluginVersion(config.resolvePluginVersion());
             try {
                 // DEBUG: one line per bot per group start, i.e. 30k lines on a fleet start.
                 // LOG_VOLUME_TIERING tier 1 — INFO may not contain anything whose rate is a

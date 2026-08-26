@@ -73,4 +73,37 @@ class BotMdcTest {
         BotMdc.setGroupContext("g-1", "env-1", null);
         assertThat(MDC.get(BotMdc.PRODUCT)).isNull();
     }
+
+    // ---- PLUGIN_HOT_RELOAD Phase 1: pluginVersion ----
+
+    @Test
+    void setPluginVersion_putsTheKey_andClearRemovesIt() {
+        BotMdc.set("g-1", 3, "env-1", "116", "BETTING_MINI", "game-1", "BauCua", "bot3");
+        BotMdc.setPluginVersion("builtin");
+
+        assertThat(MDC.get(BotMdc.PLUGIN_VERSION)).isEqualTo("builtin");
+
+        BotMdc.clear();
+
+        // Same reason clear() removes product: on a pooled or virtual thread, a leftover
+        // version would label the NEXT bot's lines — and mid-drain that is the difference
+        // between "this group is half migrated" and "it is not".
+        assertThat(MDC.get(BotMdc.PLUGIN_VERSION)).isNull();
+    }
+
+    @Test
+    void setPluginVersion_skipsNullAndBlank() {
+        BotMdc.setPluginVersion(null);
+        assertThat(MDC.get(BotMdc.PLUGIN_VERSION)).isNull();
+
+        BotMdc.setPluginVersion("");
+        assertThat(MDC.get(BotMdc.PLUGIN_VERSION)).isNull();
+    }
+
+    @Test
+    void pluginVersion_isNotAGroupLevelKey() {
+        // Mid-drain a group is mixed-version, so an aggregated group line must not claim
+        // one version for the whole group (PLUGIN_HOT_RELOAD Phase 1 step 1).
+        assertThat(BotMdc.GROUP_LEVEL_KEYS).doesNotContain(BotMdc.PLUGIN_VERSION);
+    }
 }

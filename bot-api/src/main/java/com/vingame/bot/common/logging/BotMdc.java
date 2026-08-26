@@ -32,6 +32,23 @@ public final class BotMdc {
     public static final String GAME_ID = "gameId";
     public static final String GAME_NAME = "gameName";
     public static final String BOT_USER_NAME = "botUserName";
+    /**
+     * The plugin version this bot's product implementation was loaded from
+     * (PLUGIN_HOT_RELOAD AD-11) — {@code "builtin"} until step 4 introduces a child
+     * classloader. Written by {@link #setPluginVersion(String)} rather than by
+     * {@link #set}, so the eight-argument signature does not grow a ninth.
+     * <p>
+     * <b>Deliberately not on {@link #GROUP_LEVEL_KEYS}</b>: during a drain a group is
+     * mixed-version — some of its bots on N, some on N+1 — so it is not a group-level
+     * fact and an aggregated line must not claim one version for the whole group.
+     * <p>
+     * <b>Not on {@code BotMdcTagsMeterFilter}'s tag list either</b> (AD-5). It reaches
+     * metrics through exactly one family, {@code bots_by_plugin_version}; putting it on
+     * the filter would stamp it on every {@code bot_*} series, doubling the cardinality
+     * of every bot counter during a drain and leaving a stale N-labelled copy of each
+     * for Prometheus' full retention window.
+     */
+    public static final String PLUGIN_VERSION = "pluginVersion";
 
     private BotMdc() {}
 
@@ -61,6 +78,24 @@ public final class BotMdc {
         if (gameId != null) MDC.put(GAME_ID, gameId);
         if (gameName != null) MDC.put(GAME_NAME, gameName);
         if (userName != null) MDC.put(BOT_USER_NAME, userName);
+    }
+
+    /**
+     * Set the {@link #PLUGIN_VERSION} key for the current thread.
+     * <p>
+     * A separate helper rather than a ninth parameter on {@link #set}: every caller of
+     * that method would have to be touched to add an argument that is a constant today,
+     * and the two call sites that need this ({@code Bot.initialize} and
+     * {@code BotGroupRuntime.startBot}) already sit immediately after it.
+     * <p>
+     * A null or blank value is skipped, not written, for the reason spelled out on
+     * {@link #setGroupContext(String, String, String)}: "absent" and "present and null"
+     * are different documents in the JSON layout.
+     */
+    public static void setPluginVersion(String pluginVersion) {
+        if (pluginVersion != null && !pluginVersion.isEmpty()) {
+            MDC.put(PLUGIN_VERSION, pluginVersion);
+        }
     }
 
     /**
@@ -109,5 +144,6 @@ public final class BotMdc {
         MDC.remove(GAME_ID);
         MDC.remove(GAME_NAME);
         MDC.remove(BOT_USER_NAME);
+        MDC.remove(PLUGIN_VERSION);
     }
 }

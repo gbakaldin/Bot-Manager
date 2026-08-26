@@ -278,6 +278,10 @@ public abstract class Bot {
                 configuration.getGame().getName(),
                 userName
         );
+        // PLUGIN_HOT_RELOAD AD-11. Ordering is load-bearing: this must precede the
+        // mdcSnapshot capture below, or the tag is missing from every line emitted by an
+        // async callback — which, for a bot that dies during connect, is most of them.
+        BotMdc.setPluginVersion(getPluginVersion());
         // Snapshot MDC immediately after BotMdc.set(...) so it's available before any
         // async callback can fire. configureClient(client) registers onWsStatusChange and
         // onDisconnect listeners that the library can invoke on its own threads as soon as
@@ -329,6 +333,20 @@ public abstract class Bot {
      */
     protected String productCode() {
         return configuration.resolveProductCode();
+    }
+
+    /**
+     * The plugin version this bot's product implementation was loaded from
+     * (PLUGIN_HOT_RELOAD AD-11), e.g. {@code "builtin"} — never {@code null}.
+     * <p>
+     * Delegates to {@link BotConfiguration#resolvePluginVersion()} so the MDC tag on this
+     * bot's lines and the {@code bots_by_plugin_version} row it is counted in can never
+     * disagree. Public because the per-group gauge iterates live {@code Bot} instances;
+     * there is deliberately no INFO line carrying it — {@code pluginVersion} is a per-bot
+     * fact and its INFO-tier representation is the group-level gauge (AD-9).
+     */
+    public String getPluginVersion() {
+        return configuration.resolvePluginVersion();
     }
 
     protected abstract void initializeSubclass();

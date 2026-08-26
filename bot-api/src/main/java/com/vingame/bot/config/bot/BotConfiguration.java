@@ -1,5 +1,6 @@
 package com.vingame.bot.config.bot;
 
+import com.vingame.bot.common.plugin.PluginVersions;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.game.model.Game;
@@ -107,6 +108,25 @@ public class BotConfiguration {
     SlotStrategyId slotStrategyId;
 
     /**
+     * The plugin version this bot's product implementation was loaded from
+     * (PLUGIN_HOT_RELOAD AD-10/AD-11) — the {@code pluginVersion} MDC key and the label
+     * of the {@code bots_by_plugin_version} gauge.
+     * <p>
+     * <b>Runtime, not persisted.</b> {@link BotConfiguration} is built per bot at group
+     * start and is not a {@code @Document}, so there is no Mongo change and no migration.
+     * {@code BotHealthDTO} deliberately does not carry it in Phase 1 either — that is an
+     * additive API change with no reader until a drain exists, and it lands at step 5.
+     * <p>
+     * <b>Nullable, and null is the normal case in Phase 1.</b> Nothing writes it yet:
+     * with one classloader the answer is a constant, so {@link #resolvePluginVersion()}
+     * supplies {@link PluginVersions#BUILTIN} and every bot labels correctly without the
+     * group-start path having to thread a {@link com.vingame.bot.common.plugin.PluginVersionResolver}
+     * through. Step 4, which is the first release where the answer can differ per bot, is
+     * where the builder starts setting it.
+     */
+    String pluginVersion;
+
+    /**
      * The numeric product code to label this bot's meters and MDC with, or {@code null}
      * when neither the environment nor the game knows one.
      * <p>
@@ -122,5 +142,20 @@ public class BotConfiguration {
             return null;
         }
         return game.getProductCode().getCode();
+    }
+
+    /**
+     * The plugin version to label this bot's MDC and gauge row with, never {@code null}.
+     * <p>
+     * One implementation, two readers ({@code Bot.getPluginVersion()} and the
+     * {@code bots_by_plugin_version} row build), so a bot cannot be logged under one
+     * version and counted under another — and, more practically, so an unset field can
+     * never make a bot vanish from the gauge while still appearing in
+     * {@code bots_managed} (verification P1-5 checks exactly that sum).
+     */
+    public String resolvePluginVersion() {
+        return pluginVersion != null && !pluginVersion.isEmpty()
+                ? pluginVersion
+                : PluginVersions.BUILTIN;
     }
 }
