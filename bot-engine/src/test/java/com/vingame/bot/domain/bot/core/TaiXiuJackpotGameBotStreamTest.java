@@ -7,12 +7,14 @@ import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.message.BettingMiniMessage;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
-import com.vingame.bot.domain.bot.message.GameMessageTypesResolver;
+import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.TaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.request.Bet;
 import com.vingame.bot.domain.bot.message.request.TaiXiuBet;
+import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
+import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.TaiXiuStartGameMessage;
 import com.vingame.bot.domain.bot.strategy.BetContext;
 import com.vingame.bot.domain.bot.strategy.BetDecision;
@@ -81,6 +83,18 @@ class TaiXiuJackpotGameBotStreamTest {
     private static final long CHOSEN_AMOUNT = 500_000L;
     private static final long BASE_SID = 5971L;
 
+    /**
+     * The Tai Xiu half of the message-types registry, carrying both providers exactly
+     * as the component scan discovers them. bot-engine has no Spring context of its
+     * own, so the registry is constructed directly; that discovery works is asserted in
+     * bot-messages ({@code MessageTypesCoverageTest}) and, under {@code Starter}'s own
+     * scan, in bot-app
+     * ({@code ApplicationContextLoadsTest.messageTypesRegistryIsFullyPopulated}).
+     */
+    private static final MessageTypesRegistry MESSAGE_TYPES = new MessageTypesRegistry(
+            List.of(), List.of(),
+            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()));
+
     private TaiXiuGameBot bot;
     private BotMetrics metrics;
 
@@ -119,8 +133,9 @@ class TaiXiuJackpotGameBotStreamTest {
         b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         b.setConfiguration(cfg);
         b.setStrategyFactory(factory);
-        // Wired exactly as production does — through the resolver.
-        b.setTaiXiuMessageTypes(GameMessageTypesResolver.resolveTaiXiu(product));
+        // Wired exactly as production does — through the registry, keyed on the
+        // product-code string (PLUGIN_HOT_RELOAD Phase 2c, AD-16).
+        b.setTaiXiuMessageTypes(MESSAGE_TYPES.taiXiu(product.getCode()));
         b.setRandom(new Random(0L));
         b.initializeSubclass();
         seedLong(b, "lastFetchedBalance", START_BALANCE);
@@ -289,7 +304,7 @@ class TaiXiuJackpotGameBotStreamTest {
         metrics = mock(BotMetrics.class);
         bot.setMetrics(metrics);
 
-        TaiXiuMessageTypes provider116 = GameMessageTypesResolver.resolveTaiXiu(ProductCode.P_116);
+        TaiXiuMessageTypes provider116 = MESSAGE_TYPES.taiXiu(ProductCode.P_116.getCode());
         assertThat(provider116.emitsAutoBetFlag()).isFalse();
 
         assertThat(invokeIntSeam("subscribeCmd")).isEqualTo(1005);

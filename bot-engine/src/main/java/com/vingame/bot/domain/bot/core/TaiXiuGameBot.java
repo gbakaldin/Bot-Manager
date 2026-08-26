@@ -68,7 +68,7 @@ public class TaiXiuGameBot extends BettingMiniGameBot {
 
     /**
      * Fixed-CMD, per-product message provider for Tai Xiu. Wired by
-     * {@code BotFactory} (Phase 6 — {@code GameMessageTypesResolver.resolveTaiXiu}).
+     * {@code BotFactory} (Phase 6 — {@code MessageTypesRegistry.taiXiu}).
      * Replaces the inherited betting {@code messageTypes} field, which is left null
      * for Tai Xiu (all accessor + registration seams are overridden to use this one).
      */

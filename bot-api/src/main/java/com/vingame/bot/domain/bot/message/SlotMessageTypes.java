@@ -15,7 +15,7 @@ import com.vingame.bot.domain.bot.message.slot.SlotMessage;
  * ({@code SlotMessageTypesImpl}) serves every brand, differentiated only by
  * {@code gid} (AD-3/AD-4). This interface does <b>not</b> extend
  * {@link GameMessageTypes}: the two providers have disjoint shapes and are
- * resolved through separate {@code GameMessageTypesResolver} methods.
+ * resolved through separate {@code MessageTypesRegistry} lookups.
  */
 public interface SlotMessageTypes {
 

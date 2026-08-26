@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.bot.message;
 
 import com.fasterxml.jackson.databind.jsontype.NamedType;
+import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.TaiXiuEndGameMessage;
 import com.vingame.bot.domain.bot.message.taixiu.TaiXiuStartGameMessage;
@@ -12,6 +13,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -22,14 +24,24 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Phase 3 verification (TAI_XIU_BOT plan AD-3/AD-4): the per-product Tai Xiu
  * provider registers its three inbound classes against the literal fixed cmd
  * strings {@code "1005"} / {@code "1002"} / {@code "1004"} with no offset
- * arithmetic (and no updateBet/bet registration), and the resolver exposes the
- * captured product via {@code resolveTaiXiu(ProductCode)}, throwing for the rest.
+ * arithmetic (and no updateBet/bet registration), and the registry exposes the
+ * captured product via {@code taiXiu(productCode)}, throwing for the rest
+ * (PLUGIN_HOT_RELOAD Phase 2c).
  */
-@DisplayName("TaiXiuMessageTypes provider + resolver split")
+@DisplayName("TaiXiuMessageTypes provider + registry split")
 class TaiXiuMessageTypesTest {
 
     /** The captured {@code MiniGame}/{@code taixiuPlugin} product is wired here (AD-4). */
     private static final ProductCode CAPTURED_PRODUCT = ProductCode.P_116;
+
+    /**
+     * The two Tai Xiu providers, wired as the component scan wires them. Discovery
+     * itself is covered by {@code MessageTypesRegistryTest} / {@code MessageTypesCoverageTest};
+     * what is under test here is the per-product resolution and the throw.
+     */
+    private static final MessageTypesRegistry REGISTRY = new MessageTypesRegistry(
+            List.of(), List.of(),
+            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()));
 
     @Test
     @DisplayName("Base cmd literals are 1005/1002/1004 (inbound) + 1000 (bet, outbound)")
@@ -121,28 +133,28 @@ class TaiXiuMessageTypesTest {
     }
 
     @Test
-    @DisplayName("resolveTaiXiu(captured product) returns the captured-product impl")
+    @DisplayName("taiXiu(captured product) returns the captured-product impl")
     void resolveTaiXiuReturnsImpl() {
-        TaiXiuMessageTypes resolved = GameMessageTypesResolver.resolveTaiXiu(CAPTURED_PRODUCT);
+        TaiXiuMessageTypes resolved = REGISTRY.taiXiu(CAPTURED_PRODUCT.getCode());
 
         assertThat(resolved).isInstanceOf(MiniGameTaiXiuMessageTypes.class);
         assertThat(resolved.getTypeRegistrations()).hasSize(3);
     }
 
     @Test
-    @DisplayName("resolveTaiXiu(null) throws IllegalArgumentException")
+    @DisplayName("taiXiu(null) throws IllegalArgumentException")
     void resolveTaiXiuNullThrows() {
-        assertThatThrownBy(() -> GameMessageTypesResolver.resolveTaiXiu(null))
+        assertThatThrownBy(() -> REGISTRY.taiXiu(null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("ProductCode cannot be null");
     }
 
-    @ParameterizedTest(name = "resolveTaiXiu({0}) -> IllegalArgumentException")
+    @ParameterizedTest(name = "taiXiu({0}) -> IllegalArgumentException")
     @EnumSource(value = ProductCode.class,
             names = {"P_066", "P_097", "P_098", "P_103", "P_105", "P_118", "P_119", "P_222"})
-    @DisplayName("resolveTaiXiu throws 'not yet implemented' for unimplemented product codes")
+    @DisplayName("taiXiu throws 'not yet implemented' for unimplemented product codes")
     void resolveTaiXiuThrowsForUnimplemented(ProductCode productCode) {
-        assertThatThrownBy(() -> GameMessageTypesResolver.resolveTaiXiu(productCode))
+        assertThatThrownBy(() -> REGISTRY.taiXiu(productCode.getCode()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(productCode.getCode())
                 .hasMessageContaining("not yet implemented");

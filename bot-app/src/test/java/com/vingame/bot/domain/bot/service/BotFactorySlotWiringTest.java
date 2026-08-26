@@ -72,7 +72,7 @@ class BotFactorySlotWiringTest {
                 // Scoped-debug auto-escalation is null-tolerant on every bot call site
                 // (LOG_VOLUME_TIERING AD-12); this fixture asserts wiring, not escalation.
                 (com.vingame.bot.infrastructure.observability.ScopedDebugEscalator) null,
-                strategyFactory, slotStrategyFactory);
+                strategyFactory, slotStrategyFactory, TestMessageTypes.REGISTRY);
     }
 
     private static EnvironmentClients envClientsWith(Environment env,
