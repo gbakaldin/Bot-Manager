@@ -372,7 +372,36 @@ groups:
       # The cap itself lands with step 4, sized from Phase 1's 7-day baseline (AD-6).
       #
       # 50 MiB/24 h is a FIRST GUESS, like every other threshold in this file. Tune once
-      # the 7-day baseline (verification P1-10) is in hand.
+      # the 7-day baseline (verification P1-10) is in hand. Read that baseline off a JVM
+      # with >24 h of uptime, or the boot ramp below gets baked into the tuned number.
+      #
+      # WHY THE UPTIME GATE (plan Amendment A3 — AD-7 as written shipped without it and
+      # was wrong). Metaspace is NOT flat through a restart: it ramps ~0 -> ~90-140 MB as
+      # Spring Boot, Mongo, Netty, Jackson, Micrometer, MapStruct and springdoc load, which
+      # is several times this threshold. Two things then compound. delta() extrapolates a
+      # partially-covered range exactly like rate() does, so at 2 h of uptime a real +70 MB
+      # reports as ~840 MB; and once the range IS covered, delta is value(now) -
+      # value(24h ago), and for the first 24 h after a restart that second term is the
+      # near-zero reading taken as the JVM started. So the ungated expression is
+      # continuously true from ~T+1h (when `for: 1h` is satisfied) to T+24h after EVERY
+      # restart — deploys, crash-restarts, OOM-kills, and the deploy that ships this rule.
+      #
+      # That is worse than noise. The comment above tells an operator that a firing in the
+      # first week is a pre-existing leak; ungated, the first week's firings are the boot
+      # ramp, so the operator either chases a phantom or mutes the rule — and this rule is
+      # the ONLY warning the container gets for a classloader leak (see below). An
+      # instrument that lies in the direction that gets it muted is the exact failure this
+      # phase exists to prevent.
+      #
+      # The gate is the process_start_time_seconds idiom BotManagerRestarted already uses
+      # (line 124). `and on(job)` because both sides carry job="bot-manager" and there is
+      # one bot-manager target per Prometheus (prometheus.yml). 86400 = the [24h] window:
+      # the rule may only evaluate once the window contains no boot ramp at all.
+      #
+      # delta() is KEPT rather than swapped for max_over_time - min_over_time. With the
+      # gate the range is always fully covered, so the extrapolation pathology is gone, and
+      # delta stays directional — max-min cannot be negative and would fire on a spike that
+      # had already recovered, which is not what "metaspace is growing" means.
       #
       # The companion rule PluginClassLoadersRetained —
       #   sum(plugin_classloaders_live) > 2 for: 2h
@@ -380,7 +409,7 @@ groups:
       # one JVM, and a rule that can only be false teaches nobody anything. It ships at
       # step 6. Fleet-wide JVM fact with no owning product, so audience: internal.
       - alert: MetaspaceGrowth
-        expr: delta(jvm_memory_used_bytes{area="nonheap",id="Metaspace"}[24h]) > 52428800
+        expr: delta(jvm_memory_used_bytes{area="nonheap",id="Metaspace"}[24h]) > 52428800 and on(job) (time() - process_start_time_seconds{job="bot-manager"} > 86400)
         for: 1h
         labels:
           job: bot-manager
@@ -388,7 +417,7 @@ groups:
           audience: internal
         annotations:
           summary: "Metaspace grew by {{ $value | humanize1024 }}B in 24h"
-          description: "Metaspace should be flat — classes are loaded at boot and not after. Sustained growth is a classloader leak, and with no -XX:MaxMetaspaceSize it ends in a kernel OOM-kill rather than an OutOfMemoryError. Cross-check plugin_classloaders_live (plugin_classloaders_registered_total minus plugin_classloaders_reclaimed_total staying above zero is the retention) and jvm_classes_unloaded_classes_total."
+          description: "Metaspace should be flat — classes are loaded at boot and not after. The rule only evaluates above 24h of uptime, so this is NOT the boot ramp. Sustained growth is a classloader leak, and with no -XX:MaxMetaspaceSize it ends in a kernel OOM-kill rather than an OutOfMemoryError. Cross-check plugin_classloaders_live (plugin_classloaders_registered_total minus plugin_classloaders_reclaimed_total staying above zero is the retention) and jvm_classes_unloaded_classes_total."
 
       # LOG_VOLUME_TIERING Phase 4 / AD-25(4). Track 2 (`AsyncDetail`) ships
       # blocking = false, so a full queue DROPS log events at every level — INFO and

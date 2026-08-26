@@ -268,6 +268,35 @@ class AlertRuleMetricsTest {
     }
 
     @Test
+    @DisplayName("MetaspaceGrowth is gated on JVM uptime, so it cannot fire on the boot ramp")
+    void metaspaceGrowthCarriesItsUptimeGate() {
+        // PLUGIN_HOT_RELOAD Amendment A3. Without the gate this rule is continuously true
+        // from ~T+1h to T+24h after EVERY restart — deploys, crash-restarts, OOM-kills, and
+        // the deploy that shipped it. Metaspace ramps ~0 -> ~90-140 MB at boot (several
+        // times the 50 MiB threshold) and delta() extrapolates a partially-covered range,
+        // so at 2h of uptime a real +70 MB reports as ~840 MB.
+        //
+        // That is not merely noisy. The rule's own comment tells the operator a firing in
+        // the first week is a pre-existing leak; ungated, the first week's firings are the
+        // boot ramp, so the operator chases a phantom or mutes the rule — and with no
+        // -XX:MaxMetaspaceSize (AD-6) this is the ONLY warning a classloader leak gets
+        // before a silent kernel OOM-kill. AlertRuleMetricsTest's other tests cannot see
+        // this: MetaspaceGrowth reads only jvm_*, so EXTERNAL_PREFIXES skips it everywhere
+        // else in this file. Hence a rule-shape assertion rather than a metric one.
+        Rule metaspace = rules().stream()
+                .filter(r -> "MetaspaceGrowth".equals(r.name())).findFirst()
+                .orElseThrow(() -> new AssertionError("MetaspaceGrowth is not in alerts.yml"));
+
+        assertThat(metaspace.expr())
+                .as("MetaspaceGrowth reads a 24h range over a series that starts near zero "
+                        + "at every JVM start, so it must not evaluate until the JVM has been "
+                        + "up longer than that range. Expected the process_start_time_seconds "
+                        + "idiom BotManagerRestarted already uses.")
+                .contains("process_start_time_seconds")
+                .contains("86400");
+    }
+
+    @Test
     @DisplayName("every product-routed rule keeps the product label its routing depends on")
     void productRoutedRulesKeepTheProductLabel() {
         // AD-V3: the room is chosen from the alert's `product` label (or `environmentId`

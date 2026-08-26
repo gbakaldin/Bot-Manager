@@ -105,7 +105,7 @@
       "id": 3,
       "type": "timeseries",
       "title": "Metaspace growth per 24h (MetaspaceGrowth's expression)",
-      "description": "delta over 24h, i.e. exactly what the alert evaluates. The alert threshold is 50 MiB, a first guess to be tuned from the 7-day baseline.",
+      "description": "delta over 24h — series A is the raw value, series B is what the alert actually evaluates. The rule is gated on >24h of JVM uptime (plan Amendment A3), because metaspace ramps 0 → ~90-140 MB at boot and delta() extrapolates a partially-covered range, so an ungated rule fires for ~23h after every restart. That is why B is absent for the first day after a deploy and A is not: a large A with no B is the boot ramp, and is expected. Threshold 50 MiB is a first guess, to be tuned from the 7-day baseline read off a JVM with >24h uptime.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -165,7 +165,16 @@
             "uid": "prometheus"
           },
           "expr": "delta(jvm_memory_used_bytes{area=\"nonheap\",id=\"Metaspace\"}[24h])",
-          "legendFormat": "metaspace delta 24h"
+          "legendFormat": "metaspace delta 24h (raw)"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "delta(jvm_memory_used_bytes{area=\"nonheap\",id=\"Metaspace\"}[24h]) and on(job) (time() - process_start_time_seconds{job=\"bot-manager\"} > 86400)",
+          "legendFormat": "as MetaspaceGrowth evaluates it (>24h uptime)"
         }
       ]
     },

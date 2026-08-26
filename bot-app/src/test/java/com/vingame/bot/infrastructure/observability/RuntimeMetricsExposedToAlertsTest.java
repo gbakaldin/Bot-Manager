@@ -102,8 +102,11 @@ class RuntimeMetricsExposedToAlertsTest {
 
             assertThat(scrape)
                     .as("MetaspaceGrowth is delta(jvm_memory_used_bytes{area=\"nonheap\","
-                            + "id=\"Metaspace\"}[24h]); both label values are part of the name "
-                            + "as far as the rule is concerned")
+                            + "id=\"Metaspace\"}[24h]) and on(job) (time() - "
+                            + "process_start_time_seconds > 86400); both label values are part "
+                            + "of the name as far as the rule is concerned, and the uptime gate "
+                            + "means the rule ALSO depends on process_start_time_seconds, "
+                            + "pinned by processStartTimeIsExposed above")
                     .contains("jvm_memory_used_bytes")
                     .containsPattern("jvm_memory_used_bytes\\{[^}]*area=\"nonheap\"")
                     .containsPattern("jvm_memory_used_bytes\\{[^}]*id=\"Metaspace\"");

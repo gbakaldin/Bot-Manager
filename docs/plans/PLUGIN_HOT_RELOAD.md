@@ -313,18 +313,27 @@ OOM-killed by the kernel instead — silently, with no Java-side evidence.
 
 **AD-7. One alert ships now; the second is written down now and ships at step 6.**
 - **Ships in Phase 1 — `MetaspaceGrowth`**, in the existing `bot-manager-jvm` group
-  (`prometheus/alerts.yml:338`):
-  `delta(jvm_memory_used_bytes{area="nonheap",id="Metaspace"}[24h]) > 52428800`,
+  (`prometheus/alerts.yml:338`). **Expression corrected by Amendment A3** — the
+  ungated form originally written here fires for ~23 h after every restart:
+  ```
+  delta(jvm_memory_used_bytes{area="nonheap",id="Metaspace"}[24h]) > 52428800
+    and on(job) (time() - process_start_time_seconds{job="bot-manager"} > 86400)
+  ```
   `for: 1h`, `severity: warning`, `audience: internal`. **This rule is safe to ship
   without a baseline precisely because the current system has no mechanism to grow
   metaspace** — classes are loaded at boot and never after, so the expected value is
-  ~0 and any sustained 50 MiB/day is already anomalous. Comment it as a first guess, in
-  the house style of `prometheus/alerts.yml:414-416`.
+  ~0 and any sustained 50 MiB/day is already anomalous. That premise holds only
+  *above* the boot ramp, which is what the uptime gate excludes; see A3. Comment it as
+  a first guess, in the house style of `prometheus/alerts.yml:414-416`.
 - **Deferred to step 6 — `PluginClassLoadersRetained`**:
   `sum(plugin_classloaders_live) > 2` `for: 2h`. It would be vacuous until two versions
   can coexist (the value is identically 1 until step 5), and a rule that can only be
   false teaches nobody anything. Expression recorded here so step 6 does not invent one
-  under pressure.
+  under pressure. **It does not need A3's uptime gate** — `plugin_classloaders_live` is
+  a gauge that starts at its steady-state value in the first millisecond of the JVM's
+  life, not a 24 h delta over a boot ramp — but step 6 must ask A3's question of it
+  anyway before shipping: *what does this expression read during the first hour after a
+  restart?*
 
 **AD-8. `pluginVersion` reaches Loki, and only track 1.** One field added to
 `bot-app/src/main/resources/log4j2-json-template.json`. Track 2's `PatternLayout`
@@ -771,8 +780,14 @@ curl -sf http://localhost:9090/api/v1/rules | grep -o 'MetaspaceGrowth'
 curl -sf 'http://localhost:9090/api/v1/query?query=ALERTS%7Balertname%3D%22MetaspaceGrowth%22%7D'
 ```
 Expect: `MetaspaceGrowth` present in the loaded rules, and the `ALERTS` query returning
-an **empty result vector** (`"result":[]`). A firing rule on the first day means the
-threshold is wrong, not that there is a leak.
+an **empty result vector** (`"result":[]`). Since Amendment A3 the rule cannot evaluate at
+all below 24 h of uptime, so on a freshly deployed box an empty vector is guaranteed and
+proves only that the rule *loaded*. A firing rule after the box has been up a day means the
+threshold is wrong, not that there is a leak. Confirm the gate is actually in the loaded
+rule, not just in the file:
+```bash
+curl -sf http://localhost:9090/api/v1/rules | grep -o 'process_start_time_seconds[^"]*'
+```
 
 **P1-9 — the dashboard provisioned.**
 ```bash
@@ -964,3 +979,73 @@ same file that exists because `game_info` once scraped as bare `game`. Its
 `doesNotContain("plugin_classloaders_total")` assertion is the durable half: it fails if
 any future spelling of this family picks up a reserved suffix. **Any later rename of a
 meter in this document must be probed against a real `PrometheusMeterRegistry` first.**
+
+### A3 — `MetaspaceGrowth` needs an uptime gate, or it fires on every restart
+
+**What was wrong.** AD-7 specified
+
+```
+delta(jvm_memory_used_bytes{area="nonheap",id="Metaspace"}[24h]) > 52428800   for: 1h
+```
+
+and justified it with "the current system has no mechanism to grow metaspace, so the
+expected value is ~0". **That is true only above the boot ramp.** Metaspace is not flat
+through a restart: it goes ~0 → ~90-140 MB as Spring Boot, Mongo, Netty, Jackson,
+Micrometer, MapStruct and springdoc load — several times the 50 MiB threshold. Two effects
+compound:
+
+1. **`delta()` extrapolates** a partially-covered range exactly as `rate()` does. At 2 h of
+   uptime a real +70 MB is reported as `70 MB × (24/2)` ≈ 840 MB.
+2. **Even once the range is covered**, `delta` is `value(now) − value(24 h ago)`, and for the
+   first 24 h after a restart that second term is the near-zero reading taken as the JVM
+   started.
+
+So the rule is continuously true from ~T+1 h (when `for: 1h` is satisfied) to T+24 h after
+**every** restart: every deploy, every crash-restart, every OOM-kill — including the deploy
+that ships it. `audience: internal` routes it into the VipTalk ops room, next to
+`BotManagerRestarted`, which is already telling the same story accurately.
+
+**Why this is worse than noise, and why it is a Phase 1 blocker rather than a tuning
+follow-up.** The rule's own comment tells the operator that a firing in the first week is a
+pre-existing leak to be understood before any child classloader is introduced. Ungated, the
+first week's firings *are* the boot ramp. The operator either chases a phantom or mutes the
+rule — and with no `-XX:MaxMetaspaceSize` (AD-6, deferred to step 4) this rule is the only
+warning that shape of failure gets before a silent kernel OOM-kill. Phase 1's entire
+deliverable is a leak detector; an instrument that lies in the direction that gets it muted
+fails the phase on its own terms.
+
+**Corrected expression** (shipped; the gate is the `process_start_time_seconds` idiom
+already in this file at `prometheus/alerts.yml:124`):
+
+```
+delta(jvm_memory_used_bytes{area="nonheap",id="Metaspace"}[24h]) > 52428800
+  and on(job) (time() - process_start_time_seconds{job="bot-manager"} > 86400)
+```
+
+`and on(job)` because both sides carry `job="bot-manager"` and there is exactly one
+bot-manager target per Prometheus (`prometheus/prometheus.yml`). `86400` is the `[24h]`
+window: the rule may only evaluate once its own range contains no boot ramp.
+
+**`delta()` is kept** rather than swapped for `max_over_time(...) - min_over_time(...)`.
+With the gate the range is always fully covered, so the extrapolation pathology is gone,
+and `delta` stays *directional* — max-minus-min cannot be negative and would fire on a
+spike that had already recovered, which is not what "metaspace is growing" means.
+
+**Consequences elsewhere, all applied:**
+- `grafana/provisioning/dashboards/plugin-runtime.json`'s "MetaspaceGrowth's expression"
+  panel gains a second series carrying the gated expression, so the panel still shows what
+  the rule evaluates. The raw series is kept alongside it deliberately: gating the only
+  series would blank the panel for a day after every deploy, which reads as a broken panel.
+- Verification P1-8 is amended — below 24 h of uptime an empty `ALERTS` vector is now
+  guaranteed and proves only that the rule loaded, so P1-8 also greps the loaded rule for
+  the gate.
+- **Verification P1-10's 7-day baseline must be read from a JVM with >24 h of uptime**, or
+  the boot ramp is baked into the threshold AD-6 sizes `-XX:MaxMetaspaceSize` from at
+  step 4.
+
+**Why this is a plan defect, not an implementation one.** Compliance verified the shipped
+rule matched AD-7 byte-for-byte, so no implementation of Phase 1 that followed the plan
+would have caught it. Fixing only `alerts.yml` would leave step 6 to derive
+`PluginClassLoadersRetained` from the same unexamined premise. **The general rule this
+leaves behind: before shipping any rule over a range vector, ask what it reads during the
+first `<range>` after a restart.**
