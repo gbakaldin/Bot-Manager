@@ -180,6 +180,38 @@ class PluginClassLoaderMetricsTest {
     }
 
     @Test
+    @DisplayName("two loaders on one version share one meter set and both are counted")
+    void repeatedRegistrationUnderOneVersionIsIdempotentOnTheMeters() {
+        // Guards the shape registerMeters() was changed to: computeIfAbsent mints only the
+        // AtomicLong and the meters are registered OUTSIDE the mapping function (the shape
+        // AsyncQueueMetrics already uses), because meter registration takes the registry's
+        // locks and runs every MeterFilter — arbitrary third-party work inside a CHM mapping
+        // function is the documented recursive-update hazard.
+        //
+        // The cost of moving it out is a duplicate registration call on the second
+        // register(), so this pins that the duplicate is harmless: one gauge, bound to the
+        // AtomicLong every caller increments, not a second series and not a rebind that
+        // freezes the first at its initial value.
+        String version = "shared-v1";
+        ClassLoader first = new URLClassLoader("plugin-a", new URL[0], getClass().getClassLoader());
+        ClassLoader second = new URLClassLoader("plugin-b", new URL[0], getClass().getClassLoader());
+
+        metrics.register(version, first);
+        metrics.register(version, second);
+
+        // Two DISTINCT loaders under one version is the fact the meters are meant to show —
+        // "this version was loaded twice" — as opposed to the same loader registered twice,
+        // which is a caller bug and reads identically to a retention.
+        assertThat(registry.find(PluginClassLoaderMetrics.LIVE)
+                .tag(PluginClassLoaderMetrics.TAG, version).gauges())
+                .as("one gauge series per version, not one per registration")
+                .hasSize(1);
+        assertThat(gauge(PluginClassLoaderMetrics.LIVE, version)).isEqualTo(2d);
+        assertThat(counter(PluginClassLoaderMetrics.REGISTERED, version)).isEqualTo(2d);
+        assertThat(counter(PluginClassLoaderMetrics.RECLAIMED, version)).isEqualTo(0d);
+    }
+
+    @Test
     @DisplayName("meter names are not bot_-prefixed, so the MDC tag filter cannot touch them")
     void meterNamesAreOutsideTheMdcFilterSPrefix() {
         // Same reasoning as AsyncQueueMetrics: these are JVM-wide facts with no owning

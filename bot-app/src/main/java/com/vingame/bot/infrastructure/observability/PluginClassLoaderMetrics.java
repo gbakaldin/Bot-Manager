@@ -97,6 +97,9 @@ public class PluginClassLoaderMetrics {
     /** Sampling cadence, seconds. Matched to the Prometheus scrape interval. */
     static final long SAMPLE_INTERVAL_SECONDS = 10;
 
+    /** Upper bound on the drain-failure ERROR rate. See {@link #drainQuietly()}. */
+    static final long ERROR_INTERVAL_MINUTES = 5;
+
     private final MeterRegistry registry;
     private final PluginVersionResolver versionResolver;
 
@@ -118,6 +121,10 @@ public class PluginClassLoaderMetrics {
 
     /** Per-version live count, and the state object the {@code live} gauge reads. */
     private final Map<String, AtomicLong> live = new ConcurrentHashMap<>();
+
+    /** Drain-failure throttle state — see {@link #drainQuietly()}. */
+    private final AtomicLong drainFailures = new AtomicLong();
+    private final AtomicLong lastDrainErrorAt = new AtomicLong();
 
     private ScheduledExecutorService sampler;
 
@@ -168,15 +175,37 @@ public class PluginClassLoaderMetrics {
      * <p>
      * Public because step 4's loader factory is the caller that makes this class do
      * anything interesting; in Phase 1 the only caller is {@link #start()}, registering the
-     * application classloader under {@code builtin}. Registering the same loader twice
-     * double-counts it — deliberately not deduplicated, because "the same version was
-     * loaded twice" is a fact worth seeing rather than one worth hiding.
+     * application classloader under {@code builtin}.
+     * <p>
+     * <b>Registering two distinct loaders under the same version is the fact worth
+     * seeing</b> — that is a version loaded twice, and it is deliberately not deduplicated.
+     * Registering the <em>same</em> loader twice is not that fact: it is a bookkeeping bug
+     * in the caller, and it presents as {@code live=2, registered=2} with only one reclaim
+     * ever arriving — indistinguishable from a real retention. Nothing here can tell the
+     * two apart, so step 4's factory must not do it.
      */
     public void register(String pluginVersion, ClassLoader loader) {
-        tracked.add(new VersionedRef(loader, pluginVersion, collected));
+        // Order matters here, and it is the reverse of the obvious one. A VersionedRef is
+        // enqueueable — and visible to drain() on the sampler thread — the instant it is
+        // constructed, so it must not be published before the accounting it belongs to
+        // exists. Published first, a referent collected inside that window makes drain()
+        // either miss the version's AtomicLong entirely (leaving `live` pinned one above
+        // truth forever: a PERMANENT FALSE LEAK reading, the one direction this instrument
+        // must never fail in) or decrement to -1 before the increment lands. Inert in
+        // Phase 1 — the only argument is the application classloader and that is a GC root
+        // — and not inert from step 4, whose entire point is passing a loader that is
+        // meant to be collectible.
         registerMeters(pluginVersion);
         live.get(pluginVersion).incrementAndGet();
         registry.counter(REGISTERED, TAG, pluginVersion).increment();
+
+        tracked.add(new VersionedRef(loader, pluginVersion, collected));
+        // The JIT may treat `loader` as dead the moment the VersionedRef is constructed, so
+        // without this fence the referent can be collected and enqueued before tracked.add()
+        // has published the ref that drain() matches against — and drain() would discard the
+        // reclamation, arriving at the same permanent false leak by the other door. Classic
+        // Reference.reachabilityFence hazard; the fence is what it is for.
+        Reference.reachabilityFence(loader);
     }
 
     /**
@@ -184,36 +213,74 @@ public class PluginClassLoaderMetrics {
      * {@code AsyncQueueMetrics} registers its counters eagerly: an alert (or a panel) over
      * a series that only appears once the incident starts cannot be tested before the
      * incident, and a missing series reads as a healthy one.
+     * <p>
+     * {@code computeIfAbsent} mints only the {@link AtomicLong}; the meters are registered
+     * <b>outside</b> the mapping function, exactly as {@code AsyncQueueMetrics.registerMeters}
+     * does. Meter registration takes the registry's own locks and runs every registered
+     * {@code MeterFilter} — arbitrary third-party work, which is the documented
+     * recursive-update / stall hazard inside a {@code ConcurrentHashMap} mapping function.
+     * It happens to be safe today only because nothing in the filter chain reads
+     * {@code live}, and that invariant is not visible from here. Registering outside costs
+     * a harmless duplicate call under a race, because Micrometer registration is idempotent
+     * for an identical id and {@code computeIfAbsent} hands every caller the winner's
+     * {@code AtomicLong} — so the gauge binds to the one object all of them increment.
      */
     private void registerMeters(String pluginVersion) {
-        live.computeIfAbsent(pluginVersion, version -> {
-            AtomicLong count = new AtomicLong();
-            Gauge.builder(LIVE, count, AtomicLong::doubleValue)
-                    // strongReference(true) throughout this codebase: a weakly-held state
-                    // object lets the gauge silently start reporting NaN.
-                    .strongReference(true)
-                    .tag(TAG, version)
-                    .description("Registered plugin classloaders whose weak reference has not been "
-                            + "cleared — a lower bound on retention, not a census")
-                    .register(registry);
-            Counter.builder(REGISTERED)
-                    .tag(TAG, version)
-                    .description("Plugin classloaders ever registered under this version")
-                    .register(registry);
-            Counter.builder(RECLAIMED)
-                    .tag(TAG, version)
-                    .description("Plugin classloaders observed collected — registered_total minus "
-                            + "this, sustained above zero after a drain, is the leak")
-                    .register(registry);
-            return count;
-        });
+        AtomicLong count = live.computeIfAbsent(pluginVersion, version -> new AtomicLong());
+        Gauge.builder(LIVE, count, AtomicLong::doubleValue)
+                // strongReference(true) throughout this codebase: a weakly-held state
+                // object lets the gauge silently start reporting NaN.
+                .strongReference(true)
+                .tag(TAG, pluginVersion)
+                .description("Registered plugin classloaders whose weak reference has not been "
+                        + "cleared — a lower bound on retention, not a census")
+                .register(registry);
+        Counter.builder(REGISTERED)
+                .tag(TAG, pluginVersion)
+                .description("Plugin classloaders ever registered under this version")
+                .register(registry);
+        Counter.builder(RECLAIMED)
+                .tag(TAG, pluginVersion)
+                .description("Plugin classloaders observed collected — registered_total minus "
+                        + "this, sustained above zero after a drain, is the leak")
+                .register(registry);
     }
 
+    /**
+     * The scheduled body. Deliberately <b>not</b> the bare
+     * {@code catch (Exception e) { log.error("...: {}", e.getMessage()); }} that
+     * {@code AsyncQueueMetrics.sampleQuietly} and {@code InfoGaugeRefresher.refreshQuietly}
+     * use, for two reasons specific to this class:
+     * <ul>
+     *   <li>{@code e.getMessage()} alone gives an NPE-shaped failure a one-line message and
+     *       no frame, in the class someone is reading <em>because</em> they are chasing a
+     *       metaspace leak.</li>
+     *   <li>While this is failing the meters are frozen at their last values — the gauge
+     *       keeps publishing the last good number, which reads as healthy. So the running
+     *       failure count belongs in the line, and the line is throttled rather than
+     *       repeated 8,640 times a day.</li>
+     * </ul>
+     * First failure logs immediately; after that, at most one line per
+     * {@value #ERROR_INTERVAL_MINUTES} minutes, carrying the total since start. Same
+     * first-then-periodic shape as {@code AsyncQueueMetrics}' saturation WARN.
+     */
     private void drainQuietly() {
         try {
             drain();
         } catch (Exception e) {
-            log.error("Plugin-classloader sampling failed: {}", e.getMessage());
+            long failures = drainFailures.incrementAndGet();
+            long now = System.currentTimeMillis();
+            long previous = lastDrainErrorAt.get();
+            if (previous != 0
+                    && now - previous < TimeUnit.MINUTES.toMillis(ERROR_INTERVAL_MINUTES)) {
+                return;
+            }
+            if (!lastDrainErrorAt.compareAndSet(previous, now)) {
+                return;
+            }
+            log.error("Plugin-classloader sampling failed ({} failures since start). While it "
+                    + "fails the plugin_classloaders_* meters are FROZEN at their last values, "
+                    + "which reads as healthy rather than as absent.", failures, e);
         }
     }
 
@@ -230,7 +297,20 @@ public class PluginClassLoaderMetrics {
             if (!(ref instanceof VersionedRef versioned) || !tracked.remove(versioned)) {
                 continue;
             }
-            live.get(versioned.pluginVersion).decrementAndGet();
+            // Null-safe on purpose. A version with no AtomicLong is an impossible state
+            // (register() mints it before it publishes the ref), but an unguarded
+            // dereference here would throw inside drainQuietly, which swallows it and
+            // ABANDONS THE REST OF THE QUEUE — every other loader's reclamation lost with
+            // it. Degrading to a skipped decrement keeps the pass, and the WARN says which
+            // version fell through.
+            AtomicLong count = live.get(versioned.pluginVersion);
+            if (count != null) {
+                count.decrementAndGet();
+            } else {
+                log.warn("Plugin classloader for version {} was reclaimed with no live "
+                        + "counter — `live` for that version is now unreliable",
+                        versioned.pluginVersion);
+            }
             registry.counter(RECLAIMED, TAG, versioned.pluginVersion).increment();
             reclaimed++;
         }
