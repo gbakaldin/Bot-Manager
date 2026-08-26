@@ -1594,6 +1594,16 @@ public class BotGroupBehaviorService {
      * Every managed bot is counted — {@link Bot#getPluginVersion()} never returns null —
      * so {@code sum(bots_by_plugin_version)} must equal {@code bots_managed}, and a
      * shortfall means a bot escaped the accounting rather than that it is unversioned.
+     * <p>
+     * <b>The missing {@code if (envId == null) continue;} is deliberate, and is what makes
+     * that invariant hold.</b> Every env-keyed sibling above
+     * ({@link #countManagedBotsByEnv()}, {@link #countBotsByEnvAndStatus()},
+     * {@link #countOpenWsByEnv()}) skips a group with no {@code environmentId}, because for
+     * them the environment <em>is</em> the key. Here it is one label among four, so such a
+     * group still contributes a row (with {@code environmentId=""} after the null-safe
+     * tagging). Adding the guard back for consistency with its neighbours would silently
+     * break verification P1-5 — a shortfall would then mean "some group has no environment",
+     * which is exactly the reading the paragraph above tells the operator to rule out.
      */
     public Map<PluginVersionKey, Integer> countBotsByPluginVersion() {
         Map<PluginVersionKey, Integer> counts = new LinkedHashMap<>();
