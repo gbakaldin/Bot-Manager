@@ -1,13 +1,19 @@
 # Compliance — PLUGIN_HOT_RELOAD Phase 2a
 
-Branch: `feature/plugin-hot-reload-2a` (2 commits: `563a1c3`, `5ca4cc7`)
+Branch: `feature/plugin-hot-reload-2a`
 Plan reviewed: `docs/plans/PLUGIN_HOT_RELOAD.md` (at `4d3bca7`, the branch point)
-Diff reviewed: `git diff 4d3bca7..feature/plugin-hot-reload-2a` — 22 files, +458/−101
-Build: `JAVA_HOME=…/openjdk-21.0.2 mvn clean install` → **BUILD SUCCESS**, all five
-modules, **0 failures / 0 errors**, **1900 tests** (api 128, strategies 118, messages 136,
-engine 426, app 1092) — above the A1 gate of 1866. `mvn -pl bot-api dependency:tree`
-produces no `bot-app|bot-engine|bot-strategies|bot-messages` line: the contract module
-still has no reverse edge.
+Diff reviewed: `git diff 4d3bca7..feature/plugin-hot-reload-2a`
+Commits reviewed: `563a1c3` (the string-keying), `5ca4cc7` (Boot-scan catalogue test) and
+`c237781` (QA's test-only follow-up, landed mid-review — see below). **17 production files
+touched, all in `bot-api` and `bot-strategies`**; everything else in the diff is tests and
+review docs.
+Build: `JAVA_HOME=…/openjdk-21.0.2 mvn clean install` at `5ca4cc7` → **BUILD SUCCESS**, all
+five modules, **0 failures / 0 errors**, **1900 tests** (api 128, strategies 118, messages
+136, engine 426, app 1092) — above the A1 gate of 1866. Re-run of `bot-strategies` after
+`c237781` → **122 tests, 0 failures, 0 errors** (fleet total 1904), matching
+`qa-2a.md`'s table. `mvn -pl bot-api dependency:tree` produces no
+`bot-app|bot-engine|bot-strategies|bot-messages` line: the contract module still has no
+reverse edge.
 
 > Build note, not a finding: the first `mvn clean install` failed in `bot-app` with
 > `package com.vingame.bot.domain.bot.core does not exist`. That is a shared-`~/.m2`
@@ -164,6 +170,18 @@ of the step that would make the sentence true and because leaving it would seed 
 error into Phase 2d.
 
 No code-side drift found.
+
+## Commit `c237781`, landed mid-review
+
+QA committed to this branch while this review was being written. Re-checked rather than
+assumed: it adds **four test methods** (`deprecatedEnumOverloadMatchesStringKey` and
+`deprecatedEnumOverloadRejectsNull`, betting and slot) plus `qa-2a.md`, and touches **no
+production file** — `git diff 4d3bca7..HEAD -- '*/src/main/*'` is still the same 17 files.
+Both new tests target Phase 2a's own step 3: that the deprecated enum overload resolves the
+same bean as the string key, and that its null guard keeps `create((StrategyId) null)` an
+`IllegalArgumentException` rather than an NPE — which is the AD-23 behaviour-identity point
+this review makes under step 3. In scope, and it strengthens exactly the seam 2b will
+delete. The verdict is unchanged.
 
 ## Out-of-scope changes
 
