@@ -456,6 +456,10 @@ same DTO, same `id` strings, and **the same order** — the endpoint lists the r
 but sorts built-ins into `StrategyId` declaration order first, then any non-built-in
 key alphabetically, so the UI picker does not reshuffle on deploy. Pin the order with a
 test; `StrategyId.values()` order is a de-facto UI contract that no one wrote down.
+**The registry's own iteration order is not that order and must never be used as if it
+were** — measured at Phase 2a it is alphabetical-by-class-within-package and differs from
+`StrategyId.values()` in six of nine positions (Amendment A4). Step 2d sorts explicitly,
+from `StrategyId.values()`, over whatever order the registry happens to hand back.
 
 **AD-22. `PLUGIN_PLAN.md` is deleted, not archived.** It proposes the inverse design
 (`PLUGIN_PLAN.md:14-22` puts `Bot`/`BettingMiniGameBot` in the reloadable layer) and is
@@ -540,7 +544,10 @@ independently deployable. Build with
 2. `bot-strategies`: the nine `@StrategyImpl` and two `@SlotStrategyImpl` classes take
    string literals equal to the enum names.
 3. `BettingStrategyFactory` / `SlotStrategyFactory`: `EnumMap` → `LinkedHashMap<String, …>`
-   (insertion-ordered, so AD-21's ordering has a stable base), `create(String)`,
+   (insertion-ordered — that order is Spring's **bean-discovery** order and is **not**
+   `StrategyId.values()` order; AD-21's ordering is an explicit sort that does not build
+   on it — **corrected by Amendment A4**, which supersedes the "so AD-21's ordering has a
+   stable base" originally written here), `create(String)`,
    `registeredKeys()`. Keep **deprecated** `create(StrategyId)` / `create(SlotStrategyId)`
    overloads delegating to `create(id.name())` so no engine call site moves in 2a.
    Duplicate-key `IllegalStateException` and missing-annotation WARN behaviour unchanged.
@@ -822,7 +829,12 @@ docker logs bot-manager 2>&1 | grep -E '(Betting|Slot)StrategyFactory initialize
 ```
 Expect two lines: `BettingStrategyFactory initialized: registered 9 strategies — [...]`
 and `SlotStrategyFactory initialized: registered 2 strategies — [...]`. **Counts 9 and
-2**; anything lower means a bean lost its annotation key.
+2**; anything lower means a bean lost its annotation key. **The order inside the brackets
+changes at 2a and that is expected** (Amendment A4): the line prints the registry's key
+set, which was `EnumMap` ordinal order before and is bean-discovery order after —
+`[RANDOM, MARTINGALE_CLASSIC_AGGRESSIVE, MARTINGALE_CLASSIC_CAUTIOUS, DALEMBERT_*,
+FIBONACCI_*, PAROLI_*]`. Compare the **counts and the set**, not the sequence. No HTTP
+response order changes at 2a — `StrategyController` still enumerates the enum until 2d.
 
 **P2-3 — `GET /api/v1/strategy/` is byte-identical (2a and 2d).**
 ```bash
@@ -1049,3 +1061,69 @@ would have caught it. Fixing only `alerts.yml` would leave step 6 to derive
 `PluginClassLoadersRetained` from the same unexamined premise. **The general rule this
 leaves behind: before shipping any rule over a range vector, ask what it reads during the
 first `<range>` after a restart.**
+
+---
+
+## Amendment — 2026-08-26 (Phase 2a review)
+
+*Issued by the Compliance Architect during the Phase 2a review
+(`docs/reviews/PLUGIN_HOT_RELOAD/compliance-2a.md`), on a claim Dev raised in handoff and
+which measurement confirms. The Phase 2a diff is **accepted unchanged** — it implements the
+step as written. What changes is one factual claim in the step's own parenthetical, because
+Phase 2d would otherwise inherit it. Every Architecture Decision stands.*
+
+### A4 — `LinkedHashMap` insertion order is bean-discovery order, not `StrategyId` order
+
+**What was wrong.** Phase 2a step 3 justified `LinkedHashMap` as *"insertion-ordered, so
+AD-21's ordering has a stable base."* The insertion order is real, but it is **not** a base
+for AD-21's ordering, and calling it one invites the reading "the registry already comes
+back in the right order, so 2d only has to append the non-built-ins."
+
+**Measured** on the Phase 2a branch (`feature/plugin-hot-reload-2a`, `5ca4cc7`), from the
+factory's own `@PostConstruct` INFO line, which prints `registry.keySet()`. The order is
+identical under `StrategyCatalogParityTest`'s bare `AnnotationConfigApplicationContext`
+scan and under `ApplicationContextLoadsTest`'s full Spring Boot scan:
+
+| | Order |
+|---|---|
+| `StrategyId.values()` | RANDOM, MARTINGALE_CLASSIC_**CAUTIOUS**, MARTINGALE_CLASSIC_**AGGRESSIVE**, **PAROLI**_CAUTIOUS, PAROLI_AGGRESSIVE, **DALEMBERT**_CAUTIOUS, DALEMBERT_AGGRESSIVE, FIBONACCI_CAUTIOUS, FIBONACCI_AGGRESSIVE |
+| Registry insertion | RANDOM, MARTINGALE_CLASSIC_**AGGRESSIVE**, MARTINGALE_CLASSIC_**CAUTIOUS**, **DALEMBERT**_AGGRESSIVE, DALEMBERT_CAUTIOUS, FIBONACCI_AGGRESSIVE, FIBONACCI_CAUTIOUS, **PAROLI**_AGGRESSIVE, PAROLI_CAUTIOUS |
+
+They agree on RANDOM and differ in **six of the remaining eight positions**. The registry
+order is Spring's classpath-scan order — alphabetical by **class file name within
+package**, with `RandomBehaviorStrategy` ahead of the `martingale/` subdirectory because
+`R` sorts before `m` in ASCII. So it tracks *class names*, not enum names: renaming
+`ParoliCautious`, or moving a strategy to another package, silently reorders it, and
+nothing in the build would notice. It is deterministic, but it is arbitrary and it is not
+the persisted/UI identity of anything.
+
+**Why this is a plan defect and not an implementation one.** Dev used `LinkedHashMap`
+exactly as instructed; there is no implementation of step 3 that would make the sentence
+true. The map choice is still right — a deterministic iteration order keeps the boot log
+and any future diagnostic stable, which `HashMap` would not — but it is right for that
+reason, not for the reason given. And the sentence is load-bearing in the direction of a
+regression: AD-21 requires built-ins in `StrategyId` declaration order because that order
+is a de-facto UI contract, and the one check that would catch a reshuffled picker is
+release-time (`P2-3`'s before/after `diff`), on staging, and only if the pre-deploy capture
+was taken.
+
+**What changed.** The parenthetical in Phase 2a step 3; a sentence on AD-21 stating that
+registry order is never to be used as if it were display order; and the note on
+verification P2-2 below. **No Architecture Decision, no code, and no shipped behaviour.**
+
+**Consequences elsewhere, all applied:**
+- **AD-21 is unaffected in substance and is now explicit**: 2d sorts built-ins from
+  `StrategyId.values()` and non-built-ins alphabetically, over whatever order the registry
+  returns. `StrategyController` still enumerates the enum directly at 2a, so
+  `GET /api/v1/strategy/` is byte-identical across this deploy and `P2-3` passes as written.
+- **Verification P2-2 now says the bracketed list reorders at 2a and that this is
+  expected.** It is the one observable difference this sub-phase produces, and it is
+  unavoidable: `EnumMap` iterated in ordinal order, and no string-keyed map can reproduce
+  that without an `Enum.valueOf` per key — which is exactly the coupling AD-12 forbids. It
+  is inside AD-23's tolerance because AD-23's subject is behaviour ("same strategies
+  assigned, same HTTP responses"), and a set printed in a different order in one
+  once-per-JVM boot line is not that. Recorded rather than waved through, because "same log
+  lines" is written down and a releaser diffing boot logs would otherwise flag it.
+- **The general rule this leaves behind:** an ordering requirement is satisfied by a sort,
+  never by a container's incidental order. If a plan step names a collection type *because
+  of* the order it yields, print the order and check it.
