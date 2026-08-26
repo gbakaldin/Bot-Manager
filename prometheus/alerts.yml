@@ -352,6 +352,44 @@ groups:
           summary: "JVM live threads at {{ $value }}"
           description: "Sustained high thread count — the thread-leak sawtooth signature. Check reconnect churn and executor lifecycles before the JVM exhausts native threads."
 
+      # PLUGIN_HOT_RELOAD Phase 1 / AD-7. The classloader-leak detector, shipped BEFORE
+      # the mechanism that can cause one (step 4's child classloader) — the thread-leak
+      # sawtooth was diagnosable only because jvm_threads_live_threads predated it, and a
+      # detector shipped in the same release as the leak proves nothing about the release.
+      #
+      # WHY THIS IS SAFE TO SHIP WITHOUT A BASELINE: today the application has no
+      # mechanism to grow metaspace. Classes are loaded at boot and essentially never
+      # after, so the expected 24 h delta is ~0 and any sustained 50 MiB/day is already
+      # anomalous. If it fires in the first week, that is a PRE-EXISTING leak that must be
+      # understood before any child classloader is introduced — not a threshold problem.
+      #
+      # WHY METASPACE AND NOT THE HEAP: the container runs with -XX:MaxRAMPercentage=75
+      # and -XX:+ExitOnOutOfMemoryError but NO -XX:MaxMetaspaceSize (Dockerfile), so a
+      # classloader leak never raises OutOfMemoryError: Metaspace, ExitOnOutOfMemoryError
+      # never fires, and the container is OOM-killed by the kernel instead — silently,
+      # with no Java-side evidence. On a box that has already died once and taken Mongo
+      # with it (2026-06-30), this rule is the only warning that shape of failure gets.
+      # The cap itself lands with step 4, sized from Phase 1's 7-day baseline (AD-6).
+      #
+      # 50 MiB/24 h is a FIRST GUESS, like every other threshold in this file. Tune once
+      # the 7-day baseline (verification P1-10) is in hand.
+      #
+      # The companion rule PluginClassLoadersRetained —
+      #   sum(plugin_classloaders_live) > 2 for: 2h
+      # — is deliberately NOT here: it is identically 1 until step 5 puts two versions in
+      # one JVM, and a rule that can only be false teaches nobody anything. It ships at
+      # step 6. Fleet-wide JVM fact with no owning product, so audience: internal.
+      - alert: MetaspaceGrowth
+        expr: delta(jvm_memory_used_bytes{area="nonheap",id="Metaspace"}[24h]) > 52428800
+        for: 1h
+        labels:
+          job: bot-manager
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "Metaspace grew by {{ $value | humanize1024 }}B in 24h"
+          description: "Metaspace should be flat — classes are loaded at boot and not after. Sustained growth is a classloader leak, and with no -XX:MaxMetaspaceSize it ends in a kernel OOM-kill rather than an OutOfMemoryError. Cross-check plugin_classloaders_live (created minus reclaimed staying above zero is the retention) and jvm_classes_unloaded_classes_total."
+
       # LOG_VOLUME_TIERING Phase 4 / AD-25(4). Track 2 (`AsyncDetail`) ships
       # blocking = false, so a full queue DROPS log events at every level — INFO and
       # WARN included — and log4j2 reports that only through DefaultErrorHandler:

@@ -87,6 +87,52 @@ class RuntimeMetricsExposedToAlertsTest {
     }
 
     @Test
+    @DisplayName("jvm_memory_used_bytes carries id=\"Metaspace\", spelled as MetaspaceGrowth spells it")
+    void metaspaceSeriesIsExposed() {
+        // PLUGIN_HOT_RELOAD AD-2: the metaspace series is ADOPTED, not built — it comes from
+        // Micrometer's JvmMemoryMetrics via JvmMetricsAutoConfiguration, and writing our own
+        // gauge would duplicate it and silently diverge. The cost of adopting is that the
+        // rule now depends on a name nothing in this repo produces, and AlertRuleMetricsTest
+        // deliberately skips `jvm_*` through EXTERNAL_PREFIXES. This is the only place the
+        // MetaspaceGrowth rule's metric — and, decisively, its `id="Metaspace"` selector —
+        // is pinned. A renamed pool or a dropped binder would leave the rule selecting an
+        // empty vector forever, which is indistinguishable from "no leak".
+        runner.run(context -> {
+            String scrape = context.getBean(PrometheusMeterRegistry.class).scrape();
+
+            assertThat(scrape)
+                    .as("MetaspaceGrowth is delta(jvm_memory_used_bytes{area=\"nonheap\","
+                            + "id=\"Metaspace\"}[24h]); both label values are part of the name "
+                            + "as far as the rule is concerned")
+                    .contains("jvm_memory_used_bytes")
+                    .containsPattern("jvm_memory_used_bytes\\{[^}]*area=\"nonheap\"")
+                    .containsPattern("jvm_memory_used_bytes\\{[^}]*id=\"Metaspace\"");
+            assertThat(metaspaceValue(scrape))
+                    .as("a metaspace reading of 0 would make delta() meaningless")
+                    .isGreaterThan(0d);
+        });
+    }
+
+    @Test
+    @DisplayName("the class-count series the plugin-runtime dashboard reads are exposed")
+    void classCountSeriesAreExposed() {
+        // The JVM-side corroboration for plugin_classloaders_live: our weak-reference gauge
+        // says a loader became unreachable, these say the JVM actually unloaded classes.
+        // Panelled in grafana/provisioning/dashboards/plugin-runtime.json, so the same
+        // "renamed binder is silent" hazard applies even though no alert reads them yet.
+        runner.run(context -> {
+            String scrape = context.getBean(PrometheusMeterRegistry.class).scrape();
+
+            assertThat(scrape)
+                    .contains("jvm_classes_loaded_classes")
+                    .contains("jvm_classes_unloaded_classes_total");
+            assertThat(seriesValue(scrape, "jvm_classes_loaded_classes"))
+                    .as("a JVM with zero loaded classes is not a JVM")
+                    .isGreaterThan(0d);
+        });
+    }
+
+    @Test
     @DisplayName("the application's own config does not disable the meters the rules need")
     void applicationPropertiesDoesNotDisableThem() throws IOException {
         // The auto-configuration above proves the metric exists by default; this proves the
@@ -111,6 +157,17 @@ class RuntimeMetricsExposedToAlertsTest {
                 .as("Prometheus cannot scrape what actuator does not expose")
                 .contains("management.prometheus.metrics.export.enabled=true")
                 .contains("prometheus");
+    }
+
+    /** Value of the {@code jvm_memory_used_bytes} sample whose {@code id} is Metaspace. */
+    private static double metaspaceValue(String scrape) {
+        for (String line : scrape.split("\n")) {
+            if (line.startsWith("#") || !line.startsWith("jvm_memory_used_bytes")) continue;
+            if (!line.contains("id=\"Metaspace\"")) continue;
+            String[] parts = line.trim().split("\\s+");
+            return Double.parseDouble(parts[parts.length - 1]);
+        }
+        throw new AssertionError("no jvm_memory_used_bytes sample with id=\"Metaspace\"");
     }
 
     /** First sample value of {@code name} in a Prometheus exposition. */

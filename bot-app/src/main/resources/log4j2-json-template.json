@@ -48,5 +48,9 @@
   "botUserName": {
     "$resolver": "mdc",
     "key": "botUserName"
+  },
+  "pluginVersion": {
+    "$resolver": "mdc",
+    "key": "pluginVersion"
   }
 }
