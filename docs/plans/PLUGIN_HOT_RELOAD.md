@@ -1127,3 +1127,93 @@ verification P2-2 below. **No Architecture Decision, no code, and no shipped beh
 - **The general rule this leaves behind:** an ordering requirement is satisfied by a sort,
   never by a container's incidental order. If a plan step names a collection type *because
   of* the order it yields, print the order and check it.
+
+---
+
+## Amendment — 2026-08-26 (Phase 2b review)
+
+*Issued by the Compliance Architect during the Phase 2b review
+(`docs/reviews/PLUGIN_HOT_RELOAD/compliance-2b.md`). The Phase 2b diff is **accepted
+unchanged** — it implements steps 1-6 as written, and the check AD-15 asks for is exactly
+the check that shipped. What changes is one sentence of AD-15's **justification**, which
+is falsifiable and false, and which steps 5-7 would otherwise inherit. **No Architecture
+Decision changes in substance, no code changes, no shipped behaviour changes.***
+
+### A5 — AD-15's coverage is not "strictly better"; it moves the guard onto persisted state
+
+**What was wrong.** AD-15 says:
+
+> This runs on **create and PATCH** (both already call `validate`), which is strictly
+> *better* coverage than today: Jackson only guards the request body, whereas a group whose
+> strategy bean disappeared in a deploy currently fails at `BettingStrategyFactory.create`
+> during group start, as an exception on a bot thread.
+
+Both halves of that comparison are wrong, in opposite directions.
+
+**Measured**, against `feature/plugin-hot-reload` at `63c31c8`:
+
+1. **Group start is not on the `validate` path, so the bot-thread failure the sentence
+   promises to fix is unchanged.** `BotGroupConfigValidationService.validate` has exactly
+   two production callers — `BotGroupService.save` (create only; guarded by
+   `isNewGroup`, `BotGroupService.java:148`) and `BotGroupService.update`
+   (`:319`). `BotGroupBehaviorService`'s start/restart path never calls it, and
+   `update()` routes through `save(existing)`, which skips the create-only branch. A group
+   whose strategy bean vanished still dies at `BettingStrategyFactory.create` on a bot
+   thread at group start, exactly as before. The new check fires only on a **write**.
+2. **`validate` is post-merge over the whole entity on PATCH**
+   (`BotGroupService.update`: `mapper.updateEntityFromDTO(dto, existing)` **then**
+   `configValidation.validate(existing)` — deliberately so, per TIMED_ACTIVATION AD-6, for
+   cross-field rules). So the check reads the *persisted* `strategyMix` /
+   `slotStrategyId`, not only what the caller submitted. **A group holding a key no bean
+   claims therefore fails every PATCH, including one that touches neither strategy
+   field** — renaming the group, adjusting `maxBet`, changing the activation window. Before
+   Phase 2b those PATCHes succeeded, because Jackson only ever inspected the request body.
+   That is a new failure mode, and it is not derivable from the sentence above.
+
+**Why this is a plan defect and not an implementation one.** AD-15 names the seam
+(`BotGroupConfigValidationService.validate`) and both of its call sites; that seam is
+post-merge, and no implementation of AD-15 that used it could avoid either consequence.
+Dev implemented the check as specified and its own test suite pins the benign half
+(`BotGroupStrategyKeyValidationTest.Patch.unrelatedPatchStillPasses` — "the persisted mix
+is re-validated and valid"). The defect is in the claim, not the code.
+
+**How bad it actually is, so step 5 does not over-correct.** Bounded, and the shipped
+behaviour is the right trade:
+- **The group is recoverable through the API.** `strategyMix` is full-replace when
+  supplied, so `PATCH {"strategyMix":[{"strategyId":"RANDOM","weight":1.0}]}` clears the
+  fault and passes post-merge validation. A stale `slotStrategyId` is fixed by supplying a
+  valid one (it cannot be set back to `null` — PATCH treats `null` as "keep" — but
+  `"FIXED"` is equivalent to the null fallback).
+- **Lifecycle is unaffected.** `start`, `stop`, `restart`, `schedule-restart` and `delete`
+  are separate endpoints that do not validate; `setActivationMode` and every scheduler
+  write go straight to the repository. `ActivationScheduler` and the health monitor cannot
+  be broken by a stale key.
+- **The 400 names the bad key and lists the registered ones**, sorted, so the operator can
+  self-serve.
+
+**Corrected wording for AD-15's last paragraph** (substance unchanged):
+
+> This runs on **create and PATCH** (both already call `validate`). Note what that does and
+> does not buy. `validate` is **not** on the group-start path, so a group whose strategy
+> bean disappeared in a deploy still fails at `BettingStrategyFactory.create` on a bot
+> thread — this phase does not change that. And because `validate` runs **post-merge over
+> the whole entity** on PATCH, the check reads persisted state as well as the request body:
+> a group holding an unregistered key fails *any* PATCH until its mix is replaced. That is
+> accepted deliberately — the group stays startable, stoppable and deletable, and the 400
+> names the key and lists the catalogue — but it is a new failure mode, not pure upside.
+
+**Consequences for later steps, which is why this is recorded rather than waved through:**
+- **Steps 5-7 are exactly when a registry shrinks.** A cutover to version N+1 that does not
+  carry a strategy key version N served makes every group still holding that key
+  un-PATCHable until an operator rewrites its mix. Step 7's forced-cutover design must
+  either keep the union of both versions' keys registered for the drain window, or
+  accept and document that groups mid-drain are read-only through PATCH.
+- **If the group-start guard is wanted, it is a separate decision.** Adding
+  `validate` (or a narrower key check) to the start path would turn a bot-thread exception
+  into a clean 400/409 at the start endpoint, and would deliver what AD-15's original
+  sentence claimed. It is **not** in Phase 2's scope and is not smuggled in here; name it
+  at step 5 if the drain makes it necessary.
+- **The general rule this leaves behind:** a validator that runs post-merge validates the
+  document, not the request. Before adding a rule to one, ask what it does to a *persisted*
+  document that already violates it — the answer is "every future write of that document
+  fails", and that is a migration question, not a validation question.
