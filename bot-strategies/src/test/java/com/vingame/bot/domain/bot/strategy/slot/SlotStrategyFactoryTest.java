@@ -76,6 +76,42 @@ class SlotStrategyFactoryTest {
     }
 
     @Test
+    @DisplayName("the deprecated enum overload resolves the same bean as the string key")
+    void deprecatedEnumOverloadMatchesStringKey() {
+        // PLUGIN_HOT_RELOAD Phase 2a — the twin of the betting-side assertion.
+        // create(SlotStrategyId) is retained only so SlotMachineBot:160 does not
+        // move in 2a; it delegates to create(id.name()). Nothing else asserts the
+        // two overloads land on the same bean.
+        ApplicationContext context = mock(ApplicationContext.class);
+        RandomBetStrategy bean = new RandomBetStrategy();
+        when(context.getBean(RandomBetStrategy.class))
+                .thenAnswer(invocation -> new RandomBetStrategy());
+
+        SlotStrategyFactory factory = new SlotStrategyFactory(context, List.of(bean));
+        factory.init();
+
+        assertThat(factory.create(SlotStrategyId.RANDOM))
+                .hasSameClassAs(factory.create(SlotStrategyId.RANDOM.name()));
+    }
+
+    @Test
+    @DisplayName("the deprecated enum overload rejects null with IllegalArgumentException, not NPE")
+    void deprecatedEnumOverloadRejectsNull() {
+        // AD-23: the pre-2a EnumMap returned null for a null key, so this threw
+        // IllegalArgumentException. The `id == null ? null : id.name()` guard is
+        // what keeps it doing so.
+        ApplicationContext context = mock(ApplicationContext.class);
+
+        SlotStrategyFactory factory =
+                new SlotStrategyFactory(context, List.of(new FixedBetStrategy()));
+        factory.init();
+
+        assertThatThrownBy(() -> factory.create((SlotStrategyId) null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("null");
+    }
+
+    @Test
     @DisplayName("Duplicate @SlotStrategyImpl on two beans throws at init")
     void duplicateImplThrows() {
         ApplicationContext context = mock(ApplicationContext.class);
