@@ -8,6 +8,10 @@ import com.vingame.bot.domain.alert.service.AlertService;
 import com.vingame.bot.domain.alert.service.AlertmanagerWebhookService;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import com.vingame.bot.domain.botgroup.service.ActivationScheduler;
+import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
+import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.infrastructure.notification.VipTalkClient;
 import com.vingame.bot.infrastructure.observability.InfoGaugeRefresher;
@@ -18,6 +22,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+
+import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -110,6 +116,36 @@ class ApplicationContextLoadsTest {
         assertThat(context.getBean(AlertMessageFormatter.class)).isNotNull();
         assertThat(context.getBean(AlertmanagerWebhookService.class)).isNotNull();
         assertThat(context.getBean(AlertController.class)).isNotNull();
+    }
+
+    @Test
+    @DisplayName("both strategy registries come up with the full built-in catalogue")
+    void strategyRegistriesAreFullyPopulated() {
+        // PLUGIN_HOT_RELOAD Phase 2a. The registry keys are string literals now
+        // (AD-13), so nothing at compile time ties @StrategyImpl("RANDOM") to
+        // StrategyId.RANDOM. StrategyCatalogParityTest in bot-strategies is the
+        // primary guard, but it scans a package with a bare
+        // AnnotationConfigApplicationContext — it cannot see a strategy that is
+        // reachable from that scan yet unreachable from *Starter's*. This is the
+        // only place in the build where the production scan runs, so this is the
+        // only place that can pin it. It is the build-time twin of verification
+        // P2-2 ("registered 9 strategies" / "registered 2 strategies" in the
+        // boot log); a lower count means a bean lost its annotation or its
+        // package.
+        BettingStrategyFactory betting = context.getBean(BettingStrategyFactory.class);
+        SlotStrategyFactory slot = context.getBean(SlotStrategyFactory.class);
+
+        assertThat(betting.registeredKeys())
+                .containsExactlyInAnyOrderElementsOf(
+                        Arrays.stream(StrategyId.values()).map(Enum::name).toList());
+        assertThat(slot.registeredKeys())
+                .containsExactlyInAnyOrderElementsOf(
+                        Arrays.stream(SlotStrategyId.values()).map(Enum::name).toList());
+
+        // Resolution, not just registration: a key can be registered while the
+        // prototype bean fails to build. This is what BotFactory does per bot.
+        assertThat(betting.create(StrategyId.RANDOM.name())).isNotNull();
+        assertThat(slot.create(SlotStrategyId.FIXED.name())).isNotNull();
     }
 
     @Test
