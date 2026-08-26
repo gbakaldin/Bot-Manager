@@ -39,8 +39,8 @@ class SlotStrategyFactoryTest {
                 context, List.of(new FixedBetStrategy(), new RandomBetStrategy()));
         factory.init();
 
-        assertThat(factory.registeredIds())
-                .containsExactlyInAnyOrder(SlotStrategyId.FIXED, SlotStrategyId.RANDOM);
+        assertThat(factory.registeredKeys())
+                .containsExactlyInAnyOrder("FIXED", "RANDOM");
     }
 
     @Test
@@ -95,7 +95,7 @@ class SlotStrategyFactoryTest {
         SlotStrategyFactory factory = new SlotStrategyFactory(context, List.of(new UnannotatedStrategy()));
         factory.init();
 
-        assertThat(factory.registeredIds()).isEmpty();
+        assertThat(factory.registeredKeys()).isEmpty();
     }
 
     /**
@@ -103,7 +103,7 @@ class SlotStrategyFactoryTest {
      * duplicate-registration guard. Kept inside the test class so the production
      * scan never picks it up.
      */
-    @SlotStrategyImpl(SlotStrategyId.FIXED)
+    @SlotStrategyImpl("FIXED")
     private static final class FakeFixedDuplicate implements SlotStrategy {
         @Override public long chooseBet(SlotBetContext ctx) { return 0L; }
     }

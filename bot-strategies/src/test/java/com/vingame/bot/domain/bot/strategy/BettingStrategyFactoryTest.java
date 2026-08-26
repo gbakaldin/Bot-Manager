@@ -39,7 +39,7 @@ class BettingStrategyFactoryTest {
         BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(random));
         factory.init();
 
-        assertThat(factory.registeredIds()).containsExactly(StrategyId.RANDOM);
+        assertThat(factory.registeredKeys()).containsExactly("RANDOM");
     }
 
     @Test
@@ -98,7 +98,7 @@ class BettingStrategyFactoryTest {
         BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(stray));
         factory.init();
 
-        assertThat(factory.registeredIds()).isEmpty();
+        assertThat(factory.registeredKeys()).isEmpty();
     }
 
     /**
@@ -106,7 +106,7 @@ class BettingStrategyFactoryTest {
      * the duplicate-registration guard. Kept inside the test class so the
      * production scan never picks it up.
      */
-    @StrategyImpl(StrategyId.RANDOM)
+    @StrategyImpl("RANDOM")
     private static final class FakeRandomDuplicate implements BettingStrategy {
         @Override public void onRoundEnd(RoundResult result) { }
         @Override public Optional<BetDecision> decide(BetContext ctx) { return Optional.empty(); }

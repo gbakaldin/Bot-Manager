@@ -37,11 +37,18 @@ import static org.mockito.Mockito.when;
  *       proves the factory is delegating to {@code context.getBean(Class)}
  *       rather than caching, so the prototype scope on the concrete classes
  *       wires through end-to-end.</li>
- *   <li>{@code registeredIds()} contains exactly the nine ids that are
+ *   <li>{@code registeredKeys()} contains exactly the nine keys that are
  *       implemented at the end of Phase 3 (RANDOM + the eight Martingales).</li>
  *   <li>Each concrete class carries the correct {@link RiskProfile} — the
  *       constructor-arg pattern in Architecture Decision A4 wires through.</li>
  * </ul>
+ *
+ * <p>Since PLUGIN_HOT_RELOAD Phase 2a the {@code create(StrategyId)} calls below
+ * go through the <b>deprecated</b> enum overload, which is what
+ * {@code BettingMiniGameBot} still calls until Phase 2b. That is deliberate
+ * coverage: it pins that {@code create(id)} and {@code create(id.name())} resolve
+ * the same bean. {@code StrategyCatalogParityTest} covers the string API against
+ * a real Spring context.
  */
 @DisplayName("Martingale strategy factory wiring (Phases 2-3)")
 class MartingaleStrategyFactoryWiringTest {
@@ -179,18 +186,22 @@ class MartingaleStrategyFactoryWiringTest {
     }
 
     @Test
-    @DisplayName("registeredIds contains RANDOM + all eight Martingale ids at the end of Phase 3")
-    void registeredIdsForPhase3() {
-        assertThat(wiredFactory().registeredIds()).containsExactlyInAnyOrder(
-                StrategyId.RANDOM,
-                StrategyId.MARTINGALE_CLASSIC_CAUTIOUS,
-                StrategyId.MARTINGALE_CLASSIC_AGGRESSIVE,
-                StrategyId.PAROLI_CAUTIOUS,
-                StrategyId.PAROLI_AGGRESSIVE,
-                StrategyId.DALEMBERT_CAUTIOUS,
-                StrategyId.DALEMBERT_AGGRESSIVE,
-                StrategyId.FIBONACCI_CAUTIOUS,
-                StrategyId.FIBONACCI_AGGRESSIVE);
+    @DisplayName("registeredKeys contains RANDOM + all eight Martingale keys at the end of Phase 3")
+    void registeredKeysForPhase3() {
+        // Spelled as literals, not as StrategyId.X.name(): these nine strings
+        // are the persisted BSON values and the wire values, and a test that
+        // derived them from the enum could not notice the enum being renamed
+        // out from under them (PLUGIN_HOT_RELOAD AD-12).
+        assertThat(wiredFactory().registeredKeys()).containsExactlyInAnyOrder(
+                "RANDOM",
+                "MARTINGALE_CLASSIC_CAUTIOUS",
+                "MARTINGALE_CLASSIC_AGGRESSIVE",
+                "PAROLI_CAUTIOUS",
+                "PAROLI_AGGRESSIVE",
+                "DALEMBERT_CAUTIOUS",
+                "DALEMBERT_AGGRESSIVE",
+                "FIBONACCI_CAUTIOUS",
+                "FIBONACCI_AGGRESSIVE");
     }
 
     /**
@@ -235,13 +246,14 @@ class MartingaleStrategyFactoryWiringTest {
                 .containsExactlyInAnyOrder(StrategyId.values());
 
         // Registration coverage — every declared StrategyId is also actually
-        // registered by the factory. The hard-coded test in registeredIdsForPhase3
+        // registered by the factory. The hard-coded test in registeredKeysForPhase3
         // pins the same shape, but iterating StrategyId.values() here lets
         // this test self-update on future enum additions (the test above must
         // be hand-edited).
-        assertThat(factory.registeredIds())
+        assertThat(factory.registeredKeys())
                 .as("factory must register every declared StrategyId")
-                .containsExactlyInAnyOrderElementsOf(java.util.Arrays.asList(StrategyId.values()));
+                .containsExactlyInAnyOrderElementsOf(
+                        java.util.Arrays.stream(StrategyId.values()).map(Enum::name).toList());
 
         // Resolution coverage — create() returns the right concrete class for
         // every id. Prototype-scope is already pinned by

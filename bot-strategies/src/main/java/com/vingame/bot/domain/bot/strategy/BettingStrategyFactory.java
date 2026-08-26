@@ -6,9 +6,11 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.ApplicationContext;
 import org.springframework.stereotype.Component;
 
-import java.util.EnumMap;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Spring-managed registry that produces fresh {@link BettingStrategy} instances
@@ -16,25 +18,33 @@ import java.util.Map;
  *
  * <p>Discovery happens once at startup in {@link #init()}: Spring injects every
  * {@link BettingStrategy} bean, the factory reads the {@link StrategyImpl}
- * annotation off each class to determine its {@link StrategyId}, and stores
+ * annotation off each class to determine its <b>key</b>, and stores
  * an {@link ObjectProvider} that produces fresh prototype-scoped instances on
  * demand. Strategy beans MUST be marked {@code @Scope("prototype")} (Architecture
  * Decision 12) — singleton-scoped strategies would share mutable state across
  * bots and silently corrupt decisions.
  *
- * <p>{@link #create(StrategyId)} returns a new strategy instance every call.
+ * <p><b>Keys are {@code String}s, not {@link StrategyId}s</b> (PLUGIN_HOT_RELOAD
+ * Phase 2a, AD-12): a strategy served from a plugin classloader cannot name an
+ * enum constant the engine does not declare. {@link StrategyId} survives as the
+ * catalogue of the built-in keys and their UI copy, and
+ * {@code StrategyCatalogParityTest} pins every one of its constant names to a
+ * registered bean. The registry is insertion-ordered so that
+ * {@link #registeredKeys()} has a stable base to sort from.
+ *
+ * <p>{@link #create(String)} returns a new strategy instance every call.
  * The RNG is owned by the bot and threaded through {@link BetContext#rng()} on
  * every {@code decide} call (Architecture Decision 13) — strategies never hold
  * their own RNG today. When a future strategy needs one the signature can be
  * extended with a {@code seed} parameter; until then carrying dead plumbing
  * just confuses callers about what does and doesn't seed strategy behaviour.
  *
- * <p>An unknown {@link StrategyId} at lookup throws
- * {@link IllegalArgumentException} — see Architecture Decision 12: a strategy
- * referenced from Mongo without a corresponding bean is a deploy bug, not a
- * runtime fallback case.
+ * <p>An unknown key at lookup throws {@link IllegalArgumentException} — see
+ * Architecture Decision 12: a strategy referenced from Mongo without a
+ * corresponding bean is a deploy bug, not a runtime fallback case.
  *
- * <p>See {@code docs/plans/BETTING_STRATEGIES.md}, Architecture Decisions 1, 12.
+ * <p>See {@code docs/plans/BETTING_STRATEGIES.md} Architecture Decisions 1, 12,
+ * and {@code docs/plans/PLUGIN_HOT_RELOAD.md} AD-12/AD-13.
  */
 @Slf4j
 @Component
@@ -42,8 +52,13 @@ public class BettingStrategyFactory {
 
     private final ApplicationContext context;
     private final List<BettingStrategy> discoveredStrategies;
-    private final Map<StrategyId, Class<? extends BettingStrategy>> registry =
-            new EnumMap<>(StrategyId.class);
+    /**
+     * Key → implementation class, in discovery order. {@link LinkedHashMap} and
+     * not a sorted map: the insertion order is Spring's bean-discovery order,
+     * which is what AD-21's display ordering sorts <em>from</em>.
+     */
+    private final Map<String, Class<? extends BettingStrategy>> registry =
+            new LinkedHashMap<>();
 
     public BettingStrategyFactory(ApplicationContext context,
                                   List<BettingStrategy> discoveredStrategies) {
@@ -62,7 +77,7 @@ public class BettingStrategyFactory {
                         bean.getClass().getName());
                 continue;
             }
-            StrategyId id = annotation.value();
+            String id = annotation.value();
             Class<? extends BettingStrategy> existing = registry.put(id, bean.getClass());
             if (existing != null) {
                 throw new IllegalStateException(
@@ -77,12 +92,12 @@ public class BettingStrategyFactory {
     /**
      * Build a fresh strategy instance for a single bot.
      *
-     * @param id    {@link StrategyId} assigned to the bot at startup (from the
+     * @param id    registry key assigned to the bot at startup (from the
      *              {@code BotGroup.strategyMix} fill-to-target distribution).
      * @return a new {@link BettingStrategy} instance (prototype-scoped).
      * @throws IllegalArgumentException if {@code id} has no registered bean.
      */
-    public BettingStrategy create(StrategyId id) {
+    public BettingStrategy create(String id) {
         Class<? extends BettingStrategy> clazz = registry.get(id);
         if (clazz == null) {
             throw new IllegalArgumentException("No BettingStrategy registered for " + id
@@ -93,11 +108,25 @@ public class BettingStrategyFactory {
     }
 
     /**
-     * @return the set of registered strategy ids. Used by tests and by the
-     *         assignment routine to validate a {@code strategyMix} at the API
-     *         boundary.
+     * Enum-keyed overload kept only so that Phase 2a moves no engine call site.
+     *
+     * @deprecated the registry is string-keyed (AD-12). Call
+     *             {@link #create(String)}; this overload is removed in
+     *             PLUGIN_HOT_RELOAD Phase 2b, when {@code BotConfiguration}
+     *             and the persisted mix become {@code String}s too.
      */
-    public java.util.Set<StrategyId> registeredIds() {
-        return java.util.Collections.unmodifiableSet(registry.keySet());
+    @Deprecated
+    public BettingStrategy create(StrategyId id) {
+        return create(id == null ? null : id.name());
+    }
+
+    /**
+     * @return the set of registered strategy keys, in discovery order. Used by
+     *         tests, and from Phase 2b by
+     *         {@code BotGroupConfigValidationService} to reject a
+     *         {@code strategyMix} naming a key no bean claims (AD-15).
+     */
+    public Set<String> registeredKeys() {
+        return Collections.unmodifiableSet(registry.keySet());
     }
 }

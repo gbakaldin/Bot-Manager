@@ -53,7 +53,7 @@ import java.util.Random;
 @Slf4j
 @Component
 @Scope("prototype")
-@StrategyImpl(StrategyId.RANDOM)
+@StrategyImpl("RANDOM")
 public final class RandomBehaviorStrategy implements BettingStrategy {
 
     private int numberOfBetsInCurrentSession;

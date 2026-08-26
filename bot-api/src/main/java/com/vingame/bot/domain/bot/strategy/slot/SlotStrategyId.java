@@ -1,9 +1,15 @@
 package com.vingame.bot.domain.bot.strategy.slot;
 
 /**
- * Canonical identifier for a {@link SlotStrategy} implementation. Each concrete
- * strategy class is keyed by exactly one of these via the
- * {@link SlotStrategyImpl} annotation.
+ * Catalogue of the <b>built-in</b> {@link SlotStrategy} implementations. Each
+ * concrete strategy class claims exactly one of these constant <em>names</em>
+ * via the {@link SlotStrategyImpl} annotation.
+ *
+ * <p><b>This enum is no longer the registry key</b> (PLUGIN_HOT_RELOAD Phase 2a,
+ * AD-12): the key is the constant name as a {@code String}, and no runtime code
+ * path may switch on this enum or use it as a map key. It is retained as the
+ * compile-time home of the built-in keys and their display metadata;
+ * {@code StrategyCatalogParityTest} pins each name to a registered bean.
  *
  * <p>This is a <b>separate</b> family from the betting {@code StrategyId} (AD-9
  * of {@code docs/plans/SLOT_MACHINE_BOT.md}): slot strategies pick a bet

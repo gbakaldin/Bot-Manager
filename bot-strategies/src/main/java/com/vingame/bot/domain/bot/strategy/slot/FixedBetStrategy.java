@@ -20,7 +20,7 @@ import org.springframework.stereotype.Component;
 @Slf4j
 @Component
 @Scope("prototype")
-@SlotStrategyImpl(SlotStrategyId.FIXED)
+@SlotStrategyImpl("FIXED")
 public final class FixedBetStrategy implements SlotStrategy {
 
     @Override

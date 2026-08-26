@@ -18,7 +18,7 @@ import java.util.List;
 @Slf4j
 @Component
 @Scope("prototype")
-@SlotStrategyImpl(SlotStrategyId.RANDOM)
+@SlotStrategyImpl("RANDOM")
 public final class RandomBetStrategy implements SlotStrategy {
 
     @Override

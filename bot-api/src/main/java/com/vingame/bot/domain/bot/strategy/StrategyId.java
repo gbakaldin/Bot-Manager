@@ -1,17 +1,26 @@
 package com.vingame.bot.domain.bot.strategy;
 
 /**
- * Canonical identifier for a {@link BettingStrategy} implementation. Each
- * concrete strategy class is keyed by exactly one of these via the
- * {@link StrategyImpl} annotation, and {@link BotGroup#getStrategyMix() bot
- * groups} reference strategies by this enum (NOT by class name) — so renaming
- * a strategy class is safe but renaming an enum entry breaks persisted
+ * Catalogue of the <b>built-in</b> {@link BettingStrategy} implementations, and
+ * the compile-time home of their display metadata. {@link BotGroup#getStrategyMix()
+ * Bot groups} reference strategies by <em>key</em> (NOT by class name) — so
+ * renaming a strategy class is safe but renaming an entry here breaks persisted
  * configurations.
  *
- * <p>v1 ships {@link #RANDOM} only. Future strategies (Martingale, slow-build,
- * gambler, ...) are added by extending this enum and shipping a new
- * {@code @StrategyImpl}-annotated class. See
- * {@code docs/plans/BETTING_STRATEGIES.md}, Architecture Decision 7.
+ * <p><b>This enum is no longer the registry key</b> (PLUGIN_HOT_RELOAD Phase 2a,
+ * AD-12). The key is the constant <em>name</em> as a {@code String}:
+ * {@code @StrategyImpl("RANDOM")} keys the registry, and no runtime code path
+ * may switch on this enum or use it as a map key. It is retained because it is
+ * the only structured record of the canonical key strings and their UI copy, and
+ * because deleting it would turn the renaming warning above from a loud
+ * compile-time fact into folklore. {@code StrategyCatalogParityTest} pins
+ * every constant name here to a registered bean.
+ *
+ * <p>A new built-in is still added by extending this enum and shipping a new
+ * {@code @StrategyImpl}-annotated class; a plugin-supplied strategy will
+ * register a key that appears here not at all. See
+ * {@code docs/plans/BETTING_STRATEGIES.md} Architecture Decision 7 and
+ * {@code docs/plans/PLUGIN_HOT_RELOAD.md} AD-12.
  */
 public enum StrategyId {
     /**
