@@ -687,8 +687,9 @@ export JAVA_HOME=/Users/gleb/Library/Java/JavaVirtualMachines/openjdk-21.0.2/Con
 mvn -q clean install
 ```
 Expect `BUILD SUCCESS`, all five modules built, **zero test failures and zero errors**,
-and a total test count **≥ 1485** (the pre-change baseline; each phase only adds tests).
-Record the exact count in the handoff.
+and a total test count **≥ 1866** (the pre-change baseline, measured at `254d56b` —
+**corrected by Amendment A1 below**, which supersedes the 1485 originally written here;
+each phase only adds tests). Record the exact count in the handoff.
 
 ```bash
 mvn -q -pl bot-api dependency:tree | grep -E 'bot-app|bot-engine|bot-strategies|bot-messages'
@@ -877,3 +878,44 @@ curl -sf 'http://localhost:9090/api/v1/query?query=ALERTS%7Balertstate%3D%22firi
 Expect: the same firing set as before the deploy (typically empty). A newly firing
 `EnvironmentDeadBotRatioHigh` or `GameNoRounds` after 2b/2c means a group stopped
 resolving its strategy or its messages — roll back that sub-phase.
+
+---
+
+## Amendment — 2026-08-26
+
+*Issued by the Compliance Architect during the Phase 1 review
+(`docs/reviews/PLUGIN_HOT_RELOAD/compliance.md`). Nothing outside the one figure below
+changes; every Architecture Decision stands as written.*
+
+### A1 — the per-phase local gate's test baseline is 1866, not 1485
+
+**What was wrong.** The "Per-phase local gate" said `≥ 1485 (the pre-change baseline)`.
+That figure does not describe this repo at the commit the branch was cut from.
+
+**Measured.** A detached worktree at `254d56b` — the branch point, i.e. the pre-change
+state the gate names — built with
+`JAVA_HOME=…/openjdk-21.0.2 mvn test`, counting `tests=` across every module's
+surefire XML:
+
+| Module | Tests at `254d56b` |
+|---|---|
+| `bot-api` | 125 |
+| `bot-strategies` | 111 |
+| `bot-messages` | 136 |
+| `bot-engine` | 420 |
+| `bot-app` | 1074 |
+| **Total** | **1866** |
+
+The same count on the Phase 1 branch head (`4cc152e`) is **1884**, i.e. Phase 1 adds
+**18** tests. Both builds are `BUILD SUCCESS` with zero failures and zero errors.
+
+**Why this is a plan defect and not an implementation one.** The number is a claim about
+the repository, not about anything Dev could have implemented differently; no correct
+implementation of Phase 1 would have produced 1485. And it is not cosmetic: `≥ 1485` is
+the *gate* every sub-phase in this document hands off against, so as written it would
+pass a build that had silently lost **381** existing tests. The gate is only as strong as
+the baseline is true.
+
+**What changed.** The figure in the Verification section, and nothing else. Re-measure the
+baseline when it is next used against a different branch point rather than assuming 1866
+carries forward.
