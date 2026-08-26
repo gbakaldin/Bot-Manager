@@ -85,11 +85,11 @@ class BettingMiniGameBotCrowdSeamTest {
                 .game(game).behaviorConfig(behavior)
                 .zoneName("MiniGame3").timeoutMillis(60_000L)
                 .watchdogTimeoutSeconds(120L)
-                .strategyId(StrategyId.RANDOM)
+                .strategyId(StrategyId.RANDOM.name())
                 .build();
 
         BettingStrategyFactory factory = mock(BettingStrategyFactory.class);
-        when(factory.create(StrategyId.RANDOM)).thenReturn(new NoopStrategy());
+        when(factory.create(StrategyId.RANDOM.name())).thenReturn(new NoopStrategy());
 
         bot = new BettingMiniGameBot();
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));

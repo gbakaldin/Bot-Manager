@@ -89,8 +89,13 @@ public class BotConfiguration {
      * <p>
      * May be {@code null} on legacy code paths that bypass the assignment
      * (no production caller); the {@code Bot} accessor tolerates that.
+     * <p>
+     * <b>A {@code String} registry key, not a {@link StrategyId}</b>
+     * (PLUGIN_HOT_RELOAD Phase 2b, AD-12): a strategy served from a plugin
+     * classloader cannot name an enum constant the engine declares. For a
+     * built-in the value is exactly a {@link StrategyId} constant name.
      */
-    StrategyId strategyId;
+    String strategyId;
 
     /**
      * Slot strategy id assigned to this bot (SLOT game type only).
@@ -104,8 +109,15 @@ public class BotConfiguration {
      * Nullable — defaults to {@code SlotStrategyId.FIXED} when unset. Slot
      * strategy is out of the group strategy-mix UI for v1 (AD-10), so this is
      * only ever set directly, not via the fill-to-target assignment.
+     * <p>
+     * <b>A {@code String} registry key, not a {@link SlotStrategyId}</b>
+     * (PLUGIN_HOT_RELOAD Phase 2b, AD-12). For a built-in the value is exactly
+     * a {@link SlotStrategyId} constant name. Null stays meaningful and is
+     * <em>not</em> defaulted here — the fall-back to {@code FIXED} happens at
+     * bot-build time in {@code SlotMachineBot.initializeSubclass()}, exactly as
+     * before.
      */
-    SlotStrategyId slotStrategyId;
+    String slotStrategyId;
 
     /**
      * The plugin version this bot's product implementation was loaded from

@@ -96,7 +96,7 @@ class SlotMachineBotSpinStreamTest {
                 .credentials(credentials)
                 .environmentId("env-1").botGroupId("group-1").botIndex(1)
                 .game(game).behaviorConfig(behavior)
-                .slotStrategyId(strategyId)
+                .slotStrategyId(strategyId.name())
                 .zoneName("MiniGame3").timeoutMillis(60_000L)
                 .build();
 

@@ -69,7 +69,7 @@ class BettingMiniGameBotAccumulatorTest {
                 .game(game).behaviorConfig(behavior)
                 .zoneName("MiniGame3").timeoutMillis(60_000L)
                 .watchdogTimeoutSeconds(120L)
-                .strategyId(StrategyId.RANDOM)
+                .strategyId(StrategyId.RANDOM.name())
                 .build();
 
         bot = new BettingMiniGameBot();

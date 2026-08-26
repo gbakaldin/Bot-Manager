@@ -361,7 +361,7 @@ public class BotGroupBehaviorService {
             for (int i = 1; i <= group.getBotCount(); i++) {
                 botIdentifiers.add(group.getNamePrefix() + i);
             }
-            Map<String, StrategyId> strategyAssignment = StrategyAssignment.assign(
+            Map<String, String> strategyAssignment = StrategyAssignment.assign(
                     effectiveStrategyMix(group), botIdentifiers);
             // LOG_VOLUME_TIERING tier 1: ONE line for the whole assignment, here where the
             // group-level decision is actually made, replacing the per-bot INFO line that
@@ -578,7 +578,7 @@ public class BotGroupBehaviorService {
      * @return List of created and initialized bots
      */
     private List<Bot> createBotsInParallel(BotGroup group, Environment environment, Game game,
-                                           Map<String, StrategyId> strategyAssignment) {
+                                           Map<String, String> strategyAssignment) {
         int botCount = group.getBotCount();
         Semaphore semaphore = new Semaphore(botCreationParallelism);
         // The group's product, for the MDC that tags bot_creation_failures_total below.
@@ -699,8 +699,8 @@ public class BotGroupBehaviorService {
      * @param environment        The environment configuration
      * @param game               The game configuration
      * @param botIndex           The index of this bot (1-based)
-     * @param strategyAssignment Map from username → assigned {@link StrategyId},
-     *                           computed once per group start by
+     * @param strategyAssignment Map from username → assigned strategy registry
+     *                           key, computed once per group start by
      *                           {@link StrategyAssignment#assign}. Lookup by
      *                           username; missing keys fall back to
      *                           {@link StrategyId#RANDOM} (defensive — the
@@ -709,7 +709,7 @@ public class BotGroupBehaviorService {
      * @return The created and initialized bot
      */
     private Bot createSingleBot(BotGroup group, Environment environment, Game game, int botIndex,
-                                Map<String, StrategyId> strategyAssignment) {
+                                Map<String, String> strategyAssignment) {
         String username = group.getNamePrefix() + botIndex;
         String password = group.getPassword();
 
@@ -765,7 +765,10 @@ public class BotGroupBehaviorService {
         // still starts. The assignment map carries the per-bot lifecycle
         // identity downstream (Phase 5 will read configuration.strategyId
         // in BettingMiniGameBot.initializeSubclass to build the strategy).
-        StrategyId strategyId = strategyAssignment.getOrDefault(username, StrategyId.RANDOM);
+        // StrategyId.RANDOM.name() rather than a "RANDOM" literal: the enum survives
+        // as the compile-time catalogue of the built-in keys (PLUGIN_HOT_RELOAD AD-12),
+        // so the defensive default stays tied to the catalogue.
+        String strategyId = strategyAssignment.getOrDefault(username, StrategyId.RANDOM.name());
         // DEBUG. This was INFO under BETTING_STRATEGIES AD-14, whose argument was
         // explicitly "N bots = N lines at start, mirrors the 'Bot starting in virtual
         // thread' line emitted from BotGroupRuntime at the same scale" — LOG_VOLUME_TIERING
@@ -785,9 +788,9 @@ public class BotGroupBehaviorService {
         // meaningless for slots but harmless, so it is left in place unchanged;
         // SlotMachineBot.initializeSubclass reads configuration.slotStrategyId and
         // ignores strategyId.
-        SlotStrategyId slotStrategyId = null;
+        String slotStrategyId = null;
         if (game.getGameType() == GameType.SLOT) {
-            slotStrategyId = SlotStrategyId.FIXED;
+            slotStrategyId = SlotStrategyId.FIXED.name();
             // DEBUG for the same reason as the line above: one per slot bot at group start.
             log.debug("Bot {}: assigned slot strategy {} (slot strategy is not selectable)", username, slotStrategyId);
         }
@@ -829,10 +832,10 @@ public class BotGroupBehaviorService {
      * (LOG_VOLUME_TIERING tier 1). Sorted so two groups with the same mix log the same
      * string and the line is diffable.
      */
-    static String strategyCounts(Map<String, StrategyId> assignment) {
+    static String strategyCounts(Map<String, String> assignment) {
         Map<String, Integer> counts = new TreeMap<>();
-        for (StrategyId strategyId : assignment.values()) {
-            counts.merge(strategyId.name(), 1, Integer::sum);
+        for (String strategyId : assignment.values()) {
+            counts.merge(strategyId, 1, Integer::sum);
         }
         return counts.toString();
     }
@@ -840,7 +843,7 @@ public class BotGroupBehaviorService {
     private static List<WeightedStrategy> effectiveStrategyMix(BotGroup group) {
         List<WeightedStrategy> mix = group.getStrategyMix();
         if (mix == null || mix.isEmpty()) {
-            return List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            return List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
         }
         return mix;
     }

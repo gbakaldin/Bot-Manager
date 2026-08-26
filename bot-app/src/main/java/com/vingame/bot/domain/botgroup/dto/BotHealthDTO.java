@@ -23,10 +23,14 @@ public class BotHealthDTO {
     private long lastRoundWinnings;
 
     /**
-     * Strategy id assigned to this bot at start (see
+     * Strategy registry key assigned to this bot at start (see
      * {@code BotGroup.strategyMix} and Architecture Decision 8 in
      * {@code docs/plans/BETTING_STRATEGIES.md}). Null on legacy paths that
      * bypass the assignment.
+     * <p>
+     * A {@code String} and not a {@link StrategyId} since PLUGIN_HOT_RELOAD
+     * Phase 2b (AD-12). The rendered JSON is unchanged: the enum already
+     * serialised as its bare constant name.
      */
-    private StrategyId strategyId;
+    private String strategyId;
 }

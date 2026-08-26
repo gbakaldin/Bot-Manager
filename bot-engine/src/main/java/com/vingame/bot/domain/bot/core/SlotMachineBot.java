@@ -153,9 +153,9 @@ public class SlotMachineBot extends Bot {
         // group strategy-mix UI for v1). When the factory is absent (standalone
         // tests), fall back to an inline FixedBetStrategy so the bot is testable
         // without a Spring context (mirrors the betting bot's fallback).
-        SlotStrategyId strategyId = configuration.getSlotStrategyId() != null
+        String strategyId = configuration.getSlotStrategyId() != null
                 ? configuration.getSlotStrategyId()
-                : SlotStrategyId.FIXED;
+                : SlotStrategyId.FIXED.name();
         this.strategy = slotStrategyFactory != null
                 ? slotStrategyFactory.create(strategyId)
                 : new FixedBetStrategy();

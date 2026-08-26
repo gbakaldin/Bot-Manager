@@ -128,8 +128,15 @@ public class BotGroupDTO {
      * {@code SlotStrategyId.FIXED} at bot-build time. Betting groups ignore this field.
      * PATCH is full-replace — supplying this field overwrites the persisted value, but
      * does NOT re-assign already-running bots (mirrors {@code strategyMix} semantics).
+     * <p>
+     * A {@code String} registry key, not a {@link SlotStrategyId}, since
+     * PLUGIN_HOT_RELOAD Phase 2b (AD-12). The JSON is unchanged in both
+     * directions — the enum already serialised as its bare constant name. An
+     * unknown key is rejected with a 400 by
+     * {@code BotGroupConfigValidationService} (AD-15), which is what Jackson's
+     * enum deserializer used to do implicitly.
      */
-    private SlotStrategyId slotStrategyId;
+    private String slotStrategyId;
 
     // Lifecycle management
     private BotGroupStatus targetStatus;

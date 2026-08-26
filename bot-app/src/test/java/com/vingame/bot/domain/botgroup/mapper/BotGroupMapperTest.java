@@ -309,7 +309,7 @@ class BotGroupMapperTest {
         @Test
         @DisplayName("toDTO emits strategyMix as-is when persisted on the entity")
         void toDtoEmitsStrategyMix() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             BotGroup entity = BotGroup.builder().id("g").name("g").strategyMix(mix).build();
 
             BotGroupDTO dto = mapper.toDTO(entity);
@@ -334,7 +334,7 @@ class BotGroupMapperTest {
         @Test
         @DisplayName("toEntity persists strategyMix as-is when provided in the DTO")
         void toEntityPersistsStrategyMix() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             BotGroupDTO dto = BotGroupDTO.builder().name("g").strategyMix(mix).build();
 
             BotGroup entity = mapper.toEntity(dto);
@@ -345,8 +345,8 @@ class BotGroupMapperTest {
         @Test
         @DisplayName("PATCH full-replaces strategyMix when DTO supplies a non-empty list")
         void patchFullReplacesStrategyMix() {
-            List<WeightedStrategy> oldMix = List.of(new WeightedStrategy(StrategyId.RANDOM, 0.5));
-            List<WeightedStrategy> newMix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> oldMix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 0.5));
+            List<WeightedStrategy> newMix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
 
             BotGroup entity = BotGroup.builder().id("g").name("g").strategyMix(oldMix).build();
             BotGroupDTO patch = BotGroupDTO.builder().strategyMix(newMix).build();
@@ -362,7 +362,7 @@ class BotGroupMapperTest {
         @Test
         @DisplayName("PATCH retains existing strategyMix when DTO omits the field (null)")
         void patchKeepsExistingWhenDtoNull() {
-            List<WeightedStrategy> existing = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> existing = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             BotGroup entity = BotGroup.builder().id("g").name("g").strategyMix(existing).build();
             BotGroupDTO patch = BotGroupDTO.builder().name("renamed").build();
 
@@ -375,7 +375,7 @@ class BotGroupMapperTest {
         @DisplayName("PATCH with an explicit empty strategyMix throws BadRequestException (Implementation Note 10)")
         void patchEmptyStrategyMixRejected() {
             BotGroup entity = BotGroup.builder().id("g").name("g")
-                    .strategyMix(List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0))).build();
+                    .strategyMix(List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0))).build();
             BotGroupDTO patch = BotGroupDTO.builder().strategyMix(List.of()).build();
 
             assertThatThrownBy(() -> mapper.updateEntityFromDTO(patch, entity))
@@ -392,11 +392,11 @@ class BotGroupMapperTest {
         @DisplayName("toDTO emits slotStrategyId as-is when persisted on the entity")
         void toDtoEmitsSlotStrategyId() {
             BotGroup entity = BotGroup.builder().id("g").name("g")
-                    .slotStrategyId(SlotStrategyId.RANDOM).build();
+                    .slotStrategyId(SlotStrategyId.RANDOM.name()).build();
 
             BotGroupDTO dto = mapper.toDTO(entity);
 
-            assertThat(dto.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM);
+            assertThat(dto.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM.name());
         }
 
         @Test
@@ -411,35 +411,35 @@ class BotGroupMapperTest {
         @DisplayName("toEntity persists slotStrategyId as-is when provided in the DTO")
         void toEntityPersistsSlotStrategyId() {
             BotGroupDTO dto = BotGroupDTO.builder().name("g")
-                    .slotStrategyId(SlotStrategyId.RANDOM).build();
+                    .slotStrategyId(SlotStrategyId.RANDOM.name()).build();
 
             BotGroup entity = mapper.toEntity(dto);
 
-            assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM);
+            assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM.name());
         }
 
         @Test
         @DisplayName("PATCH full-replaces slotStrategyId when DTO supplies a value")
         void patchFullReplacesSlotStrategyId() {
             BotGroup entity = BotGroup.builder().id("g").name("g")
-                    .slotStrategyId(SlotStrategyId.FIXED).build();
-            BotGroupDTO patch = BotGroupDTO.builder().slotStrategyId(SlotStrategyId.RANDOM).build();
+                    .slotStrategyId(SlotStrategyId.FIXED.name()).build();
+            BotGroupDTO patch = BotGroupDTO.builder().slotStrategyId(SlotStrategyId.RANDOM.name()).build();
 
             mapper.updateEntityFromDTO(patch, entity);
 
-            assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM);
+            assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM.name());
         }
 
         @Test
         @DisplayName("PATCH retains existing slotStrategyId when DTO omits the field (null)")
         void patchKeepsExistingWhenDtoNull() {
             BotGroup entity = BotGroup.builder().id("g").name("g")
-                    .slotStrategyId(SlotStrategyId.RANDOM).build();
+                    .slotStrategyId(SlotStrategyId.RANDOM.name()).build();
             BotGroupDTO patch = BotGroupDTO.builder().name("renamed").build();
 
             mapper.updateEntityFromDTO(patch, entity);
 
-            assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM);
+            assertThat(entity.getSlotStrategyId()).isEqualTo(SlotStrategyId.RANDOM.name());
         }
     }
 

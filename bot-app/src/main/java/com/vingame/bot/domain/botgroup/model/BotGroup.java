@@ -152,12 +152,20 @@ public class BotGroup {
      * {@code BotGroupBehaviorService.createSingleBot}. Betting groups ignore this
      * field (their per-bot strategy comes from {@link #strategyMix}).
      * <p>
+     * <b>A {@code String} registry key, not a {@link SlotStrategyId}</b>
+     * (PLUGIN_HOT_RELOAD Phase 2b, AD-12/AD-14). The persisted BSON is unchanged:
+     * with no Spring Data converters in this application an enum was already
+     * stored as its {@code name()} string, so every existing document reads back
+     * into this field verbatim — no migration script, no dual-read. Pinned by
+     * {@code PersistedStrategyKeyCompatTest}. Null still means "fall back to
+     * FIXED"; it is not defaulted here.
+     * <p>
      * <b>PATCH semantics:</b> full-replace — a non-null DTO value overwrites the
      * persisted value; a null DTO value keeps the existing one. Mid-flight changes
      * do NOT re-assign already-running bots — only newly-created / restarted bots
      * pick up the new value, mirroring {@link #strategyMix}.
      */
-    private SlotStrategyId slotStrategyId;
+    private String slotStrategyId;
 
     /**
      * Instant this group was first persisted. Stamped by

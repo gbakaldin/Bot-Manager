@@ -53,8 +53,8 @@ class BettingStrategyFactoryTest {
         BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(a));
         factory.init();
 
-        BettingStrategy s1 = factory.create(StrategyId.RANDOM);
-        BettingStrategy s2 = factory.create(StrategyId.RANDOM);
+        BettingStrategy s1 = factory.create(StrategyId.RANDOM.name());
+        BettingStrategy s2 = factory.create(StrategyId.RANDOM.name());
 
         assertThat(s1).isNotSameAs(s2);
         assertThat(s1).isInstanceOf(RandomBehaviorStrategy.class);
@@ -62,55 +62,36 @@ class BettingStrategyFactoryTest {
     }
 
     @Test
-    @DisplayName("create with unknown StrategyId throws IllegalArgumentException")
+    @DisplayName("create with an unregistered key throws IllegalArgumentException")
     void unknownIdThrows() {
         ApplicationContext context = mock(ApplicationContext.class);
 
         BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of());
         factory.init();
 
-        assertThatThrownBy(() -> factory.create(StrategyId.RANDOM))
+        assertThatThrownBy(() -> factory.create(StrategyId.RANDOM.name()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("RANDOM");
     }
 
     @Test
-    @DisplayName("the deprecated enum overload resolves the same bean as the string key")
-    void deprecatedEnumOverloadMatchesStringKey() {
-        // PLUGIN_HOT_RELOAD Phase 2a. create(StrategyId) is retained only so that
-        // no engine call site moves in 2a — BettingMiniGameBot:178 still calls it.
-        // It delegates to create(id.name()), and nothing else asserts the two
-        // overloads land on the same bean: MartingaleStrategyFactoryWiringTest
-        // only exercises the enum path, StrategyCatalogParityTest only the string
-        // path. Pin the delegation itself so 2b's removal of this overload is a
-        // deletion, not a behaviour change.
-        ApplicationContext context = mock(ApplicationContext.class);
-        RandomBehaviorStrategy bean = new RandomBehaviorStrategy();
-        when(context.getBean(RandomBehaviorStrategy.class))
-                .thenAnswer(invocation -> new RandomBehaviorStrategy());
-
-        BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(bean));
-        factory.init();
-
-        assertThat(factory.create(StrategyId.RANDOM))
-                .hasSameClassAs(factory.create(StrategyId.RANDOM.name()));
-    }
-
-    @Test
-    @DisplayName("the deprecated enum overload rejects null with IllegalArgumentException, not NPE")
-    void deprecatedEnumOverloadRejectsNull() {
-        // AD-23 (Phase 2 changes no behaviour): before Phase 2a the registry was
-        // an EnumMap, and EnumMap.get(null) returns null, so create((StrategyId)
-        // null) threw IllegalArgumentException. The overload's `id == null ? null
-        // : id.name()` guard is what preserves that — drop the guard and the same
-        // input becomes a NullPointerException.
+    @DisplayName("a null key is rejected with IllegalArgumentException, not NPE")
+    void nullKeyRejectedWithIllegalArgumentException() {
+        // AD-23 (Phase 2 changes no behaviour). Before Phase 2a the registry was
+        // an EnumMap and EnumMap.get(null) returns null, so create(null) threw
+        // IllegalArgumentException rather than NPE. Phase 2a preserved that with
+        // an `id == null` guard on the deprecated enum overload; Phase 2b deletes
+        // that overload, and the property now belongs to create(String) alone —
+        // LinkedHashMap.get(null) is also null-tolerant, so the message is the
+        // same. Pinned here because it is one `Objects.requireNonNull` away from
+        // silently changing.
         ApplicationContext context = mock(ApplicationContext.class);
 
         BettingStrategyFactory factory =
                 new BettingStrategyFactory(context, List.of(new RandomBehaviorStrategy()));
         factory.init();
 
-        assertThatThrownBy(() -> factory.create((StrategyId) null))
+        assertThatThrownBy(() -> factory.create(null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("null");
     }

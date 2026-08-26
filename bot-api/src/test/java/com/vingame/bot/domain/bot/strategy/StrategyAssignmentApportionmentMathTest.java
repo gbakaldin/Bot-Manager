@@ -119,9 +119,9 @@ class StrategyAssignmentApportionmentMathTest {
         // routine's "coalesce then apply largest-remainder" semantics still
         // produce a sum-correct result when fed duplicate keys.
         List<WeightedStrategy> mix = List.of(
-                new WeightedStrategy(StrategyId.RANDOM, 0.3),
-                new WeightedStrategy(StrategyId.RANDOM, 0.5),
-                new WeightedStrategy(StrategyId.RANDOM, 0.2)
+                new WeightedStrategy(StrategyId.RANDOM.name(), 0.3),
+                new WeightedStrategy(StrategyId.RANDOM.name(), 0.5),
+                new WeightedStrategy(StrategyId.RANDOM.name(), 0.2)
         );
         StrategyAssignment.ApportionmentResult prod = StrategyAssignment.apportion(mix, 100);
         int[] ref = largestRemainder(new double[]{1.0}, 100);
@@ -137,7 +137,7 @@ class StrategyAssignmentApportionmentMathTest {
         // (n - floor(1.0 * n) == 0). The test is here for completeness — and
         // to surface a regression if anyone changes the leftover loop.
         StrategyAssignment.ApportionmentResult res =
-                StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0)), 7);
+                StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0)), 7);
         assertThat(res.target()).containsExactly(7);
     }
 
@@ -148,13 +148,13 @@ class StrategyAssignmentApportionmentMathTest {
         // Reflectively confirm the record shape so a Lombok or generation
         // change is caught here, not in StrategyAssignmentTest.
         StrategyAssignment.ApportionmentResult res =
-                StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0)), 3);
-        assertThat(res.ids()).containsExactly(StrategyId.RANDOM);
+                StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0)), 3);
+        assertThat(res.ids()).containsExactly(StrategyId.RANDOM.name());
         assertThat(res.target()).containsExactly(3);
 
         Method idsAccessor = StrategyAssignment.ApportionmentResult.class.getMethod("ids");
         Method targetAccessor = StrategyAssignment.ApportionmentResult.class.getMethod("target");
-        assertThat(idsAccessor.invoke(res)).isEqualTo(List.of(StrategyId.RANDOM));
+        assertThat(idsAccessor.invoke(res)).isEqualTo(List.of(StrategyId.RANDOM.name()));
         assertThat((int[]) targetAccessor.invoke(res)).containsExactly(3);
     }
 
@@ -163,7 +163,7 @@ class StrategyAssignmentApportionmentMathTest {
     void noLeftoverOnExactFraction() {
         // 1.0 weight over botCount=10 → floor(10) = 10, leftover = 0.
         StrategyAssignment.ApportionmentResult res =
-                StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0)), 10);
+                StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0)), 10);
         assertThat(res.target()).containsExactly(10);
     }
 
@@ -203,16 +203,16 @@ class StrategyAssignmentApportionmentMathTest {
     @Test
     @DisplayName("Limitation: production apportion coalesces same-id entries — multi-bucket testing requires a second StrategyId")
     void coalesceLimitationDocumented() {
-        Map<StrategyId, Long> tally = new LinkedHashMap<>();
+        Map<String, Long> tally = new LinkedHashMap<>();
         StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(
                 List.of(
-                        new WeightedStrategy(StrategyId.RANDOM, 0.3),
-                        new WeightedStrategy(StrategyId.RANDOM, 0.5),
-                        new WeightedStrategy(StrategyId.RANDOM, 0.2)
+                        new WeightedStrategy(StrategyId.RANDOM.name(), 0.3),
+                        new WeightedStrategy(StrategyId.RANDOM.name(), 0.5),
+                        new WeightedStrategy(StrategyId.RANDOM.name(), 0.2)
                 ),
                 100);
         // Exactly one bucket survives the coalesce — this is the limitation.
-        assertThat(res.ids()).containsExactly(StrategyId.RANDOM);
+        assertThat(res.ids()).containsExactly(StrategyId.RANDOM.name());
         assertThat(res.target()).hasSize(1);
         // The reference algorithm (above) is what would happen if the bucket
         // weren't coalesced; this single-bucket production output is correct

@@ -242,12 +242,12 @@ class BettingMiniGameBotRampSeamTest {
                     .game(game).behaviorConfig(behavior)
                     .zoneName("MiniGame3").timeoutMillis(60_000L)
                     .watchdogTimeoutSeconds(120L)
-                    .strategyId(StrategyId.RANDOM)
+                    .strategyId(StrategyId.RANDOM.name())
                     .build();
 
             strategy = new ControlledStrategy();
             BettingStrategyFactory factory = mock(BettingStrategyFactory.class);
-            when(factory.create(StrategyId.RANDOM)).thenReturn(strategy);
+            when(factory.create(StrategyId.RANDOM.name())).thenReturn(strategy);
 
             bot = new BettingMiniGameBot();
             bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));

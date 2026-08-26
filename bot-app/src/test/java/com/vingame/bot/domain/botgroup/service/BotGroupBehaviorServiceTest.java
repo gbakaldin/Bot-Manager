@@ -1107,7 +1107,7 @@ class BotGroupBehaviorServiceTest {
                     .botCount(3)
                     .namePrefix("bot")
                     .password("pass")
-                    .strategyMix(List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0)))
+                    .strategyMix(List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0)))
                     .build();
 
             Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
@@ -1133,7 +1133,7 @@ class BotGroupBehaviorServiceTest {
             assertThat(configCaptor.getAllValues())
                     .as("captured BotConfigurations")
                     .isNotEmpty()
-                    .allSatisfy(cfg -> assertThat(cfg.getStrategyId()).isEqualTo(StrategyId.RANDOM));
+                    .allSatisfy(cfg -> assertThat(cfg.getStrategyId()).isEqualTo(StrategyId.RANDOM.name()));
 
             // Cleanup the side-effect runtime created on the failed start path.
             BotGroupRuntime rt = runningGroups().get("g-1");
@@ -1172,7 +1172,7 @@ class BotGroupBehaviorServiceTest {
                     .isNotEmpty()
                     .allSatisfy(cfg -> assertThat(cfg.getStrategyId())
                             .as("read-side fallback should default missing mix to RANDOM")
-                            .isEqualTo(StrategyId.RANDOM));
+                            .isEqualTo(StrategyId.RANDOM.name()));
 
             BotGroupRuntime rt = runningGroups().get("g-1");
             if (rt != null) rt.stopAllBots();
@@ -1188,7 +1188,7 @@ class BotGroupBehaviorServiceTest {
             runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
             try {
                 Bot b = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
-                lenient().when(b.getStrategyId()).thenReturn(StrategyId.RANDOM);
+                lenient().when(b.getStrategyId()).thenReturn(StrategyId.RANDOM.name());
                 putBots(runtime, List.of(b));
                 runningGroups().put("g-1", runtime);
 
@@ -1196,7 +1196,7 @@ class BotGroupBehaviorServiceTest {
 
                 assertThat(dto.getBots()).hasSize(1);
                 BotHealthDTO botDto = dto.getBots().get(0);
-                assertThat(botDto.getStrategyId()).isEqualTo(StrategyId.RANDOM);
+                assertThat(botDto.getStrategyId()).isEqualTo(StrategyId.RANDOM.name());
             } finally {
                 runtime.getExecutor().shutdownNow();
                 runningGroups().remove("g-1");
@@ -1220,7 +1220,7 @@ class BotGroupBehaviorServiceTest {
                     .namePrefix("bot")
                     .password("pass")
                     // client picked RANDOM, but slots are never selectable — must be overridden to FIXED
-                    .slotStrategyId(SlotStrategyId.RANDOM)
+                    .slotStrategyId(SlotStrategyId.RANDOM.name())
                     .build();
 
             Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
@@ -1241,7 +1241,7 @@ class BotGroupBehaviorServiceTest {
                     .isNotEmpty()
                     .allSatisfy(cfg -> assertThat(cfg.getSlotStrategyId())
                             .as("group slotStrategyId RANDOM must be silently overridden to FIXED")
-                            .isEqualTo(SlotStrategyId.FIXED));
+                            .isEqualTo(SlotStrategyId.FIXED.name()));
 
             BotGroupRuntime rt = runningGroups().get("g-1");
             if (rt != null) rt.stopAllBots();
@@ -1278,7 +1278,7 @@ class BotGroupBehaviorServiceTest {
                     .isNotEmpty()
                     .allSatisfy(cfg -> assertThat(cfg.getSlotStrategyId())
                             .as("SLOT bots always run FIXED regardless of group slotStrategyId")
-                            .isEqualTo(SlotStrategyId.FIXED));
+                            .isEqualTo(SlotStrategyId.FIXED.name()));
 
             BotGroupRuntime rt = runningGroups().get("g-1");
             if (rt != null) rt.stopAllBots();
@@ -1296,7 +1296,7 @@ class BotGroupBehaviorServiceTest {
                     .namePrefix("bot")
                     .password("pass")
                     // even if a slotStrategyId leaks onto a betting group, it must not flow through
-                    .slotStrategyId(SlotStrategyId.RANDOM)
+                    .slotStrategyId(SlotStrategyId.RANDOM.name())
                     .build();
 
             Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();

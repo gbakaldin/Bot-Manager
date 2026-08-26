@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -47,9 +47,9 @@ class StrategyAssignmentTest {
      * Tally a per-strategy bot count from an assignment result so we can assert
      * the apportionment matches the largest-remainder target.
      */
-    private static Map<StrategyId, Integer> tally(Map<String, StrategyId> assignment) {
-        Map<StrategyId, Integer> tally = new EnumMap<>(StrategyId.class);
-        for (StrategyId id : assignment.values()) {
+    private static Map<String, Integer> tally(Map<String, String> assignment) {
+        Map<String, Integer> tally = new LinkedHashMap<>();
+        for (String id : assignment.values()) {
             tally.merge(id, 1, Integer::sum);
         }
         return tally;
@@ -77,24 +77,24 @@ class StrategyAssignmentTest {
             // raw-int level by inspecting the per-bucket target vector before
             // assign() collapses it.
             List<WeightedStrategy> mix = List.of(
-                    new WeightedStrategy(StrategyId.RANDOM, 0.3),
-                    new WeightedStrategy(StrategyId.RANDOM, 0.5),
-                    new WeightedStrategy(StrategyId.RANDOM, 0.2)
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.3),
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.5),
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.2)
             );
             // Coalescing merges all three into one StrategyId.RANDOM entry
             // with summed weight 1.0; the resulting target vector is [100].
             StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(mix, 100);
-            assertThat(res.ids()).containsExactly(StrategyId.RANDOM);
+            assertThat(res.ids()).containsExactly(StrategyId.RANDOM.name());
             assertThat(res.target()).containsExactly(100);
         }
 
         @Test
         @DisplayName("100 bots, single-bucket weight 1.0 → all 100 in one strategy")
         void hundredBotsSingleBucket() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(mix, 100);
 
-            assertThat(res.ids()).containsExactly(StrategyId.RANDOM);
+            assertThat(res.ids()).containsExactly(StrategyId.RANDOM.name());
             assertThat(res.target()).containsExactly(100);
         }
 
@@ -106,12 +106,12 @@ class StrategyAssignmentTest {
             // exists to pin the no-leftover edge of apportion(): floor(1.0 *
             // 100) == 100, leftover == 0.
             StrategyAssignment.ApportionmentResult one =
-                    StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0)), 7);
+                    StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0)), 7);
             assertThat(one.target()).containsExactly(7);
 
             // Botcount == 0 edge — every bucket gets 0, no leftover to fix up.
             StrategyAssignment.ApportionmentResult zero =
-                    StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0)), 0);
+                    StrategyAssignment.apportion(List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0)), 0);
             assertThat(zero.target()).containsExactly(0);
         }
 
@@ -122,9 +122,9 @@ class StrategyAssignmentTest {
             // This is the invariant the largest-remainder method exists to
             // guarantee (vs. naive Math.round which drifts).
             List<WeightedStrategy> mix = List.of(
-                    new WeightedStrategy(StrategyId.RANDOM, 0.31),
-                    new WeightedStrategy(StrategyId.RANDOM, 0.51),
-                    new WeightedStrategy(StrategyId.RANDOM, 0.18)
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.31),
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.51),
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.18)
             );
             for (int n = 1; n <= 200; n++) {
                 StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(mix, n);
@@ -140,7 +140,7 @@ class StrategyAssignmentTest {
         @DisplayName("Negative weight rejected")
         void negativeWeightRejected() {
             assertThatThrownBy(() -> StrategyAssignment.apportion(
-                    List.of(new WeightedStrategy(StrategyId.RANDOM, -1.0)), 5))
+                    List.of(new WeightedStrategy(StrategyId.RANDOM.name(), -1.0)), 5))
                     .isInstanceOf(IllegalArgumentException.class);
         }
 
@@ -148,7 +148,7 @@ class StrategyAssignmentTest {
         @DisplayName("Zero weight rejected")
         void zeroWeightRejected() {
             assertThatThrownBy(() -> StrategyAssignment.apportion(
-                    List.of(new WeightedStrategy(StrategyId.RANDOM, 0.0)), 5))
+                    List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 0.0)), 5))
                     .isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("weight");
         }
@@ -161,13 +161,13 @@ class StrategyAssignmentTest {
         @Test
         @DisplayName("Single-strategy mix [(RANDOM, 1.0)] assigns every bot to RANDOM")
         void singleStrategyAssignsAll() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             List<String> ids = identifiers("bot", 30);
 
-            Map<String, StrategyId> assignment = StrategyAssignment.assign(mix, ids);
+            Map<String, String> assignment = StrategyAssignment.assign(mix, ids);
 
             assertThat(assignment).hasSize(30);
-            assertThat(assignment.values()).containsOnly(StrategyId.RANDOM);
+            assertThat(assignment.values()).containsOnly(StrategyId.RANDOM.name());
             assertThat(assignment.keySet()).containsExactlyInAnyOrderElementsOf(ids);
         }
 
@@ -175,31 +175,31 @@ class StrategyAssignmentTest {
         @DisplayName("5-bot edge — every bot is assigned exactly once with no drops")
         void fiveBotsApportionFully() {
             List<WeightedStrategy> mix = List.of(
-                    new WeightedStrategy(StrategyId.RANDOM, 0.3),
-                    new WeightedStrategy(StrategyId.RANDOM, 0.5),
-                    new WeightedStrategy(StrategyId.RANDOM, 0.2)
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.3),
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.5),
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.2)
             );
             List<String> ids = identifiers("bot", 5);
 
-            Map<String, StrategyId> assignment = StrategyAssignment.assign(mix, ids);
+            Map<String, String> assignment = StrategyAssignment.assign(mix, ids);
 
             assertThat(assignment).hasSize(5);
             assertThat(assignment.keySet()).containsExactlyInAnyOrderElementsOf(ids);
             // All 5 land on RANDOM (the only enum entry); the apportionment
             // math handled the (1.5, 2.5, 1.0) → integer fix-up internally.
-            assertThat(assignment.values()).containsOnly(StrategyId.RANDOM);
+            assertThat(assignment.values()).containsOnly(StrategyId.RANDOM.name());
         }
 
         @Test
         @DisplayName("100 bots, single-strategy mix — total count 100, all RANDOM")
         void hundredBotsAllRandom() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             List<String> ids = identifiers("bot", 100);
 
-            Map<String, StrategyId> assignment = StrategyAssignment.assign(mix, ids);
+            Map<String, String> assignment = StrategyAssignment.assign(mix, ids);
 
             assertThat(assignment).hasSize(100);
-            assertThat(tally(assignment).get(StrategyId.RANDOM)).isEqualTo(100);
+            assertThat(tally(assignment).get(StrategyId.RANDOM.name())).isEqualTo(100);
         }
     }
 
@@ -210,11 +210,11 @@ class StrategyAssignmentTest {
         @Test
         @DisplayName("Re-running with the same inputs produces bit-identical output")
         void sameInputsSameOutput() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             List<String> ids = identifiers("bot", 47);
 
-            Map<String, StrategyId> first = StrategyAssignment.assign(mix, ids);
-            Map<String, StrategyId> second = StrategyAssignment.assign(mix, ids);
+            Map<String, String> first = StrategyAssignment.assign(mix, ids);
+            Map<String, String> second = StrategyAssignment.assign(mix, ids);
 
             // LinkedHashMap iteration order must match too — the algorithm
             // populates the result in sorted-identifier order, so callers can
@@ -225,13 +225,13 @@ class StrategyAssignmentTest {
         @Test
         @DisplayName("Input-list permutation does not change the per-bot strategy assignment")
         void inputOrderDoesNotMatter() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             List<String> a = identifiers("bot", 30);
             List<String> b = new ArrayList<>(a);
             Collections.reverse(b);
 
-            Map<String, StrategyId> forward = StrategyAssignment.assign(mix, a);
-            Map<String, StrategyId> reversed = StrategyAssignment.assign(mix, b);
+            Map<String, String> forward = StrategyAssignment.assign(mix, a);
+            Map<String, String> reversed = StrategyAssignment.assign(mix, b);
 
             // Iterate by identifier (not insertion order) for the equality
             // check — every bot must end up with the same StrategyId
@@ -248,14 +248,14 @@ class StrategyAssignmentTest {
             // list. Confirm that for a fixed identifier set, every identifier
             // is present in the assignment no matter what order it was passed
             // in — the hash-sort step canonicalizes ordering.
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             List<String> ids = identifiers("user", 100);
 
             Set<String> seenAcrossRuns = new HashSet<>();
             for (int run = 0; run < 3; run++) {
                 List<String> shuffled = new ArrayList<>(ids);
                 Collections.shuffle(shuffled, new java.util.Random(run));
-                Map<String, StrategyId> assignment = StrategyAssignment.assign(mix, shuffled);
+                Map<String, String> assignment = StrategyAssignment.assign(mix, shuffled);
                 seenAcrossRuns.addAll(assignment.keySet());
                 assertThat(assignment.keySet()).containsAll(ids);
             }
@@ -282,21 +282,21 @@ class StrategyAssignmentTest {
         @Test
         @DisplayName("Null identifiers list returns empty map")
         void nullIdentifiersReturnsEmpty() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             assertThat(StrategyAssignment.assign(mix, null)).isEmpty();
         }
 
         @Test
         @DisplayName("Empty identifiers list returns empty map")
         void emptyIdentifiersReturnsEmpty() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             assertThat(StrategyAssignment.assign(mix, List.of())).isEmpty();
         }
 
         @Test
         @DisplayName("Duplicate bot identifier is rejected with IllegalArgumentException")
         void duplicateIdentifierRejected() {
-            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM, 1.0));
+            List<WeightedStrategy> mix = List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0));
             List<String> ids = List.of("a", "b", "a");
 
             assertThatThrownBy(() -> StrategyAssignment.assign(mix, ids))
@@ -308,13 +308,13 @@ class StrategyAssignmentTest {
         @DisplayName("Duplicate StrategyId entries in mix are coalesced (weights summed)")
         void duplicateStrategyIdsCoalesce() {
             List<WeightedStrategy> mix = List.of(
-                    new WeightedStrategy(StrategyId.RANDOM, 0.5),
-                    new WeightedStrategy(StrategyId.RANDOM, 1.0)
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 0.5),
+                    new WeightedStrategy(StrategyId.RANDOM.name(), 1.0)
             );
-            Map<String, StrategyId> assignment = StrategyAssignment.assign(mix, identifiers("bot", 10));
+            Map<String, String> assignment = StrategyAssignment.assign(mix, identifiers("bot", 10));
 
             assertThat(assignment).hasSize(10);
-            assertThat(assignment.values()).containsOnly(StrategyId.RANDOM);
+            assertThat(assignment.values()).containsOnly(StrategyId.RANDOM.name());
         }
     }
 }

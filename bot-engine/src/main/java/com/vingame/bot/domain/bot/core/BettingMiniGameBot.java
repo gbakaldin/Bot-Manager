@@ -173,7 +173,11 @@ public class BettingMiniGameBot extends Bot {
         // populated by BotGroupBehaviorService.createSingleBot via the
         // fill-to-target assignment over BotGroup.strategyMix; legacy/test
         // fixtures that bypass the assignment default to RANDOM (Decision 7).
-        StrategyId effectiveId = strategyId != null ? strategyId : StrategyId.RANDOM;
+        // The default is spelled StrategyId.RANDOM.name() rather than "RANDOM":
+        // the enum survives as the compile-time catalogue of the built-in keys
+        // (PLUGIN_HOT_RELOAD AD-12), so reading the name off it keeps the
+        // default tied to the catalogue instead of to a loose literal.
+        String effectiveId = strategyId != null ? strategyId : StrategyId.RANDOM.name();
         if (strategyFactory != null) {
             this.strategy = strategyFactory.create(effectiveId);
         } else {

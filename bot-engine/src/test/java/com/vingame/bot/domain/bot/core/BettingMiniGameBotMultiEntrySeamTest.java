@@ -92,12 +92,12 @@ class BettingMiniGameBotMultiEntrySeamTest {
                 .game(game).behaviorConfig(behavior)
                 .zoneName("MiniGame3").timeoutMillis(60_000L)
                 .watchdogTimeoutSeconds(120L)
-                .strategyId(StrategyId.RANDOM)
+                .strategyId(StrategyId.RANDOM.name())
                 .build();
 
         strategy = new MutableStrategy(0, 200L);
         BettingStrategyFactory factory = mock(BettingStrategyFactory.class);
-        when(factory.create(StrategyId.RANDOM)).thenReturn(strategy);
+        when(factory.create(StrategyId.RANDOM.name())).thenReturn(strategy);
 
         BettingMiniGameBot b = new BettingMiniGameBot();
         b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));

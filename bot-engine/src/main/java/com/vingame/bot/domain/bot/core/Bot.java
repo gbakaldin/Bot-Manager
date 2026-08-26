@@ -103,12 +103,17 @@ public abstract class Bot {
     protected TokensProvider tokens;
 
     /**
-     * Strategy id assigned to this bot at start by the group's strategy mix.
+     * Strategy registry key assigned to this bot at start by the group's
+     * strategy mix.
      * <p>
      * Populated from {@link BotConfiguration#getStrategyId()} in
      * {@link #setConfiguration(BotConfiguration)}. Surfaced via
      * {@code BotHealthDTO.strategyId} so operators can see the per-bot
      * assignment in {@code GET /api/v1/bot-group/{id}/health}.
+     * <p>
+     * A {@code String} and not a {@link StrategyId} since PLUGIN_HOT_RELOAD
+     * Phase 2b (AD-12); for a built-in it is exactly a {@link StrategyId}
+     * constant name, and the JSON it renders to on the health DTO is unchanged.
      * <p>
      * May be {@code null} for legacy callers that build a {@code BotConfiguration}
      * without going through the group-start assignment path (currently none in
@@ -116,7 +121,7 @@ public abstract class Bot {
      * directly).
      */
     @Getter
-    protected StrategyId strategyId;
+    protected String strategyId;
 
     protected volatile long lastFetchedBalance = -1;
     protected final AtomicLong expectedCurrentBalance = new AtomicLong(-100_000_000L);

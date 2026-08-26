@@ -102,7 +102,7 @@ class BettingMiniGameBotStartGameMd5GuardTest {
                 .game(game).behaviorConfig(behavior)
                 .zoneName("MiniGame").timeoutMillis(60_000L)
                 .watchdogTimeoutSeconds(120L)
-                .strategyId(StrategyId.RANDOM)
+                .strategyId(StrategyId.RANDOM.name())
                 .build();
 
         TaiXiuGameBot b = new TaiXiuGameBot();

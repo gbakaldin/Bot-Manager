@@ -43,12 +43,12 @@ import static org.mockito.Mockito.when;
  *       constructor-arg pattern in Architecture Decision A4 wires through.</li>
  * </ul>
  *
- * <p>Since PLUGIN_HOT_RELOAD Phase 2a the {@code create(StrategyId)} calls below
- * go through the <b>deprecated</b> enum overload, which is what
- * {@code BettingMiniGameBot} still calls until Phase 2b. That is deliberate
- * coverage: it pins that {@code create(id)} and {@code create(id.name())} resolve
- * the same bean. {@code StrategyCatalogParityTest} covers the string API against
- * a real Spring context.
+ * <p>Since PLUGIN_HOT_RELOAD Phase 2b the enum overload of {@code create} is
+ * gone and every call below is {@code create(StrategyId.X.name())}. The key is
+ * still sourced from the enum rather than from a bare literal, because
+ * {@link StrategyId} is the compile-time catalogue of the built-in keys (AD-12)
+ * and a rename must break something here. {@code StrategyCatalogParityTest}
+ * covers the same contract against a real Spring component scan.
  */
 @DisplayName("Martingale strategy factory wiring (Phases 2-3)")
 class MartingaleStrategyFactoryWiringTest {
@@ -98,7 +98,7 @@ class MartingaleStrategyFactoryWiringTest {
     @Test
     @DisplayName("create(MARTINGALE_CLASSIC_CAUTIOUS) returns ClassicMartingaleCautious with CAUTIOUS profile")
     void classicCautiousResolves() {
-        BettingStrategy s = wiredFactory().create(StrategyId.MARTINGALE_CLASSIC_CAUTIOUS);
+        BettingStrategy s = wiredFactory().create(StrategyId.MARTINGALE_CLASSIC_CAUTIOUS.name());
         assertThat(s).isInstanceOf(ClassicMartingaleCautious.class);
         assertThat(((ClassicMartingaleCautious) s).getProfile()).isEqualTo(RiskProfile.CAUTIOUS);
     }
@@ -106,7 +106,7 @@ class MartingaleStrategyFactoryWiringTest {
     @Test
     @DisplayName("create(MARTINGALE_CLASSIC_AGGRESSIVE) returns ClassicMartingaleAggressive with AGGRESSIVE profile")
     void classicAggressiveResolves() {
-        BettingStrategy s = wiredFactory().create(StrategyId.MARTINGALE_CLASSIC_AGGRESSIVE);
+        BettingStrategy s = wiredFactory().create(StrategyId.MARTINGALE_CLASSIC_AGGRESSIVE.name());
         assertThat(s).isInstanceOf(ClassicMartingaleAggressive.class);
         assertThat(((ClassicMartingaleAggressive) s).getProfile()).isEqualTo(RiskProfile.AGGRESSIVE);
     }
@@ -114,7 +114,7 @@ class MartingaleStrategyFactoryWiringTest {
     @Test
     @DisplayName("create(PAROLI_CAUTIOUS) returns ParoliCautious with CAUTIOUS profile")
     void paroliCautiousResolves() {
-        BettingStrategy s = wiredFactory().create(StrategyId.PAROLI_CAUTIOUS);
+        BettingStrategy s = wiredFactory().create(StrategyId.PAROLI_CAUTIOUS.name());
         assertThat(s).isInstanceOf(ParoliCautious.class);
         assertThat(((ParoliCautious) s).getProfile()).isEqualTo(RiskProfile.CAUTIOUS);
     }
@@ -122,7 +122,7 @@ class MartingaleStrategyFactoryWiringTest {
     @Test
     @DisplayName("create(PAROLI_AGGRESSIVE) returns ParoliAggressive with AGGRESSIVE profile")
     void paroliAggressiveResolves() {
-        BettingStrategy s = wiredFactory().create(StrategyId.PAROLI_AGGRESSIVE);
+        BettingStrategy s = wiredFactory().create(StrategyId.PAROLI_AGGRESSIVE.name());
         assertThat(s).isInstanceOf(ParoliAggressive.class);
         assertThat(((ParoliAggressive) s).getProfile()).isEqualTo(RiskProfile.AGGRESSIVE);
     }
@@ -130,7 +130,7 @@ class MartingaleStrategyFactoryWiringTest {
     @Test
     @DisplayName("create(DALEMBERT_CAUTIOUS) returns DAlembertCautious with CAUTIOUS profile")
     void dalembertCautiousResolves() {
-        BettingStrategy s = wiredFactory().create(StrategyId.DALEMBERT_CAUTIOUS);
+        BettingStrategy s = wiredFactory().create(StrategyId.DALEMBERT_CAUTIOUS.name());
         assertThat(s).isInstanceOf(DAlembertCautious.class);
         assertThat(((DAlembertCautious) s).getProfile()).isEqualTo(RiskProfile.CAUTIOUS);
     }
@@ -138,7 +138,7 @@ class MartingaleStrategyFactoryWiringTest {
     @Test
     @DisplayName("create(DALEMBERT_AGGRESSIVE) returns DAlembertAggressive with AGGRESSIVE profile")
     void dalembertAggressiveResolves() {
-        BettingStrategy s = wiredFactory().create(StrategyId.DALEMBERT_AGGRESSIVE);
+        BettingStrategy s = wiredFactory().create(StrategyId.DALEMBERT_AGGRESSIVE.name());
         assertThat(s).isInstanceOf(DAlembertAggressive.class);
         assertThat(((DAlembertAggressive) s).getProfile()).isEqualTo(RiskProfile.AGGRESSIVE);
     }
@@ -146,7 +146,7 @@ class MartingaleStrategyFactoryWiringTest {
     @Test
     @DisplayName("create(FIBONACCI_CAUTIOUS) returns FibonacciCautious with CAUTIOUS profile")
     void fibonacciCautiousResolves() {
-        BettingStrategy s = wiredFactory().create(StrategyId.FIBONACCI_CAUTIOUS);
+        BettingStrategy s = wiredFactory().create(StrategyId.FIBONACCI_CAUTIOUS.name());
         assertThat(s).isInstanceOf(FibonacciCautious.class);
         assertThat(((FibonacciCautious) s).getProfile()).isEqualTo(RiskProfile.CAUTIOUS);
     }
@@ -154,7 +154,7 @@ class MartingaleStrategyFactoryWiringTest {
     @Test
     @DisplayName("create(FIBONACCI_AGGRESSIVE) returns FibonacciAggressive with AGGRESSIVE profile")
     void fibonacciAggressiveResolves() {
-        BettingStrategy s = wiredFactory().create(StrategyId.FIBONACCI_AGGRESSIVE);
+        BettingStrategy s = wiredFactory().create(StrategyId.FIBONACCI_AGGRESSIVE.name());
         assertThat(s).isInstanceOf(FibonacciAggressive.class);
         assertThat(((FibonacciAggressive) s).getProfile()).isEqualTo(RiskProfile.AGGRESSIVE);
     }
@@ -174,8 +174,8 @@ class MartingaleStrategyFactoryWiringTest {
                 StrategyId.FIBONACCI_AGGRESSIVE,
         };
         for (StrategyId id : martingaleIds) {
-            BettingStrategy first = factory.create(id);
-            BettingStrategy second = factory.create(id);
+            BettingStrategy first = factory.create(id.name());
+            BettingStrategy second = factory.create(id.name());
             assertThat(first)
                     .as("two create(%s) calls must return distinct instances", id)
                     .isNotSameAs(second);
@@ -260,7 +260,7 @@ class MartingaleStrategyFactoryWiringTest {
         // martingaleStrategiesArePrototypeScoped; here we only confirm the
         // class wiring is correct end-to-end.
         for (java.util.Map.Entry<StrategyId, Class<? extends BettingStrategy>> e : expected.entrySet()) {
-            BettingStrategy resolved = factory.create(e.getKey());
+            BettingStrategy resolved = factory.create(e.getKey().name());
             assertThat(resolved)
                     .as("create(%s) must return an instance of %s", e.getKey(), e.getValue().getSimpleName())
                     .isInstanceOf(e.getValue());

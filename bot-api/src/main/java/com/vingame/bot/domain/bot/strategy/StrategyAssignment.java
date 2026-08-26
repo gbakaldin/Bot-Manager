@@ -43,8 +43,8 @@ import java.util.Map;
  *   <li>Non-positive weights are rejected with {@link IllegalArgumentException}
  *       — a strategy with weight {@code <= 0} should be removed from the mix
  *       rather than silently dropped here.</li>
- *   <li>Duplicate {@link StrategyId} entries in the mix are summed before
- *       apportionment so the caller does not have to pre-dedupe.</li>
+ *   <li>Duplicate strategy keys in the mix are summed before apportionment so
+ *       the caller does not have to pre-dedupe.</li>
  * </ul>
  */
 public final class StrategyAssignment {
@@ -56,14 +56,12 @@ public final class StrategyAssignment {
     /**
      * Apportionment vector — internal output of the largest-remainder step.
      * Exposed package-private so {@code StrategyAssignmentTest} can drive the
-     * apportionment math directly with mixes of distinct enum entries (the
-     * full {@link #assign} call requires a {@link StrategyId} per strategy
-     * which limits distinct-bucket testing in v1 with only one enum value).
+     * apportionment math directly with mixes of distinct entries.
      *
-     * @param ids    strategy ids in the order they were submitted (post-coalesce)
+     * @param ids    strategy keys in the order they were submitted (post-coalesce)
      * @param target integer per-strategy target counts that sum to {@code botCount}
      */
-    record ApportionmentResult(List<StrategyId> ids, int[] target) {
+    record ApportionmentResult(List<String> ids, int[] target) {
     }
 
     /**
@@ -72,8 +70,8 @@ public final class StrategyAssignment {
      * identifier-sorting step.
      *
      * @param mix      weighted strategy mix; must be non-null and non-empty.
-     *                 Each weight must be {@code > 0}. Duplicate
-     *                 {@link StrategyId} entries are coalesced (weights summed).
+     *                 Each weight must be {@code > 0}. Duplicate strategy keys
+     *                 are coalesced (weights summed).
      * @param botCount total number of bots to distribute. Must be {@code >= 0}.
      * @return the per-strategy target vector. Iteration order of
      *         {@link ApportionmentResult#ids()} matches the user-supplied
@@ -81,10 +79,10 @@ public final class StrategyAssignment {
      * @throws IllegalArgumentException if any weight is {@code <= 0}.
      */
     static ApportionmentResult apportion(List<WeightedStrategy> mix, int botCount) {
-        // Coalesce duplicate StrategyId entries (caller may submit the same id
-        // twice). EnumMap preserves enum-declaration order which we later use
-        // as the secondary sort key for largest-remainder ties.
-        Map<StrategyId, Double> coalesced = new LinkedHashMap<>();
+        // Coalesce duplicate strategy keys (caller may submit the same key
+        // twice). LinkedHashMap preserves the caller's mix order, which we
+        // later use as the secondary sort key for largest-remainder ties.
+        Map<String, Double> coalesced = new LinkedHashMap<>();
         for (WeightedStrategy w : mix) {
             if (w.weight() <= 0) {
                 throw new IllegalArgumentException(
@@ -101,7 +99,7 @@ public final class StrategyAssignment {
         // user-supplied ordering in BotGroup.strategyMix.
         double sumWeights = coalesced.values().stream().mapToDouble(Double::doubleValue).sum();
 
-        List<StrategyId> ids = new ArrayList<>(coalesced.keySet());
+        List<String> ids = new ArrayList<>(coalesced.keySet());
         int[] target = new int[ids.size()];
         double[] remainder = new double[ids.size()];
         int allocated = 0;
@@ -137,7 +135,7 @@ public final class StrategyAssignment {
      * @param botIdentifiers stable, unique per-bot identifiers (typically
      *                       {@code namePrefix + botIndex}). Order is irrelevant;
      *                       the routine re-sorts deterministically by hash.
-     * @return a map from bot identifier to assigned {@link StrategyId}. Every
+     * @return a map from bot identifier to assigned strategy key. Every
      *         entry of {@code botIdentifiers} appears exactly once in the
      *         result (unless the mix is empty, in which case the result is
      *         empty).
@@ -145,15 +143,15 @@ public final class StrategyAssignment {
      *                                  {@code botIdentifiers} contains
      *                                  duplicates.
      */
-    public static Map<String, StrategyId> assign(List<WeightedStrategy> mix,
-                                                 List<String> botIdentifiers) {
+    public static Map<String, String> assign(List<WeightedStrategy> mix,
+                                             List<String> botIdentifiers) {
         if (mix == null || mix.isEmpty() || botIdentifiers == null || botIdentifiers.isEmpty()) {
             return Collections.emptyMap();
         }
 
         int botCount = botIdentifiers.size();
         ApportionmentResult apportionment = apportion(mix, botCount);
-        List<StrategyId> ids = apportionment.ids;
+        List<String> ids = apportionment.ids;
         int[] target = apportionment.target;
 
         // Sort bot identifiers deterministically by hash for reproducible
@@ -176,10 +174,10 @@ public final class StrategyAssignment {
         }
 
         // Slice the sorted identifier list into contiguous chunks per strategy.
-        Map<String, StrategyId> assignment = new LinkedHashMap<>(botCount);
+        Map<String, String> assignment = new LinkedHashMap<>(botCount);
         int cursor = 0;
         for (int i = 0; i < ids.size(); i++) {
-            StrategyId id = ids.get(i);
+            String id = ids.get(i);
             int slotCount = target[i];
             for (int k = 0; k < slotCount; k++) {
                 assignment.put(sorted.get(cursor++), id);

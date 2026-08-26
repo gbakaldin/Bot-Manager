@@ -25,12 +25,11 @@ import java.util.Set;
  * bots and silently corrupt decisions.
  *
  * <p><b>Keys are {@code String}s, not {@link StrategyId}s</b> (PLUGIN_HOT_RELOAD
- * Phase 2a, AD-12): a strategy served from a plugin classloader cannot name an
+ * Phase 2a/2b, AD-12): a strategy served from a plugin classloader cannot name an
  * enum constant the engine does not declare. {@link StrategyId} survives as the
  * catalogue of the built-in keys and their UI copy, and
  * {@code StrategyCatalogParityTest} pins every one of its constant names to a
- * registered bean. The registry is insertion-ordered so that
- * {@link #registeredKeys()} has a stable base to sort from.
+ * registered bean.
  *
  * <p>{@link #create(String)} returns a new strategy instance every call.
  * The RNG is owned by the bot and threaded through {@link BetContext#rng()} on
@@ -54,8 +53,14 @@ public class BettingStrategyFactory {
     private final List<BettingStrategy> discoveredStrategies;
     /**
      * Key → implementation class, in discovery order. {@link LinkedHashMap} and
-     * not a sorted map: the insertion order is Spring's bean-discovery order,
-     * which is what AD-21's display ordering sorts <em>from</em>.
+     * not a {@link java.util.HashMap} so that iteration is deterministic within
+     * a JVM run (a stable boot log, a stable {@code strategies present: [...]}
+     * tail on a lookup failure). That order is Spring's bean-discovery order —
+     * alphabetical by class file name within package — and it is emphatically
+     * <em>not</em> {@code StrategyId.values()} order (plan Amendment A4). No
+     * consumer may treat it as a display order: AD-21's ordering is an explicit
+     * sort from {@code StrategyId.values()} that does not consult this map's
+     * order at all.
      */
     private final Map<String, Class<? extends BettingStrategy>> registry =
             new LinkedHashMap<>();
@@ -108,21 +113,7 @@ public class BettingStrategyFactory {
     }
 
     /**
-     * Enum-keyed overload kept only so that Phase 2a moves no engine call site.
-     *
-     * @deprecated the registry is string-keyed (AD-12). Call
-     *             {@link #create(String)}; this overload is removed in
-     *             PLUGIN_HOT_RELOAD Phase 2b, when {@code BotConfiguration}
-     *             and the persisted mix become {@code String}s too.
-     */
-    @Deprecated
-    public BettingStrategy create(StrategyId id) {
-        return create(id == null ? null : id.name());
-    }
-
-    /**
-     * @return the set of registered strategy keys, in discovery order. Used by
-     *         tests, and from Phase 2b by
+     * @return the set of registered strategy keys, in discovery order. Read by
      *         {@code BotGroupConfigValidationService} to reject a
      *         {@code strategyMix} naming a key no bean claims (AD-15).
      */

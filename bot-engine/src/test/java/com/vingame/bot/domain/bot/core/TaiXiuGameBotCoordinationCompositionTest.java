@@ -104,12 +104,12 @@ class TaiXiuGameBotCoordinationCompositionTest {
                 .game(game).behaviorConfig(behavior)
                 .zoneName("MiniGame").timeoutMillis(60_000L)
                 .watchdogTimeoutSeconds(120L)
-                .strategyId(StrategyId.RANDOM)
+                .strategyId(StrategyId.RANDOM.name())
                 .build();
 
         strategy = new MutableStrategy(TaiXiuGameBot.TAI_EID, 100_000L);
         BettingStrategyFactory factory = mock(BettingStrategyFactory.class);
-        when(factory.create(StrategyId.RANDOM)).thenReturn(strategy);
+        when(factory.create(StrategyId.RANDOM.name())).thenReturn(strategy);
 
         TaiXiuGameBot b = new TaiXiuGameBot();
         b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));

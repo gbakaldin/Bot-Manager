@@ -25,7 +25,7 @@ import java.util.Set;
  * state across bots.
  *
  * <p><b>Keys are {@code String}s, not {@link SlotStrategyId}s</b>
- * (PLUGIN_HOT_RELOAD Phase 2a, AD-12), for the same reason as the betting twin:
+ * (PLUGIN_HOT_RELOAD Phase 2a/2b, AD-12), for the same reason as the betting twin:
  * a plugin-supplied strategy cannot name an enum constant the engine does not
  * declare. {@link SlotStrategyId} survives as the catalogue of the built-in
  * keys, pinned to registered beans by {@code StrategyCatalogParityTest}.
@@ -96,21 +96,9 @@ public class SlotStrategyFactory {
     }
 
     /**
-     * Enum-keyed overload kept only so that Phase 2a moves no engine call site.
-     *
-     * @deprecated the registry is string-keyed (AD-12). Call
-     *             {@link #create(String)}; this overload is removed in
-     *             PLUGIN_HOT_RELOAD Phase 2b, when
-     *             {@code BotConfiguration.slotStrategyId} becomes a
-     *             {@code String}.
-     */
-    @Deprecated
-    public SlotStrategy create(SlotStrategyId id) {
-        return create(id == null ? null : id.name());
-    }
-
-    /**
      * @return the set of registered slot strategy keys, in discovery order.
+     *         Read by {@code BotGroupConfigValidationService} to reject a
+     *         {@code slotStrategyId} no bean claims (AD-15).
      */
     public Set<String> registeredKeys() {
         return Collections.unmodifiableSet(registry.keySet());

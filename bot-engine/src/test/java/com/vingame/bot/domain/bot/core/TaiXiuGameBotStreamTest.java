@@ -112,7 +112,7 @@ class TaiXiuGameBotStreamTest {
                 .game(gameSpy).behaviorConfig(behavior)
                 .zoneName("MiniGame").timeoutMillis(60_000L)
                 .watchdogTimeoutSeconds(120L)
-                .strategyId(StrategyId.RANDOM)
+                .strategyId(StrategyId.RANDOM.name())
                 .build();
 
         // Deterministic strategy: always bet CHOSEN_AMOUNT on CHOSEN_EID.
@@ -125,7 +125,7 @@ class TaiXiuGameBotStreamTest {
             public void onRoundEnd(RoundResult result) { /* no-op */ }
         };
         BettingStrategyFactory factory = mock(BettingStrategyFactory.class);
-        when(factory.create(StrategyId.RANDOM)).thenReturn(fixed);
+        when(factory.create(StrategyId.RANDOM.name())).thenReturn(fixed);
 
         TaiXiuGameBot b = new TaiXiuGameBot();
         b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
