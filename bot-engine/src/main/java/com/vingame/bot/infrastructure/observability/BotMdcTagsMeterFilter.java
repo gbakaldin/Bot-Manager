@@ -70,7 +70,14 @@ public class BotMdcTagsMeterFilter implements MeterFilter {
             // the refresher thread, whose MDC belongs to whatever ran there last.
             "groups_dead_by_env",
             "group_avg_balance",
-            "group_balance_ratio"
+            "group_balance_ratio",
+            // PLUGIN_HOT_RELOAD AD-4: the per-group plugin-version gauge. It does not
+            // literally match the bot_ prefix check, so listing it is belt-and-braces in
+            // the same way bots_managed / bots_by_status are — and it matters more here
+            // than for those, because this is the one family that legitimately carries
+            // `pluginVersion` and it must carry the version of the bots it counted, not
+            // whatever the refresher thread's MDC was left holding.
+            "bots_by_plugin_version"
     );
 
     @Override

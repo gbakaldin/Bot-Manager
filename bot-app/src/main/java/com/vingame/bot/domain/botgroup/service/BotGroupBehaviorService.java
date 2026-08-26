@@ -1474,6 +1474,21 @@ public class BotGroupBehaviorService {
     }
 
     /**
+     * Grouping key for {@code bots_by_plugin_version} (PLUGIN_HOT_RELOAD AD-5): the
+     * owning group plus the plugin version its bots' implementations came from.
+     * <p>
+     * Per <em>group</em> rather than per environment because the question this gauge
+     * answers during a step-5/6 drain is "which groups are on which version, and how far
+     * has the drain got". {@code environmentId} and {@code product} ride along as the
+     * usual routing labels and are functionally determined by the group, so they cost no
+     * series. It is deliberately <b>not</b> a group-level MDC key: mid-drain a group is
+     * mixed-version, which is exactly why the version is on the row and not on the group.
+     */
+    public record PluginVersionKey(String botGroupId, String environmentId,
+                                   String product, String pluginVersion) {
+    }
+
+    /**
      * Distinct set of games currently backing live bots, for the {@code game_join}
      * join gauge. Sourced from each bot's {@link BotConfiguration#getGame()} so the
      * dropdown is populated the moment a group starts, before the first bet (AD-2).
@@ -1561,6 +1576,34 @@ public class BotGroupBehaviorService {
             if (envId == null) continue;
             counts.merge(new EnvKey(envId, runtime.getProduct()),
                     runtime.getBotInstances().size(), Integer::sum);
+        }
+        return counts;
+    }
+
+    /**
+     * Snapshot count of live bots grouped by {@code (botGroupId, pluginVersion)}, backing
+     * the {@code bots_by_plugin_version} MultiGauge (PLUGIN_HOT_RELOAD AD-5).
+     * <p>
+     * This is the <b>only</b> metric family carrying {@code pluginVersion}. The label is
+     * deliberately kept off {@code BotMdcTagsMeterFilter}, so it never lands on the
+     * {@code bot_*} counters: those are already per-group, and during a drain the label
+     * would double the cardinality of every one of them and leave a stale N-labelled copy
+     * for Prometheus' full retention window. One join-style gauge answers the drain
+     * question without that.
+     * <p>
+     * Every managed bot is counted — {@link Bot#getPluginVersion()} never returns null —
+     * so {@code sum(bots_by_plugin_version)} must equal {@code bots_managed}, and a
+     * shortfall means a bot escaped the accounting rather than that it is unversioned.
+     */
+    public Map<PluginVersionKey, Integer> countBotsByPluginVersion() {
+        Map<PluginVersionKey, Integer> counts = new LinkedHashMap<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            for (Bot bot : runtime.getBotInstances()) {
+                PluginVersionKey key = new PluginVersionKey(runtime.getGroupId(),
+                        runtime.getEnvironmentId(), runtime.getProduct(),
+                        bot.getPluginVersion());
+                counts.merge(key, 1, Integer::sum);
+            }
         }
         return counts;
     }

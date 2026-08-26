@@ -9,6 +9,7 @@ import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvStatus
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameStatusKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GroupBalance;
+import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.PluginVersionKey;
 import com.vingame.bot.infrastructure.observability.InfoGaugeRefresher.InfoGauges;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -499,6 +500,62 @@ class InfoGaugeRefresherTest {
         assertThat(registry.find("groups_dead_by_env").gauges()).isEmpty();
         assertThat(registry.find("group_avg_balance").gauges()).isEmpty();
         assertThat(registry.find("group_balance_ratio").gauges()).isEmpty();
+    }
+
+    // ---- PLUGIN_HOT_RELOAD Phase 1: bots_by_plugin_version ----
+
+    @Test
+    void botsByPluginVersionGauge_carriesGroupEnvProductAndVersion() {
+        when(behaviorService.countBotsByPluginVersion()).thenReturn(Map.of(
+                new PluginVersionKey("group-uuid-1", "env-uuid-1", "116", "builtin"), 47));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        Gauge row = registry.find("bots_by_plugin_version").tag("botGroupId", "group-uuid-1").gauge();
+        assertThat(row).isNotNull();
+        assertThat(row.value()).isEqualTo(47.0);
+        assertThat(row.getId().getTag("environmentId")).isEqualTo("env-uuid-1");
+        assertThat(row.getId().getTag("product")).isEqualTo("116");
+        assertThat(row.getId().getTag("pluginVersion")).isEqualTo("builtin");
+    }
+
+    @Test
+    void botsByPluginVersionGauge_splitsOneGroupAcrossTwoVersions() {
+        // The step-5/6 drain shape, and the reason the version is a ROW label rather than a
+        // group-level MDC key: mid-drain a group is genuinely mixed-version, so one group
+        // must be able to produce two rows that sum to its bot count.
+        when(behaviorService.countBotsByPluginVersion()).thenReturn(Map.of(
+                new PluginVersionKey("group-uuid-1", "env-uuid-1", "116", "builtin"), 30,
+                new PluginVersionKey("group-uuid-1", "env-uuid-1", "116", "v2"), 20));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        assertThat(registry.find("bots_by_plugin_version").gauges()).hasSize(2);
+        assertThat(registry.find("bots_by_plugin_version")
+                .tag("pluginVersion", "builtin").gauge().value()).isEqualTo(30.0);
+        assertThat(registry.find("bots_by_plugin_version")
+                .tag("pluginVersion", "v2").gauge().value()).isEqualTo(20.0);
+    }
+
+    @Test
+    void botsByPluginVersionGauge_isOnTheAggregateExclusionList() {
+        // AD-4/AD-5: this is the one family that legitimately carries pluginVersion, and it
+        // must carry the version of the bots it counted — not whatever the refresher
+        // thread's MDC was left holding.
+        MDC.put(BotMdc.BOT_GROUP_ID, "group-xyz");
+        MDC.put(BotMdc.PLUGIN_VERSION, "mdc-leak");
+
+        when(behaviorService.countBotsByPluginVersion()).thenReturn(Map.of(
+                new PluginVersionKey("group-uuid-1", "env-uuid-1", "116", "builtin"), 3));
+
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        Gauge row = registry.find("bots_by_plugin_version").tag("botGroupId", "group-uuid-1").gauge();
+        assertThat(row).isNotNull();
+        assertThat(row.getId().getTag("pluginVersion")).isEqualTo("builtin");
+        assertThat(row.getId().getTags())
+                .as("the refresher thread's MDC must not reach this row")
+                .noneMatch(tag -> "group-xyz".equals(tag.getValue()));
     }
 
     // ---- scheduler lifecycle (PostConstruct start / PreDestroy stop) ----

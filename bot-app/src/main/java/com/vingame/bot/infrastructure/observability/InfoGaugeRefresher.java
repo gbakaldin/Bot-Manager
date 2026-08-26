@@ -42,6 +42,14 @@ import java.util.concurrent.TimeUnit;
  *       {@code {botGroupId, groupName, environmentId, product, gameId, gameName}} —
  *       mean expected balance over a group's connected bots, absolute, for
  *       dashboards (AD-V12).</li>
+ *   <li><b>bots_by_plugin_version</b>
+ *       {@code {botGroupId, environmentId, product, pluginVersion}} — bot count per
+ *       group per plugin version (PLUGIN_HOT_RELOAD AD-5). One row per group and a
+ *       constant {@code pluginVersion="builtin"} until step 5 can put two versions in
+ *       one JVM; from then on it is the drain's progress bar. This is the <em>only</em>
+ *       family carrying {@code pluginVersion} — deliberately, so the label never lands
+ *       on the already-per-group {@code bot_*} counters and doubles their cardinality
+ *       mid-drain.</li>
  *   <li><b>group_balance_ratio</b> {@code {…same labels…}} — the same mean divided
  *       by the group's deposit amount, so one threshold (0.10) covers every
  *       currency scale and deposit size. Rows exist only for non-auto-deposit
@@ -52,7 +60,7 @@ import java.util.concurrent.TimeUnit;
  * extra label to existing series rather than new series. The fleet aggregates in
  * {@link ObservabilityConfig} stay unlabelled (AD-V2).
  * <p>
- * All nine meter names are on the {@link BotMdcTagsMeterFilter} aggregate allow-list,
+ * All ten meter names are on the {@link BotMdcTagsMeterFilter} aggregate allow-list,
  * so they never inherit MDC tags from the refresher thread.
  * <p>
  * <b>Why {@code _join}, not {@code _info}:</b> {@code _info} is a <em>reserved
@@ -120,7 +128,8 @@ public class InfoGaugeRefresher {
                       MultiGauge wsConnectionsOpenByEnv,
                       MultiGauge groupsDeadByEnv,
                       MultiGauge groupAvgBalance,
-                      MultiGauge groupBalanceRatio) {
+                      MultiGauge groupBalanceRatio,
+                      MultiGauge botsByPluginVersion) {
     }
 
     /**
@@ -157,9 +166,13 @@ public class InfoGaugeRefresher {
                 .description("Average expected balance as a fraction of the group's deposit amount "
                         + "(non-auto-deposit groups only)")
                 .register(registry);
+        MultiGauge botsByPluginVersion = MultiGauge.builder("bots_by_plugin_version")
+                .description("Number of bots per group, broken down by the plugin version their "
+                        + "implementation was loaded from")
+                .register(registry);
         return new InfoGauges(gameInfo, environmentInfo, botsByGameStatus, botsByEnvStatus,
                 botsManagedByEnv, wsConnectionsOpenByEnv, groupsDeadByEnv,
-                groupAvgBalance, groupBalanceRatio);
+                groupAvgBalance, groupBalanceRatio, botsByPluginVersion);
     }
 
     /**
@@ -238,6 +251,16 @@ public class InfoGaugeRefresher {
                 .toList(), true);
         gauges.groupBalanceRatio().register(groupBalances.stream()
                 .map(b -> MultiGauge.Row.of(groupTags(b), b.ratio()))
+                .toList(), true);
+
+        gauges.botsByPluginVersion().register(behaviorService.countBotsByPluginVersion()
+                .entrySet().stream()
+                .map(en -> MultiGauge.Row.of(
+                        Tags.of("botGroupId", nullSafe(en.getKey().botGroupId()),
+                                "environmentId", nullSafe(en.getKey().environmentId()),
+                                "product", nullSafe(en.getKey().product()),
+                                "pluginVersion", nullSafe(en.getKey().pluginVersion())),
+                        en.getValue()))
                 .toList(), true);
     }
 
