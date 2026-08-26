@@ -36,19 +36,19 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>
  * <b>Why weak references.</b> {@code live} is the leak detector, and it can only be one if
  * it is measuring reachability rather than bookkeeping: after a drop,
- * {@code created − reclaimed} staying above zero <em>is</em> the retention.
+ * {@code registered − reclaimed} staying above zero <em>is</em> the retention.
  * {@code jvm_classes_unloaded_classes_total} moving is the JVM-side corroboration.
  * <ul>
  *   <li>{@code plugin_classloaders_live{pluginVersion}} — registered loaders whose
  *       {@link WeakReference} has not been cleared.</li>
- *   <li>{@code plugin_classloaders_created_total{pluginVersion}} — loaders ever
+ *   <li>{@code plugin_classloaders_registered_total{pluginVersion}} — loaders ever
  *       registered.</li>
  *   <li>{@code plugin_classloaders_reclaimed_total{pluginVersion}} — loaders observed
  *       collected through the {@link ReferenceQueue}.</li>
  * </ul>
  * <b>At Phase 1 the registry holds exactly one entry</b> — the application classloader
  * under {@code builtin} — so a healthy scrape reads {@code live{builtin}=1},
- * {@code created_total{builtin}=1}, {@code reclaimed_total{builtin}=0}. That is degenerate
+ * {@code registered_total{builtin}=1}, {@code reclaimed_total{builtin}=0}. That is degenerate
  * on purpose (AD-1): the meter names, the tag, the panel and the unit test all exist and
  * are proven before step 4 creates the failure mode they detect. A leak detector shipped
  * in the same release as the leak proves nothing about the release.
@@ -71,7 +71,24 @@ import java.util.concurrent.atomic.AtomicLong;
 public class PluginClassLoaderMetrics {
 
     static final String LIVE = "plugin_classloaders_live";
-    static final String CREATED = "plugin_classloaders_created_total";
+
+    /**
+     * <b>Not {@code plugin_classloaders_created_total}</b>, which is what this was until
+     * QA probed it against a real {@code PrometheusMeterRegistry}. {@code _created} is a
+     * <em>reserved Prometheus suffix</em> (the OpenMetrics created-timestamp series): the
+     * client's name sanitiser strips {@code _total}, then strips {@code _created}, and the
+     * counter exposition re-appends {@code _total} — so the meter scraped as
+     * {@code plugin_classloaders_total}, a name nobody wrote, no dashboard queried and no
+     * verification step grepped. {@link #RECLAIMED} is untouched by the rule, which is
+     * exactly what made it look like a typo rather than a rule. Same class of defect as
+     * the {@code game_info} → bare {@code game} bug that opened
+     * {@code InfoGaugePrometheusScrapeTest}, and that test is now the guard for both:
+     * every other test here pins names against a {@code SimpleMeterRegistry}, which
+     * applies no naming convention at all. {@code _registered_total} round-trips intact
+     * (verified by probe) and pairs with {@code _reclaimed_total}.
+     */
+    static final String REGISTERED = "plugin_classloaders_registered_total";
+
     static final String RECLAIMED = "plugin_classloaders_reclaimed_total";
 
     /** MDC/metric tag key, matching {@code com.vingame.bot.common.logging.BotMdc#PLUGIN_VERSION}. */
@@ -159,7 +176,7 @@ public class PluginClassLoaderMetrics {
         tracked.add(new VersionedRef(loader, pluginVersion, collected));
         registerMeters(pluginVersion);
         live.get(pluginVersion).incrementAndGet();
-        registry.counter(CREATED, TAG, pluginVersion).increment();
+        registry.counter(REGISTERED, TAG, pluginVersion).increment();
     }
 
     /**
@@ -179,13 +196,13 @@ public class PluginClassLoaderMetrics {
                     .description("Registered plugin classloaders whose weak reference has not been "
                             + "cleared — a lower bound on retention, not a census")
                     .register(registry);
-            Counter.builder(CREATED)
+            Counter.builder(REGISTERED)
                     .tag(TAG, version)
                     .description("Plugin classloaders ever registered under this version")
                     .register(registry);
             Counter.builder(RECLAIMED)
                     .tag(TAG, version)
-                    .description("Plugin classloaders observed collected — created_total minus "
+                    .description("Plugin classloaders observed collected — registered_total minus "
                             + "this, sustained above zero after a drain, is the leak")
                     .register(registry);
             return count;

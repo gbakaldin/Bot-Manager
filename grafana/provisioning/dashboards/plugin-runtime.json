@@ -34,7 +34,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "Classloader / metaspace leak detection for the plugin hot-reload work (PLUGIN_HOT_RELOAD Phase 1).\n\nUntil step 4 introduces a child `ClassLoader` there is **one** plugin version, `builtin`, so the healthy readings here are **flat metaspace**, **flat loaded classes**, and `plugin_classloaders_live = 1`. That is the point: the instruments predate the mechanism, and the default time range is 7 days because the deliverable is a *baseline* (`-XX:MaxMetaspaceSize` is sized from it at step 4 — AD-6).\n\nRead `live` as a **lower bound on retention** — a cleared weak reference proves the loader was collected, but `System.gc()` is a hint, so a loader that is unreachable and not yet collected still counts. `created_total − reclaimed_total` staying above zero after a drain *is* the leak."
+        "content": "Classloader / metaspace leak detection for the plugin hot-reload work (PLUGIN_HOT_RELOAD Phase 1).\n\nUntil step 4 introduces a child `ClassLoader` there is **one** plugin version, `builtin`, so the healthy readings here are **flat metaspace**, **flat loaded classes**, and `plugin_classloaders_live = 1`. That is the point: the instruments predate the mechanism, and the default time range is 7 days because the deliverable is a *baseline* (`-XX:MaxMetaspaceSize` is sized from it at step 4 — AD-6).\n\nRead `live` as a **lower bound on retention** — a cleared weak reference proves the loader was collected, but `System.gc()` is a hint, so a loader that is unreachable and not yet collected still counts. `registered_total − reclaimed_total` staying above zero after a drain *is* the leak."
       }
     },
     {
@@ -338,8 +338,8 @@
     {
       "id": 7,
       "type": "timeseries",
-      "title": "Plugin classloaders created vs reclaimed",
-      "description": "created_total − reclaimed_total staying above zero after a version is dropped IS the retention. Both are cumulative counters, drawn raw on purpose.",
+      "title": "Plugin classloaders registered vs reclaimed",
+      "description": "registered_total − reclaimed_total staying above zero after a version is dropped IS the retention. Both are cumulative counters, drawn raw on purpose. The left-hand series is NOT named _created_total: `_created` is a reserved Prometheus suffix and such a counter scrapes as plugin_classloaders_total, so this panel queried an empty vector forever.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -386,8 +386,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "plugin_classloaders_created_total",
-          "legendFormat": "created {{pluginVersion}}"
+          "expr": "plugin_classloaders_registered_total",
+          "legendFormat": "registered {{pluginVersion}}"
         },
         {
           "refId": "B",

@@ -74,7 +74,7 @@ class PluginClassLoaderMetricsTest {
         // over a series that only appears once the incident starts cannot be tested before
         // the incident.
         assertThat(gauge(PluginClassLoaderMetrics.LIVE, PluginVersions.BUILTIN)).isEqualTo(1d);
-        assertThat(counter(PluginClassLoaderMetrics.CREATED, PluginVersions.BUILTIN)).isEqualTo(1d);
+        assertThat(counter(PluginClassLoaderMetrics.REGISTERED, PluginVersions.BUILTIN)).isEqualTo(1d);
         assertThat(counter(PluginClassLoaderMetrics.RECLAIMED, PluginVersions.BUILTIN)).isEqualTo(0d);
     }
 
@@ -113,7 +113,7 @@ class PluginClassLoaderMetricsTest {
         assertThat(gauge(PluginClassLoaderMetrics.LIVE, version))
                 .as("registration must be visible before the drop, or the test proves nothing")
                 .isEqualTo(1d);
-        assertThat(counter(PluginClassLoaderMetrics.CREATED, version)).isEqualTo(1d);
+        assertThat(counter(PluginClassLoaderMetrics.REGISTERED, version)).isEqualTo(1d);
 
         // Drop the last strong reference. Everything after this point is the JVM's choice.
         throwaway = null;
@@ -170,12 +170,12 @@ class PluginClassLoaderMetricsTest {
         }
 
         assertThat(metrics.liveCount(version))
-                .as("`live` is created − reclaimed; a loader that was collected must leave it")
+                .as("`live` is registered − reclaimed; a loader that was collected must leave it")
                 .isZero();
         assertThat(gauge(PluginClassLoaderMetrics.LIVE, version)).isEqualTo(0d);
         assertThat(counter(PluginClassLoaderMetrics.RECLAIMED, version)).isEqualTo(1d);
-        assertThat(counter(PluginClassLoaderMetrics.CREATED, version))
-                .as("created_total is cumulative — it must not decrease when a loader goes")
+        assertThat(counter(PluginClassLoaderMetrics.REGISTERED, version))
+                .as("registered_total is cumulative — it must not decrease when a loader goes")
                 .isEqualTo(1d);
     }
 
@@ -186,7 +186,7 @@ class PluginClassLoaderMetricsTest {
         // group, and BotMdcTagsMeterFilter would otherwise stamp them with whatever MDC the
         // 10 s sampler thread happened to inherit.
         assertThat(PluginClassLoaderMetrics.LIVE).doesNotStartWith("bot_");
-        assertThat(PluginClassLoaderMetrics.CREATED).doesNotStartWith("bot_");
+        assertThat(PluginClassLoaderMetrics.REGISTERED).doesNotStartWith("bot_");
         assertThat(PluginClassLoaderMetrics.RECLAIMED).doesNotStartWith("bot_");
     }
 

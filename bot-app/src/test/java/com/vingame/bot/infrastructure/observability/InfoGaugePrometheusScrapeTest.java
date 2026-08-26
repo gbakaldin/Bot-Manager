@@ -157,20 +157,26 @@ class InfoGaugePrometheusScrapeTest {
      * {@code grafana/provisioning/dashboards/plugin-runtime.json} queries and the strings
      * verification P1-4 greps for have until now been checked against nothing.
      * <p>
-     * <b>This test is currently RED, and it is red because of a production defect, not a
-     * test defect.</b> {@code plugin_classloaders_created_total} scrapes as
+     * <b>This test was RED on arrival, because of a production defect rather than a test
+     * defect</b>, and the fix was the rename it asked for — not a relaxed assertion.
+     * {@code plugin_classloaders_created_total} scraped as
      * {@code plugin_classloaders_total}: {@code _created} is a <em>reserved Prometheus
      * suffix</em> (the OpenMetrics created-timestamp series), so the Prometheus client's
      * name sanitiser strips {@code _total}, then strips {@code _created}, and the counter
      * exposition appends {@code _total} to what is left. Its sibling
-     * {@code plugin_classloaders_reclaimed_total} is untouched, which is what makes the
+     * {@code plugin_classloaders_reclaimed_total} is untouched, which is what made the
      * defect look like a typo rather than a rule. This is the same class of failure that
-     * opened this file — {@code game_info} scraping as bare {@code game} — and it has the
-     * same shape of consequence: the dashboard's "created vs reclaimed" panel, the one that
-     * shows a retained loader, queries a name that will never exist, and P1-4 fails on the
-     * box. Verified by probe against this registry: {@code _registered_total} and
-     * {@code _loaded_total} both survive intact, so the fix is a one-constant rename in
-     * {@code PluginClassLoaderMetrics} plus the panel, the alert prose and P1-4.
+     * opened this file — {@code game_info} scraping as bare {@code game} — and it had the
+     * same shape of consequence: the dashboard's "registered vs reclaimed" panel, the one
+     * that shows a retained loader, queried a name that would never exist, and P1-4 would
+     * have failed on the box. Verified by probe against this registry:
+     * {@code _registered_total} and {@code _loaded_total} both survive intact, so the fix
+     * was a one-constant rename in {@code PluginClassLoaderMetrics} plus the panel, the
+     * alert prose and P1-4.
+     * <p>
+     * The {@code doesNotContain("plugin_classloaders_total")} assertion below is the part
+     * that must survive any future edit: it is what fails if someone reintroduces a
+     * reserved suffix on this family, under {@code _created} or any other spelling.
      */
     @Test
     void pluginRuntimeMeters_renderUnderTheNamesTheDashboardSpells() {
@@ -199,16 +205,15 @@ class InfoGaugePrometheusScrapeTest {
                         + "pluginVersion=\"builtin\",product=\"116\"} 47.0");
 
         assertThat(scrape)
-                .as("plugin_classloaders_created_total is unreachable from Prometheus: "
-                        + "`_created` is a reserved suffix, so this counter scrapes as "
-                        + "`plugin_classloaders_total`. The Grafana panel and verification "
-                        + "P1-4 both spell the name registered in code, which no scrape will "
-                        + "ever contain. Rename the CREATED constant (e.g. to "
-                        + "plugin_classloaders_registered_total, which round-trips intact) "
-                        + "and update plugin-runtime.json, the MetaspaceGrowth description "
-                        + "and P1-4 with it.")
-                .contains("# TYPE plugin_classloaders_created_total counter")
-                .contains("plugin_classloaders_created_total{pluginVersion=\"builtin\"} 1.0")
+                .as("the loaders-ever-registered counter must reach Prometheus under the name "
+                        + "the Grafana panel queries and verification P1-4 greps. It was "
+                        + "plugin_classloaders_created_total, which is unreachable: `_created` "
+                        + "is a reserved suffix, so it scraped as `plugin_classloaders_total` — "
+                        + "a name nobody wrote. Do not re-spell this with any reserved suffix; "
+                        + "if you must rename it again, probe the round-trip against this "
+                        + "registry first.")
+                .contains("# TYPE plugin_classloaders_registered_total counter")
+                .contains("plugin_classloaders_registered_total{pluginVersion=\"builtin\"} 1.0")
                 .doesNotContain("plugin_classloaders_total");
     }
 }

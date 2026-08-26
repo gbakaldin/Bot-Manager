@@ -272,14 +272,14 @@ line-for-line on `AsyncQueueMetrics`. It publishes:
 | Meter | Type | Tags | Meaning |
 |---|---|---|---|
 | `plugin_classloaders_live` | gauge | `pluginVersion` | registered loaders whose `WeakReference` has not been cleared |
-| `plugin_classloaders_created_total` | counter | `pluginVersion` | loaders ever registered |
+| `plugin_classloaders_registered_total` | counter | `pluginVersion` | loaders ever registered — **corrected by Amendment A2**, this said `..._created_total`, which is unreachable from Prometheus |
 | `plugin_classloaders_reclaimed_total` | counter | `pluginVersion` | loaders observed collected via the `ReferenceQueue` |
 
 **`live` is the leak detector and the reason it must be weak-reference-based**: after a
-drop, `created − reclaimed` staying above zero *is* the retention. `jvm_classes_unloaded_classes_total`
+drop, `registered − reclaimed` staying above zero *is* the retention. `jvm_classes_unloaded_classes_total`
 moving is the JVM-side corroboration. At Phase 1 the registry holds exactly one
 entry — the application classloader under `builtin` — so the readings are
-`live{builtin}=1, created_total{builtin}=1, reclaimed_total{builtin}=0`. That is
+`live{builtin}=1, registered_total{builtin}=1, reclaimed_total{builtin}=0`. That is
 degenerate on purpose: the meter names, the panel, the tag, and the unit test all
 exist and are proven before step 4 needs them.
 
@@ -730,9 +730,11 @@ Expect: one `Metaspace` sample with a value **> 0**; both class-count series pre
 curl -sf $BOT/actuator/prometheus | grep -E '^plugin_classloaders_'
 ```
 Expect exactly three families, all tagged `pluginVersion="builtin"`:
-`plugin_classloaders_live = 1`, `plugin_classloaders_created_total = 1`,
+`plugin_classloaders_live = 1`, `plugin_classloaders_registered_total = 1`,
 `plugin_classloaders_reclaimed_total = 0`. A missing series (rather than a zero) means
-the eager registration did not run.
+the eager registration did not run. **`plugin_classloaders_registered_total` is corrected
+by Amendment A2** — this step originally spelled it `..._created_total`, a name no scrape
+can ever contain; if you see `plugin_classloaders_total` here, the rename was lost.
 
 **P1-5 — every running bot is accounted for under `builtin`.** Start (or confirm
 running) one bot group, wait ≥ 20 s for two refresher cycles, then:
@@ -919,3 +921,46 @@ the baseline is true.
 **What changed.** The figure in the Verification section, and nothing else. Re-measure the
 baseline when it is next used against a different branch point rather than assuming 1866
 carries forward.
+
+---
+
+## Amendment — 2026-08-26 (Phase 1 fix pass)
+
+*Issued by Dev while fixing the two blocking defects in
+`docs/reviews/PLUGIN_HOT_RELOAD/qa.md` (FAIL) and `docs/reviews/PLUGIN_HOT_RELOAD/review.md`
+(CHANGES_REQUESTED). Both are **plan defects**: Compliance verified the implementation
+matched this document, so the code was wrong because this document was. Fixing only the
+code would leave step 6 to re-derive the same broken rule from AD-7.*
+
+### A2 — the loaders-ever-registered counter is `plugin_classloaders_registered_total`
+
+**What was wrong.** AD-3's meter table and verification P1-4 both named the counter
+`plugin_classloaders_created_total`. That name is **unreachable from Prometheus**.
+`_created` is a reserved suffix (the OpenMetrics created-timestamp series), so the client's
+name sanitiser strips `_total`, then strips `_created`, and the counter exposition
+re-appends `_total`. The meter therefore scrapes as `plugin_classloaders_total` — a name no
+panel queries and no verification step greps. Its sibling
+`plugin_classloaders_reclaimed_total` is untouched by the rule, which is what made this look
+like a typo rather than a rule.
+
+**Measured**, by probe against a real `PrometheusMeterRegistry` (QA's, then re-run
+independently before choosing the replacement):
+
+| Registered | Scraped |
+|---|---|
+| `plugin_classloaders_created_total` | `plugin_classloaders_total` |
+| `plugin_classloaders_registered_total` | `plugin_classloaders_registered_total` |
+| `plugin_classloaders_loaded_total` | `plugin_classloaders_loaded_total` |
+| `plugin_classloaders_reclaimed_total` | `plugin_classloaders_reclaimed_total` |
+
+**Corrected to `plugin_classloaders_registered_total`** — it round-trips intact, pairs with
+`..._reclaimed_total`, and is semantically truer to `register(...)`. AD-3's table, AD-3's
+prose (`registered − reclaimed`), and verification P1-4 are updated in place.
+
+**Why the whole Phase 1 test suite missed it.** Every test that pinned these names did so
+against a `SimpleMeterRegistry`, which applies no naming convention at all. The guard is
+now `InfoGaugePrometheusScrapeTest`, which asserts against the real text exposition — the
+same file that exists because `game_info` once scraped as bare `game`. Its
+`doesNotContain("plugin_classloaders_total")` assertion is the durable half: it fails if
+any future spelling of this family picks up a reserved suffix. **Any later rename of a
+meter in this document must be probed against a real `PrometheusMeterRegistry` first.**
