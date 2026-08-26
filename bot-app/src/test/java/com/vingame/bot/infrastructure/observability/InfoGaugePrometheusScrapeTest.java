@@ -146,4 +146,69 @@ class InfoGaugePrometheusScrapeTest {
                         + "gameId=\"game-uuid-1\",gameName=\"Tai Xiu\",groupName=\"tptxg2\","
                         + "product=\"116\"} 25.0");
     }
+
+    /**
+     * PLUGIN_HOT_RELOAD Phase 1 — the three {@code plugin_classloaders_*} meters and
+     * {@code bots_by_plugin_version}, checked against the <b>text exposition</b> rather than
+     * the in-registry meter id.
+     * <p>
+     * Everything else that pins these names does it against a {@code SimpleMeterRegistry},
+     * which applies no naming convention at all, so the strings
+     * {@code grafana/provisioning/dashboards/plugin-runtime.json} queries and the strings
+     * verification P1-4 greps for have until now been checked against nothing.
+     * <p>
+     * <b>This test is currently RED, and it is red because of a production defect, not a
+     * test defect.</b> {@code plugin_classloaders_created_total} scrapes as
+     * {@code plugin_classloaders_total}: {@code _created} is a <em>reserved Prometheus
+     * suffix</em> (the OpenMetrics created-timestamp series), so the Prometheus client's
+     * name sanitiser strips {@code _total}, then strips {@code _created}, and the counter
+     * exposition appends {@code _total} to what is left. Its sibling
+     * {@code plugin_classloaders_reclaimed_total} is untouched, which is what makes the
+     * defect look like a typo rather than a rule. This is the same class of failure that
+     * opened this file — {@code game_info} scraping as bare {@code game} — and it has the
+     * same shape of consequence: the dashboard's "created vs reclaimed" panel, the one that
+     * shows a retained loader, queries a name that will never exist, and P1-4 fails on the
+     * box. Verified by probe against this registry: {@code _registered_total} and
+     * {@code _loaded_total} both survive intact, so the fix is a one-constant rename in
+     * {@code PluginClassLoaderMetrics} plus the panel, the alert prose and P1-4.
+     */
+    @Test
+    void pluginRuntimeMeters_renderUnderTheNamesTheDashboardSpells() {
+        new PluginClassLoaderMetrics(registry, () -> "builtin")
+                .register("builtin", getClass().getClassLoader());
+
+        when(behaviorService.countBotsByPluginVersion()).thenReturn(Map.of(
+                new BotGroupBehaviorService.PluginVersionKey(
+                        "group-uuid-1", "env-uuid-1", "116", "builtin"), 47));
+        InfoGaugeRefresher.refresh(behaviorService, gauges);
+
+        String scrape = registry.scrape();
+
+        assertThat(scrape).contains("# TYPE plugin_classloaders_live gauge");
+        assertThat(scrape).contains("plugin_classloaders_live{pluginVersion=\"builtin\"} 1.0");
+        assertThat(scrape).contains("# TYPE plugin_classloaders_reclaimed_total counter");
+        assertThat(scrape).contains(
+                "plugin_classloaders_reclaimed_total{pluginVersion=\"builtin\"} 0.0");
+
+        // The panel is `sum by (pluginVersion) (bots_by_plugin_version)`, and verification
+        // P1-5 sums this family against bots_managed — both need the label on the exposition,
+        // not merely on the in-registry id.
+        assertThat(scrape).contains("# TYPE bots_by_plugin_version gauge");
+        assertThat(scrape).contains(
+                "bots_by_plugin_version{botGroupId=\"group-uuid-1\",environmentId=\"env-uuid-1\","
+                        + "pluginVersion=\"builtin\",product=\"116\"} 47.0");
+
+        assertThat(scrape)
+                .as("plugin_classloaders_created_total is unreachable from Prometheus: "
+                        + "`_created` is a reserved suffix, so this counter scrapes as "
+                        + "`plugin_classloaders_total`. The Grafana panel and verification "
+                        + "P1-4 both spell the name registered in code, which no scrape will "
+                        + "ever contain. Rename the CREATED constant (e.g. to "
+                        + "plugin_classloaders_registered_total, which round-trips intact) "
+                        + "and update plugin-runtime.json, the MetaspaceGrowth description "
+                        + "and P1-4 with it.")
+                .contains("# TYPE plugin_classloaders_created_total counter")
+                .contains("plugin_classloaders_created_total{pluginVersion=\"builtin\"} 1.0")
+                .doesNotContain("plugin_classloaders_total");
+    }
 }

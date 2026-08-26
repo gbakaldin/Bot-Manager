@@ -8,8 +8,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import java.lang.ref.WeakReference;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -30,6 +32,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link Assumptions} escape rather than a hard assert. A build that cannot reclaim skips
  * rather than fails; the alternative is a flaky test that gets muted, which is strictly
  * worse than one that occasionally says nothing.
+ * <p>
+ * <b>The escape is bounded, and the bound is the point.</b> An unqualified
+ * {@code assumeTrue(reclaimed)} would skip in two situations that look identical from
+ * inside the polling loop and are not remotely the same: the JVM declined to collect
+ * (inconclusive, fine) and <em>the JVM collected it but our accounting never noticed</em>
+ * (the defect). The second is not hypothetical — it is what happens the moment
+ * {@code PluginClassLoaderMetrics} stops strongly holding its own {@code VersionedRef}s,
+ * and it is the failure this whole class was written against, because in production it
+ * presents as a leak detector that reads flat forever. So the test keeps a
+ * <b>control</b> {@link java.lang.ref.WeakReference} to the same loader, registered with no
+ * queue: if the control has been cleared and {@code drain()} still saw nothing, that is a
+ * hard failure and only a genuinely uncollected loader may skip.
  */
 @DisplayName("PluginClassLoaderMetrics — weak-reference classloader accounting (AD-3)")
 class PluginClassLoaderMetricsTest {
@@ -87,6 +101,13 @@ class PluginClassLoaderMetricsTest {
         String version = "spike-v1";
         ClassLoader throwaway = new URLClassLoader("plugin-spike", new URL[0],
                 getClass().getClassLoader());
+
+        // The control. A second weak reference to the same loader, deliberately registered
+        // with NO ReferenceQueue and held only by this frame, so it answers one question the
+        // instrument under test cannot be trusted to answer about itself: did the JVM
+        // actually collect the loader? See CONTROL below for why that distinction is the
+        // whole point of this test.
+        WeakReference<ClassLoader> control = new WeakReference<>(throwaway);
         metrics.register(version, throwaway);
 
         assertThat(gauge(PluginClassLoaderMetrics.LIVE, version))
@@ -99,20 +120,54 @@ class PluginClassLoaderMetricsTest {
         assertThat(throwaway).isNull(); // keep the null assignment from being optimised away
 
         boolean reclaimed = false;
-        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(10).toNanos();
+        long collectedAt = 0;
+        long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
         while (System.nanoTime() < deadline) {
             System.gc();
             if (metrics.drain() > 0) {
                 reclaimed = true;
                 break;
             }
+            // refersTo(null), not get() == null: get() hands the referent back out, which
+            // under some collectors is enough to keep it alive for another cycle.
+            if (collectedAt == 0 && control.refersTo(null)) {
+                collectedAt = System.nanoTime();
+            }
+            // Clearing and enqueueing are not the same instant — ReferenceHandler runs on its
+            // own thread — so once the control says "collected", allow a bounded grace period
+            // for the queue before concluding anything.
+            if (collectedAt != 0
+                    && System.nanoTime() - collectedAt > Duration.ofSeconds(5).toNanos()) {
+                break;
+            }
             Thread.sleep(50);
         }
 
-        Assumptions.assumeTrue(reclaimed,
-                "the JVM did not collect the throwaway classloader within 10s — System.gc() is a "
-                        + "hint, so this is inconclusive rather than a failure. The production "
-                        + "gauge is a LOWER BOUND on retention for the same reason.");
+        if (!reclaimed) {
+            // CONTROL. Without this branch the Assumptions escape below swallows the exact
+            // regression this class exists to catch. If PluginClassLoaderMetrics stops
+            // strongly holding its own VersionedRefs, they become unreachable, the GC never
+            // enqueues them, drain() returns 0 forever, reclaimed_total never moves — and the
+            // instrument reports "no leaks" by having lost its bookkeeping. That looks
+            // identical, from inside the loop above, to "the JVM declined to run a GC", so a
+            // bare assumeTrue(reclaimed) turns it into a green build with a silent skip.
+            // Verified by mutation: deleting `tracked.add(...)` in register() leaves this test
+            // SKIPPED, not failed. The control reference distinguishes the two cases, because
+            // it is cleared by the same collection that should have enqueued ours.
+            assertThat(control.refersTo(null))
+                    .as("the JVM collected the throwaway classloader but drain() never observed "
+                            + "it. That is not GC non-determinism — it is the ReferenceQueue "
+                            + "wiring, or the strong-reference set that keeps VersionedRefs "
+                            + "enqueueable, being broken. In production that failure mode is a "
+                            + "leak detector that reads flat forever.")
+                    .isFalse();
+            Assumptions.abort(
+                    "the JVM did not collect the throwaway classloader within 10s — System.gc() "
+                            + "is a hint, so this is inconclusive rather than a failure. The "
+                            + "production gauge is a LOWER BOUND on retention for the same "
+                            + "reason. Note the accounting itself was NOT let off: the control "
+                            + "weak reference above proves the loader was still reachable.");
+        }
 
         assertThat(metrics.liveCount(version))
                 .as("`live` is created − reclaimed; a loader that was collected must leave it")

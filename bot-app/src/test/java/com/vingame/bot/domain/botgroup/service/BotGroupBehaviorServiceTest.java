@@ -1881,6 +1881,64 @@ class BotGroupBehaviorServiceTest {
             }
         }
 
+        // ---- PLUGIN_HOT_RELOAD Phase 1: per-(group, version) accessor ----
+
+        @Test
+        @DisplayName("countBotsByPluginVersion splits one group across versions and sums to getTotalManagedBots")
+        void countBotsByPluginVersion_splitsAGroupAndSumsToTheFleet() {
+            Game bauCua = game("game-uuid-1", "BauCua", GameType.BETTING_MINI);
+            BotGroupRuntime r1 = new BotGroupRuntime("g-1", 0, "env-1", "Staging", "Group 1", "116");
+            BotGroupRuntime r2 = new BotGroupRuntime("g-2", 0, "env-2", "Prod", "Group 2", "097");
+            try {
+                // g-1 is the step-5/6 drain shape: one group, genuinely mixed-version. That is
+                // the reason the version is a ROW label and deliberately not a group-level MDC
+                // key — a group-level fact could not represent this state at all.
+                putBots(r1, List.of(
+                        mockBotWithPluginVersion(bauCua, null),
+                        mockBotWithPluginVersion(bauCua, "builtin"),
+                        mockBotWithPluginVersion(bauCua, "v2")));
+                putBots(r2, List.of(mockBotWithPluginVersion(bauCua, null)));
+                runningGroups().put("g-1", r1);
+                runningGroups().put("g-2", r2);
+
+                Map<BotGroupBehaviorService.PluginVersionKey, Integer> counts =
+                        service.countBotsByPluginVersion();
+
+                // An unset pluginVersion is `builtin`, not a second key — Phase 1 sets the
+                // field nowhere, so if the default leaked through as null or "" the whole
+                // family would render under an empty label on the first deploy.
+                assertThat(counts.get(new BotGroupBehaviorService.PluginVersionKey(
+                        "g-1", "env-1", "116", "builtin"))).isEqualTo(2);
+                assertThat(counts.get(new BotGroupBehaviorService.PluginVersionKey(
+                        "g-1", "env-1", "116", "v2"))).isEqualTo(1);
+                assertThat(counts.get(new BotGroupBehaviorService.PluginVersionKey(
+                        "g-2", "env-2", "097", "builtin"))).isEqualTo(1);
+                assertThat(counts.keySet())
+                        .allSatisfy(key -> assertThat(key.pluginVersion()).isNotBlank());
+
+                // Verification P1-5 is exactly this equality, read off the scrape:
+                // sum(bots_by_plugin_version) must equal bots_managed. A shortfall on the box
+                // means a bot escaped the accounting, and this is where that is cheap to catch.
+                assertThat(counts.values().stream().mapToInt(Integer::intValue).sum())
+                        .as("sum(bots_by_plugin_version) == bots_managed")
+                        .isEqualTo(service.getTotalManagedBots());
+            } finally {
+                r1.getExecutor().shutdownNow();
+                r2.getExecutor().shutdownNow();
+                runningGroups().remove("g-1");
+                runningGroups().remove("g-2");
+            }
+        }
+
+        @Test
+        @DisplayName("countBotsByPluginVersion is empty when no group is running")
+        void countBotsByPluginVersion_isEmptyWithNoGroups() {
+            // The idle-instance reading. An empty map means no rows are registered at all,
+            // which is what MultiGauge.register(…, true) needs in order to retire stale rows
+            // rather than leave a stopped group's bots on the dashboard forever.
+            assertThat(service.countBotsByPluginVersion()).isEmpty();
+        }
+
         @Test
         @DisplayName("countOpenWsByEnv uses isConnected() — not BotStatus — and sums to getOpenWsConnectionCount")
         void countOpenWsByEnv_usesIsConnectedPredicate() {
@@ -2396,6 +2454,29 @@ class BotGroupBehaviorServiceTest {
                 .build();
         lenient().when(b.getStatus()).thenReturn(status);
         lenient().when(b.getConfiguration()).thenReturn(config);
+        return b;
+    }
+
+    /**
+     * A bot carrying the one thing {@code countBotsByPluginVersion} reads beyond identity.
+     * <p>
+     * {@code getPluginVersion()} is answered by delegating to the configuration exactly as
+     * the real {@code Bot} does, rather than stubbed to a literal: Phase 1 sets the field
+     * nowhere, so the interesting case is precisely the unset one, and a stub returning a
+     * literal would test the stub instead of {@code resolvePluginVersion()}'s default.
+     */
+    private static Bot mockBotWithPluginVersion(Game game, String pluginVersion) {
+        Bot b = mock(Bot.class);
+        BotConfiguration config = BotConfiguration.builder()
+                .game(game)
+                .environmentId("env-1")
+                .botGroupId("g-1")
+                .botIndex(1)
+                .pluginVersion(pluginVersion)
+                .build();
+        lenient().when(b.getStatus()).thenReturn(BotStatus.CONNECTION_AUTHENTICATED);
+        lenient().when(b.getConfiguration()).thenReturn(config);
+        lenient().when(b.getPluginVersion()).thenAnswer(inv -> config.resolvePluginVersion());
         return b;
     }
 
