@@ -1,11 +1,14 @@
 package com.vingame.bot.domain.bot.message.taixiu;
 
 import com.vingame.bot.domain.bot.message.EndGameMessage;
+import com.vingame.bot.domain.bot.message.MessageTypesImpl;
 import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.TaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
+import com.vingame.bot.domain.game.model.GameType;
+import org.springframework.stereotype.Component;
 
 /**
  * {@link TaiXiuMessageTypes} implementation for the captured
@@ -14,9 +17,14 @@ import com.vingame.bot.domain.bot.message.UpdateBetMessage;
  * the CMDs (1005/1002/1004) come from the interface at the default
  * {@code cmdOffset()==0} (AD-1).
  * <p>
- * Resolved via {@code GameMessageTypesResolver.resolveTaiXiu(ProductCode)}. Mirrors
- * the per-product betting-mini providers (e.g. {@code TipGameMessageTypes}).
+ * Resolved via {@code MessageTypesRegistry.taiXiu("116")}. Mirrors the per-product
+ * betting-mini providers (e.g. {@code TipGameMessageTypes}) — note that 116 is
+ * claimed twice across the two tables, once here for TAI_XIU and once by
+ * {@code TipGameMessageTypes} for BETTING_MINI. The registry keys on
+ * {@code (gameType, product)}, so that is not a collision.
  */
+@Component
+@MessageTypesImpl(gameType = GameType.TAI_XIU, products = "116")
 public class MiniGameTaiXiuMessageTypes implements TaiXiuMessageTypes {
 
     @Override
