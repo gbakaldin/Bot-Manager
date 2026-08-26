@@ -2,11 +2,18 @@ package com.vingame.bot.domain.botgroup.validation;
 
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
+import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
 import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Single integration seam for game-type-specific bot-group config validation
@@ -30,21 +37,35 @@ public class BotGroupConfigValidationService {
 
     private final GameConfigValidatorFactory validatorFactory;
     private final GameService gameService;
+    private final BettingStrategyFactory bettingStrategyFactory;
+    private final SlotStrategyFactory slotStrategyFactory;
 
     public BotGroupConfigValidationService(GameConfigValidatorFactory validatorFactory,
-                                           GameService gameService) {
+                                           GameService gameService,
+                                           BettingStrategyFactory bettingStrategyFactory,
+                                           SlotStrategyFactory slotStrategyFactory) {
         this.validatorFactory = validatorFactory;
         this.gameService = gameService;
+        this.bettingStrategyFactory = bettingStrategyFactory;
+        this.slotStrategyFactory = slotStrategyFactory;
     }
 
     /**
      * Resolve the group's {@link GameType} and run its validator.
      *
      * @param group the bot group to validate (post-merge on the PATCH path).
-     * @throws BadRequestException if {@code gameId} is missing/unresolvable, or
-     *         if the game-type validator rejects the configuration.
+     * @throws BadRequestException if a strategy key names no registered bean, if
+     *         {@code gameId} is missing/unresolvable, or if the game-type
+     *         validator rejects the configuration.
      */
     public void validate(BotGroup group) {
+        // Strategy keys first, because that is where they used to be rejected:
+        // until PLUGIN_HOT_RELOAD Phase 2b these were enum-typed, so an unknown
+        // key failed Jackson deserialization of the request body — before any
+        // service ran. Keeping it first preserves which error a body with two
+        // faults reports (PLUGIN_HOT_RELOAD AD-15).
+        validateStrategyKeys(group);
+
         // Activation config is game-type-independent (TIMED_ACTIVATION AD-7), so
         // it is checked here for every group rather than in a per-GameType
         // validator. A null/legacy activationMode passes through unchanged.
@@ -70,5 +91,66 @@ public class BotGroupConfigValidationService {
         }
 
         validatorFactory.forType(gameType).validate(group);
+    }
+
+    /**
+     * PLUGIN_HOT_RELOAD AD-15 — the validation Jackson used to do implicitly,
+     * made explicit at the same HTTP status.
+     *
+     * <p>Before Phase 2b {@code strategyMix[].strategyId} and
+     * {@code slotStrategyId} were enum-typed, so {@code "NONSENSE"} failed enum
+     * deserialization and the request was a 400 before it reached any service.
+     * They are {@code String}s now, so nothing would reject it — this does,
+     * against the registries that actually have to resolve the key at group
+     * start.
+     *
+     * <p>Running here rather than at the mapper means it covers <b>create and
+     * PATCH</b> (both call {@link #validate}), which is strictly better than
+     * what it replaces: Jackson only ever guarded the request body, whereas a
+     * group whose strategy bean vanished in a deploy used to fail at
+     * {@code BettingStrategyFactory.create} on a bot thread during group start.
+     *
+     * <p>Null and empty short-circuit before either registry is consulted. That
+     * is not an optimisation: {@code strategyMix} is null on every group that
+     * predates BETTING_STRATEGIES and {@code slotStrategyId} is null on every
+     * non-SLOT group, and null {@code slotStrategyId} is meaningful — it means
+     * "fall back to FIXED at bot-build time".
+     *
+     * <p>{@code slotStrategyId} is checked even for non-SLOT groups: it is a
+     * persisted field on every group and a bad value is a bad value. The
+     * game-type-specific rules live in the per-{@link GameType} validators.
+     */
+    private void validateStrategyKeys(BotGroup group) {
+        List<WeightedStrategy> mix = group.getStrategyMix();
+        if (mix != null && !mix.isEmpty()) {
+            Set<String> registered = bettingStrategyFactory.registeredKeys();
+            for (WeightedStrategy entry : mix) {
+                String key = entry == null ? null : entry.strategyId();
+                if (key == null || !registered.contains(key)) {
+                    throw new BadRequestException(
+                            "Unknown strategyId '" + key + "' in strategyMix — registered strategies: "
+                                    + sorted(registered));
+                }
+            }
+        }
+
+        String slotStrategyId = group.getSlotStrategyId();
+        if (slotStrategyId != null) {
+            Set<String> registered = slotStrategyFactory.registeredKeys();
+            if (!registered.contains(slotStrategyId)) {
+                throw new BadRequestException(
+                        "Unknown slotStrategyId '" + slotStrategyId
+                                + "' — registered slot strategies: " + sorted(registered));
+            }
+        }
+    }
+
+    /**
+     * The registries iterate in Spring's bean-discovery order, which is
+     * arbitrary (plan Amendment A4). Sort the list an operator reads out of a
+     * 400 body so it is stable across machines and packagings.
+     */
+    private static Set<String> sorted(Set<String> keys) {
+        return new TreeSet<>(keys);
     }
 }

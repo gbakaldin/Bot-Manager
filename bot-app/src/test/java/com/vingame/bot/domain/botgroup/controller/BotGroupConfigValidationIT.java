@@ -77,10 +77,35 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         SlotConfigValidator.class,
         TaiXiuConfigValidator.class,
         CardGameConfigValidator.class,
-        UpDownConfigValidator.class
+        UpDownConfigValidator.class,
+        BotGroupConfigValidationIT.RealStrategyRegistries.class
 })
 @DisplayName("BotGroup config-validation (end-to-end)")
 class BotGroupConfigValidationIT {
+
+    /**
+     * PLUGIN_HOT_RELOAD Phase 2b, AD-15: {@link BotGroupConfigValidationService}
+     * now injects both strategy registries, so this slice has to supply them.
+     * Real beans over a real component scan, matching
+     * {@code BotGroupStrategyKeyValidationTest}; {@code @RestController} is
+     * excluded because {@code StrategyController} shares that package root and
+     * this slice only maps {@link BotGroupController}.
+     *
+     * <p><b>Note for whoever reads this next:</b> nothing in this class executes.
+     * The build configures no failsafe plugin and surefire's default includes are
+     * {@code *Test} / {@code Test*} / {@code *Tests} / {@code *TestCase}, so the
+     * {@code IT} suffix means "compiled, never run". Pre-existing and out of scope
+     * for Phase 2b; kept correct here so it works the day someone wires failsafe
+     * or renames it.
+     */
+    @org.springframework.boot.test.context.TestConfiguration
+    @org.springframework.context.annotation.ComponentScan(
+            basePackages = "com.vingame.bot.domain.bot.strategy",
+            excludeFilters = @org.springframework.context.annotation.ComponentScan.Filter(
+                    type = org.springframework.context.annotation.FilterType.ANNOTATION,
+                    classes = org.springframework.web.bind.annotation.RestController.class))
+    static class RealStrategyRegistries {
+    }
 
     @Autowired
     private MockMvc mockMvc;
