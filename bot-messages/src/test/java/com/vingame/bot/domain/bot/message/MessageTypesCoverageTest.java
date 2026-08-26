@@ -179,15 +179,24 @@ class MessageTypesCoverageTest {
     }
 
     /**
-     * The scan's own shape. {@link MessageTypesRegistryTest} asserts which products are
-     * registered; this asserts the counts the boot log prints, so a lost bean fails at
-     * build time rather than on the box.
+     * The counts the boot log prints, asserted at build time so a lost bean fails here
+     * rather than on the box — the same role as
+     * {@code StrategyCatalogParityTest.scanDiscoversTheWholeCatalogue}.
+     * <p>
+     * The expected numbers are <b>derived</b> from the inventories above rather than
+     * written as literals, on purpose: a hardcoded 4 and 2 would be a third copy of the
+     * same fact, and every duplicated copy is another file that shipping a brand has to
+     * touch. As arithmetic it is a cross-check — registry size plus inventory size must
+     * equal {@code ProductCode.values().length} — not a duplicate.
      */
     @Test
-    @DisplayName("A real component scan discovers 4 betting-mini products, 2 Tai Xiu products, 1 slot provider")
+    @DisplayName("A real component scan discovers every product not on an inventory, plus the slot provider")
     void scanDiscoversTheWholeCatalogue() {
-        assertThat(registry.registeredBettingMiniProducts()).hasSize(4);
-        assertThat(registry.registeredTaiXiuProducts()).hasSize(2);
+        int products = ProductCode.values().length;
+        assertThat(registry.registeredBettingMiniProducts())
+                .hasSize(products - BETTING_MINI_NOT_YET_IMPLEMENTED.size());
+        assertThat(registry.registeredTaiXiuProducts())
+                .hasSize(products - TAI_XIU_NOT_YET_IMPLEMENTED.size());
         assertThat(registry.hasSlotProvider()).isTrue();
     }
 

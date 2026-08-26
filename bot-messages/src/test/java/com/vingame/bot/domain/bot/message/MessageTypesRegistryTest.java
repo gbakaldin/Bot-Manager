@@ -15,8 +15,6 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.util.Arrays;
@@ -111,13 +109,20 @@ class MessageTypesRegistryTest {
                 .hasMessage("ProductCode cannot be null");
     }
 
-    @ParameterizedTest(name = "bettingMini({0}) -> IllegalArgumentException")
-    @EnumSource(value = ProductCode.class, names = {"P_066", "P_103", "P_105", "P_114", "P_119", "P_222"})
-    @DisplayName("Should throw IllegalArgumentException for unimplemented product codes")
-    void shouldThrowForUnimplementedProductCodes(ProductCode productCode) {
-        assertThatThrownBy(() -> registry.bettingMini(productCode.getCode()))
+    /**
+     * One representative unimplemented product. The pre-2c version of this test spelled
+     * all six as an {@code @EnumSource} list; keeping that here would make it a
+     * <b>second copy</b> of {@code MessageTypesCoverageTest}'s inventory, and a
+     * duplicated inventory is a tax on the exact thing this phase exists to make cheap —
+     * shipping a brand. AD-19 puts the exhaustive list in one place; this keeps only the
+     * "a miss throws" shape.
+     */
+    @Test
+    @DisplayName("Should throw IllegalArgumentException for an unimplemented product code")
+    void shouldThrowForUnimplementedProductCode() {
+        assertThatThrownBy(() -> registry.bettingMini(ProductCode.P_066.getCode()))
                 .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining(productCode.getCode())
+                .hasMessageContaining(ProductCode.P_066.getCode())
                 .hasMessageContaining("not yet implemented");
     }
 
@@ -144,6 +149,15 @@ class MessageTypesRegistryTest {
 
     /* ---- what the scan did and did not pick up ---- */
 
+    /**
+     * The AD-23 behaviour-identity pin: the registry registers <em>exactly</em> what
+     * {@code GameMessageTypesResolver}'s three switches returned, no more and no less.
+     * Deliberately a hardcoded set — shipping a brand must be a conscious edit here,
+     * because "which products have a provider" is the one observable this sub-phase
+     * promises not to change by accident. Together with the one inventory line in
+     * {@code MessageTypesCoverageTest} it is the whole cost of a new product; nothing in
+     * {@code src/main} outside the new provider itself has to change.
+     */
     @Test
     @DisplayName("The scan registers exactly the products the resolver's switch handled")
     void scanRegistersExactlyThePreviousSwitchArms() {

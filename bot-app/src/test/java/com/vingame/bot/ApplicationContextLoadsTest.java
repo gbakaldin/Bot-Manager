@@ -169,10 +169,12 @@ class ApplicationContextLoadsTest {
         // only place that proves the new spring-context dependency is enough.
         MessageTypesRegistry registry = context.getBean(MessageTypesRegistry.class);
 
-        assertThat(registry.registeredBettingMiniProducts())
-                .containsExactlyInAnyOrder("097", "098", "116", "118");
-        assertThat(registry.registeredTaiXiuProducts())
-                .containsExactlyInAnyOrder("114", "116");
+        // A superset check, not an exact set. What this test uniquely proves is that no
+        // provider goes *missing* under Starter's scan; "exactly these products and no
+        // others" is already pinned once, in bot-messages, and a second copy here would
+        // be a file every future brand has to touch for no extra protection.
+        assertThat(registry.registeredBettingMiniProducts()).contains("097", "098", "116", "118");
+        assertThat(registry.registeredTaiXiuProducts()).contains("114", "116");
         assertThat(registry.hasSlotProvider()).isTrue();
 
         // Resolution, not just registration — this is what BotFactory does per bot.
