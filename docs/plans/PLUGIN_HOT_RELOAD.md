@@ -1320,3 +1320,90 @@ had. **No code, no shipped behaviour, no Architecture Decision.**
 else changes" is only true when the old and new signatures accept the same domain. A change
 of parameter *type* — here enum to `String` — moves the null handling from the callee to the
 caller unless someone writes down where it went.
+
+---
+
+## Amendment — 2026-08-27 (Phase 2 review fix pass)
+
+*Issued by the Compliance Architect while verifying the fix pass that answers
+`review-2a.md` / `review-2b.md` / `review-2c.md`
+(`docs/reviews/PLUGIN_HOT_RELOAD/compliance-fixpass.md`). The fix-pass diff is **accepted
+unchanged**. Both entries below are things this document should already have said and does
+not: A8 is a step-5 constraint the plan never recorded, A9 is one stale sequence in a
+verification step. **No Architecture Decision changes in substance, no code changes, no
+shipped behaviour changes.***
+
+### A8 — the registry key has no version dimension, and a duplicate key fails the whole context
+
+**What is missing.** Nothing in this document — not AD-12, not AD-17, not AD-21, not the
+"Forward-compatibility facts confirmed for later steps" list, not the Open Items — records
+either half of the following, which `review-2c.md` F4 raised against
+`MessageTypesRegistry` and `review-2a.md` raised against `BettingStrategyFactory`. A5
+covers the adjacent case (a registry that *shrinks* across a cutover leaves groups holding
+a retired key un-PATCHable); this is the case where a registry *collides*, and it is not
+the same problem.
+
+**Measured** at `7d8a08d`, and true of all three registries:
+
+1. **Two live plugin versions are not expressible under the current keys.** The
+   message-types key is `(GameType, productCode)`
+   (`MessageTypesRegistry.indexByProduct`); the strategy key is the bare string
+   (`BettingStrategyFactory.init`, `SlotStrategyFactory.init`). None carries a version.
+   Step 5's stated end state is v1 and v2 of a brand's plugin serving different groups at
+   the same time — both versions' providers claim `"116"`, both versions' strategies claim
+   `"RANDOM"`, and under these keys that is a duplicate.
+2. **A duplicate key fails context refresh, i.e. it takes the whole engine down.** All
+   three registries throw `IllegalStateException` from a `@Component`
+   constructor / `@PostConstruct`. That is **right while every key is ours** — two built-in
+   providers claiming `"116"` is a programming error and the build should not produce a
+   startable artifact — and it becomes **wrong the moment a third-party plugin can collide
+   with a built-in**, because a bad plugin should be rejected and logged, not stop the
+   other nine brands from starting.
+
+**What step 5 has to decide, once, for all three registries.** Either a version dimension
+in the key, or one registry instance per plugin version in a child context with
+`BotFactory` selecting on the group's pinned version — plus a **collision policy** for a
+key a plugin does not own. The policy must be one policy: the mechanism is now duplicated
+in a second registry, so deciding it twice is how the two drift. This is needed **before**
+plugins can register, not after, which is why it is recorded here rather than left to be
+rediscovered under time pressure.
+
+**Why this is a plan entry and not a code change.** Neither half is a defect today —
+singleton-in-the-root-context is the correct shape for one version, and the throw is the
+correct posture for keys that are all ours. Dev recorded both in a comment on the
+`registry.put` line in `MessageTypesRegistry` (the code that has to change) and could not
+record them here. Both are now here as well; the comment stays, because that is where the
+next person editing the key will read it.
+
+**Related, and deliberately not merged into this entry:** A5's drain-window constraint
+(step 7 must keep the union of both versions' *strategy* keys registered, or accept that
+mid-drain groups are read-only through PATCH). A5 is about a key that disappears; A8 is
+about a key claimed twice. Step 5 needs an answer to both.
+
+### A9 — verification P2-2's bracketed order is sorted, not discovery order
+
+**What was wrong.** A4 rewrote P2-2 to say the strategy-factory boot line prints the
+registry's key set in bean-discovery order and quoted the expected sequence
+`[RANDOM, MARTINGALE_CLASSIC_AGGRESSIVE, MARTINGALE_CLASSIC_CAUTIOUS, DALEMBERT_*,
+FIBONACCI_*, PAROLI_*]`. The fix pass answers `review-2a.md`'s first finding — that
+classpath-scan order leaks into one INFO line and two exception messages — by sorting
+every operator-facing key list at render time. All three registries' boot lines and both
+`create()` lookup-failure tails now render sorted; `MessageTypesRegistry`'s startup line
+sorts its product lists for the same reason (`[097, 098, 116, 118]`, `[114, 116]`).
+
+**Consequence for the releaser.** `BettingStrategyFactory initialized` now reads
+`[DALEMBERT_AGGRESSIVE, DALEMBERT_CAUTIOUS, FIBONACCI_AGGRESSIVE, FIBONACCI_CAUTIOUS,
+MARTINGALE_CLASSIC_AGGRESSIVE, MARTINGALE_CLASSIC_CAUTIOUS, PAROLI_AGGRESSIVE,
+PAROLI_CAUTIOUS, RANDOM]` and `SlotStrategyFactory initialized` reads `[FIXED, RANDOM]`.
+**P2-2 still passes exactly as written** — it asks for the counts (9 and 2) and the set,
+and explicitly says not to compare the sequence. Only A4's illustrative sequence is stale.
+
+**Still inside AD-23, for the reason A4 gave.** AD-23's subject is behaviour — same
+strategies assigned, same HTTP responses — and a set printed in a different order in one
+once-per-JVM boot line is not that. `GET /api/v1/strategy/` is untouched (it enumerates
+`StrategyId` until 2d), so P2-3 is unaffected and AD-21's display order is unaffected: the
+sort applies to diagnostics, never to the UI contract.
+
+**The general rule this leaves behind:** an amendment that quotes an observed sequence
+dates as fast as the sequence does. Quote the property being asserted (counts, set) and
+keep the sequence as an illustration marked as one.
