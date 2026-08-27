@@ -468,7 +468,8 @@ key alphabetically, so the UI picker does not reshuffle on deploy. Pin the order
 test; `StrategyId.values()` order is a de-facto UI contract that no one wrote down.
 **The registry's own iteration order is not that order and must never be used as if it
 were** — measured at Phase 2a it is alphabetical-by-class-within-package and differs from
-`StrategyId.values()` in six of nine positions (Amendment A4). Step 2d sorts explicitly,
+`StrategyId.values()` in eight of nine positions — it agrees on `RANDOM` alone
+(Amendment A4). Step 2d sorts explicitly,
 from `StrategyId.values()`, over whatever order the registry happens to hand back.
 **"Preserved exactly" governs the order and the per-entry values; "lists the registry"
 governs the *set*, and the registry wins whenever the two disagree — see Amendment A10,
@@ -1112,7 +1113,11 @@ scan and under `ApplicationContextLoadsTest`'s full Spring Boot scan:
 | `StrategyId.values()` | RANDOM, MARTINGALE_CLASSIC_**CAUTIOUS**, MARTINGALE_CLASSIC_**AGGRESSIVE**, **PAROLI**_CAUTIOUS, PAROLI_AGGRESSIVE, **DALEMBERT**_CAUTIOUS, DALEMBERT_AGGRESSIVE, FIBONACCI_CAUTIOUS, FIBONACCI_AGGRESSIVE |
 | Registry insertion | RANDOM, MARTINGALE_CLASSIC_**AGGRESSIVE**, MARTINGALE_CLASSIC_**CAUTIOUS**, **DALEMBERT**_AGGRESSIVE, DALEMBERT_CAUTIOUS, FIBONACCI_AGGRESSIVE, FIBONACCI_CAUTIOUS, **PAROLI**_AGGRESSIVE, PAROLI_CAUTIOUS |
 
-They agree on RANDOM and differ in **six of the remaining eight positions**. The registry
+They agree on RANDOM and differ in **all eight of the remaining positions** — `PAROLI_*`
+and `DALEMBERT_*` swap as blocks *and* the cautious/aggressive pair swaps within each
+block, so no position after the first survives. (Corrected during the Phase 2d fix pass:
+this said "six of the remaining eight", which QA re-measured against the table directly
+above. It *understates* the divergence, so nothing built on it changes.) The registry
 order is Spring's classpath-scan order — alphabetical by **class file name within
 package**, with `RandomBehaviorStrategy` ahead of the `martingale/` subdirectory because
 `R` sorts before `m` in ASCII. So it tracks *class names*, not enum names: renaming

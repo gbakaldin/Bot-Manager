@@ -425,6 +425,15 @@ declare.
   `strategyMix[].strategyId` and `slotStrategyId` read back unchanged. No
   migration. `slotStrategyId == null` still means "fall back to `FIXED` at
   bot-build time" and must stay null through the entity and DTO layers.
+- **`BotGroup.slotStrategyId` has no effect on any bot, whatever it holds.**
+  `BotGroupBehaviorService:791-795` sets the per-bot value to `FIXED` for every
+  SLOT group and to `null` otherwise, ignoring the persisted field entirely — a
+  silent override, not a rejection (slot strategy is not selectable; slot play is
+  invisible to other players). So the null-means-`FIXED` rule above is true but
+  does **not** imply a non-null value is honoured; it is not. Combined with
+  review-2b's finding that a bad persisted value can never be PATCHed back to
+  `null`, the field is validated (400 on an unregistered key), persisted and
+  exposed while changing nothing about how a bot plays. Do not build on it.
 - **Jackson's implicit key validation was replaced explicitly**, same 400
   (`BotGroupConfigValidationService`, AD-15). Note what it does *not* buy
   (Amendment A5): `validate` is **not** on the group-start path, so a group whose
@@ -439,9 +448,21 @@ declare.
   `displayName` with an empty description. Order is an **explicit sort** —
   built-ins in `StrategyId` declaration order, then everything else alphabetically.
   A registry's own iteration order is bean-discovery order (alphabetical by class
-  file within package, Amendment A4) and **must never be used as a display order**;
-  operator-facing key lists in boot lines and exception tails are sorted at render
-  time for the same reason.
+  file within package, Amendment A4) and **must never be used as a display order**
+  — it agrees with `StrategyId.values()` on `RANDOM` alone and differs in **all
+  eight** remaining positions; operator-facing key lists in boot lines and
+  exception tails are sorted at render time for the same reason.
+- **A built-in whose bean goes missing is absent from the picker, and says so
+  once.** Listing the registry means the endpoint can now disagree with the enum,
+  which it could not before. `StrategyCatalog`'s `@PostConstruct` logs one WARN
+  naming `BUILTINS.keySet() - registeredKeys()` — once per JVM, so it is tier-1
+  admissible and Loki-visible. Without it the same fault surfaces only as a
+  shorter dropdown, a 400 on *every* PATCH of an affected group, and bots dying on
+  a bot thread. The build-time guard for the same divergence is
+  **`ApplicationContextLoadsTest.strategyRegistriesAreFullyPopulated`** (exact set
+  equality both ways, under the real `Starter` scan), *not*
+  `StrategyCatalogParityTest`, which proves only enum ⊆ registry under a bare
+  package scan.
 - **A duplicate key fails context refresh** in all three registries, which is right
   while every key is ours and becomes wrong once a third-party plugin can collide
   with a built-in. Neither the strategy key nor the message-types key carries a
