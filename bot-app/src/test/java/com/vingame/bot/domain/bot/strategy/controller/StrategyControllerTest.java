@@ -6,18 +6,46 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.FilterType;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.bind.annotation.RestController;
 
 import static org.hamcrest.Matchers.hasItem;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * <p>Since PLUGIN_HOT_RELOAD Phase 2d the endpoint serves
+ * {@code StrategyCatalog}, which reads {@code BettingStrategyFactory}'s
+ * registered keys, so the slice needs the real registries
+ * ({@link RealStrategyRegistries}) rather than a stub. A mocked factory would let
+ * every assertion below pass while the production catalogue was empty. Every
+ * assertion in this class is unchanged across that phase — which is the point:
+ * AD-21 preserves the response contract exactly.
+ */
 @WebMvcTest(StrategyController.class)
-@Import(RestExceptionHandler.class)
+@Import({RestExceptionHandler.class, StrategyControllerTest.RealStrategyRegistries.class})
 @DisplayName("StrategyController")
 class StrategyControllerTest {
+
+    /**
+     * Real {@code BettingStrategyFactory} / {@code SlotStrategyFactory} /
+     * {@code StrategyCatalog} over a real component scan of the strategy package,
+     * as in {@code BotGroupStrategyKeyValidationTest}. {@code @RestController} is
+     * excluded because {@link StrategyController} itself lives under this package
+     * root and is already registered by the slice.
+     */
+    @TestConfiguration
+    @ComponentScan(
+            basePackages = "com.vingame.bot.domain.bot.strategy",
+            excludeFilters = @ComponentScan.Filter(
+                    type = FilterType.ANNOTATION, classes = RestController.class))
+    static class RealStrategyRegistries {
+    }
 
     @Autowired
     private MockMvc mockMvc;
