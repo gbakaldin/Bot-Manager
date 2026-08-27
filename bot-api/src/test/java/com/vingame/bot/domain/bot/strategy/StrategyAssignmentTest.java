@@ -6,8 +6,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -20,13 +20,18 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * fill-to-target apportionment via the largest-remainder method, sliced over
  * hash-sorted bot identifiers for deterministic per-bot pinning.
  *
- * <p>The 100-bot 30/50/20 test (driven through the package-private
- * {@link StrategyAssignment#apportion} since v1 ships a single
- * {@link StrategyId} value, so distinct-bucket testing via the public
- * {@link StrategyAssignment#assign} entry point is not yet possible) is the
- * explicit verification step called out in Phase 4. The 5-bot rounding test
- * pins the rounding rule. The determinism test pins the contract that lets a
- * bot keep its strategy across restarts.
+ * <p>The 100-bot 30/50/20 test drives the package-private
+ * {@link StrategyAssignment#apportion}. The 5-bot rounding test pins the rounding
+ * rule. The determinism test pins the contract that lets a bot keep its strategy
+ * across restarts.
+ *
+ * <p><b>Distinct buckets through the public {@link StrategyAssignment#assign} are
+ * covered</b> — see {@link MultiBucketAssignment}. The javadoc here used to say
+ * they were "not yet possible" because v1 shipped a single {@link StrategyId}
+ * value; that has been wrong since {@code StrategyId} grew to nine constants, and
+ * since PLUGIN_HOT_RELOAD Phase 2b the key is a {@code String}, so any two
+ * distinct literals are two buckets. review-2b flagged that 2b deleted the excuse
+ * from the production javadoc without adding the coverage it implied.
  */
 @DisplayName("StrategyAssignment")
 class StrategyAssignmentTest {
@@ -315,6 +320,102 @@ class StrategyAssignmentTest {
 
             assertThat(assignment).hasSize(10);
             assertThat(assignment.values()).containsOnly(StrategyId.RANDOM.name());
+        }
+    }
+
+    /**
+     * The multi-bucket slicing loop in {@code assign} — the code path every other
+     * test in this file collapses past, because they all feed one key and so take
+     * a single chunk covering the whole sorted list.
+     *
+     * <p>Keys are bare literals, not {@code StrategyId.X.name()}. The routine is
+     * pure apportionment over opaque strings and must stay that way: a
+     * plugin-supplied key with no enum constant is the end state of
+     * PLUGIN_HOT_RELOAD, and a test that only ever fed it enum names would not
+     * notice the day something started to care.
+     */
+    @Nested
+    @DisplayName("assign — distinct buckets")
+    class MultiBucketAssignment {
+
+        @Test
+        @DisplayName("three distinct keys over 100 bots tally to exactly 30/50/20")
+        void threeDistinctKeysTallyToTarget() {
+            List<WeightedStrategy> mix = List.of(
+                    new WeightedStrategy("ALPHA", 0.3),
+                    new WeightedStrategy("BETA", 0.5),
+                    new WeightedStrategy("GAMMA", 0.2));
+
+            Map<String, String> assignment = StrategyAssignment.assign(mix, identifiers("bot", 100));
+
+            assertThat(assignment).hasSize(100);
+            assertThat(tally(assignment))
+                    .containsEntry("ALPHA", 30)
+                    .containsEntry("BETA", 50)
+                    .containsEntry("GAMMA", 20);
+        }
+
+        @Test
+        @DisplayName("every identifier is assigned exactly once across the buckets")
+        void everyIdentifierIsAssignedExactlyOnce() {
+            List<String> ids = identifiers("bot", 37);
+            List<WeightedStrategy> mix = List.of(
+                    new WeightedStrategy("ALPHA", 1.0),
+                    new WeightedStrategy("BETA", 2.0),
+                    new WeightedStrategy("GAMMA", 4.0));
+
+            Map<String, String> assignment = StrategyAssignment.assign(mix, ids);
+
+            assertThat(assignment.keySet()).containsExactlyInAnyOrderElementsOf(ids);
+            assertThat(tally(assignment).values().stream().mapToInt(Integer::intValue).sum())
+                    .isEqualTo(37);
+        }
+
+        @Test
+        @DisplayName("a bucket whose target rounds to zero receives no bots, and no bot is dropped")
+        void underfilledBucketReceivesNoBots() {
+            // Three keys, two bots: targets are (2, 0, 0). assign's cursor
+            // invariant would throw if the empty chunks were mishandled.
+            List<WeightedStrategy> mix = List.of(
+                    new WeightedStrategy("BULK", 1.0),
+                    new WeightedStrategy("SLIVER_A", 0.001),
+                    new WeightedStrategy("SLIVER_B", 0.001));
+
+            Map<String, String> assignment = StrategyAssignment.assign(mix, identifiers("bot", 2));
+
+            assertThat(assignment).hasSize(2);
+            assertThat(assignment.values()).containsOnly("BULK");
+        }
+
+        @Test
+        @DisplayName("assignment is stable across calls — the pinning contract, on a multi-bucket mix")
+        void multiBucketAssignmentIsDeterministic() {
+            // The determinism test elsewhere in this file feeds one key, so it
+            // cannot tell a stable assignment from a stable constant. With three
+            // buckets a re-run that reshuffled the slicing would show up.
+            List<WeightedStrategy> mix = List.of(
+                    new WeightedStrategy("ALPHA", 0.3),
+                    new WeightedStrategy("BETA", 0.5),
+                    new WeightedStrategy("GAMMA", 0.2));
+            List<String> ids = identifiers("bot", 50);
+
+            assertThat(StrategyAssignment.assign(mix, ids))
+                    .isEqualTo(StrategyAssignment.assign(mix, ids));
+        }
+
+        @Test
+        @DisplayName("the bucket order follows the mix, not the keys' natural order")
+        void bucketOrderFollowsTheMix() {
+            // ZULU is submitted first with the largest weight. If assign sorted
+            // the keys, ALPHA would take the biggest chunk instead.
+            List<WeightedStrategy> mix = List.of(
+                    new WeightedStrategy("ZULU", 0.8),
+                    new WeightedStrategy("ALPHA", 0.2));
+
+            Map<String, Integer> tally = tally(
+                    StrategyAssignment.assign(mix, identifiers("bot", 10)));
+
+            assertThat(tally).containsEntry("ZULU", 8).containsEntry("ALPHA", 2);
         }
     }
 }

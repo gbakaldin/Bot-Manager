@@ -55,8 +55,14 @@ public final class StrategyAssignment {
 
     /**
      * Apportionment vector — internal output of the largest-remainder step.
-     * Exposed package-private so {@code StrategyAssignmentTest} can drive the
-     * apportionment math directly with mixes of distinct entries.
+     * Exposed package-private so {@code StrategyAssignmentTest} and
+     * {@code StrategyAssignmentApportionmentMathTest} can drive the apportionment
+     * math directly with mixes of distinct entries, which they do — the
+     * multi-bucket target vector, leftover distribution across distinct buckets
+     * and the insertion-order tie-break are all exercised through the public
+     * {@link #apportion} and {@link #assign} (review-2b: PLUGIN_HOT_RELOAD
+     * Phase 2b made that free by retyping the key to {@code String}, and the
+     * coverage followed later than the javadoc claiming it).
      *
      * @param ids    strategy keys in the order they were submitted (post-coalesce)
      * @param target integer per-strategy target counts that sum to {@code botCount}

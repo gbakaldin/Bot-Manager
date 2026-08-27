@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.bot.strategy;
 
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -17,25 +18,29 @@ import static org.assertj.core.api.Assertions.assertThat;
  * apportionment <i>math</i> against the 30/50/20 distribution explicitly called
  * out in Phase 4 verification.
  *
- * <p><b>Structural limitation.</b> v1 ships a single {@link StrategyId} value
- * ({@link StrategyId#RANDOM}), and {@link StrategyAssignment#apportion} coalesces
- * weights by {@link StrategyId}. There is therefore no public-API path that can
- * produce a multi-bucket apportionment with distinct strategies — every test
- * built on the public {@code apportion} entry point collapses to a single bucket.
+ * <p><b>The structural limitation this file was built around is gone.</b> It used
+ * to say: v1 ships a single {@link StrategyId} value, {@code apportion} coalesces
+ * by strategy key, and therefore no public-API path can produce a multi-bucket
+ * apportionment. That stopped being true twice over — {@code StrategyId} has had
+ * nine constants since BETTING_STRATEGIES, and since PLUGIN_HOT_RELOAD Phase 2b the
+ * key is a {@code String}, so any two distinct literals are two buckets.
  *
- * <p>This test pins the algorithm <i>algebraically</i>: an independent
- * implementation of the same largest-remainder rule (reproduced inline here for
- * forensic clarity) is verified to produce {@code [30, 50, 20]} for
- * {@code (0.3, 0.5, 0.2) * 100}, and to maintain the {@code sum == botCount}
- * invariant across a sweep of bot counts. This is a "the math we want is the
- * math we shipped" guarantee — if a future change to {@code apportion}'s
- * formula diverges from this reference, the equivalence check at the bottom of
- * the test (single-bucket sum-only) breaks loudly.
+ * <p>review-2b flagged that Phase 2b deleted the excuse from
+ * {@code StrategyAssignment}'s javadoc without taking the coverage that had just
+ * become free. {@link MultiBucketApportionment} below is that coverage: the
+ * per-bucket target vector, largest-remainder leftover distributed <em>across
+ * distinct buckets</em>, and the insertion-order tie-break, all through the
+ * production {@code apportion}. {@code StrategyAssignmentTest} covers the
+ * multi-bucket slicing loop in {@code assign}.
  *
- * <p>When a second {@link StrategyId} ships, replace this scaffolding with a
- * direct call to {@code StrategyAssignment.assign(...)} on a distinct-strategy
- * mix — the production routine will then exercise the multi-bucket path
- * end-to-end and this test should be deleted.
+ * <p>The inline reference implementation stays. It pins the algorithm
+ * <i>algebraically</i> — an independent implementation of the same
+ * largest-remainder rule, verified to produce {@code [30, 50, 20]} for
+ * {@code (0.3, 0.5, 0.2) * 100} and to maintain the {@code sum == botCount}
+ * invariant across a sweep of bot counts. That is a "the math we want is the math
+ * we shipped" guarantee, and it is worth more now than it was: the multi-bucket
+ * tests below assert production against expected values, while this asserts
+ * production against a second implementation of the rule.
  */
 @DisplayName("StrategyAssignment.apportion — largest-remainder math")
 class StrategyAssignmentApportionmentMathTest {
@@ -195,13 +200,17 @@ class StrategyAssignmentApportionmentMathTest {
     }
 
     /**
-     * Demonstration: the production routine's coalesce step prevents
-     * multi-bucket testing through the public API. This regression-test
-     * documents the limitation explicitly so a future contributor adding a
-     * second {@link StrategyId} sees the right place to extend coverage.
+     * The coalesce step itself, which is a documented feature rather than a
+     * limitation: a caller may submit the same key twice and the weights are
+     * summed rather than the second silently winning.
+     *
+     * <p>The old {@code @DisplayName} on this test read "multi-bucket testing
+     * requires a second StrategyId", which was untrue when it was written and is
+     * doubly untrue now — see {@link MultiBucketApportionment}. The assertion is
+     * unchanged; only the claim about what it implies.
      */
     @Test
-    @DisplayName("Limitation: production apportion coalesces same-id entries — multi-bucket testing requires a second StrategyId")
+    @DisplayName("Production apportion coalesces same-key entries into one bucket, summing weights")
     void coalesceLimitationDocumented() {
         Map<String, Long> tally = new LinkedHashMap<>();
         StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(
@@ -214,8 +223,104 @@ class StrategyAssignmentApportionmentMathTest {
         // Exactly one bucket survives the coalesce — this is the limitation.
         assertThat(res.ids()).containsExactly(StrategyId.RANDOM.name());
         assertThat(res.target()).hasSize(1);
-        // The reference algorithm (above) is what would happen if the bucket
-        // weren't coalesced; this single-bucket production output is correct
-        // but does not exercise the per-bucket distribution code path.
+        // 0.3 + 0.5 + 0.2 summed into one bucket, which then takes all 100.
+        assertThat(res.target()).containsExactly(100);
+    }
+
+    /**
+     * The multi-bucket path, through the production {@code apportion}. Everything
+     * here was unreachable while the key was an enum with one constant, and became
+     * free at Phase 2b without anyone taking it up (review-2b).
+     *
+     * <p>Keys are spelled as bare literals rather than {@code StrategyId.X.name()}
+     * on purpose: this is apportionment math over opaque strings, and the routine
+     * must not care whether a key names a built-in. A plugin-supplied key is the
+     * end state of this whole feature, and a test that only ever feeds it enum
+     * names would not notice the day something started to.
+     */
+    @Nested
+    @DisplayName("Production apportion — distinct buckets")
+    class MultiBucketApportionment {
+
+        @Test
+        @DisplayName("(0.3, 0.5, 0.2) over 100 bots → exactly (30, 50, 20) across three buckets")
+        void threeBucketsMatchTheReference() {
+            StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(
+                    List.of(new WeightedStrategy("ALPHA", 0.3),
+                            new WeightedStrategy("BETA", 0.5),
+                            new WeightedStrategy("GAMMA", 0.2)),
+                    100);
+
+            assertThat(res.ids()).containsExactly("ALPHA", "BETA", "GAMMA");
+            assertThat(res.target()).containsExactly(30, 50, 20);
+        }
+
+        @Test
+        @DisplayName("leftover is distributed across distinct buckets by largest remainder")
+        void leftoverGoesToTheLargestRemainders() {
+            // (0.3, 0.5, 0.2) * 5 = (1.5, 2.5, 1.0) → floors (1, 2, 1) = 4,
+            // leftover 1 → the largest remainder is BETA's 0.5, tied with ALPHA's
+            // 0.5, and the tie breaks by index, so ALPHA takes it.
+            StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(
+                    List.of(new WeightedStrategy("ALPHA", 0.3),
+                            new WeightedStrategy("BETA", 0.5),
+                            new WeightedStrategy("GAMMA", 0.2)),
+                    5);
+
+            assertThat(res.target()).containsExactly(2, 2, 1);
+            assertThat(sum(res.target())).isEqualTo(5);
+        }
+
+        @Test
+        @DisplayName("the tie-break is the mix's insertion order, not the keys' natural order")
+        void tieBreakFollowsInsertionOrderNotAlphabetical() {
+            // Three equal weights over 10 bots: floors (3, 3, 3) = 9, leftover 1,
+            // all three remainders equal. The winner is whichever was submitted
+            // first. ZULU is submitted first and ALPHA last, so an implementation
+            // that sorted the keys instead of preserving mix order would give the
+            // extra bot to ALPHA and fail here.
+            StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(
+                    List.of(new WeightedStrategy("ZULU", 1.0),
+                            new WeightedStrategy("MIKE", 1.0),
+                            new WeightedStrategy("ALPHA", 1.0)),
+                    10);
+
+            assertThat(res.ids()).containsExactly("ZULU", "MIKE", "ALPHA");
+            assertThat(res.target()).containsExactly(4, 3, 3);
+        }
+
+        @Test
+        @DisplayName("a bucket whose weight is tiny relative to n gets zero bots, and the sum still holds")
+        void underfilledBucketGetsZero() {
+            StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(
+                    List.of(new WeightedStrategy("BULK", 1.0),
+                            new WeightedStrategy("SLIVER", 0.001)),
+                    2);
+
+            assertThat(res.ids()).containsExactly("BULK", "SLIVER");
+            assertThat(res.target()).containsExactly(2, 0);
+            assertThat(sum(res.target())).isEqualTo(2);
+        }
+
+        @Test
+        @DisplayName("sum-of-targets invariant holds across n=1..200 on a three-bucket mix")
+        void sumInvariantAcrossASweep() {
+            for (int n = 1; n <= 200; n++) {
+                StrategyAssignment.ApportionmentResult res = StrategyAssignment.apportion(
+                        List.of(new WeightedStrategy("ALPHA", 0.3),
+                                new WeightedStrategy("BETA", 0.5),
+                                new WeightedStrategy("GAMMA", 0.2)),
+                        n);
+                assertThat(sum(res.target()))
+                        .withFailMessage("targets must sum to botCount for n=%d", n)
+                        .isEqualTo(n);
+            }
+        }
+
+        private int sum(int[] target) {
+            int total = 0;
+            for (int t : target) total += t;
+            return total;
+        }
     }
 }
