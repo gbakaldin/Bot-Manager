@@ -470,6 +470,9 @@ test; `StrategyId.values()` order is a de-facto UI contract that no one wrote do
 were** — measured at Phase 2a it is alphabetical-by-class-within-package and differs from
 `StrategyId.values()` in six of nine positions (Amendment A4). Step 2d sorts explicitly,
 from `StrategyId.values()`, over whatever order the registry happens to hand back.
+**"Preserved exactly" governs the order and the per-entry values; "lists the registry"
+governs the *set*, and the registry wins whenever the two disagree — see Amendment A10,
+which also fixes the endpoint's expected body as a constant.**
 
 **AD-22. `PLUGIN_PLAN.md` is deleted, not archived.** It proposes the inverse design
 (`PLUGIN_PLAN.md:14-22` puts `Bot`/`BettingMiniGameBot` in the reloadable layer) and is
@@ -1407,3 +1410,137 @@ sort applies to diagnostics, never to the UI contract.
 **The general rule this leaves behind:** an amendment that quotes an observed sequence
 dates as fast as the sequence does. Quote the property being asserted (counts, set) and
 keep the sequence as an illustration marked as one.
+
+---
+
+## Amendment — 2026-08-27 (Phase 2d review)
+
+*Issued by the Compliance Architect during the Phase 2d review
+(`docs/reviews/PLUGIN_HOT_RELOAD/compliance-2d.md`), on the first of three items Dev
+raised in handoff. The Phase 2d diff is **accepted unchanged** — it implements steps 1-4
+as written and its choice on the under-specified point is the correct one. **No
+Architecture Decision changes in substance, no code changes, no shipped behaviour
+changes.***
+
+### A10 — AD-21 asserts two things that only coincide while the build forces them to; registry membership wins
+
+**What was under-specified.** AD-21 opens with *"`StrategyController`'s response contract
+is preserved exactly"* and, one clause later, *"the endpoint lists the registry"*. Before
+Phase 2d the endpoint enumerated `StrategyId.values()`, so its response was the **enum**;
+after 2d it is the **registry**. Those are two different statements about the *set* of
+entries, and this document never says which one wins when they disagree. It says only how
+to order the set, which is the question A4 had already forced into the open — the set
+question was never asked.
+
+They disagree in exactly one direction that matters: a `StrategyId` constant whose bean
+has gone missing. Under "preserved exactly" it is still offered by the picker and then
+rejected on POST by AD-15's key check; under "lists the registry" it is absent.
+
+**Measured** at `9c61a4c`, against the shipped guards:
+
+| Guard | Context it scans | What it asserts |
+|---|---|---|
+| `StrategyCatalogParityTest` (bot-strategies) | bare `AnnotationConfigApplicationContext` over `com.vingame.bot.domain.bot.strategy` | every enum name **is** a registered key; sizes are 9 and 2 |
+| `ApplicationContextLoadsTest.strategyRegistriesAreFullyPopulated` (bot-app) | the **real** `@SpringBootTest` scan from `Starter` | `registeredKeys()` **equals** `StrategyId.values()` as a set, both directions, for both registries |
+
+So the divergence is not shippable today: the second test is exact set equality under the
+production scan and fails the build in either direction. Dev's handoff attributes the
+guard to `StrategyCatalogParityTest`, which is the weaker of the two — it proves
+enum ⊆ registry under a bare package scan, and its own javadoc says it cannot see a bean
+that is reachable from that scan yet unreachable from `Starter`'s. **The load-bearing
+guard is `ApplicationContextLoadsTest`.** Name it, because it is the one a future edit
+could weaken without noticing what it was for.
+
+**Ruled: the registry is the set; the enum is only the copy.** Three reasons, in
+increasing order of how much they bind:
+
+1. **The enum-as-set reading makes Phase 2 deliver nothing at this endpoint.** A
+   plugin-supplied key is, by construction, one the enum does not declare. If the enum
+   decided membership, the picker could never offer a plugin strategy, and AD-21's own
+   "the endpoint lists the registry" would be decorative.
+2. **It keeps the picker and the validator agreeing.** AD-15 rejects any key no bean
+   claims, on create and PATCH. Offering a key in the picker that the very next POST
+   answers with a 400 is a worse contract than not offering it.
+3. **A5 already made the enum reading actively misleading.** A group holding an
+   unregistered key fails *every* PATCH until its mix is replaced. Under the enum
+   reading the picker would keep presenting that key as a valid choice while no write
+   carrying it can succeed.
+
+**Why this is a plan entry and not a code change.** There is no implementation that
+satisfies both clauses of AD-21 in the divergent case, and nothing in this document
+breaks the tie. Dev picked the clause that AD-21's own mechanism sentence names and that
+the phase exists to enable, and pinned it with
+`StrategyCatalogTest.unregisteredBuiltinIsNotListed`. That is the right answer; it was
+just never written down as the answer.
+
+**Consequences for later steps, which is the reason this is recorded rather than waved
+through:**
+
+- **Steps 5-7 are when this stops being hypothetical.** The build gate is a build gate: it
+  constrains one artifact's built-ins. A5 already establishes that a cutover to version
+  N+1 which does not carry a key version N served leaves groups holding that key
+  un-PATCHable. Under A10 the same cutover *also silently removes that key from the
+  picker* — at runtime, with no test able to fire. That is the correct behaviour and it is
+  invisible, so step 7's forced-cutover design must decide whether the drain window keeps
+  the union of both versions' keys registered (A5's option, which also fixes this) or
+  whether a key vanishing from the UI mid-drain is announced some other way.
+- **A missing bean is now visible only in the boot line.** Under the enum reading a lost
+  strategy produced a 400 on use; under this one it produces a shorter list nobody counts.
+  Verification P2-2's `registered 9 strategies` count is therefore the operator-facing
+  signal for the whole endpoint, not just for the factory — treat a count below 9 as a UI
+  regression as well as a wiring one.
+- **Phase 2d step 1's "lists the registri*es*" (plural) does not extend to slots.** The
+  slot registry has two keys and `SlotStrategyId` carries display copy for both, so
+  joining it would compile and read like an improvement. AD-21 and verification P2-3 both
+  require `?gameType=SLOT` to keep returning `[]`, and they govern; the plural is
+  illustrative. The shipped code pins `"[]"` with that reasoning in a comment, which is
+  the durable home for it. **Wording only — no substance changes here.**
+- **The general rule this leaves behind:** when a decision says a response is "preserved
+  exactly" *and* names a new source for it, say which one owns the **set**, which one owns
+  the **order**, and which one owns the **values**. Those are three contracts, and only
+  the last two were specified.
+
+### A11 — verification P2-3's "before" body is a constant; pin it instead of relying on a capture
+
+**What was wrong.** P2-3 verifies `GET /api/v1/strategy/` by capturing the body before the
+deploy and diffing it after. That works, but it makes the *only* evidence for the one
+endpoint this phase re-sources depend on an ephemeral `/tmp` file, and for Phase 2 it
+already failed: `docs/reviews/PLUGIN_HOT_RELOAD/release-phase2.md` reports P2-3 as PASS
+with a matching md5, but the preserved artefacts
+(`phase2-capture-before.txt` / `-after.txt`) contain **no strategy body at all** — zero
+occurrences of `displayName`. Only the md5 in the prose survived. The 2d deploy would
+otherwise have inherited a "before" that does not exist on file.
+
+**Measured.** The pre-Phase-2d body is fully determined by `StrategyId` and
+`StrategyInfoDTO` — nine entries, no server state, no configuration. Serialising
+`Arrays.stream(StrategyId.values()).map(StrategyInfoDTO::of).toList()` at `9c61a4c`
+reproduces the release log's md5 exactly:
+
+```
+GET /api/v1/strategy/            1822 bytes   md5 a72c40f56057cda5434b273ea36315ea
+GET /api/v1/strategy/?gameType=SLOT          "[]"
+```
+
+That the independently computed figure equals the one the releaser recorded off the box
+is what makes it usable: the same constant is both the pre-2d and the post-2d expectation,
+because AD-21 freezes the body and `StrategyCatalogResponseContractTest` asserts
+byte-identity against that same expression through the slice's `ObjectMapper`.
+
+**Corrected P2-3.** Still take the before/after capture — it is cheap and it catches a
+serialisation difference the build cannot see — but check both sides against the constant
+as well:
+
+```bash
+curl -sf $BOT/api/v1/strategy/ | md5sum      # expect a72c40f56057cda5434b273ea36315ea
+curl -sf "$BOT/api/v1/strategy/?gameType=SLOT"   # expect []
+```
+
+A mismatch on the **before** capture means the box is not running what you think it is; a
+mismatch on the **after** capture is an AD-21 regression and the sub-phase rolls back.
+**Preserve the body itself** alongside the group captures — a capture referenced by a
+release report and not committed is not evidence. Re-derive the constant if `StrategyId`'s
+copy ever changes; it is a hash of the display text, not of the design.
+
+**Why this is a plan entry.** P2-3 as written is not wrong, it is fragile in a way that
+was demonstrated rather than theorised, and the replacement is a measurement this document
+can carry. **No code, no shipped behaviour, no Architecture Decision.**
