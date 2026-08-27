@@ -69,6 +69,16 @@ class StrategyControllerTest {
      * silently change a user-visible string — pinning each one here means a
      * future copy edit shows up as a test failure and forces explicit
      * acknowledgement.
+     *
+     * <p><b>Correction (QA, Phase 2d).</b> That last sentence is not true of this
+     * test: every expected string below is read from the same {@code StrategyId}
+     * getter it is compared against, so a copy edit moves both sides together and
+     * this stays green — confirmed by mutation (renaming
+     * {@code FIBONACCI_CAUTIOUS}'s displayName passed the entire build). What
+     * these assertions do pin is that each id is <em>present</em> and carries
+     * <em>its own</em> copy rather than another entry's. The independent pin is
+     * {@code StrategyCatalogResponseContractTest#bodyMatchesTheCheckedInCopyFixture},
+     * which compares against a checked-in fixture file.
      */
     @Test
     @DisplayName("GET /api/v1/strategy/ exposes the 8 Martingale entries with their locked-in displayName / description")

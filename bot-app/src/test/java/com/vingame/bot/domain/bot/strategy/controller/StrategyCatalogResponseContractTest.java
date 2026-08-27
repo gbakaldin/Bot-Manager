@@ -16,6 +16,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -74,6 +75,13 @@ class StrategyCatalogResponseContractTest {
      * {@link #literalOrderMatchesTheEnumDeclarationOrder()} keeps the two honest
      * about each other.
      */
+    /**
+     * Classpath-relative to this test class. Kept next to the test rather than
+     * under a shared fixtures root: it is the response of one endpoint, and the
+     * failure message has to point a reader straight at the file to edit.
+     */
+    private static final String CATALOGUE_FIXTURE = "/strategy/betting-strategy-catalogue.json";
+
     private static final List<String> EXPECTED_ORDER = List.of(
             "RANDOM",
             "MARTINGALE_CLASSIC_CAUTIOUS",
@@ -156,6 +164,44 @@ class StrategyCatalogResponseContractTest {
                     assertThat(dto.displayName()).isNotBlank();
                     assertThat(dto.description()).isNotBlank();
                 });
+    }
+
+    /**
+     * The one thing {@link #preChangeBody()} cannot see: the <b>copy itself</b>.
+     *
+     * <p>The byte-identity tests above serialise {@code StrategyId.values()} on
+     * both sides, so they compare the enum with itself — an edit to a constant's
+     * {@code displayName} or {@code description} moves expected and actual
+     * together and they stay green. So does every other assertion in the build:
+     * {@code StrategyControllerTest}'s "locked-in strings" test reads the same
+     * getters it asserts against, and its only literal is {@code "Random"}. QA
+     * confirmed this by mutation — renaming {@code FIBONACCI_CAUTIOUS}'s
+     * displayName to {@code "Fibonacci (Safe)"} passed all 1998 tests.
+     *
+     * <p>This fixture is therefore the only <b>independent</b> statement of the
+     * response in the repo: a checked-in file, not an expression. It is the
+     * build-time form of verification P2-3's before/after {@code curl} diff,
+     * which otherwise only catches a copy change if someone remembered to take
+     * the pre-deploy capture. MARTINGALE_STRATEGIES A1 calls these strings
+     * locked-in and the frontend renders them verbatim into the picker; changing
+     * one is allowed, but it must be a deliberate act that updates this file.
+     *
+     * <p>Compared as parsed trees, so it pins element order, the field set of
+     * each entry and every value, while staying indifferent to pretty-printing.
+     */
+    @Test
+    @DisplayName("The body matches the checked-in catalogue fixture, copy included")
+    void bodyMatchesTheCheckedInCopyFixture() throws Exception {
+        JsonNode expected;
+        try (InputStream fixture = getClass().getResourceAsStream(CATALOGUE_FIXTURE)) {
+            assertThat(fixture).as("missing test resource %s", CATALOGUE_FIXTURE).isNotNull();
+            expected = objectMapper.readTree(fixture);
+        }
+
+        assertThat(objectMapper.readTree(body("/api/v1/strategy/")))
+                .as("the strategy picker's ids, labels, tooltips and their order — if this "
+                        + "changed on purpose, update %s in the same commit", CATALOGUE_FIXTURE)
+                .isEqualTo(expected);
     }
 
     /**

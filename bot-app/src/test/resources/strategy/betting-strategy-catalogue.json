@@ -1,0 +1,47 @@
+[
+  {
+    "id": "RANDOM",
+    "displayName": "Random",
+    "description": "Pure RNG decisions on every tick. Ignores affinity weights and history."
+  },
+  {
+    "id": "MARTINGALE_CLASSIC_CAUTIOUS",
+    "displayName": "Classic Martingale (Cautious)",
+    "description": "Doubles the bet after every loss and resets to the minimum after a win. Picks the safer entries more often."
+  },
+  {
+    "id": "MARTINGALE_CLASSIC_AGGRESSIVE",
+    "displayName": "Classic Martingale (Aggressive)",
+    "description": "Doubles the bet after every loss and resets to the minimum after a win. Chases the riskier entries with bigger payouts."
+  },
+  {
+    "id": "PAROLI_CAUTIOUS",
+    "displayName": "Paroli (Cautious)",
+    "description": "Doubles the bet after every win and resets after a loss or after a short winning streak. Picks the safer entries more often."
+  },
+  {
+    "id": "PAROLI_AGGRESSIVE",
+    "displayName": "Paroli (Aggressive)",
+    "description": "Doubles the bet after every win and resets after a loss or after a short winning streak. Chases the riskier entries with bigger payouts."
+  },
+  {
+    "id": "DALEMBERT_CAUTIOUS",
+    "displayName": "D'Alembert (Cautious)",
+    "description": "Raises the bet by one step after a loss and lowers it by one step after a win. Picks the safer entries more often."
+  },
+  {
+    "id": "DALEMBERT_AGGRESSIVE",
+    "displayName": "D'Alembert (Aggressive)",
+    "description": "Raises the bet by one step after a loss and lowers it by one step after a win. Chases the riskier entries with bigger payouts."
+  },
+  {
+    "id": "FIBONACCI_CAUTIOUS",
+    "displayName": "Fibonacci (Cautious)",
+    "description": "Follows the Fibonacci sequence — one step forward after a loss, two steps back after a win. Picks the safer entries more often."
+  },
+  {
+    "id": "FIBONACCI_AGGRESSIVE",
+    "displayName": "Fibonacci (Aggressive)",
+    "description": "Follows the Fibonacci sequence — one step forward after a loss, two steps back after a win. Chases the riskier entries with bigger payouts."
+  }
+]
