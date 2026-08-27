@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -71,7 +72,9 @@ public class BettingStrategyFactory {
      * reorders it and nothing in the build would notice.
      *
      * <p>It is emphatically not {@code StrategyId.values()} order — the two agree
-     * on {@code RANDOM} and differ in six of the remaining eight positions. No
+     * on {@code RANDOM} alone and differ in <b>all eight</b> of the remaining
+     * positions ({@code PAROLI_*} and {@code DALEMBERT_*} swap as blocks and each
+     * pair swaps within its block, so no position after the first survives). No
      * consumer may treat this map's order as a display order: AD-21's ordering is
      * an explicit sort from {@code StrategyId.values()} that does not consult it
      * at all. Anything an operator reads — the boot line, the
@@ -157,10 +160,32 @@ public class BettingStrategyFactory {
      * @return the set of registered strategy keys, in discovery order. Read by
      *         {@code BotGroupConfigValidationService} to reject a
      *         {@code strategyMix} naming a key no bean claims (AD-15) — which
-     *         sorts it itself before rendering it into a 400 body.
+     *         sorts it itself before rendering it into a 400 body — and, since
+     *         Phase 2d, by {@code StrategyCatalog} on every
+     *         {@code GET /api/v1/strategy/}.
+     *
+     *         <p><b>A snapshot, deliberately, not a view</b> (review-2d finding 3).
+     *         This used to be {@code unmodifiableSet(registry.keySet())}, which is
+     *         an unmodifiable <em>view</em> over {@link #registry}: safe only while
+     *         the map is written once in {@link #init()} and never touched again.
+     *         Phase 2d put an HTTP request thread on this method, and step 5 is
+     *         where the registry starts being mutated after refresh — at which
+     *         point a view would throw {@link java.util.ConcurrentModificationException}
+     *         on the request thread mid-stream, i.e. a 500 on the picker whenever a
+     *         reload landed mid-request, looking like an endpoint bug rather than a
+     *         registry-lifecycle bug. Nine strings per call is not a cost worth
+     *         reasoning about.
+     *
+     *         <p>The copy is a {@link java.util.LinkedHashSet} and <b>not</b>
+     *         {@code Set.copyOf}: {@code Set.copyOf}'s iteration order is
+     *         unspecified and salted per JVM run, which would both discard the
+     *         discovery order this javadoc promises and make
+     *         {@code BettingStrategyFactoryTest.lookupFailureTailIsSorted} — whose
+     *         premise is that this method reproduces the unsorted scan order, so
+     *         that the sorted exception tail proves something — flake.
      */
     public Set<String> registeredKeys() {
-        return Collections.unmodifiableSet(registry.keySet());
+        return Collections.unmodifiableSet(new LinkedHashSet<>(registry.keySet()));
     }
 
     /**

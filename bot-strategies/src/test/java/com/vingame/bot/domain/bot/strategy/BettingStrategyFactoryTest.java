@@ -4,8 +4,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.ApplicationContext;
 
+import java.lang.reflect.Field;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -182,6 +185,64 @@ class BettingStrategyFactoryTest {
         factory.init();
 
         assertThat(factory.registeredKeys()).isEmpty();
+    }
+
+    /**
+     * review-2d finding 3. {@code registeredKeys()} used to hand back
+     * {@code unmodifiableSet(registry.keySet())} — an unmodifiable <em>view</em>,
+     * safe only while the map is written once and never touched again. Phase 2d put
+     * an HTTP request thread on this method ({@code StrategyCatalog} streams and
+     * sorts it per request) and step 5 is where the registry starts being mutated
+     * after refresh, at which point a view throws
+     * {@link java.util.ConcurrentModificationException} mid-stream on that thread —
+     * a 500 on the picker that reads like an endpoint bug.
+     *
+     * <p>The mutation is done by reflection because no public path can mutate the
+     * registry today; that is the whole point, and it is why the property is
+     * otherwise unobservable and would be reverted as a pointless copy.
+     */
+    @Test
+    @DisplayName("registeredKeys returns a snapshot, not a live view of the registry")
+    @SuppressWarnings("unchecked")
+    void registeredKeysIsASnapshot() throws Exception {
+        ApplicationContext context = mock(ApplicationContext.class);
+        BettingStrategyFactory factory =
+                new BettingStrategyFactory(context, List.of(new RandomBehaviorStrategy()));
+        factory.init();
+
+        Set<String> taken = factory.registeredKeys();
+
+        Field registryField = BettingStrategyFactory.class.getDeclaredField("registry");
+        registryField.setAccessible(true);
+        Map<String, Class<? extends BettingStrategy>> registry =
+                (Map<String, Class<? extends BettingStrategy>>) registryField.get(factory);
+        registry.put("LATE_ARRIVAL", RandomBehaviorStrategy.class);
+
+        assertThat(taken)
+                .as("a set handed out before the mutation must not see it")
+                .containsExactly("RANDOM");
+        assertThat(factory.registeredKeys())
+                .as("and the next read must, since it is a fresh snapshot")
+                .containsExactly("RANDOM", "LATE_ARRIVAL");
+    }
+
+    @Test
+    @DisplayName("the snapshot is still unmodifiable and still in discovery order")
+    void snapshotKeepsItsOldGuarantees() {
+        // Not Set.copyOf: its iteration order is unspecified and salted per JVM run,
+        // which would discard the documented discovery order and make
+        // lookupFailureTailIsSorted — whose premise is that this method reproduces
+        // the *unsorted* scan order — flake.
+        ApplicationContext context = mock(ApplicationContext.class);
+        BettingStrategyFactory factory = new BettingStrategyFactory(
+                context, List.of(new RandomBehaviorStrategy(), new FakeAaaStrategy()));
+        factory.init();
+
+        Set<String> keys = factory.registeredKeys();
+
+        assertThat(keys).containsExactly("RANDOM", "AAA_FIRST_WHEN_SORTED");
+        assertThatThrownBy(() -> keys.add("NOPE"))
+                .isInstanceOf(UnsupportedOperationException.class);
     }
 
     /**
