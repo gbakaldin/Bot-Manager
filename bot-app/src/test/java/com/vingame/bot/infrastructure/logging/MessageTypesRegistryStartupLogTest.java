@@ -109,6 +109,33 @@ class MessageTypesRegistryStartupLogTest {
     }
 
     /**
+     * The product lists are sorted, so the line is byte-identical between two deploys
+     * that discovered the same catalogue.
+     *
+     * <p>This is not hypothetical tidiness. The map is a {@code LinkedHashMap} in
+     * Spring's classpath-scan order, and the TAI_XIU pair was observed rendering as
+     * <em>both</em> {@code [114, 116]} and {@code [116, 114]} within a single build,
+     * depending on which context constructed the registry. review-2c's merge guidance
+     * makes this line the releaser's smoke check — {@code docker logs bot-manager |
+     * grep "MessageTypesRegistry initialized"} — so an unstable order makes the one
+     * artefact a human diffs against the previous deploy un-diffable, for nothing.
+     * Same treatment, same reason, as {@code (Betting|Slot)StrategyFactory}'s
+     * "registered N strategies" (review-2a).
+     */
+    @Test
+    @DisplayName("the product lists are sorted, so the line is stable across scans")
+    void productListsAreSorted() {
+        newFullRegistry();
+
+        String message = registryEvents().get(0).getMessage().getFormattedMessage();
+
+        assertThat(message)
+                .as("sorted, not scan order — this is the releaser's smoke string")
+                .contains("BETTING_MINI 4 products [097, 098, 116, 118]")
+                .contains("TAI_XIU 2 products [114, 116]");
+    }
+
+    /**
      * The load-bearing half. A future contributor adding a per-product line inside the
      * registration loop would still leave the test above green (it constructs one
      * registry and would just see more events — caught) — but more importantly, this

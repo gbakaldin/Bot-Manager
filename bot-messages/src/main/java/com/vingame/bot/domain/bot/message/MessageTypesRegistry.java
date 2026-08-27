@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Spring-managed registry that resolves the message-types provider for a
@@ -108,10 +109,17 @@ public class MessageTypesRegistry {
 
         // Tier-1 INFO: one line per JVM at application startup, the same shape and
         // justification as (Betting|Slot)StrategyFactory's "registered N strategies".
+        //
+        // The product lists are sorted, for the same reason as those two: the map's
+        // own order is Spring's classpath-scan order, and this line is what the
+        // releaser greps to confirm the catalogue came up whole. Unsorted it is not
+        // stable — the TAI_XIU pair really does render as both [114, 116] and
+        // [116, 114] depending on which context built the registry, which makes the
+        // smoke string un-diffable against a previous deploy for no benefit.
         log.info("MessageTypesRegistry initialized: BETTING_MINI {} products {}, "
                         + "TAI_XIU {} products {}, SLOT provider {}",
-                tables.bettingMini().size(), tables.bettingMini().keySet(),
-                tables.taiXiu().size(), tables.taiXiu().keySet(),
+                tables.bettingMini().size(), new TreeSet<>(tables.bettingMini().keySet()),
+                tables.taiXiu().size(), new TreeSet<>(tables.taiXiu().keySet()),
                 tables.slot() == null ? "none" : tables.slot().getClass().getSimpleName());
     }
 
@@ -219,6 +227,30 @@ public class MessageTypesRegistry {
                                 + " providers may be product-neutral (AD-17).");
             }
             for (String product : annotation.products()) {
+                // Two step-5 constraints live on this line, recorded here rather than
+                // in the plan because this is the code that has to change (review-2c
+                // F4). Both are design decisions for step 5, NOT defects today: the
+                // key is deliberately (gameType, product) with no version dimension,
+                // and adding one before versions exist would be speculative.
+                //
+                // 1. Two live plugin versions are not expressible under this key.
+                //    The end goal is v1 and v2 of a brand's plugin serving different
+                //    groups at once; both versions' providers claim "116", which is a
+                //    duplicate here and refuses the refresh. Step 5 needs either a
+                //    version in the key or one registry instance per plugin version
+                //    in a child context, with BotFactory selecting on the group's
+                //    pinned version. The singleton-in-the-root-context shape is what
+                //    has to give.
+                // 2. This throw is right while every key is ours — two built-in
+                //    providers claiming "116" is a programming error and the build
+                //    should not produce a startable artifact. It becomes wrong the
+                //    moment a third-party plugin can collide with a built-in: a bad
+                //    plugin should be rejected and logged, not stop the other nine
+                //    brands from starting. That is a policy decision needed BEFORE
+                //    plugins can register, not after.
+                //
+                // The same two apply verbatim to BettingStrategyFactory's duplicate
+                // guard; the policy must be one policy, decided once.
                 T existing = registry.put(product, provider);
                 if (existing != null) {
                     throw new IllegalStateException(
