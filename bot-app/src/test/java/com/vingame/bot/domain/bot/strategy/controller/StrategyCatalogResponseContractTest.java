@@ -42,8 +42,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * de-facto UI contract nobody wrote down (it is the sequence the strategy picker
  * renders), and Amendment A4 measured that the registry's own iteration order is
  * <em>not</em> that order — it is bean-discovery order, alphabetical by class file
- * name within package, differing in six of nine positions and silently changing
- * if a strategy class is renamed. So the ordering has to come from an explicit
+ * name within package, agreeing on {@code RANDOM} alone and differing in all
+ * eight remaining positions, and silently changing if a strategy class is renamed. So the ordering has to come from an explicit
  * sort, and this is the test that fails if someone removes it.
  *
  * <p><b>The baseline is executable, not copy-pasted.</b>
