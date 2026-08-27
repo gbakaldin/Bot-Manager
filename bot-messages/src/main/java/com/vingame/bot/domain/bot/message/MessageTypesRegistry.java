@@ -2,6 +2,8 @@ package com.vingame.bot.domain.bot.message;
 
 import com.vingame.bot.domain.game.model.GameType;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.aop.support.AopUtils;
+import org.springframework.core.annotation.AnnotationUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
@@ -40,7 +42,17 @@ import java.util.Set;
  * <p><b>Lookup failures keep the operator-facing text byte-for-byte</b> (AD-20). The
  * "not yet implemented for product code" string is what an operator greps when a new
  * brand's group fails to start; {@code MessageTypesErrorTextTest} pins it as a
- * literal.
+ * literal. Note it renders no key set: there is no {@code providers present:} tail
+ * here, unlike {@code BettingStrategyFactory.create}'s message.
+ *
+ * <p><b>Every misconfiguration fails the context refresh — all four of them.</b> A
+ * provider that claims the wrong {@code gameType}, a product-keyed provider claiming
+ * no products, a SLOT provider claiming products, and a provider carrying no
+ * {@link MessageTypesImpl} at all are one posture, not three-plus-one. The last was a
+ * WARN-and-skip copied from {@code BettingStrategyFactory}, and the analogy did not
+ * hold: that class has no hard branch to be inconsistent with, this one has three, and
+ * they all read the annotation the soft branch tolerated. See {@link #annotationOf}
+ * for why the soft form was the worst of the four to keep.
  *
  * <p>See {@code docs/plans/PLUGIN_HOT_RELOAD.md} AD-16 through AD-20.
  */
@@ -49,33 +61,58 @@ import java.util.Set;
 public class MessageTypesRegistry {
 
     /**
-     * Product-code string → provider, in bean-discovery order.
-     * {@link LinkedHashMap} keeps iteration deterministic within a JVM run so the
-     * startup line and the {@code providers present:} tail of a lookup failure do not
-     * shuffle between runs. That order is Spring's classpath-scan order and is
-     * <b>not</b> a contract — nothing may consume it as if it were (PLUGIN_HOT_RELOAD
-     * Amendment A4, learned on the strategy registries).
+     * The whole wiring, as one immutable value.
+     *
+     * <p><b>Why a carrier and not three fields.</b> Three separate {@code final}
+     * fields are correct today — they are assigned once, in the constructor, and
+     * {@code final}-field semantics safely publish them to the bot-creation virtual
+     * threads that read them lock-free. They stop being correct the moment step 5
+     * lets a plugin version be swapped in at runtime: assigning three fields one at a
+     * time publishes an interleaved state where {@code bettingMini} is v2 while
+     * {@code taiXiu} is still v1, so a bot group started inside that window gets a
+     * mixed-version wiring — the exact failure a versioned plugin system exists to
+     * prevent, and one that leaves no trace in the logs.
+     *
+     * <p>Folding them into one carrier makes that window unexpressible: step 5's
+     * reload becomes a single write of a fully-built {@code Tables}, and this field
+     * becomes {@code private volatile Tables tables}. Every accessor already reads it
+     * exactly once into a local, so no accessor has to change when it does.
+     *
+     * <p>Both maps are {@link LinkedHashMap}s wrapped unmodifiable. That keeps
+     * iteration deterministic within a JVM run, so the startup line does not shuffle
+     * between runs — but the order is Spring's classpath-scan order and is <b>not</b>
+     * a contract; nothing may consume it as if it were (PLUGIN_HOT_RELOAD Amendment
+     * A4, learned on the strategy registries). Note there is no
+     * {@code providers present:} tail on a lookup failure to keep stable — AD-20 pins
+     * that message byte-for-byte and it renders no key set.
+     *
+     * @param bettingMini product-code string → betting-mini provider.
+     * @param taiXiu      product-code string → Tai Xiu provider.
+     * @param slot        the single product-neutral SLOT provider, or {@code null} if
+     *                    none was discovered.
      */
-    private final Map<String, GameMessageTypes> bettingMiniByProduct;
-    private final Map<String, TaiXiuMessageTypes> taiXiuByProduct;
+    private record Tables(Map<String, GameMessageTypes> bettingMini,
+                          Map<String, TaiXiuMessageTypes> taiXiu,
+                          SlotMessageTypes slot) {
+    }
 
-    /** The single product-neutral SLOT provider, or {@code null} if none was discovered. */
-    private final SlotMessageTypes slotProvider;
+    private final Tables tables;
 
     public MessageTypesRegistry(List<GameMessageTypes> bettingMiniProviders,
                                 List<SlotMessageTypes> slotProviders,
                                 List<TaiXiuMessageTypes> taiXiuProviders) {
-        this.bettingMiniByProduct = indexByProduct(bettingMiniProviders, GameType.BETTING_MINI);
-        this.taiXiuByProduct = indexByProduct(taiXiuProviders, GameType.TAI_XIU);
-        this.slotProvider = resolveProductNeutral(slotProviders);
+        this.tables = new Tables(
+                indexByProduct(bettingMiniProviders, GameType.BETTING_MINI),
+                indexByProduct(taiXiuProviders, GameType.TAI_XIU),
+                resolveProductNeutral(slotProviders));
 
         // Tier-1 INFO: one line per JVM at application startup, the same shape and
         // justification as (Betting|Slot)StrategyFactory's "registered N strategies".
         log.info("MessageTypesRegistry initialized: BETTING_MINI {} products {}, "
                         + "TAI_XIU {} products {}, SLOT provider {}",
-                bettingMiniByProduct.size(), bettingMiniByProduct.keySet(),
-                taiXiuByProduct.size(), taiXiuByProduct.keySet(),
-                slotProvider == null ? "none" : slotProvider.getClass().getSimpleName());
+                tables.bettingMini().size(), tables.bettingMini().keySet(),
+                tables.taiXiu().size(), tables.taiXiu().keySet(),
+                tables.slot() == null ? "none" : tables.slot().getClass().getSimpleName());
     }
 
     /**
@@ -88,7 +125,7 @@ public class MessageTypesRegistry {
      *                                  claims it (AD-20 text).
      */
     public GameMessageTypes bettingMini(String productCode) {
-        return lookup(bettingMiniByProduct, productCode, "GameMessageTypes");
+        return lookup(tables.bettingMini(), productCode, "GameMessageTypes");
     }
 
     /**
@@ -103,12 +140,13 @@ public class MessageTypesRegistry {
      *                               one is discovered by a real component scan.
      */
     public SlotMessageTypes slot() {
-        if (slotProvider == null) {
+        SlotMessageTypes provider = tables.slot();
+        if (provider == null) {
             throw new IllegalStateException(
                     "No SlotMessageTypes provider is registered — expected exactly one "
                             + "@MessageTypesImpl(gameType = SLOT, products = {}) bean.");
         }
-        return slotProvider;
+        return provider;
     }
 
     /**
@@ -120,7 +158,7 @@ public class MessageTypesRegistry {
      *                                  claims it (AD-20 text).
      */
     public TaiXiuMessageTypes taiXiu(String productCode) {
-        return lookup(taiXiuByProduct, productCode, "TaiXiuMessageTypes");
+        return lookup(tables.taiXiu(), productCode, "TaiXiuMessageTypes");
     }
 
     /**
@@ -128,14 +166,14 @@ public class MessageTypesRegistry {
      *         Used by {@code MessageTypesCoverageTest} (AD-19) for its inventory.
      */
     public Set<String> registeredBettingMiniProducts() {
-        return bettingMiniByProduct.keySet();
+        return tables.bettingMini().keySet();
     }
 
     /**
      * @return the product codes with a Tai Xiu provider, in discovery order.
      */
     public Set<String> registeredTaiXiuProducts() {
-        return taiXiuByProduct.keySet();
+        return tables.taiXiu().keySet();
     }
 
     /**
@@ -143,7 +181,7 @@ public class MessageTypesRegistry {
      *         assert presence without tripping {@link #slot()}'s throw.
      */
     public boolean hasSlotProvider() {
-        return slotProvider != null;
+        return tables.slot() != null;
     }
 
     /**
@@ -173,9 +211,6 @@ public class MessageTypesRegistry {
         Map<String, T> registry = new LinkedHashMap<>();
         for (T provider : providers) {
             MessageTypesImpl annotation = annotationOf(provider);
-            if (annotation == null) {
-                continue;
-            }
             requireGameType(annotation, provider, expected);
             if (annotation.products().length == 0) {
                 throw new IllegalStateException(
@@ -201,9 +236,6 @@ public class MessageTypesRegistry {
         SlotMessageTypes resolved = null;
         for (SlotMessageTypes provider : providers) {
             MessageTypesImpl annotation = annotationOf(provider);
-            if (annotation == null) {
-                continue;
-            }
             requireGameType(annotation, provider, GameType.SLOT);
             if (annotation.products().length != 0) {
                 throw new IllegalStateException(
@@ -222,14 +254,66 @@ public class MessageTypesRegistry {
         return resolved;
     }
 
+    /**
+     * Read {@link MessageTypesImpl} off a discovered bean.
+     *
+     * <p><b>Why not {@code provider.getClass().getAnnotation(...)}.</b> That reads the
+     * annotation off whatever object Spring handed us, which is not necessarily the
+     * class that carries it:
+     * <ul>
+     *   <li><b>Proxies.</b> All six providers implement an interface, so the first
+     *       piece of advice applied to any of them — a {@code @Timed}, a
+     *       {@code @Validated}, an {@code @EnableAspectJAutoProxy} added for something
+     *       else entirely — yields a proxy whose {@code getClass()} is
+     *       {@code $Proxy42}, which carries no annotation.
+     *       {@link AopUtils#getTargetClass} unwraps it. Nothing proxies these beans
+     *       today; this is the cheap guard against the day something does.</li>
+     *   <li><b>Class hierarchy.</b> {@code @MessageTypesImpl} is not
+     *       {@code @Inherited}, so {@code getAnnotation} would also miss a provider
+     *       that inherits its declaration from a base class.
+     *       {@link AnnotationUtils#findAnnotation} searches the hierarchy, which is
+     *       the behaviour a reader expects and the one the failure branch below
+     *       assumes.</li>
+     * </ul>
+     *
+     * <p>What this cannot fix is the step-5 classloader case: if a plugin classloader
+     * loads its own copy of {@code MessageTypesImpl}, a lookup against the engine's
+     * copy finds nothing however it is spelled. That is a parent-first delegation
+     * requirement on the plugin classloader —
+     * {@code com.vingame.bot.domain.bot.message.MessageTypesImpl} must resolve to the
+     * engine's copy — recorded here because the reason is easier to write down now
+     * than to rediscover later.
+     *
+     * @throws IllegalStateException if the bean carries no {@link MessageTypesImpl}
+     *                               anywhere in its hierarchy.
+     */
     private static MessageTypesImpl annotationOf(Object provider) {
-        MessageTypesImpl annotation = provider.getClass().getAnnotation(MessageTypesImpl.class);
+        Class<?> targetClass = AopUtils.getTargetClass(provider);
+        MessageTypesImpl annotation =
+                AnnotationUtils.findAnnotation(targetClass, MessageTypesImpl.class);
         if (annotation == null) {
-            // A provider bean without @MessageTypesImpl is a programming error — the
-            // registry has no key for it. Same posture as BettingStrategyFactory:
-            // warn loudly and skip rather than guess.
-            log.warn("Message-types bean {} is missing @MessageTypesImpl — skipping registration",
-                    provider.getClass().getName());
+            // Hard failure, deliberately, and deliberately unlike BettingStrategyFactory
+            // — which warns and skips, and which this class used to copy.
+            //
+            // Three sibling misconfigurations in this class already fail context
+            // refresh (wrong gameType, a product-keyed provider with no products, a
+            // SLOT provider with products) and all three read from this annotation.
+            // A missing annotation is both the likeliest of the four (copy a provider,
+            // remember @Component, forget the second annotation) and the one with the
+            // worst symptom: the app starts clean, and nothing is wrong until someone
+            // starts a group for that brand hours or days later and reads
+            // "GameMessageTypes not yet implemented for product code: 116" about a
+            // brand that has been in production for months. That message points the
+            // reader away from the cause, and the one WARN that would explain it
+            // scrolled past at boot.
+            //
+            // Failing here costs nothing in practice because MessageTypesCoverageTest
+            // catches the same mistake at build time — which is the point: the build
+            // stops it, so this throw is the backstop for the deploy that skipped the
+            // build, not a routine outcome.
+            throw new IllegalStateException(
+                    provider.getClass().getName() + " is a discovered message-types bean but "
+                            + "carries no @MessageTypesImpl — the registry has no key for it.");
         }
         return annotation;
     }

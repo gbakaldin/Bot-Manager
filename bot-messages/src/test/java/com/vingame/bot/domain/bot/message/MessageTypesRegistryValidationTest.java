@@ -2,6 +2,7 @@ package com.vingame.bot.domain.bot.message;
 
 import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
+import com.vingame.bot.domain.bot.message.slot.SlotMessage;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
@@ -69,8 +70,29 @@ class MessageTypesRegistryValidationTest {
     static class SecondProductNeutralSlot extends SlotMessageTypesImpl {
     }
 
-    /** No {@code @MessageTypesImpl} at all — the WARN-and-skip path. */
-    static class UnannotatedBettingMini extends BomGameMessageTypes {
+    /**
+     * No {@code @MessageTypesImpl} <em>anywhere in its hierarchy</em>.
+     *
+     * <p>It implements the contract directly rather than subclassing a real provider,
+     * which matters: the registry resolves the annotation with
+     * {@code AnnotationUtils.findAnnotation}, which searches superclasses, so
+     * {@code extends BomGameMessageTypes} would silently inherit 097/098 and this
+     * fixture would not be testing what it says it tests. See
+     * {@link AnnotationInheritedFromASuperclass} for the other half of that pair.
+     */
+    static class UnannotatedBettingMini implements GameMessageTypes {
+        @Override public Class<? extends SubscribeMessage> subscribeType() { return null; }
+        @Override public Class<? extends StartGameMessage> startGameType() { return null; }
+        @Override public Class<? extends StartGameMd5Message> startGameMd5Type() { return null; }
+        @Override public Class<? extends UpdateBetMessage> updateBetType() { return null; }
+        @Override public Class<? extends EndGameMessage> endGameType() { return null; }
+    }
+
+    /**
+     * Carries no annotation of its own but inherits one from a real provider. Pins the
+     * hierarchy search, which is a behaviour change from {@code getAnnotation}.
+     */
+    static class InheritsBomAnnotation extends BomGameMessageTypes {
     }
 
     @Nested
@@ -180,28 +202,104 @@ class MessageTypesRegistryValidationTest {
     }
 
     @Nested
-    @DisplayName("a provider bean with no @MessageTypesImpl is skipped, not fatal")
+    @DisplayName("a provider bean with no @MessageTypesImpl is fatal, like its three siblings")
     class MissingAnnotation {
 
         /**
-         * Deliberately not a throw: the registry has no key for such a bean, and a
-         * context that refuses to start over one unkeyed bean would be a worse failure
-         * than a product that resolves nothing. The safety net is that the product it
-         * <em>would</em> have claimed then fails {@link MessageTypesCoverageTest} —
-         * verified by mutation, where removing {@code @Component} from
-         * {@code TipGameMessageTypes} turns that test red for product 116.
+         * <b>This reverses the WARN-and-skip this test previously pinned</b> (review-2c
+         * F2). The old posture was copied from {@code BettingStrategyFactory}, and the
+         * analogy did not survive contact: that class has no hard branch to be
+         * inconsistent with, whereas this one fails refresh for the three sibling
+         * mistakes — wrong {@code gameType}, no products, SLOT-with-products — all of
+         * which read the very annotation the soft branch tolerated.
+         *
+         * <p>The old justification was that "a context that refuses to start over one
+         * unkeyed bean would be a worse failure than a product that resolves nothing".
+         * That weighs the wrong two things. Skipping does not give you "a product that
+         * resolves nothing" at a moment anyone is watching; it gives you a clean
+         * startup and then, hours or days later,
+         * {@code "GameMessageTypes not yet implemented for product code: 116"} about a
+         * brand that has been live for months — a message that actively points away
+         * from the cause, with the one explanatory WARN long since scrolled past.
+         *
+         * <p>The old safety net named here still exists and is why the throw is cheap:
+         * {@link MessageTypesCoverageTest} turns red for the affected product at build
+         * time (verified by mutation — removing {@code @Component} from
+         * {@code TipGameMessageTypes} fails it for 116). The build is what stops this
+         * mistake; the throw is the backstop for the deploy that skipped the build.
          */
         @Test
-        @DisplayName("construction succeeds and the unannotated bean registers nothing")
-        void unannotatedProviderIsSkipped() {
-            MessageTypesRegistry registry = new MessageTypesRegistry(
-                    List.of(new UnannotatedBettingMini()), List.of(), List.of());
+        @DisplayName("construction throws, naming the class and what it is missing")
+        void unannotatedProviderIsRejected() {
+            assertThatThrownBy(() -> new MessageTypesRegistry(
+                    List.of(new UnannotatedBettingMini()), List.of(), List.of()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(UnannotatedBettingMini.class.getName())
+                    .hasMessageContaining("carries no @MessageTypesImpl");
+        }
 
-            assertThat(registry.registeredBettingMiniProducts()).isEmpty();
-            assertThatThrownBy(() -> registry.bettingMini("097"))
-                    .isInstanceOf(IllegalArgumentException.class)
-                    .hasMessage("GameMessageTypes not yet implemented for product code: 097."
-                            + " Please create a GameMessageTypes implementation for this product.");
+        /**
+         * The same posture on the SLOT arm, which resolves through a different method
+         * ({@code resolveProductNeutral}) and had its own copy of the skip.
+         */
+        @Test
+        @DisplayName("an unannotated SLOT provider is rejected too")
+        void unannotatedSlotProviderIsRejected() {
+            assertThatThrownBy(() -> new MessageTypesRegistry(
+                    List.of(), List.of(new UnannotatedSlot()), List.of()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(UnannotatedSlot.class.getName())
+                    .hasMessageContaining("carries no @MessageTypesImpl");
+        }
+    }
+
+    /** No {@code @MessageTypesImpl} anywhere in its hierarchy, on the SLOT contract. */
+    static class UnannotatedSlot implements SlotMessageTypes {
+        @Override public Class<? extends SlotMessage> subscribeResponseType() { return null; }
+        @Override public Class<? extends SlotMessage> spinResultType() { return null; }
+    }
+
+    @Nested
+    @DisplayName("the annotation is resolved through the class hierarchy, not off getClass()")
+    class AnnotationInheritedFromASuperclass {
+
+        /**
+         * {@code AnnotationUtils.findAnnotation} replaced
+         * {@code provider.getClass().getAnnotation(...)} to survive a proxied bean
+         * (review-2c F3) — nothing proxies these today, but the whole feature ends in
+         * child classloaders and a classloader-fragile reflective lookup is the wrong
+         * thing to leave lying around.
+         *
+         * <p>It brings one behaviour change worth pinning rather than discovering:
+         * {@code findAnnotation} searches superclasses, so a subclass of an annotated
+         * provider now inherits the claim even though {@code @MessageTypesImpl} is not
+         * {@code @Inherited}. That is the reading a reader expects, and it is what
+         * makes {@link MissingAnnotation}'s fixture have to implement the contract
+         * directly instead of extending a real provider.
+         */
+        @Test
+        @DisplayName("a subclass of an annotated provider inherits its products")
+        void subclassInheritsTheAnnotation() {
+            MessageTypesRegistry registry = new MessageTypesRegistry(
+                    List.of(new InheritsBomAnnotation()), List.of(), List.of());
+
+            assertThat(registry.registeredBettingMiniProducts()).containsExactly("097", "098");
+            assertThat(registry.bettingMini("097")).isInstanceOf(InheritsBomAnnotation.class);
+        }
+
+        /**
+         * The consequence that makes the inheritance safe: a subclass registered
+         * alongside its own superclass is a duplicate claim, which is already fatal.
+         * So the widened lookup cannot silently shadow a brand's provider.
+         */
+        @Test
+        @DisplayName("a subclass registered next to its superclass is a duplicate, not a shadow")
+        void subclassAlongsideItsSuperclassIsADuplicate() {
+            assertThatThrownBy(() -> new MessageTypesRegistry(
+                    List.of(new BomGameMessageTypes(), new InheritsBomAnnotation()),
+                    List.of(), List.of()))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Duplicate");
         }
     }
 
