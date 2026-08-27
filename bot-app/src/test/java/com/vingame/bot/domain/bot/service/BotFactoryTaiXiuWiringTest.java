@@ -40,7 +40,8 @@ import static org.mockito.Mockito.when;
  * before entering {@code initialize()}.
  * <p>
  * Because the TAI_XIU branch resolves the message types <em>inside</em> the switch
- * via {@code GameMessageTypesResolver.resolveTaiXiu(env.getProductCode())}, the env
+ * via {@code messageTypesRegistry.taiXiu(env.getProductCode().getCode())}
+ * (PLUGIN_HOT_RELOAD Phase 2c replaced the static resolver), the env
  * is given {@link ProductCode#P_116 P_116} — the only Tai Xiu product implemented
  * in v1 (Phase 3 placeholder). A successful (non-throwing) resolve there is itself
  * part of the wiring this test exercises.
@@ -77,7 +78,7 @@ class BotFactoryTaiXiuWiringTest {
                 // Scoped-debug auto-escalation is null-tolerant on every bot call site
                 // (LOG_VOLUME_TIERING AD-12); this fixture asserts wiring, not escalation.
                 (com.vingame.bot.infrastructure.observability.ScopedDebugEscalator) null,
-                strategyFactory, slotStrategyFactory);
+                strategyFactory, slotStrategyFactory, TestMessageTypes.REGISTRY);
     }
 
     private static EnvironmentClients envClientsWith(Environment env,

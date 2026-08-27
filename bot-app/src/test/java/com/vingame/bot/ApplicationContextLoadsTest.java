@@ -8,11 +8,17 @@ import com.vingame.bot.domain.alert.service.AlertService;
 import com.vingame.bot.domain.alert.service.AlertmanagerWebhookService;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import com.vingame.bot.domain.botgroup.service.ActivationScheduler;
+import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
+import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
+import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
+import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
+import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
+import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.infrastructure.notification.VipTalkClient;
 import com.vingame.bot.infrastructure.observability.InfoGaugeRefresher;
 import org.junit.jupiter.api.DisplayName;
@@ -146,6 +152,46 @@ class ApplicationContextLoadsTest {
         // prototype bean fails to build. This is what BotFactory does per bot.
         assertThat(betting.create(StrategyId.RANDOM.name())).isNotNull();
         assertThat(slot.create(SlotStrategyId.FIXED.name())).isNotNull();
+    }
+
+    @Test
+    @DisplayName("the message-types registry comes up with every product's provider")
+    void messageTypesRegistryIsFullyPopulated() {
+        // PLUGIN_HOT_RELOAD Phase 2c. The providers moved from a hardcoded
+        // `switch (productCode)` in shared code to @Component + @MessageTypesImpl
+        // beans (AD-17/AD-18), so nothing at compile time ties product "116" to
+        // TipGameMessageTypes any more. MessageTypesCoverageTest in bot-messages is
+        // the primary guard, but it scans a package with a bare
+        // AnnotationConfigApplicationContext — it cannot see a provider that is
+        // reachable from that scan yet unreachable from *Starter's*, which is the
+        // scan that actually runs in production. bot-messages is the first module
+        // whose beans cross a jar boundary into this context, so this is also the
+        // only place that proves the new spring-context dependency is enough.
+        MessageTypesRegistry registry = context.getBean(MessageTypesRegistry.class);
+
+        // A superset check, not an exact set. What this test uniquely proves is that no
+        // provider goes *missing* under Starter's scan; "exactly these products and no
+        // others" is already pinned once, in bot-messages, and a second copy here would
+        // be a file every future brand has to touch for no extra protection.
+        assertThat(registry.registeredBettingMiniProducts()).contains("097", "098", "116", "118");
+        assertThat(registry.registeredTaiXiuProducts()).contains("114", "116");
+        assertThat(registry.hasSlotProvider()).isTrue();
+
+        // Resolution, not just registration — this is what BotFactory does per bot.
+        assertThat(registry.bettingMini(ProductCode.P_116.getCode()))
+                .isInstanceOf(TipGameMessageTypes.class);
+        assertThat(registry.taiXiu(ProductCode.P_114.getCode()))
+                .isInstanceOf(JackpotTaiXiuMessageTypes.class);
+        assertThat(registry.slot()).isInstanceOf(SlotMessageTypesImpl.class);
+    }
+
+    @Test
+    @DisplayName("BotFactory wires from the context with the registry injected")
+    void botFactoryIsConstructableBySpring() {
+        // BotFactory gained a ninth constructor argument in Phase 2c. It has no
+        // @Autowired-ambiguity risk today (single constructor), but this is the class
+        // of change that crash-looped VipTalkClient — assert the bean actually wires.
+        assertThat(context.getBean(BotFactory.class)).isNotNull();
     }
 
     @Test

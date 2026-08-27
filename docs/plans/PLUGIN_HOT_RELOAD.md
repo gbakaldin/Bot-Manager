@@ -445,11 +445,21 @@ for every `GameType`, either resolves a provider or appears on an explicit
 with the same protective effect and a readable inventory.
 
 **AD-20. Operator-facing error text is preserved byte-for-byte.** A registry miss throws
-the same `IllegalArgumentException` message as
-`GameMessageTypesResolver.java:52-54` / `:98-100`
-(`"GameMessageTypes not yet implemented for product code: 066. Please create a
-GameMessageTypes implementation for this product."`). Pin with a test. This string is
-what an operator greps when a new brand's group fails to start.
+the same `IllegalArgumentException` message the corresponding resolver method threw.
+**Corrected by Amendment A6** — this originally cited `GameMessageTypesResolver.java:52-54`
+/ `:98-100` and then quoted only the first of them, but those two ranges held **different**
+strings, and the third operator-facing string in the same two methods was not named at all.
+The three strings to preserve, all pinned as literals by a test:
+
+| Where | String |
+|---|---|
+| `:52-54`, betting-mini miss | `"GameMessageTypes not yet implemented for product code: 066. Please create a GameMessageTypes implementation for this product."` |
+| `:98-100`, Tai Xiu miss | `"TaiXiuMessageTypes not yet implemented for product code: 097. Please create a TaiXiuMessageTypes implementation for this product."` |
+| `:42-44`, `:88-90`, null product | `"ProductCode cannot be null"` |
+
+The contract name is therefore a **parameter** of the shared lookup, not a constant. These
+strings are what an operator greps when a new brand's group fails to start, and
+verification P2-7 greps the first of them verbatim.
 
 **AD-21. `StrategyController`'s response contract is preserved exactly.** Same path,
 same DTO, same `id` strings, and **the same order** — the endpoint lists the registry
@@ -586,11 +596,21 @@ independently deployable. Build with
 3. `bot-messages`: new `MessageTypesRegistry` `@Component` with the three typed lookups
    (AD-17), preserving AD-20's exception text; delete `GameMessageTypesResolver`.
 4. `bot-app`: `BotFactory` injects the registry; the three call sites at
-   `BotFactory.java:160, 168, 181` become instance calls. Nothing else changes —
-   `switch (game.getGameType())` at `:156` stays (it selects a *bot class*, not a
-   product implementation).
-5. Tests: port `GameMessageTypesResolverTest` to the registry; add
-   `MessageTypesCoverageTest` (AD-19) and an error-text test (AD-20).
+   `BotFactory.java:160, 168, 181` become instance calls, passing the product **through a
+   null-safe key extraction** — `Environment.productCode` is a plain nullable field, so
+   `env.getProductCode().getCode()` would convert the documented
+   `IllegalArgumentException("ProductCode cannot be null")` into an NPE
+   (**corrected by Amendment A7**; "Nothing else changes" originally read as forbidding
+   the helper). `switch (game.getGameType())` at `:156` stays — it selects a *bot class*,
+   not a product implementation, and being a switch **expression** over an enum with no
+   `default` arm it keeps its own compile-time exhaustiveness (A7).
+5. Tests: port `GameMessageTypesResolverTest` to the registry — and with it the **four
+   other** test-side consumers of the resolver, across three modules
+   (`SlotMessageTypesTest`, `TaiXiuMessageTypesTest`,
+   `taixiu/JackpotTaiXiuMessageTypesTest` in `bot-messages`,
+   `TaiXiuJackpotGameBotStreamTest` in `bot-engine`, plus the `BotFactory*` fixtures in
+   `bot-app` that gain a constructor argument); add `MessageTypesCoverageTest` (AD-19)
+   and an error-text test (AD-20).
 6. Ship.
 
 ### Phase 2d — `StrategyController` + doc cleanup (one Dev session)
@@ -1217,3 +1237,86 @@ behaviour is the right trade:
   document, not the request. Before adding a rule to one, ask what it does to a *persisted*
   document that already violates it — the answer is "every future write of that document
   fails", and that is a migration question, not a validation question.
+## Amendment — 2026-08-26 (Phase 2c review)
+
+*Issued by the Compliance Architect during the Phase 2c review
+(`docs/reviews/PLUGIN_HOT_RELOAD/compliance-2c.md`), on two under-specifications Dev raised
+in handoff and which measurement against `c3fac8a` confirms. The Phase 2c diff is **accepted
+unchanged** — in both cases the code is right and this document was wrong. Every
+Architecture Decision stands in substance; AD-20 gains the two strings it omitted.*
+
+### A6 — AD-20 cites two ranges holding **different** strings, and quotes only one
+
+**What was wrong.** AD-20 required a registry miss to throw "the same
+`IllegalArgumentException` message as `GameMessageTypesResolver.java:52-54` / `:98-100`",
+then quoted a single literal naming `GameMessageTypes`. Read literally that is
+unimplementable-as-intended: the two cited ranges did not hold the same string.
+
+**Measured** at `c3fac8a`, from
+`bot-messages/src/main/java/com/vingame/bot/domain/bot/message/GameMessageTypesResolver.java`:
+
+| Range | Method | String |
+|---|---|---|
+| `:52-54` | `resolveBettingMini` | `GameMessageTypes not yet implemented for product code: <code>. Please create a GameMessageTypes implementation for this product.` |
+| `:98-100` | `resolveTaiXiu` | `TaiXiuMessageTypes not yet implemented for product code: <code>. Please create a TaiXiuMessageTypes implementation for this product.` |
+| `:42-44`, `:88-90` | both | `ProductCode cannot be null` |
+
+So the quoted text is the betting-mini variant only. Implementing it for **both** ranges —
+the literal instruction — would make a Tai Xiu miss report `GameMessageTypes` to an operator
+who is grepping for the contract that actually failed, and would do it in the one string
+this AD exists to protect: verification **P2-7 greps `'not yet implemented for product
+code'` out of `docker logs`** and expects the message to name the missing contract. The
+third string, `"ProductCode cannot be null"`, is equally operator-facing and equally
+survivable only by being written down; AD-20 did not mention it, and it was left to AD-23's
+general "changes no behaviour" to carry.
+
+**Why this is a plan defect and not an implementation one.** There is no implementation that
+satisfies the quoted sentence for both ranges without regressing one of them. Dev
+parameterised the contract name on a shared private `lookup(...)` and pinned all three
+strings as whole literals in `MessageTypesErrorTextTest` — which is the only reading that
+preserves behaviour, and it is what AD-23 requires.
+
+**What changed.** AD-20 now lists all three strings in a table and states that the contract
+name is a parameter of the lookup rather than a constant. **No code, no shipped behaviour,
+no other Architecture Decision.**
+
+**The general rule this leaves behind:** when a decision says "byte-for-byte", quote every
+byte it governs. A single quoted example next to a plural citation reads as "these are the
+same string" and will be implemented that way.
+
+### A7 — Phase 2c step 4's "Nothing else changes" turns a documented exception into an NPE
+
+**What was wrong.** Step 4 said the three `BotFactory` call sites "become instance calls.
+Nothing else changes." The registry lookups take a `String`, so the literal transcription is
+`messageTypesRegistry.bettingMini(env.getProductCode().getCode())`.
+
+**Measured.** `Environment.productCode`
+(`bot-app/src/main/java/com/vingame/bot/domain/environment/model/Environment.java:45`) is a
+plain Lombok `@Getter/@Setter` field on a `@Document` — no `@NonNull`, no validation, and a
+Mongo document written without it deserialises to `null`. Both pre-2c resolver methods
+opened with an explicit `if (productCode == null) throw new
+IllegalArgumentException("ProductCode cannot be null")`, i.e. the null case was **handled
+and documented**, with its own javadoc `@throws`. The literal transcription replaces that
+with a `NullPointerException` from `BotFactory` — a different type, a different message, and
+no mention of the product code at all. That is precisely the silent contract change AD-23
+forbids, produced by following the plan.
+
+**Why this is a plan defect and not an implementation one.** Step 4 and AD-23 contradict each
+other for a null product code, and step 4 is the more specific instruction, so a faithful Dev
+reading it as written ships the NPE. Dev instead added a four-line private
+`productKey(Environment)` that forwards the null, letting the registry's own guard produce
+the original message; `MessageTypesErrorTextTest.nullTextIsUnchanged` pins it on both
+lookups. That is the behaviour-preserving reading and it is accepted.
+
+**What changed.** Step 4 now names the null-safe key extraction, and records the second
+half of the same sentence that a review pass questioned: `switch (game.getGameType())` at
+`:156` is a switch **expression** over an enum with no `default` arm, so `javac` still
+fails the build on a sixth `GameType` after 2c exactly as before it. Nothing was lost there
+and nothing had to replace it. Step 5's "port `GameMessageTypesResolverTest`" is also
+corrected to name the four other test-side consumers across three modules that the resolver
+had. **No code, no shipped behaviour, no Architecture Decision.**
+
+**The general rule this leaves behind:** "the call site becomes an instance call, nothing
+else changes" is only true when the old and new signatures accept the same domain. A change
+of parameter *type* — here enum to `String` — moves the null handling from the callee to the
+caller unless someone writes down where it went.

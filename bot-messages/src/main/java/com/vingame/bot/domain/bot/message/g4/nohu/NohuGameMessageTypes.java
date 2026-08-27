@@ -2,15 +2,20 @@ package com.vingame.bot.domain.bot.message.g4.nohu;
 
 import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.GameMessageTypes;
+import com.vingame.bot.domain.bot.message.MessageTypesImpl;
 import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
+import com.vingame.bot.domain.game.model.GameType;
+import org.springframework.stereotype.Component;
 
 /**
  * Message types provider for NOHU product.
  * Supplies concrete NOHU message classes for deserialization.
  */
+@Component
+@MessageTypesImpl(gameType = GameType.BETTING_MINI, products = "118")
 public class NohuGameMessageTypes implements GameMessageTypes {
 
     @Override

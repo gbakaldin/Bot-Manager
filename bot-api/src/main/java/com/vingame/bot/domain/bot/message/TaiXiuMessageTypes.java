@@ -22,7 +22,7 @@ import com.fasterxml.jackson.databind.jsontype.NamedType;
  * {@code getTypeRegistrations(int, boolean)} adds {@code CODE + offset}, which is
  * exactly the per-environment OFFSET arithmetic Tai Xiu must avoid. The two providers
  * have disjoint registration shapes and are resolved through separate
- * {@code GameMessageTypesResolver} methods.
+ * {@code MessageTypesRegistry} lookups.
  * <p>
  * <b>Per-provider CMD offset (TAI_XIU_114_JACKPOT plan AD-1).</b> The four base CMDs
  * resolved from the original captures are subscribe {@code 1005} (outbound), startGame

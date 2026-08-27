@@ -8,8 +8,17 @@ import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
 
 /**
- * Message types provider for BOM product.
- * Supplies concrete BOM message classes for deserialization.
+ * Message types provider for the B52 message shapes.
+ * <p>
+ * <b>Deliberately not registered.</b> It carries neither {@code @Component} nor
+ * {@code @MessageTypesImpl}, so {@code MessageTypesRegistry} never sees it — which
+ * is exactly what {@code GameMessageTypesResolver}'s switch did before
+ * PLUGIN_HOT_RELOAD Phase 2c: product 098 (whose {@code ProductCode} name is
+ * {@code P_098("098", "B52", …)}) resolved to {@link
+ * com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes}, and this class was
+ * reachable only from tests. Annotating it for 098 would be a behaviour change, not
+ * a completion; if the 098 wire shape is ever confirmed to be this one, that is its
+ * own decision with its own evidence.
  */
 public class B52GameMessageTypes implements GameMessageTypes {
 

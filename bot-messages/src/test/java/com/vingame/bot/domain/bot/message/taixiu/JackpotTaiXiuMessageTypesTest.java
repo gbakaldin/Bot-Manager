@@ -5,11 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.vingame.bot.domain.bot.message.BettingMiniMessage;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
-import com.vingame.bot.domain.bot.message.GameMessageTypesResolver;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.HasJackpot;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
+import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.TaiXiuMessageTypes;
 import com.vingame.bot.domain.brand.model.ProductCode;
@@ -17,6 +17,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -27,7 +28,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * Phase 5 verification (TAI_XIU_114_JACKPOT plan AD-5/AD-6): the P_114 jackpot
  * provider exposes the +100 CMDs (1105/1102/1104/1100), registers the <b>reused</b>
  * inbound classes (AD-3) against {@code "1105"/"1102"/"1104"}, sets the auto-bet flag,
- * is wired into {@code resolveTaiXiu(P_114)}, and the 114 capture-derived fixtures
+ * is wired into {@code MessageTypesRegistry.taiXiu("114")}, and the 114 capture-derived fixtures
  * round-trip into those reused classes with the bot-relevant fields intact + the
  * refund-aware accounting (AD-9) holding for full / partial / zero refund.
  */
@@ -80,12 +81,21 @@ class JackpotTaiXiuMessageTypesTest {
         assertThat(byName).doesNotContainKey("1100");
     }
 
-    /* ---- resolver wiring (AD-6) ---- */
+    /* ---- registry wiring (AD-6; PLUGIN_HOT_RELOAD Phase 2c) ---- */
+
+    /**
+     * The two Tai Xiu providers as the component scan wires them. Discovery is covered
+     * by {@code MessageTypesRegistryTest}/{@code MessageTypesCoverageTest}; these three
+     * cases are about which product lands on which provider.
+     */
+    private static final MessageTypesRegistry REGISTRY = new MessageTypesRegistry(
+            List.of(), List.of(),
+            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()));
 
     @Test
-    @DisplayName("resolveTaiXiu(P_114) returns the jackpot provider")
+    @DisplayName("taiXiu(114) returns the jackpot provider")
     void resolverReturnsJackpotProvider() {
-        TaiXiuMessageTypes resolved = GameMessageTypesResolver.resolveTaiXiu(ProductCode.P_114);
+        TaiXiuMessageTypes resolved = REGISTRY.taiXiu(ProductCode.P_114.getCode());
         assertThat(resolved).isInstanceOf(JackpotTaiXiuMessageTypes.class);
         assertThat(resolved.cmdOffset()).isEqualTo(100);
         assertThat(resolved.emitsAutoBetFlag()).isTrue();
@@ -93,18 +103,18 @@ class JackpotTaiXiuMessageTypesTest {
     }
 
     @Test
-    @DisplayName("resolveTaiXiu(P_116) still returns the offset-0 provider (no 114 regression)")
+    @DisplayName("taiXiu(116) still returns the offset-0 provider (no 114 regression)")
     void resolverP116Unchanged() {
-        TaiXiuMessageTypes resolved = GameMessageTypesResolver.resolveTaiXiu(ProductCode.P_116);
+        TaiXiuMessageTypes resolved = REGISTRY.taiXiu(ProductCode.P_116.getCode());
         assertThat(resolved).isInstanceOf(MiniGameTaiXiuMessageTypes.class);
         assertThat(resolved.cmdOffset()).isZero();
         assertThat(resolved.emitsAutoBetFlag()).isFalse();
     }
 
     @Test
-    @DisplayName("resolveTaiXiu(P_066) still throws 'not yet implemented'")
+    @DisplayName("taiXiu(066) still throws 'not yet implemented'")
     void resolverUnimplementedStillThrows() {
-        assertThatThrownBy(() -> GameMessageTypesResolver.resolveTaiXiu(ProductCode.P_066))
+        assertThatThrownBy(() -> REGISTRY.taiXiu(ProductCode.P_066.getCode()))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(ProductCode.P_066.getCode())
                 .hasMessageContaining("not yet implemented");

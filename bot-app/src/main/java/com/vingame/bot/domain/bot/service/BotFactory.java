@@ -12,9 +12,10 @@ import com.vingame.bot.domain.bot.core.BettingMiniGameBot;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.SlotMachineBot;
 import com.vingame.bot.domain.bot.core.TaiXiuGameBot;
-import com.vingame.bot.domain.bot.message.GameMessageTypesResolver;
+import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
+import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.environment.model.Environment;
 import io.netty.channel.EventLoopGroup;
@@ -72,6 +73,7 @@ public class BotFactory {
     private final ScopedDebugEscalator scopedDebugEscalator;
     private final BettingStrategyFactory strategyFactory;
     private final SlotStrategyFactory slotStrategyFactory;
+    private final MessageTypesRegistry messageTypesRegistry;
 
     @Autowired
     public BotFactory(EnvironmentClientRegistry clientRegistry,
@@ -81,7 +83,8 @@ public class BotFactory {
                       GroupLifecycleAggregator groupLifecycleAggregator,
                       ScopedDebugEscalator scopedDebugEscalator,
                       BettingStrategyFactory strategyFactory,
-                      SlotStrategyFactory slotStrategyFactory) {
+                      SlotStrategyFactory slotStrategyFactory,
+                      MessageTypesRegistry messageTypesRegistry) {
         this.clientRegistry = clientRegistry;
         this.eventLoopGroup = eventLoopGroup;
         this.botMetrics = botMetrics;
@@ -90,6 +93,7 @@ public class BotFactory {
         this.scopedDebugEscalator = scopedDebugEscalator;
         this.strategyFactory = strategyFactory;
         this.slotStrategyFactory = slotStrategyFactory;
+        this.messageTypesRegistry = messageTypesRegistry;
     }
 
     /**
@@ -157,7 +161,7 @@ public class BotFactory {
             case BETTING_MINI -> {
                 BettingMiniGameBot bettingBot = new BettingMiniGameBot();
                 bettingBot.setMessageTypes(
-                        GameMessageTypesResolver.resolveBettingMini(env.getProductCode()));
+                        messageTypesRegistry.bettingMini(productKey(env)));
                 // Wire the strategy registry so initializeSubclass() can build the
                 // per-bot BettingStrategy for configuration.strategyId.
                 bettingBot.setStrategyFactory(strategyFactory);
@@ -165,7 +169,7 @@ public class BotFactory {
             }
             case SLOT -> {
                 SlotMachineBot slotBot = new SlotMachineBot();
-                slotBot.setMessageTypes(GameMessageTypesResolver.resolveSlot());
+                slotBot.setMessageTypes(messageTypesRegistry.slot());
                 // Wire the slot strategy registry so initializeSubclass() can build
                 // the per-bot SlotStrategy for configuration.slotStrategyId (AD-9).
                 slotBot.setSlotStrategyFactory(slotStrategyFactory);
@@ -178,7 +182,7 @@ public class BotFactory {
                 // betting strategy family unchanged (AD-6), same as BETTING_MINI.
                 TaiXiuGameBot taiXiuBot = new TaiXiuGameBot();
                 taiXiuBot.setTaiXiuMessageTypes(
-                        GameMessageTypesResolver.resolveTaiXiu(env.getProductCode()));
+                        messageTypesRegistry.taiXiu(productKey(env)));
                 taiXiuBot.setStrategyFactory(strategyFactory);
                 yield taiXiuBot;
             }
@@ -212,5 +216,21 @@ public class BotFactory {
             configuration.getCredentials().getUsername(), environmentId);
 
         return bot;
+    }
+
+    /**
+     * The environment's product as {@code MessageTypesRegistry} keys it — the string
+     * {@code ProductCode.getCode()}, not the enum constant (PLUGIN_HOT_RELOAD AD-16).
+     * <p>
+     * Null-safe on purpose. {@code Environment.productCode} is a plain nullable field,
+     * and before Phase 2c a null reached {@code GameMessageTypesResolver} and came back
+     * as {@code IllegalArgumentException("ProductCode cannot be null")}. Passing
+     * {@code env.getProductCode().getCode()} directly would turn that into an NPE here,
+     * which is exactly the kind of silent contract change AD-23 forbids — so the null is
+     * forwarded and the registry still produces the original message.
+     */
+    private static String productKey(Environment env) {
+        ProductCode productCode = env.getProductCode();
+        return productCode == null ? null : productCode.getCode();
     }
 }

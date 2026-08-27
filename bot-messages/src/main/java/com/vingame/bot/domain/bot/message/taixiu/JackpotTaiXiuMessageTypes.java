@@ -1,11 +1,14 @@
 package com.vingame.bot.domain.bot.message.taixiu;
 
 import com.vingame.bot.domain.bot.message.EndGameMessage;
+import com.vingame.bot.domain.bot.message.MessageTypesImpl;
 import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.TaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
+import com.vingame.bot.domain.game.model.GameType;
+import org.springframework.stereotype.Component;
 
 /**
  * {@link TaiXiuMessageTypes} implementation for the P_114 / RIK
@@ -36,8 +39,10 @@ import com.vingame.bot.domain.bot.message.UpdateBetMessage;
  * <b>same</b> concrete classes as {@link MiniGameTaiXiuMessageTypes}. No 114-specific
  * inbound classes are created (OI-2).
  * <p>
- * Resolved via {@code GameMessageTypesResolver.resolveTaiXiu(ProductCode.P_114)} (AD-6).
+ * Resolved via {@code MessageTypesRegistry.taiXiu("114")} (AD-6).
  */
+@Component
+@MessageTypesImpl(gameType = GameType.TAI_XIU, products = "114")
 public class JackpotTaiXiuMessageTypes implements TaiXiuMessageTypes {
 
     /**

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -16,10 +17,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * Phase 2 verification (SLOT_MACHINE_BOT plan AD-1/AD-4): the product-neutral
  * slot provider registers its two classes against the literal fixed cmd strings
- * {@code "1300"} / {@code "1302"} with no offset arithmetic, and the resolver
- * exposes it via {@code resolveSlot()}.
+ * {@code "1300"} / {@code "1302"} with no offset arithmetic, and the registry
+ * exposes it via {@code slot()} (PLUGIN_HOT_RELOAD Phase 2c).
  */
-@DisplayName("SlotMessageTypes provider + resolver split")
+@DisplayName("SlotMessageTypes provider + registry split")
 class SlotMessageTypesTest {
 
     @Test
@@ -51,9 +52,10 @@ class SlotMessageTypesTest {
     }
 
     @Test
-    @DisplayName("resolveSlot() returns a product-neutral SlotMessageTypes")
+    @DisplayName("registry.slot() returns a product-neutral SlotMessageTypes")
     void resolveSlotReturnsProvider() {
-        SlotMessageTypes resolved = GameMessageTypesResolver.resolveSlot();
+        SlotMessageTypes resolved = new MessageTypesRegistry(
+                List.of(), List.of(new SlotMessageTypesImpl()), List.of()).slot();
 
         assertThat(resolved).isInstanceOf(SlotMessageTypesImpl.class);
         assertThat(resolved.getTypeRegistrations()).hasSize(2);
