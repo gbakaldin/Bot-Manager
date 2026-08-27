@@ -398,6 +398,56 @@ BotFactory.createBot() → build with credentials → authenticate()
 - **Configuration-driven bots**: `BettingMiniGameBot` is concrete; game types handled via `Game` entity and `GameMessageTypes`
 - **Virtual threads everywhere**: Schedulers, bot creation, health monitoring all use virtual threads for lightweight concurrency
 
+### Plugin registries — product implementations are resolved by `String` key
+
+`docs/plans/PLUGIN_HOT_RELOAD.md` Phase 2 replaced static, enum-typed resolution
+with three string-keyed Spring registries. Nothing is loaded from a new
+classloader yet and **behaviour is identical** (AD-23) — what changed is that a
+product implementation is now addressable by a name the engine does not have to
+declare.
+
+| Registry | Key | Discovery |
+|---|---|---|
+| `BettingStrategyFactory` | strategy key, e.g. `"RANDOM"` | `@StrategyImpl("RANDOM")` on a prototype bean |
+| `SlotStrategyFactory` | slot strategy key | `@SlotStrategyImpl("FIXED")` |
+| `MessageTypesRegistry` | `(GameType, productCode)`, e.g. `(BETTING_MINI, "116")` | `@MessageTypesImpl(gameType=…, products={"097","098"})` |
+
+- **`StrategyId` / `SlotStrategyId` survive, demoted to the built-in catalogue**
+  (AD-12). They are the compile-time home of the canonical key strings and of the
+  `displayName` / `description` the UI picker renders — **no runtime code path may
+  switch on them or use them as a map key**. `StrategyCatalogParityTest` pins every
+  constant name to a registered bean; that test is what replaced the annotation's
+  lost type check, so `@StrategyImpl("RANDOM ")` fails the build rather than
+  registering a phantom key. `ProductCode` is *not* de-enum-ed (AD-16) — it is
+  brand metadata (`appId`, `usernameMaxLength`, `vipTalkRoomId`), not a plugin key.
+- **The persisted and wire shapes did not change.** BSON was already the enum
+  `name()` string and no `MongoCustomConversions` exist, so
+  `strategyMix[].strategyId` and `slotStrategyId` read back unchanged. No
+  migration. `slotStrategyId == null` still means "fall back to `FIXED` at
+  bot-build time" and must stay null through the entity and DTO layers.
+- **Jackson's implicit key validation was replaced explicitly**, same 400
+  (`BotGroupConfigValidationService`, AD-15). Note what it does *not* buy
+  (Amendment A5): `validate` is **not** on the group-start path, so a group whose
+  strategy bean vanished still dies at `BettingStrategyFactory.create` on a bot
+  thread; and because `validate` runs **post-merge over the whole entity** on
+  PATCH, a group holding an unregistered key fails *any* PATCH until its mix is
+  replaced. It stays startable, stoppable and deletable, and the 400 names the key
+  and lists the catalogue.
+- **`GET /api/v1/strategy/` is registry-backed but its response is contract-frozen**
+  (AD-21). `StrategyCatalog` joins registered keys to display metadata: a built-in
+  takes the enum's copy, any other key falls back to the key itself as
+  `displayName` with an empty description. Order is an **explicit sort** —
+  built-ins in `StrategyId` declaration order, then everything else alphabetically.
+  A registry's own iteration order is bean-discovery order (alphabetical by class
+  file within package, Amendment A4) and **must never be used as a display order**;
+  operator-facing key lists in boot lines and exception tails are sorted at render
+  time for the same reason.
+- **A duplicate key fails context refresh** in all three registries, which is right
+  while every key is ours and becomes wrong once a third-party plugin can collide
+  with a built-in. Neither the strategy key nor the message-types key carries a
+  version dimension, so two live plugin versions are not expressible under them.
+  Both are step-5 decisions, recorded in Amendment A8.
+
 ### Token Naming Reference
 
 The same token is called different things in different contexts — this is a known mess:
@@ -674,7 +724,15 @@ rather than expecting all of them to move at once.
 - [ ] Add Grafana for observability, connect Loki for log aggregation
 
 **Architecture:**
-- [ ] Spring Plugin Support Framework - move bot scripts and messages to separate plugin module/repository for hot-reload without full restart
+- [ ] Spring Plugin Support Framework - move bot scripts and messages to separate
+  plugin module/repository for hot-reload without full restart. Planned as a
+  seven-step sequence in `docs/plans/PLUGIN_HOT_RELOAD.md`; **steps 1-2 are done**
+  (observability baseline + string-keyed registries — see "Plugin registries"
+  under Architecture). Steps 3-7 (separate jars, child classloader, two coexisting
+  versions, drain + classloader release, reload endpoint + forced cutover) are not
+  started and are gated on a classloader-GC spike. The root `PLUGIN_PLAN.md` that
+  used to describe this was **deleted** (AD-22) — it put the engine in the
+  reloadable layer, which is the inverse of the shipped design.
 - [x] Time-based activation — recurring time-of-day windows on `BotGroup` via
   `activationMode` (`SCHEDULED`/`MANUAL_ON`/`MANUAL_OFF`, null = legacy) +
   `activationWindow` (`{from, to, days}`), reconciled every minute by

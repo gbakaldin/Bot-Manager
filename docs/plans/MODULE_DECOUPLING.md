@@ -14,10 +14,12 @@ future drain-based hot-reload effort — but this plan **does not build** hot-re
 dynamic classloading, PF4J, or any reload endpoint. Those remain a separate,
 spike-gated, out-of-scope effort.
 
-> `PLUGIN_PLAN.md` at the repo root is **STALE and superseded** by this document.
-> It predates the Docker/observability stack and proposes hot-reloadable
-> *game/message plugins* with the **engine placed in a reloadable layer** — the
-> inverse of the correct design. Engine is stable core. Do not follow it.
+> `PLUGIN_PLAN.md` at the repo root was **STALE and superseded** by this document,
+> and has since been **deleted** (`docs/plans/PLUGIN_HOT_RELOAD.md` AD-22; git
+> history is the archive). It predated the Docker/observability stack and proposed
+> hot-reloadable *game/message plugins* with the **engine placed in a reloadable
+> layer** — the inverse of the correct design. Engine is stable core. If you find a
+> copy, do not follow it; the live plan is `PLUGIN_HOT_RELOAD.md`.
 
 ---
 
