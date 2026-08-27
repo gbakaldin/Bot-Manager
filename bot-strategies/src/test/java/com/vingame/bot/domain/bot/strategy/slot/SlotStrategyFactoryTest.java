@@ -95,6 +95,25 @@ class SlotStrategyFactoryTest {
     }
 
     @Test
+    @DisplayName("the strategies-present tail is sorted, and a blank key stays visible")
+    void lookupFailureTailIsSortedAndKeyIsQuoted() {
+        // The twin of BettingStrategyFactoryTest.lookupFailureTailIsSorted /
+        // blankKeyIsQuotedInTheMessage. RANDOM is handed in first so an
+        // insertion-ordered render would put it first and fail the assertion.
+        ApplicationContext context = mock(ApplicationContext.class);
+        SlotStrategyFactory factory = new SlotStrategyFactory(
+                context, List.of(new RandomBetStrategy(), new FixedBetStrategy()));
+        factory.init();
+
+        assertThat(factory.registeredKeys()).containsExactly("RANDOM", "FIXED");
+
+        assertThatThrownBy(() -> factory.create(""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("registered for ''")
+                .hasMessageContaining("strategies present: [FIXED, RANDOM]");
+    }
+
+    @Test
     @DisplayName("Duplicate @SlotStrategyImpl on two beans throws at init")
     void duplicateImplThrows() {
         ApplicationContext context = mock(ApplicationContext.class);

@@ -97,6 +97,67 @@ class BettingStrategyFactoryTest {
     }
 
     @Test
+    @DisplayName("the strategies-present tail is sorted, not in scan order")
+    void lookupFailureTailIsSorted() {
+        // review-2a: the tail is the string an operator pastes into a ticket when a
+        // group fails to start, and registry order is Spring's scan order — not
+        // stable across an exploded-classes run and a jar run (Amendment A4). This
+        // fixture is deliberately handed its beans in an order that is NOT sorted,
+        // so an unsorted render would reproduce it and fail here.
+        ApplicationContext context = mock(ApplicationContext.class);
+        BettingStrategyFactory factory = new BettingStrategyFactory(
+                context, List.of(new RandomBehaviorStrategy(), new FakeAaaStrategy()));
+        factory.init();
+
+        assertThat(factory.registeredKeys()).containsExactly("RANDOM", "AAA_FIRST_WHEN_SORTED");
+
+        assertThatThrownBy(() -> factory.create("NOPE"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("strategies present: [AAA_FIRST_WHEN_SORTED, RANDOM]");
+    }
+
+    @Test
+    @DisplayName("a blank key is visible in the lookup failure, not swallowed by the message")
+    void blankKeyIsQuotedInTheMessage() {
+        // Since Phase 2b the key is a String, so "" and "   " are representable.
+        // They cannot arrive through the API (AD-15 rejects them as unknown keys)
+        // but they can arrive from a direct Mongo write, and unquoted the message
+        // read "No BettingStrategy registered for  — strategies present: [...]".
+        // Quoting is the whole fix: no isBlank() fallback, because silently turning
+        // a corrupt config into a RANDOM bot is what BETTING_STRATEGIES AD-12
+        // forbids.
+        ApplicationContext context = mock(ApplicationContext.class);
+        BettingStrategyFactory factory =
+                new BettingStrategyFactory(context, List.of(new RandomBehaviorStrategy()));
+        factory.init();
+
+        assertThatThrownBy(() -> factory.create("   "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("registered for '   '");
+        assertThatThrownBy(() -> factory.create(""))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("registered for ''");
+    }
+
+    @Test
+    @DisplayName("the annotation is read through the class hierarchy, not off getClass()")
+    void annotationIsResolvedThroughTheHierarchy() {
+        // review-2c F3: the lookup moved to AopUtils.getTargetClass +
+        // AnnotationUtils.findAnnotation so a proxied bean is not silently skipped.
+        // A proxy cannot be built here without pulling in an AOP fixture, but
+        // findAnnotation's other effect — searching superclasses, which
+        // getAnnotation did not do because @StrategyImpl is not @Inherited — is
+        // observable directly and is what would regress if someone reverted the
+        // line.
+        ApplicationContext context = mock(ApplicationContext.class);
+        BettingStrategyFactory factory =
+                new BettingStrategyFactory(context, List.of(new SubclassOfAnnotatedBase()));
+        factory.init();
+
+        assertThat(factory.registeredKeys()).containsExactly("INHERITED_KEY");
+    }
+
+    @Test
     @DisplayName("Duplicate @StrategyImpl on two beans throws at init")
     void duplicateImplThrows() {
         ApplicationContext context = mock(ApplicationContext.class);
@@ -136,10 +197,35 @@ class BettingStrategyFactoryTest {
 
     /**
      * Strategy without {@code @StrategyImpl} — the factory should skip it
-     * with a WARN, not crash.
+     * with a WARN, not crash. Note it implements the interface directly rather
+     * than subclassing an annotated strategy: since the annotation lookup moved to
+     * {@code AnnotationUtils.findAnnotation} it searches superclasses, so a
+     * subclass would inherit a key and this fixture would stop testing its name.
      */
     private static final class UnannotatedStrategy implements BettingStrategy {
         @Override public void onRoundEnd(RoundResult result) { }
         @Override public Optional<BetDecision> decide(BetContext ctx) { return Optional.empty(); }
+    }
+
+    /**
+     * A second key that sorts before {@code RANDOM} alphabetically but is
+     * registered after it, so {@link #lookupFailureTailIsSorted} can tell a sorted
+     * render apart from an insertion-ordered one.
+     */
+    @StrategyImpl("AAA_FIRST_WHEN_SORTED")
+    private static final class FakeAaaStrategy implements BettingStrategy {
+        @Override public void onRoundEnd(RoundResult result) { }
+        @Override public Optional<BetDecision> decide(BetContext ctx) { return Optional.empty(); }
+    }
+
+    /** An annotated base, so a subclass has something to inherit. */
+    @StrategyImpl("INHERITED_KEY")
+    private static class AnnotatedBase implements BettingStrategy {
+        @Override public void onRoundEnd(RoundResult result) { }
+        @Override public Optional<BetDecision> decide(BetContext ctx) { return Optional.empty(); }
+    }
+
+    /** Carries no annotation of its own; inherits {@code @StrategyImpl("INHERITED_KEY")}. */
+    private static final class SubclassOfAnnotatedBase extends AnnotatedBase {
     }
 }

@@ -2,8 +2,10 @@ package com.vingame.bot.domain.bot.strategy;
 
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.aop.support.AopUtils;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.ApplicationContext;
+import org.springframework.core.annotation.AnnotationUtils;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
@@ -11,6 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * Spring-managed registry that produces fresh {@link BettingStrategy} instances
@@ -52,15 +55,28 @@ public class BettingStrategyFactory {
     private final ApplicationContext context;
     private final List<BettingStrategy> discoveredStrategies;
     /**
-     * Key → implementation class, in discovery order. {@link LinkedHashMap} and
-     * not a {@link java.util.HashMap} so that iteration is deterministic within
-     * a JVM run (a stable boot log, a stable {@code strategies present: [...]}
-     * tail on a lookup failure). That order is Spring's bean-discovery order —
-     * alphabetical by class file name within package — and it is emphatically
-     * <em>not</em> {@code StrategyId.values()} order (plan Amendment A4). No
-     * consumer may treat it as a display order: AD-21's ordering is an explicit
-     * sort from {@code StrategyId.values()} that does not consult this map's
-     * order at all.
+     * Key → implementation class, in discovery order.
+     *
+     * <p>{@link LinkedHashMap} and not a {@link java.util.HashMap} so that
+     * iteration is deterministic <em>within a JVM run</em>. That is the whole of
+     * the property: it keeps a diagnostic from reshuffling between two reads on
+     * one box. It is <b>not</b> stability across runs, machines or packagings —
+     * the order is Spring's classpath-scan order, which on a directory scan is
+     * derived from filesystem listing order and can legitimately differ between
+     * an exploded {@code target/classes} run and a jar run. Amendment A4
+     * measured what it actually is today (alphabetical by <em>class file name</em>
+     * within package, so {@code RandomBehaviorStrategy} sorts ahead of the whole
+     * {@code martingale/} subdirectory) and that is an observation, not a
+     * contract: renaming a class or moving it to another package silently
+     * reorders it and nothing in the build would notice.
+     *
+     * <p>It is emphatically not {@code StrategyId.values()} order — the two agree
+     * on {@code RANDOM} and differ in six of the remaining eight positions. No
+     * consumer may treat this map's order as a display order: AD-21's ordering is
+     * an explicit sort from {@code StrategyId.values()} that does not consult it
+     * at all. Anything an operator reads — the boot line, the
+     * {@code strategies present: [...]} tail — is sorted at render time instead,
+     * so it does not depend on this at all.
      */
     private final Map<String, Class<? extends BettingStrategy>> registry =
             new LinkedHashMap<>();
@@ -74,24 +90,44 @@ public class BettingStrategyFactory {
     @PostConstruct
     void init() {
         for (BettingStrategy bean : discoveredStrategies) {
-            StrategyImpl annotation = bean.getClass().getAnnotation(StrategyImpl.class);
+            // Resolve the target class once and use it for both the annotation and
+            // the registered value. Not bean.getClass(): that is whatever object
+            // Spring handed us, and a proxied bean's getClass() is $ProxyN — which
+            // carries no annotation (a silent skip) and is not a bean definition
+            // (getBean would fail later). Nothing proxies these beans today; this
+            // is the cheap guard against the day something does, and against the
+            // plugin classloaders this whole effort ends in. Kept identical to
+            // MessageTypesRegistry.annotationOf, which has the same exposure.
+            Class<? extends BettingStrategy> implClass =
+                    AopUtils.getTargetClass(bean).asSubclass(BettingStrategy.class);
+            StrategyImpl annotation = AnnotationUtils.findAnnotation(implClass, StrategyImpl.class);
             if (annotation == null) {
                 // A BettingStrategy bean without @StrategyImpl is a programming
                 // error — the registry has no key for it. Surface loudly.
+                //
+                // Deliberately still a WARN-and-skip, unlike MessageTypesRegistry,
+                // which hard-fails the same mistake (review-2c F2): that class has
+                // three sibling misconfigurations that already fail context refresh
+                // and all of them read the annotation, so a soft fourth was the odd
+                // one out. This class has no such siblings to be inconsistent with.
                 log.warn("BettingStrategy bean {} is missing @StrategyImpl — skipping registration",
-                        bean.getClass().getName());
+                        implClass.getName());
                 continue;
             }
             String id = annotation.value();
-            Class<? extends BettingStrategy> existing = registry.put(id, bean.getClass());
+            Class<? extends BettingStrategy> existing = registry.put(id, implClass);
             if (existing != null) {
                 throw new IllegalStateException(
                         "Duplicate @StrategyImpl(" + id + ") on " + existing.getName()
-                                + " and " + bean.getClass().getName());
+                                + " and " + implClass.getName());
             }
         }
+        // Sorted, not registry.keySet(): the map's order is Spring's scan order and
+        // is not stable across packagings, so an unsorted list makes a boot log
+        // pointlessly hard to diff between an IDE run and the box. Sorting at
+        // startup costs nothing and this line fires once per JVM.
         log.info("BettingStrategyFactory initialized: registered {} strategies — {}",
-                registry.size(), registry.keySet());
+                registry.size(), sortedKeys());
     }
 
     /**
@@ -105,8 +141,13 @@ public class BettingStrategyFactory {
     public BettingStrategy create(String id) {
         Class<? extends BettingStrategy> clazz = registry.get(id);
         if (clazz == null) {
-            throw new IllegalArgumentException("No BettingStrategy registered for " + id
-                    + " — strategies present: " + registry.keySet());
+            // The key is quoted because it may be blank. Since Phase 2b the type is
+            // String, so "" and "   " are representable — unreachable through the API
+            // (AD-15 rejects them as unknown keys) but reachable by a direct Mongo
+            // write, and unquoted they rendered as "registered for  — strategies
+            // present:", a lookup error with an invisible key.
+            throw new IllegalArgumentException("No BettingStrategy registered for '" + id
+                    + "' — strategies present: " + sortedKeys());
         }
         // getBean(class) on a prototype-scoped @Component returns a fresh instance.
         return context.getBean(clazz);
@@ -115,9 +156,20 @@ public class BettingStrategyFactory {
     /**
      * @return the set of registered strategy keys, in discovery order. Read by
      *         {@code BotGroupConfigValidationService} to reject a
-     *         {@code strategyMix} naming a key no bean claims (AD-15).
+     *         {@code strategyMix} naming a key no bean claims (AD-15) — which
+     *         sorts it itself before rendering it into a 400 body.
      */
     public Set<String> registeredKeys() {
         return Collections.unmodifiableSet(registry.keySet());
+    }
+
+    /**
+     * The keys as an operator should read them. {@link #registry} iterates in
+     * Spring's scan order, which is arbitrary across packagings (Amendment A4);
+     * every message a human sees renders from this instead, so the same fault
+     * produces the same string in an IDE and on the box.
+     */
+    private Set<String> sortedKeys() {
+        return new TreeSet<>(registry.keySet());
     }
 }
