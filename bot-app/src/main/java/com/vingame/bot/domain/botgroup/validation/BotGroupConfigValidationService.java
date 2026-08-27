@@ -117,10 +117,21 @@ public class BotGroupConfigValidationService {
      * start.
      *
      * <p>Running here rather than at the mapper means it covers <b>create and
-     * PATCH</b> (both call {@link #validate}), which is strictly better than
-     * what it replaces: Jackson only ever guarded the request body, whereas a
-     * group whose strategy bean vanished in a deploy used to fail at
-     * {@code BettingStrategyFactory.create} on a bot thread during group start.
+     * PATCH</b> (both call {@link #validate}). Note what that does and does not
+     * buy — AD-15 originally claimed "strictly better coverage" and Amendment A5
+     * falsified it in both directions. {@link #validate} is <b>not</b> on the
+     * group-start path ({@code BotGroupBehaviorService} never calls it), so a
+     * group whose strategy bean vanished in a deploy still fails at
+     * {@code BettingStrategyFactory.create} on a bot thread, exactly as before.
+     * And because {@link #validate} runs <b>post-merge over the whole entity</b>
+     * on PATCH (TIMED_ACTIVATION AD-6, for cross-field rules), this reads
+     * persisted state as well as the request body: a group holding an
+     * unregistered key fails <em>any</em> PATCH — renaming it, adjusting
+     * {@code maxBet} — until its mix is replaced. That is accepted deliberately.
+     * The group stays startable, stoppable and deletable, {@code strategyMix} is
+     * full-replace when supplied so a single PATCH clears the fault, and the 400
+     * names the bad key and lists the catalogue. But it is a new failure mode,
+     * not pure upside, and steps 5-7 are exactly when a registry shrinks.
      *
      * <p>Null and empty short-circuit before either registry is consulted. That
      * is not an optimisation: {@code strategyMix} is null on every group that
