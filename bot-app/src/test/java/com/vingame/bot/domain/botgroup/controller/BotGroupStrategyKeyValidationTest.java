@@ -4,6 +4,7 @@ import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapperImpl;
@@ -38,10 +39,12 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.never;
@@ -178,7 +181,7 @@ class BotGroupStrategyKeyValidationTest {
                 .namePrefix("vt").password("secret").botCount(1)
                 .minBet(100L).maxBet(500L).betIncrement(10L)
                 .minBetsPerRound(1).maxBetsPerRound(5).maxTotalBetPerRound(1000L)
-                .strategyMix(List.of(new com.vingame.bot.domain.bot.strategy.WeightedStrategy("RANDOM", 1.0)))
+                .strategyMix(List.of(new WeightedStrategy("RANDOM", 1.0)))
                 .build();
     }
 
@@ -191,10 +194,10 @@ class BotGroupStrategyKeyValidationTest {
         void catalogueIsReal() {
             assertThat(bettingStrategyFactory.registeredKeys())
                     .containsExactlyInAnyOrderElementsOf(
-                            java.util.Arrays.stream(StrategyId.values()).map(Enum::name).toList());
+                            Arrays.stream(StrategyId.values()).map(Enum::name).toList());
             assertThat(slotStrategyFactory.registeredKeys())
                     .containsExactlyInAnyOrderElementsOf(
-                            java.util.Arrays.stream(SlotStrategyId.values()).map(Enum::name).toList());
+                            Arrays.stream(SlotStrategyId.values()).map(Enum::name).toList());
         }
     }
 
@@ -209,7 +212,7 @@ class BotGroupStrategyKeyValidationTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(createBody("[{\"strategyId\":\"NONSENSE\",\"weight\":1.0}]", null)))
                     .andExpect(status().isBadRequest())
-                    .andExpect(content().string(org.hamcrest.Matchers.containsString("NONSENSE")));
+                    .andExpect(content().string(containsString("NONSENSE")));
 
             verify(repository, never()).save(any(BotGroup.class));
         }
@@ -221,7 +224,7 @@ class BotGroupStrategyKeyValidationTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(createBody("[{\"strategyId\":\"NONSENSE\",\"weight\":1.0}]", null)))
                     .andExpect(status().isBadRequest())
-                    .andExpect(content().string(org.hamcrest.Matchers.containsString("MARTINGALE_CLASSIC_CAUTIOUS")));
+                    .andExpect(content().string(containsString("MARTINGALE_CLASSIC_CAUTIOUS")));
         }
 
         @Test
@@ -253,7 +256,7 @@ class BotGroupStrategyKeyValidationTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(createBody(null, "\"NONSENSE\"")))
                     .andExpect(status().isBadRequest())
-                    .andExpect(content().string(org.hamcrest.Matchers.containsString("slotStrategyId")));
+                    .andExpect(content().string(containsString("slotStrategyId")));
 
             verify(repository, never()).save(any(BotGroup.class));
         }
@@ -296,7 +299,7 @@ class BotGroupStrategyKeyValidationTest {
                             .contentType(MediaType.APPLICATION_JSON)
                             .content("{\"strategyMix\":[{\"strategyId\":\"NONSENSE\",\"weight\":1.0}]}"))
                     .andExpect(status().isBadRequest())
-                    .andExpect(content().string(org.hamcrest.Matchers.containsString("NONSENSE")));
+                    .andExpect(content().string(containsString("NONSENSE")));
 
             // The rejection must not partially apply — verification P2-5.
             verify(repository, never()).save(any(BotGroup.class));

@@ -161,10 +161,22 @@ public interface BotGroupMapper {
             entity.setStrategyMix(dto.getStrategyMix());
         }
         // slotStrategyId PATCH semantics: full-replace if DTO supplies the field
-        // (non-null); a null DTO field keeps the existing value. No empty-value
-        // case to guard — it is a single nullable enum, and null is a valid
-        // "fall back to FIXED" state. Mid-flight changes do NOT re-assign
-        // already-running bots, mirroring strategyMix.
+        // (non-null); a null DTO field keeps the existing value, which is also the
+        // valid "fall back to FIXED" state.
+        //
+        // There IS an empty-value case, and it is deliberately not guarded here.
+        // Since PLUGIN_HOT_RELOAD Phase 2b this is a nullable String, not an enum,
+        // so "" is representable and reaches setSlotStrategyId("") through the
+        // Optional below — "" is non-null. It is rejected one frame later by
+        // BotGroupConfigValidationService's AD-15 check, which is not a registered
+        // key and answers 400 naming ''. That is the right owner: the mapper knows
+        // PATCH merge semantics, the validator knows the registry. Do not drop
+        // that check on the strength of this comment — an earlier version of it
+        // said "no empty-value case to guard — it is a single nullable enum",
+        // which stopped being true when the type changed.
+        //
+        // Mid-flight changes do NOT re-assign already-running bots, mirroring
+        // strategyMix.
         entity.setSlotStrategyId(Optional.ofNullable(dto.getSlotStrategyId()).orElse(entity.getSlotStrategyId()));
         entity.setTargetStatus(Optional.ofNullable(dto.getTargetStatus()).orElse(entity.getTargetStatus()));
         entity.setScheduledRestartTime(Optional.ofNullable(dto.getScheduledRestartTime()).orElse(entity.getScheduledRestartTime()));

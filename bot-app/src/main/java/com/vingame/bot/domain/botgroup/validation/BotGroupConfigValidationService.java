@@ -62,8 +62,20 @@ public class BotGroupConfigValidationService {
         // Strategy keys first, because that is where they used to be rejected:
         // until PLUGIN_HOT_RELOAD Phase 2b these were enum-typed, so an unknown
         // key failed Jackson deserialization of the request body — before any
-        // service ran. Keeping it first preserves which error a body with two
-        // faults reports (PLUGIN_HOT_RELOAD AD-15).
+        // service ran. Keeping it first preserves which error wins *within this
+        // method*, so a group with both a bad strategy key and a bad activation
+        // window reports the strategy key — the relative order Jackson used to
+        // impose (PLUGIN_HOT_RELOAD AD-15).
+        //
+        // It does not preserve which error a whole create *body* reports, and an
+        // earlier version of this comment claimed it did. BotGroupController.save
+        // is @Validated(OnCreate.class) and BotGroupDTO carries @NotBlank /
+        // @Positive, and bean validation runs after Jackson but before the
+        // controller body — so a create body with a blank namePrefix and
+        // strategyId "NONSENSE" used to report the enum fault and now reports
+        // "namePrefix must not be blank". Both are 400 and no client parses which
+        // of two faults comes first, so this is comment accuracy, not behaviour.
+        // The PATCH path has no @Validated and does behave as described above.
         validateStrategyKeys(group);
 
         // Activation config is game-type-independent (TIMED_ACTIVATION AD-7), so

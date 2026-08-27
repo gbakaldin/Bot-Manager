@@ -77,10 +77,12 @@ adding a new game type's rules is a new `@Component`, not an edited switch.
   and
   `/Users/gleb/IdeaProjects/Bot/src/main/java/com/vingame/bot/domain/bot/strategy/slot/SlotStrategyFactory.java`
   — both `@Component`, both take `List<Strategy>` in the constructor, both build an
-  `EnumMap` keyed by an enum in `@PostConstruct init()` reading a marker annotation
-  off each bean, both reject duplicate keys with `IllegalStateException`, both
-  expose `create(key)` throwing `IllegalArgumentException` on unknown key, and both
-  expose `registeredIds()`. This is the exact shape to copy.
+  `LinkedHashMap` keyed by a `String` in `@PostConstruct init()` reading a marker
+  annotation off each bean, both reject duplicate keys with `IllegalStateException`,
+  both expose `create(key)` throwing `IllegalArgumentException` on unknown key, and
+  both expose `registeredKeys()`. This is the exact shape to copy.
+  (Was `EnumMap` keyed by an enum, exposing `registeredIds()`, until
+  PLUGIN_HOT_RELOAD Phase 2a/2b retyped the registries and retired that method.)
 - The thing we are deliberately **not** copying: `BotFactory`
   (`/Users/gleb/IdeaProjects/Bot/src/main/java/com/vingame/bot/domain/bot/service/BotFactory.java:143-163`)
   switches on `GameType` inline. Validation must not replicate that.

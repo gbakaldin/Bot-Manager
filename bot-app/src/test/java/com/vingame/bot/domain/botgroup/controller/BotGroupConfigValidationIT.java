@@ -27,11 +27,15 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.ComponentScan;
+import org.springframework.context.annotation.FilterType;
 import org.springframework.context.annotation.Import;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Optional;
 
@@ -98,12 +102,12 @@ class BotGroupConfigValidationIT {
      * for Phase 2b; kept correct here so it works the day someone wires failsafe
      * or renames it.
      */
-    @org.springframework.boot.test.context.TestConfiguration
-    @org.springframework.context.annotation.ComponentScan(
+    @TestConfiguration
+    @ComponentScan(
             basePackages = "com.vingame.bot.domain.bot.strategy",
-            excludeFilters = @org.springframework.context.annotation.ComponentScan.Filter(
-                    type = org.springframework.context.annotation.FilterType.ANNOTATION,
-                    classes = org.springframework.web.bind.annotation.RestController.class))
+            excludeFilters = @ComponentScan.Filter(
+                    type = FilterType.ANNOTATION,
+                    classes = RestController.class))
     static class RealStrategyRegistries {
     }
 

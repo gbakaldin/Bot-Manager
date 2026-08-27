@@ -15,6 +15,8 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -159,7 +161,7 @@ class BotGroupConfigValidationServiceTest {
         // BotGroupMapper already rejects an empty strategyMix supplied on PATCH
         // ("strategyMix must be non-empty"); an empty list reaching here means a
         // create body, where empty means "fall back to [(RANDOM, 1.0)]".
-        BotGroup group = BotGroup.builder().gameId("g1").strategyMix(java.util.List.of()).build();
+        BotGroup group = BotGroup.builder().gameId("g1").strategyMix(List.of()).build();
         Game game = Game.builder().id("g1").gameType(GameType.BETTING_MINI).build();
         when(gameService.findById("g1")).thenReturn(game);
         when(validatorFactory.forType(GameType.BETTING_MINI)).thenReturn(validator);
