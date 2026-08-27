@@ -1,0 +1,18 @@
+# PLUGIN_HOT_RELOAD Phase 2d — pre-deploy capture (the "before" for P2-3 / A11)
+#
+# Captured: 2026-08-27T11:03:32Z
+# Host: Bot-1 (staging), http://localhost:8080
+# Deployed build at capture time: Phase 2c (StrategyController still enumerates StrategyId.values())
+# Command: ssh Bot-1 'curl -sf http://localhost:8080/api/v1/strategy/'
+#
+# GET /api/v1/strategy/            bytes=1822  md5=a72c40f56057cda5434b273ea36315ea
+# GET /api/v1/strategy/?gameType=SLOT   bytes=2  body=[]
+# Amendment A11 expectation: 1822 bytes, md5 a72c40f56057cda5434b273ea36315ea -> MATCH
+#
+=== BEGIN GET /api/v1/strategy/ (raw, exact bytes as served) ===
+[{"id":"RANDOM","displayName":"Random","description":"Pure RNG decisions on every tick. Ignores affinity weights and history."},{"id":"MARTINGALE_CLASSIC_CAUTIOUS","displayName":"Classic Martingale (Cautious)","description":"Doubles the bet after every loss and resets to the minimum after a win. Picks the safer entries more often."},{"id":"MARTINGALE_CLASSIC_AGGRESSIVE","displayName":"Classic Martingale (Aggressive)","description":"Doubles the bet after every loss and resets to the minimum after a win. Chases the riskier entries with bigger payouts."},{"id":"PAROLI_CAUTIOUS","displayName":"Paroli (Cautious)","description":"Doubles the bet after every win and resets after a loss or after a short winning streak. Picks the safer entries more often."},{"id":"PAROLI_AGGRESSIVE","displayName":"Paroli (Aggressive)","description":"Doubles the bet after every win and resets after a loss or after a short winning streak. Chases the riskier entries with bigger payouts."},{"id":"DALEMBERT_CAUTIOUS","displayName":"D'Alembert (Cautious)","description":"Raises the bet by one step after a loss and lowers it by one step after a win. Picks the safer entries more often."},{"id":"DALEMBERT_AGGRESSIVE","displayName":"D'Alembert (Aggressive)","description":"Raises the bet by one step after a loss and lowers it by one step after a win. Chases the riskier entries with bigger payouts."},{"id":"FIBONACCI_CAUTIOUS","displayName":"Fibonacci (Cautious)","description":"Follows the Fibonacci sequence — one step forward after a loss, two steps back after a win. Picks the safer entries more often."},{"id":"FIBONACCI_AGGRESSIVE","displayName":"Fibonacci (Aggressive)","description":"Follows the Fibonacci sequence — one step forward after a loss, two steps back after a win. Chases the riskier entries with bigger payouts."}]
+=== END GET /api/v1/strategy/ ===
+
+=== BEGIN GET /api/v1/strategy/?gameType=SLOT (raw) ===
+[]
+=== END GET /api/v1/strategy/?gameType=SLOT ===
