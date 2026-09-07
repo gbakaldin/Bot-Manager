@@ -425,6 +425,9 @@ if `targetStatus != STOPPED`, set `STOPPED` + `lastStoppedAt` and save, logging
 `restart` (`:1009`) are untouched, and the behaviour for a group **with** a runtime is
 byte-for-byte identical.
 
+> **Amended — "`restart` is untouched" does not survive AD-5. See Amendment A1 at the
+> bottom of this document.**
+
 Tests in `BotGroupBehaviorServiceRestartTest`: `stop_persistsStoppedWhenNoRuntimeAndDead()`,
 `stop_isNoOpWhenNoRuntimeAndAlreadyStopped()`, plus assert the existing with-runtime path is
 unchanged.
@@ -555,6 +558,9 @@ After ≥ 72 h of staging soak with no unexplained recovery:
   `ACTIVE`, leaving DB `DEAD` + runtime `ACTIVE`. Eligibility condition 3 (AD-3) is what
   stops the next tick spuriously restarting a healthy group; do not drop it as redundant.
   The DB self-corrects at the next `stop`/`start`/death.
+  **Amended — this note covered only the ACTIVE variant of the race, and the STOPPED
+  variant does not self-correct. `handleBotGroupDeath` now takes the lock; see
+  Amendment A2 at the bottom of this document.**
 - **`bot.group.dead.threshold` is 0.80, so a group can sit at 79% DEAD forever** and is
   *not* a recovery candidate. That is unchanged, pre-existing, and out of scope here —
   `EnvironmentDeadBotRatioHigh` is the signal for it.
@@ -797,3 +803,93 @@ docker logs bot-manager 2>&1 | grep "Dead-group recovery scheduler"
 Expect one line reporting `enabled=true`. Re-run **V8** once to confirm end-to-end recovery
 still works with the flag unset. On prod, run V0a, V0b, V1 and this step only — do **not**
 manufacture a DEAD group on a live prod fleet.
+
+---
+
+## Amendment — 2026-09-07 (compliance re-verification)
+
+Two statements in this plan were falsified by the shipped branch, and in both cases the
+plan was wrong rather than the code. Recorded here so the releaser and Phase 4 read
+something true; the plan text above is left in place with a pointer, not rewritten.
+
+Neither amendment touches AD-5, AD-3's conditions, the attempt budget, the probe
+predicate, or any verification step. `stopAndLogout` really is untouched, and the
+`stop()` behaviour V6 checks is exactly as Phase 2 specified.
+
+### A1 — Phase 2's "`restart` (`:1009`) is untouched" cannot hold once AD-5 exists
+
+Phase 2 makes `stop()` persist `STOPPED` for a runtime-less group and AD-5 makes
+`STOPPED` a **permanent** opt-out. `restart()` is `stop()` then `start()`. So, with
+`restart` left untouched, a `/restart` whose start half throws leaves the group parked
+`STOPPED` where it used to be left `DEAD` — permanently opted out of auto-recovery,
+absent from `findByTargetStatus(DEAD)` and from every dead-group signal that reads the
+persisted status, with nothing logged to say so.
+
+That is not a hypothetical corner. Phase 3's exhaustion ERROR tells the operator to run
+`POST /api/v1/bot-group/<id>/restart`, and a start failure is the *likely* outcome for a
+group whose environment is still sick — so the plan as written disabled recovery on
+precisely the button it tells operators to press. The plan asserted an invariant
+("nothing else changes") without evaluating it against the meaning AD-5 had just given
+`STOPPED`.
+
+**Shipped instead** (`8cccef0`), and accepted:
+
+- `stop(String)` keeps its Phase 2 behaviour and is still the operator entry point. A
+  private `stop(String, boolean parkRuntimeless)` overload exists so that
+- `restart()`'s internal stop passes `false` and does **not** park a runtime-less group —
+  a teardown step is not a statement of intent. That restores pre-Phase-2 behaviour for
+  that one caller.
+- `restart()` reads the persisted `targetStatus` before its stop, and if the start half
+  throws it restores that value — but only when the status is `STOPPED` now and was not
+  before. A group the operator had genuinely parked stays parked; an `ACTIVE`, or the
+  zero-bot guard's `DEAD`, is left alone because the start path wrote those on purpose.
+
+Net effect on `restart` relative to `main`: unchanged, plus a restore on the failure
+path. A failed restart is a no-op on persisted intent, which is what it always looked
+like.
+
+### A2 — "the DB self-corrects at the next `stop`/`start`/death" is false for the STOPPED variant
+
+The Implementation Note on `handleBotGroupDeath`'s missing lock reasoned about one
+ordering only — a death write landing after a recovery's `ACTIVE` — and correctly said
+AD-3 condition 3 covers it. The other ordering is not covered by anything: a health-monitor
+tick sitting between its own `findById` and its `save` when an operator's `/stop` lands
+leaves Mongo at `DEAD` with **no runtime**. That is a fully eligible recovery candidate for
+a group an operator just stopped; it is the one AD-5 hole reachable with no `PATCH` at all;
+and no eligibility predicate can see it, because from the predicate's point of view it is
+indistinguishable from an ordinary death. It does not self-correct — nothing writes that
+group again until a human does.
+
+The race is pre-existing. Only its *consequence* is new, and the new consequence is
+autonomous recovery restarting money-spending bots against operator intent, so it is closed
+rather than documented.
+
+**Shipped instead** (`f4a436b`), and accepted:
+
+- `handleBotGroupDeath` takes the per-group lock with **`tryLock(2, SECONDS)`, never a bare
+  `lock()`**. `stop()` holds that lock while `stopAllBots` awaits the bot executor for up to
+  30 s and only then calls `healthMonitor.shutdownNow()`, so an uninterruptible block would
+  park the monitor thread behind its own shutdown for that window.
+- Failing to acquire is not a lost update. The only other holders of this lock are `start`,
+  `startForRecovery` and `stop`, all of which write the group's status themselves; the
+  runtime is left untouched, and the 30 s monitor tick re-evaluates. The one non-writing
+  holder is `startLocked`'s "already running" no-op, which costs one tick of delay.
+- Under the lock the runtime is re-checked for identity against `runningGroups`. That also
+  closes an unrelated pre-existing metrics bug: `stopAllBots` credits and closes the
+  `groupDeadSince` window *first*, so a straggler tick calling `markAsDead()` afterwards
+  re-opened a window nothing would ever credit again.
+
+`runningGroups.put` happens at `BotGroupBehaviorService:473`, long before
+`startHealthMonitoring` at `:603` and its 10 s initial delay, so the identity check can
+never spuriously reject a live runtime in production.
+
+### Rulings on two judgement calls Dev raised explicitly
+
+- **A successful recovery still charges the attempt budget.** Accepted, and it is what this
+  plan already says: AD-8 spends the budget "only on attempts", a success is an attempt, and
+  Phase 3's success branch schedules the reset for `+settle-minutes` rather than granting it
+  at once. Refunding would make the budget unbounded for exactly the flap it bounds. The
+  cost is that the budget can be spent by a success, so the hand-off (one ERROR + one
+  `group_recovery_exhausted_total`) is emitted from the exhausted-skip branch as well as
+  from `recordFailure` (`4236614`) — it must not be possible to exhaust silently.
+- **`handleBotGroupDeath`'s `tryLock`.** Accepted; see A2.
