@@ -1674,6 +1674,32 @@ public class BotGroupBehaviorService {
     }
 
     /**
+     * Ids of the in-memory runtimes that currently report themselves DEAD
+     * (DEAD_GROUP_AUTO_RECOVERY AD-4).
+     * <p>
+     * The recovery selector is driven by the <em>persisted</em>
+     * {@code targetStatus == DEAD}, which is what makes it see a group that died
+     * before this JVM started — the longest-down case, and the one
+     * {@link #countDeadGroupsByEnv()} is structurally blind to. This accessor
+     * supplies the other half of that union: a runtime that is DEAD in memory while
+     * Mongo still says otherwise, which happens when {@code handleBotGroupDeath}'s
+     * save threw and its catch swallowed the failure.
+     * <p>
+     * Deliberately ids only, not runtimes: the caller re-reads the persisted group
+     * anyway, and handing out live runtime objects to a scheduler thread is not a
+     * seam this class wants.
+     */
+    public Collection<String> listDeadRuntimeGroupIds() {
+        List<String> ids = new ArrayList<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            if (runtime.isGroupDead()) {
+                ids.add(runtime.getGroupId());
+            }
+        }
+        return ids;
+    }
+
+    /**
      * Health snapshot of one running bot group, backing the tier-2 fleet rollup
      * (LOG_VOLUME_TIERING Phase 1 step 3).
      * <p>
