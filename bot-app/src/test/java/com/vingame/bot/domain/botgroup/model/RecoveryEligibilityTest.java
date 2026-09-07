@@ -117,6 +117,41 @@ class RecoveryEligibilityTest {
                 null, false, 12)).isFalse();
     }
 
+    /**
+     * <b>QA FINDING (AD-5).</b> Condition 2 is a disjunction, so it only asks "not
+     * DEAD" — it never asks "not STOPPED". A row an operator parked {@code STOPPED}
+     * therefore still qualifies while a DEAD in-memory runtime for it survives, and
+     * AD-5's "the opt-out is absolute" does not hold in that one shape.
+     * <p>
+     * Pinned as the current behaviour rather than the intended one so a future fix
+     * has to change this assertion on purpose. See
+     * {@code docs/reviews/DEAD_GROUP_AUTO_RECOVERY/qa.md} for the reachability
+     * analysis and {@code RecoveryCandidateSelectorTest} for the same shape driven
+     * through the real selector.
+     */
+    @Test
+    @DisplayName("QA FINDING: persisted STOPPED + a DEAD runtime → still a candidate (AD-5 gap)")
+    void stoppedWithDeadRuntimeIsStillACandidate() {
+        assertThat(candidate(BotGroupStatus.STOPPED, null, null, 20,
+                BotGroupStatus.DEAD, true, 12))
+                .as("current behaviour — AD-5 says this should be false")
+                .isTrue();
+    }
+
+    @Test
+    @DisplayName("MANUAL_OFF + a DEAD runtime → still not a candidate (condition 4 is not a disjunction)")
+    void manualOffWithDeadRuntimeIsNotACandidate() {
+        assertThat(candidate(BotGroupStatus.STOPPED, ActivationMode.MANUAL_OFF, null, 20,
+                BotGroupStatus.DEAD, true, 12)).isFalse();
+    }
+
+    @Test
+    @DisplayName("an ACTIVE runtime wins even when the dead-runtime flag is set — condition 3 is evaluated first")
+    void activeRuntimeStatusWinsOverTheDeadFlag() {
+        assertThat(candidate(BotGroupStatus.DEAD, null, null, 20,
+                BotGroupStatus.ACTIVE, true, 12)).isFalse();
+    }
+
     @Test
     @DisplayName("botCount 0 → not a candidate (nothing to rebuild)")
     void zeroBotsIsNotACandidate() {

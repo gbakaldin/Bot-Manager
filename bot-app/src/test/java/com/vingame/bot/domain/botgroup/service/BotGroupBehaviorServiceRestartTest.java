@@ -1055,6 +1055,47 @@ class BotGroupBehaviorServiceRestartTest {
         }
     }
 
+    @Test
+    @DisplayName("stop() on an unknown id now propagates ResourceNotFoundException — Phase 2 replaced the WARN + return")
+    void stop_propagatesNotFoundForAnUnknownIdWhenThereIsNoRuntime() {
+        // Behaviour change worth pinning: before Phase 2 this path logged
+        // "Bot group {} is not running" and returned normally for ANY id, existing
+        // or not. It now loads the group in order to persist the operator's intent,
+        // so an unknown id surfaces as a 404 through RestExceptionHandler.
+        //
+        // The REST surface is unchanged, because BotGroupController.runWithManualOverride
+        // already calls service.findById(id) before delegating — an unknown id was
+        // always a 404 there. The change is visible only to a direct in-process
+        // caller, which is why it is asserted against the service and not the API.
+        when(botGroupService.findById("ghost"))
+                .thenThrow(new com.vingame.bot.common.exception.ResourceNotFoundException("BotGroup not found"));
+
+        assertThatThrownBy(() -> service.stop("ghost"))
+                .isInstanceOf(com.vingame.bot.common.exception.ResourceNotFoundException.class);
+        verify(botGroupService, never()).save(any(BotGroup.class));
+    }
+
+    @Test
+    @DisplayName("startForRecovery() refuses a MANUAL_OFF group — the second opt-out, re-asserted under the lock")
+    void startForRecovery_refusesManualOffUnderTheLock() {
+        // A timed group that an operator stopped is parked MANUAL_OFF by
+        // BotGroupController.runWithManualOverride, and AD-3 condition 4 must reject
+        // it even though its persisted status is DEAD (e.g. it was stopped while
+        // already dead, or the health monitor re-stamped DEAD afterwards).
+        BotGroup parked = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.DEAD)
+                .activationMode(com.vingame.bot.domain.botgroup.model.ActivationMode.MANUAL_OFF)
+                .build();
+        when(botGroupService.findById("g-1")).thenReturn(parked);
+
+        assertThat(service.startForRecovery("g-1")).isFalse();
+        verify(botFactory, never()).createBot(anyString(), any(BotConfiguration.class));
+        verify(botGroupService, never()).save(any(BotGroup.class));
+        assertThat(runningGroups(service).get("g-1")).isNull();
+    }
+
     /**
      * Run {@code action} with a {@link CapturingAppender} attached to
      * {@link BotGroupBehaviorService}'s logger at {@code ALL}, and return the events

@@ -27,6 +27,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
@@ -433,5 +434,119 @@ class DeadGroupRecoverySchedulerTest {
         assertThat(attemptLines.get(1)).contains("attempt 2/6");
         // ...and only a recovery that actually held earns a fresh one.
         assertThat(attemptLines.get(2)).contains("attempt 1/6");
+    }
+
+    /* ---------------- QA additions: backoff arithmetic, tie-break, budget edge ---------------- */
+
+    @Test
+    @DisplayName("backoff index is backoff[min(n-1, len-1)] — the last entry is reused once the table runs out")
+    void backoffIndexClampsToTheLastEntry() {
+        persistedDead(deadGroup("g1"));
+        envIsHealthy();
+        when(behaviorService.startForRecovery("g1")).thenReturn(false);
+        lenient().when(behaviorService.getActualStatus("g1")).thenReturn(BotGroupStatus.STOPPED);
+        // Four attempts against a two-entry table: the clamp must supply the 3rd and 4th.
+        DeadGroupRecoveryScheduler scheduler = scheduler(true, 4, 1, 1, 2);
+
+        scheduler.reconcileAll(T0);                  // attempt 1 → wait backoff[0] = 1m
+        scheduler.reconcileAll(T0.plusSeconds(60));  // attempt 2 → wait backoff[1] = 2m
+        scheduler.reconcileAll(T0.plusSeconds(180)); // attempt 3 → clamped to backoff[1]
+        scheduler.reconcileAll(T0.plusSeconds(300)); // attempt 4 → clamped to backoff[1]
+
+        verify(behaviorService, times(4)).startForRecovery("g1");
+        assertThat(lines(Level.WARN)).hasSize(4);
+        assertThat(lines(Level.WARN).get(0)).contains("next attempt in 1m");
+        assertThat(lines(Level.WARN).get(1)).contains("next attempt in 2m");
+        assertThat(lines(Level.WARN).get(2)).contains("next attempt in 2m");
+        assertThat(lines(Level.WARN).get(3)).contains("next attempt in 2m");
+    }
+
+    /**
+     * The earliest-due tie-break. Every fresh candidate carries {@code nextDue =
+     * EPOCH}, so on the first tick after a mass death the tie-break <em>is</em> the
+     * ordering, and it is {@code lastStoppedAt ?: lastStartedAt}, oldest first.
+     * <p>
+     * <b>QA note:</b> there is no persisted died-at stamp, and
+     * {@code handleBotGroupDeath} writes neither timestamp, while every successful
+     * start nulls {@code lastStoppedAt}. So for a group that died in flight this
+     * resolves to {@code lastStartedAt} — "started longest ago", not "dead longest",
+     * which is what the method's javadoc claims. It is only a tie-break, but the two
+     * orders are not the same one.
+     */
+    @Test
+    @DisplayName("the earliest-due tie-break is lastStoppedAt ?: lastStartedAt, oldest first — it beats the id tie-break")
+    void tieBreakPrefersTheOlderDeadSinceStamp() {
+        LocalDateTime base = LocalDateTime.of(2026, 9, 7, 9, 0);
+        // "g-a" sorts first by id but was started most recently; "g-z" must win.
+        persistedDead(
+                deadGroup("g-a").toBuilder().lastStartedAt(base.plusHours(3)).build(),
+                deadGroup("g-z").toBuilder().lastStartedAt(base).build());
+        envIsHealthy();
+        when(behaviorService.startForRecovery(anyString())).thenReturn(false);
+        lenient().when(behaviorService.getActualStatus(anyString())).thenReturn(BotGroupStatus.STOPPED);
+
+        scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
+
+        verify(behaviorService).startForRecovery("g-z");
+        verify(behaviorService, never()).startForRecovery("g-a");
+    }
+
+    @Test
+    @DisplayName("lastStoppedAt takes precedence over lastStartedAt, and a group with neither sorts last")
+    void tieBreakPrefersLastStoppedAtAndSortsUnknownLast() {
+        LocalDateTime base = LocalDateTime.of(2026, 9, 7, 9, 0);
+        persistedDead(
+                deadGroup("g-none"),          // no stamps at all → sorts last
+                deadGroup("g-stopped").toBuilder()
+                        .lastStoppedAt(base).lastStartedAt(base.plusHours(5)).build());
+        envIsHealthy();
+        when(behaviorService.startForRecovery(anyString())).thenReturn(false);
+        lenient().when(behaviorService.getActualStatus(anyString())).thenReturn(BotGroupStatus.STOPPED);
+
+        scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
+
+        verify(behaviorService).startForRecovery("g-stopped");
+        verify(behaviorService, never()).startForRecovery("g-none");
+    }
+
+    /**
+     * <b>QA FINDING (AD-8).</b> A success is charged to the budget but never emits
+     * the hand-off, and {@code expireStates} only resets a state for a group that has
+     * <em>stopped being a candidate</em>. So a group whose <em>final</em> budgeted
+     * attempt succeeds and which then re-dies inside the settle window is skipped on
+     * every subsequent tick with a DEBUG line only: no further attempt, no
+     * {@code group_recovery_exhausted_total}, and no ERROR — the exact hand-off AD-8
+     * promises, and the trigger for Phase 4's
+     * {@code EnvironmentGroupRecoveryExhausted} rule.
+     * <p>
+     * The group is not invisible — it is DEAD, so {@code EnvironmentGroupDead} still
+     * fires — but the recovery-specific signal is missing. Pinned as current
+     * behaviour; see {@code docs/reviews/DEAD_GROUP_AUTO_RECOVERY/qa.md}.
+     */
+    @Test
+    @DisplayName("QA FINDING: a success on the final attempt, then a re-death, is never retried and never reports exhaustion")
+    void successOnTheFinalAttemptThenReDeathIsSilentlyAbandoned() {
+        persistedDead(deadGroup("g1"));
+        envIsHealthy();
+        when(behaviorService.startForRecovery("g1")).thenReturn(false, true);
+        lenient().when(behaviorService.getActualStatus("g1")).thenReturn(BotGroupStatus.STOPPED);
+        lenient().when(behaviorService.getRunningBotCountForGroup("g1")).thenReturn(20);
+        // backoff 0 ⇒ due on every tick; budget 2 ⇒ attempt 2 is the last one.
+        DeadGroupRecoveryScheduler scheduler = scheduler(true, 2, 1, 0);
+
+        // Tick 1 fails, tick 2 succeeds (the final budgeted attempt), and the group
+        // is still reported DEAD afterwards — it flapped straight back down.
+        for (int i = 0; i < 8; i++) {
+            scheduler.reconcileAll(T0.plusSeconds(i * 60L));
+        }
+
+        verify(behaviorService, times(2)).startForRecovery("g1");
+        assertThat(attempts(DeadGroupRecoveryScheduler.OUTCOME_SUCCESS)).isEqualTo(1d);
+        assertThat(lines(Level.ERROR))
+                .as("current behaviour — AD-8's hand-off ERROR is never emitted here")
+                .isEmpty();
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL).counter())
+                .as("current behaviour — no exhaustion counter, so the Phase 4 alert cannot fire")
+                .isNull();
     }
 }
