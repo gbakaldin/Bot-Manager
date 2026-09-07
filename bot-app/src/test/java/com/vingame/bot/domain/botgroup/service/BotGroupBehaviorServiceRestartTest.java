@@ -831,6 +831,142 @@ class BotGroupBehaviorServiceRestartTest {
                 .as("stop() stamps lastStoppedAt").isNotNull();
     }
 
+    // ------------------------------------------------------------------
+    // DEAD_GROUP_AUTO_RECOVERY Phase 2 — stop() on a runtime-less group.
+    //
+    // Before this phase, stop() early-returned with a bare WARN whenever
+    // runningGroups held no runtime, persisting nothing. A group that died and
+    // then outlived its runtime (the ordinary shape after an app restart, since
+    // onStartup rebuilds only targetStatus=ACTIVE groups) was therefore stuck at
+    // targetStatus=DEAD forever: POST /stop was a no-op on it. AD-5 makes STOPPED
+    // the only opt-out from auto-recovery, so an unreachable STOPPED is an
+    // unusable opt-out — hence these two tests guard a prerequisite, not a
+    // cosmetic fix.
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("stop() persists STOPPED for a runtime-less DEAD group (AD-5 opt-out prerequisite)")
+    void stop_persistsStoppedWhenNoRuntimeAndDead() {
+        BotGroup group = BotGroup.builder()
+                .id("g-noruntime").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.DEAD).build();
+        when(botGroupService.findById("g-noruntime")).thenReturn(group);
+
+        // Deliberately no entry in runningGroups: this is a group that died before
+        // the current JVM started.
+        assertThat(runningGroups(service).get("g-noruntime")).isNull();
+
+        List<LogEvent> events = captureBehaviorServiceLogs(() -> service.stop("g-noruntime"));
+
+        ArgumentCaptor<BotGroup> saved = ArgumentCaptor.forClass(BotGroup.class);
+        verify(botGroupService).save(saved.capture());
+        assertThat(saved.getValue().getTargetStatus())
+                .as("a runtime-less stop() must still park the group STOPPED")
+                .isEqualTo(BotGroupStatus.STOPPED);
+        assertThat(saved.getValue().getLastStoppedAt())
+                .as("a runtime-less stop() stamps lastStoppedAt like the normal path")
+                .isNotNull();
+
+        // Nothing was torn down, because there was nothing to tear down. If this
+        // ever starts evicting, the runtime-less branch has grown a side effect it
+        // has no runtime to justify.
+        verify(sessionAggregationService, never()).evictGroup(anyString());
+        verify(groupLifecycleAggregator, never()).evictGroup(anyString());
+
+        assertThat(formattedAt(events, Level.INFO))
+                .as("the runtime-less park is announced at INFO, naming the prior status")
+                .anyMatch(m -> m.contains("Bot group g-noruntime has no runtime")
+                        && m.contains("persisting STOPPED")
+                        && m.contains("DEAD"));
+    }
+
+    @Test
+    @DisplayName("stop() on a runtime-less group that is already STOPPED writes nothing and keeps the WARN")
+    void stop_isNoOpWhenNoRuntimeAndAlreadyStopped() {
+        BotGroup group = BotGroup.builder()
+                .id("g-parked").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.STOPPED).build();
+        when(botGroupService.findById("g-parked")).thenReturn(group);
+
+        List<LogEvent> events = captureBehaviorServiceLogs(() -> service.stop("g-parked"));
+
+        // Idempotent: no second write, so a repeated /stop cannot keep re-stamping
+        // lastStoppedAt and rewriting an unchanged document.
+        verify(botGroupService, never()).save(any(BotGroup.class));
+        assertThat(formattedAt(events, Level.WARN))
+                .as("the historical WARN is preserved for the already-parked case")
+                .anyMatch(m -> m.contains("Bot group g-parked is not running"));
+        assertThat(formattedAt(events, Level.INFO))
+                .as("no STOPPED-persisted line when nothing was persisted")
+                .noneMatch(m -> m.contains("persisting STOPPED"));
+    }
+
+    @Test
+    @DisplayName("stop() with a live runtime is unchanged by Phase 2 — teardown path, one findById, no runtime-less line")
+    void stop_withRuntimeIsUnchangedByTheRuntimeLessBranch() {
+        BotGroup group = BotGroup.builder()
+                .id("g-live").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(0).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.ACTIVE).build();
+        when(botGroupService.findById("g-live")).thenReturn(group);
+
+        BotGroupRuntime active = new BotGroupRuntime("g-live", 0, "env-1");
+        runningGroups(service).put("g-live", active);
+
+        List<LogEvent> events = captureBehaviorServiceLogs(() -> service.stop("g-live"));
+
+        // The with-runtime path still loads the group exactly once (after teardown)
+        // — the new branch must not add a second read for a group that has a runtime.
+        verify(botGroupService, times(1)).findById("g-live");
+        verify(sessionAggregationService).evictGroup("g-live");
+        assertThat(runningGroups(service).get("g-live")).isNull();
+
+        List<String> infos = formattedAt(events, Level.INFO);
+        assertThat(infos)
+                .as("the with-runtime path keeps its original success line")
+                .anyMatch(m -> m.contains("Bot group g-live stopped successfully"));
+        assertThat(infos)
+                .as("the with-runtime path must never take the runtime-less branch")
+                .noneMatch(m -> m.contains("has no runtime"));
+    }
+
+    /**
+     * Run {@code action} with a {@link CapturingAppender} attached to
+     * {@link BotGroupBehaviorService}'s logger at {@code ALL}, and return the events
+     * it emitted. The appender is always detached and the prior level restored, so
+     * one test cannot leak log configuration into the next.
+     */
+    private static List<LogEvent> captureBehaviorServiceLogs(Runnable action) {
+        CapturingAppender appender = new CapturingAppender(
+                "CapturingAppender-stop-" + System.nanoTime());
+        appender.start();
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        String loggerName = BotGroupBehaviorService.class.getName();
+        LoggerConfig loggerConfig = ctx.getConfiguration().getLoggerConfig(loggerName);
+        Level prev = loggerConfig.getLevel();
+        loggerConfig.addAppender(appender, Level.ALL, null);
+        loggerConfig.setLevel(Level.ALL);
+        ctx.updateLoggers();
+        try {
+            action.run();
+        } finally {
+            loggerConfig.removeAppender(appender.getName());
+            loggerConfig.setLevel(prev);
+            ctx.updateLoggers();
+            appender.stop();
+        }
+        return appender.events();
+    }
+
+    private static List<String> formattedAt(List<LogEvent> events, Level level) {
+        return events.stream()
+                .filter(e -> e.getLevel() == level)
+                .map(e -> e.getMessage().getFormattedMessage())
+                .toList();
+    }
+
     /**
      * Minimal in-memory log4j2 appender so we can assert on emitted log events.
      * Lives as a static nested class to keep the test file self-contained.

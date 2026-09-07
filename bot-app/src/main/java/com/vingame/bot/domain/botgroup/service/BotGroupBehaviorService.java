@@ -849,7 +849,22 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Stop a bot group - stops all bots, cleans up resources, removes from runtime map
+     * Stop a bot group - stops all bots, cleans up resources, removes from runtime map.
+     * <p>
+     * <b>A group with no in-memory runtime is still parked {@code STOPPED}</b>
+     * (DEAD_GROUP_AUTO_RECOVERY Phase 2). This used to be a bare WARN + return that
+     * persisted nothing, so a group that died and then outlived its runtime — the
+     * ordinary shape after an app restart, since {@code onStartup} rebuilds only
+     * {@code targetStatus=ACTIVE} groups — was stuck at {@code DEAD} with no way for
+     * an operator to express "leave it down". AD-5 makes {@code STOPPED} the <i>only</i>
+     * opt-out from auto-recovery, so a {@code STOPPED} an operator cannot reach is an
+     * opt-out they cannot use; that makes this a prerequisite for the recovery
+     * reconciler rather than a tidy-up. Persisting the intent is all this path does —
+     * there is no runtime to tear down.
+     * <p>
+     * The path is idempotent: a runtime-less group that is <i>already</i> {@code STOPPED}
+     * keeps the historical WARN and writes nothing. Behaviour for a group <b>with</b> a
+     * runtime is unchanged.
      */
     public void stop(String id) {
         // Same per-group lock as start() (AD-5) so an operator Stop cannot race a
@@ -860,7 +875,23 @@ public class BotGroupBehaviorService {
         try {
             BotGroupRuntime runtime = runningGroups.get(id);
             if (runtime == null) {
-                log.warn("Bot group {} is not running", id);
+                // No runtime to tear down, but the operator's intent still has to
+                // land in Mongo — see the javadoc. findById throws
+                // ResourceNotFoundException for an unknown id; the only REST caller
+                // (BotGroupController.runWithManualOverride) already loaded the group
+                // before calling us, so this adds no new 404 to the API surface.
+                BotGroup persisted = botGroupService.findById(id);
+                if (persisted.getTargetStatus() == BotGroupStatus.STOPPED) {
+                    // Already parked. Keep the historical WARN and skip the write so a
+                    // repeated /stop cannot keep re-stamping lastStoppedAt.
+                    log.warn("Bot group {} is not running", id);
+                    return;
+                }
+                log.info("Bot group {} has no runtime — persisting STOPPED (was {})",
+                        id, persisted.getTargetStatus());
+                persisted.setTargetStatus(BotGroupStatus.STOPPED);
+                persisted.setLastStoppedAt(LocalDateTime.now());
+                botGroupService.save(persisted);
                 return;
             }
 
