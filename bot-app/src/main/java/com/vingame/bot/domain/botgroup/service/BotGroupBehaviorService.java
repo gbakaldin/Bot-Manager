@@ -1851,6 +1851,49 @@ public class BotGroupBehaviorService {
     }
 
     /**
+     * {@link #countOpenWsByEnv()} restricted to runtimes whose {@code actualStatus}
+     * is {@code ACTIVE} — the accessor behind AD-10's live-sibling short-circuit
+     * (DEAD_GROUP_AUTO_RECOVERY).
+     * <p>
+     * <b>Why the unrestricted sibling cannot be used for that.</b> AD-10 skips the
+     * network probe when "any <em>running</em> group on the same environment" holds
+     * an open socket, on the grounds that a live sibling is stronger evidence than a
+     * probe. {@code countOpenWsByEnv} iterates <em>all</em> of {@code runningGroups},
+     * which includes the DEAD runtime of the group being evaluated:
+     * {@code handleBotGroupDeath} only marks the runtime DEAD, it does not stop the
+     * bots, and at {@code bot.group.dead.threshold=0.80} a group is DEAD while up to
+     * 20% of its bots are still connected. So the most common death shape — the group
+     * dies, a minority survives — would have declared its own environment healthy on
+     * the strength of its own sockets, and the probe gate that exists to require
+     * <em>independent</em> evidence would have been satisfied by the thing being
+     * recovered.
+     * <p>
+     * Filtering to ACTIVE excludes every candidate structurally rather than by
+     * arithmetic: {@code RecoveryEligibility} condition 3 rejects any group with an
+     * ACTIVE runtime, so a group counted here can never be a group being recovered.
+     * <p>
+     * <b>What this still does not prove.</b> {@link Bot#isConnected()} stays true for
+     * a server-side-pruned zombie (see CLAUDE.md, "Server-Side Subscriber Pruning"),
+     * so a fleet of silently evicted bots reads as a live sibling. The short-circuit
+     * is cheap positive evidence, not a proof of origin health; the cost of it being
+     * wrong is one budgeted attempt (AD-8).
+     */
+    public Map<EnvKey, Integer> countOpenWsByEnvForActiveRuntimes() {
+        Map<EnvKey, Integer> counts = new LinkedHashMap<>();
+        for (BotGroupRuntime runtime : runningGroups.values()) {
+            String envId = runtime.getEnvironmentId();
+            if (envId == null || runtime.getActualStatus() != BotGroupStatus.ACTIVE) continue;
+            EnvKey key = new EnvKey(envId, runtime.getProduct());
+            int open = 0;
+            for (Bot bot : runtime.getBotInstances()) {
+                if (bot.isConnected()) open++;
+            }
+            counts.merge(key, open, Integer::sum);
+        }
+        return counts;
+    }
+
+    /**
      * Per-environment count of bot groups currently in DEAD state, backing the
      * {@code groups_dead_by_env} MultiGauge (VIPTALK_ALERTING_V2 Phase 4).
      * <p>

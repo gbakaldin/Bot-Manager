@@ -272,7 +272,7 @@ class EnvironmentProbeSchedulerTest {
                 .thenReturn(List.of(deadGroup("g1", "env-1")));
         when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of());
         when(environmentService.findById("env-1")).thenReturn(environment("env-1", URL));
-        when(behaviorService.countOpenWsByEnv())
+        when(behaviorService.countOpenWsByEnvForActiveRuntimes())
                 .thenReturn(Map.of(new EnvKey("env-1", "116"), 3));
 
         scheduler.probeAll();
@@ -281,6 +281,36 @@ class EnvironmentProbeSchedulerTest {
         verify(probe, never()).probe(any(), any());
         assertThat(counter("env-1", EnvironmentProbeScheduler.OUTCOME_LIVE_SIBLING)).isEqualTo(2d);
         assertThat(scheduler.isHealthy("env-1")).isTrue();
+    }
+
+    /**
+     * AD-10's evidence must come from somebody else. {@code handleBotGroupDeath}
+     * only marks the runtime DEAD — it does not stop the bots — and at
+     * {@code dead.threshold=0.80} a group is DEAD while up to 20% of them are still
+     * connected. Counting those as a live sibling would let the most common death
+     * shape declare its own environment healthy, satisfy the probe gate with the
+     * thing being recovered, and reach {@code healthy-streak} in two ticks having
+     * never touched the network.
+     * <p>
+     * The scheduler asks {@code countOpenWsByEnvForActiveRuntimes}, so a DEAD
+     * runtime contributes nothing and a real probe happens.
+     */
+    @Test
+    @DisplayName("a dying group's own surviving bots are not a live sibling — the probe still runs (AD-10)")
+    void aDeadRuntimesOwnSocketsDoNotShortCircuitTheProbe() {
+        when(repository.findByTargetStatus(BotGroupStatus.DEAD))
+                .thenReturn(List.of(deadGroup("g1", "env-1")));
+        when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of("g1"));
+        when(environmentService.findById("env-1")).thenReturn(environment("env-1", URL));
+        // The DEAD group's own minority is invisible to the ACTIVE-only accessor.
+        when(behaviorService.countOpenWsByEnvForActiveRuntimes()).thenReturn(Map.of());
+        when(probe.probe(eq(URL), any())).thenReturn(BAD_GATEWAY);
+
+        scheduler.probeAll();
+
+        verify(probe, times(1)).probe(eq(URL), any());
+        assertThat(counter("env-1", EnvironmentProbeScheduler.OUTCOME_LIVE_SIBLING)).isZero();
+        assertThat(scheduler.isHealthy("env-1")).isFalse();
     }
 
     @Test

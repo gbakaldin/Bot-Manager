@@ -45,10 +45,12 @@ import java.util.concurrent.TimeUnit;
  * <ul>
  *   <li><b>No candidates ⇒ no probe traffic at all.</b> That is the normal state of
  *       a healthy fleet, and it is why this can run unconditionally.</li>
- *   <li><b>A live sibling short-circuits the probe</b> (AD-10): if any running group
- *       on the same environment currently holds an open WebSocket, the environment is
- *       healthy on stronger evidence than a probe could produce, at zero network
- *       cost. Those ticks are counted under {@code outcome="live_sibling"}.</li>
+ *   <li><b>A live sibling short-circuits the probe</b> (AD-10): if an <b>ACTIVE</b>
+ *       group on the same environment currently holds an open WebSocket, the
+ *       environment is healthy at zero network cost. Those ticks are counted under
+ *       {@code outcome="live_sibling"}. ACTIVE is the whole point — a DEAD runtime's
+ *       surviving bots are the dying group's own sockets, not a sibling's, and the
+ *       gate exists to require independent evidence.</li>
  *   <li><b>Health is a streak</b> (AD-12): {@link #isHealthy(String)} is true only
  *       after {@code bot.recovery.probe.healthy-streak} consecutive healthy results,
  *       so one 200 from a flapping origin is not evidence.</li>
@@ -128,8 +130,11 @@ public class EnvironmentProbeScheduler {
         prober = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofVirtual().name("env-ws-probe").factory()
         );
-        // First tick one full period in, so a boot that auto-starts groups is not
-        // probed mid-startup.
+        // First tick one full period in: there is nothing useful to probe in the
+        // first seconds of a JVM. This is not a guarantee that startup is over —
+        // onStartup auto-starts every ACTIVE group serially and a multi-group fleet
+        // takes minutes, not one tick. It does not need to be: probing during
+        // startup costs nothing and the reconciler is separately gated.
         prober.scheduleAtFixedRate(this::probeAllQuietly,
                 tickSeconds * 1000L, tickSeconds * 1000L, TimeUnit.MILLISECONDS);
 
@@ -197,8 +202,10 @@ public class EnvironmentProbeScheduler {
         Map<String, Target> targets = buildTargets(now);
 
         // Only ask the runtime for live siblings when there is something to decide.
+        // ACTIVE runtimes only (AD-10): a DEAD runtime's surviving minority of bots
+        // is the dying group's own evidence, not a sibling's — see the accessor.
         Map<BotGroupBehaviorService.EnvKey, Integer> openWsByEnv =
-                targets.isEmpty() ? Map.of() : behaviorService.countOpenWsByEnv();
+                targets.isEmpty() ? Map.of() : behaviorService.countOpenWsByEnvForActiveRuntimes();
 
         List<MultiGauge.Row<?>> rows = new ArrayList<>();
         Map<String, String> freshEnvUrls = new HashMap<>();
@@ -294,9 +301,18 @@ public class EnvironmentProbeScheduler {
     }
 
     /**
-     * AD-10: any running group on the same environment with at least one open
-     * WebSocket is stronger evidence than the probe could gather, so the network
-     * call is skipped entirely.
+     * AD-10: any <b>ACTIVE</b> group on the same environment with at least one open
+     * WebSocket is evidence the probe could not improve on, so the network call is
+     * skipped entirely.
+     * <p>
+     * "ACTIVE" is load-bearing and is enforced by the accessor, not here.
+     * {@code countOpenWsByEnv} counts DEAD runtimes too, and
+     * {@code handleBotGroupDeath} does not stop a dead group's bots — at
+     * {@code dead.threshold=0.80} up to 20% of them are still connected — so the
+     * common in-JVM death would otherwise have let a group's own surviving minority
+     * declare its environment healthy and skip the probe entirely. Restricting to
+     * ACTIVE excludes every candidate structurally, since eligibility condition 3
+     * rejects any group whose runtime is ACTIVE.
      */
     private boolean hasLiveSibling(Target target,
                                    Map<BotGroupBehaviorService.EnvKey, Integer> openWsByEnv) {
