@@ -2,10 +2,9 @@ package com.vingame.bot.infrastructure.probe;
 
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
-import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
-import com.vingame.bot.domain.botgroup.model.RecoveryEligibility;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
+import com.vingame.bot.domain.botgroup.service.RecoveryCandidateSelector;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -22,11 +21,9 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -38,8 +35,9 @@ import java.util.concurrent.TimeUnit;
  * anything</b> — it answers one question for the Phase 3 reconciler: is the origin
  * behind this environment serving again?
  *
- * <p>Each tick it selects the recovery candidates exactly as the future reconciler
- * will ({@link RecoveryEligibility} over the <em>persisted</em>
+ * <p>Each tick it selects the recovery candidates through the shared
+ * {@link RecoveryCandidateSelector} — the same call the Phase 3 reconciler makes
+ * (the predicate over the <em>persisted</em>
  * {@code targetStatus == DEAD}, unioned with the in-memory DEAD runtimes — AD-4),
  * resolves their environments, de-duplicates by {@code webSocketMiniUrl} (the only
  * WebSocket URL any bot uses, whatever its game type) and probes each URL once.
@@ -300,42 +298,15 @@ public class EnvironmentProbeScheduler {
      * Package-private for tests.
      */
     Map<String, Target> buildTargets(Instant now) {
-        Set<String> deadRuntimeIds = new HashSet<>(behaviorService.listDeadRuntimeGroupIds());
-
-        // Persisted DEAD is the primary source: it is what makes a group that died
-        // before this JVM started visible at all (AD-4).
-        Map<String, BotGroup> byId = new LinkedHashMap<>();
-        for (BotGroup group : botGroupRepository.findByTargetStatus(BotGroupStatus.DEAD)) {
-            if (group != null && group.getId() != null) {
-                byId.put(group.getId(), group);
-            }
-        }
-        for (String id : deadRuntimeIds) {
-            if (id != null && !byId.containsKey(id)) {
-                botGroupRepository.findById(id).ifPresent(g -> byId.put(id, g));
-            }
-        }
-
         Map<String, Target> targets = new LinkedHashMap<>();
         Map<String, Environment> envCache = new HashMap<>();
 
-        for (BotGroup group : byId.values()) {
+        // Candidate selection is shared verbatim with the Phase 3 reconciler
+        // (RecoveryCandidateSelector): the set we probe and the set we recover must
+        // not be allowed to drift apart.
+        for (BotGroup group : RecoveryCandidateSelector.select(
+                botGroupRepository, behaviorService, now, zone)) {
             String id = group.getId();
-            BotGroupStatus runtimeStatus = null;
-            if (deadRuntimeIds.contains(id)) {
-                runtimeStatus = BotGroupStatus.DEAD;
-            } else if (behaviorService.isGroupRunning(id)) {
-                runtimeStatus = BotGroupStatus.ACTIVE;
-            }
-
-            boolean candidate = RecoveryEligibility.isCandidate(
-                    group.getTargetStatus(), group.getActivationMode(), group.getActivationWindow(),
-                    group.getBotCount(), runtimeStatus, runtimeStatus == BotGroupStatus.DEAD,
-                    now, zone);
-            if (!candidate) {
-                continue;
-            }
-
             String envId = group.getEnvironmentId();
             if (envId == null) {
                 log.debug("Recovery candidate {} has no environment — not probing", id);
