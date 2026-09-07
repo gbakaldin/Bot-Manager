@@ -933,6 +933,82 @@ class BotGroupBehaviorServiceRestartTest {
                 .noneMatch(m -> m.contains("has no runtime"));
     }
 
+    /* ----- DEAD_GROUP_AUTO_RECOVERY: a failed restart must not opt a group out ----- */
+
+    /**
+     * Phase 2 made {@code stop()} persist {@code STOPPED} for a runtime-less group,
+     * and AD-5 made {@code STOPPED} a permanent opt-out from auto-recovery. Since
+     * {@code restart} is {@code stop} then {@code start}, a {@code /restart} whose
+     * start half throws would have stranded the group at {@code STOPPED} where it
+     * used to be left {@code DEAD} — silently disabling recovery for it, removing it
+     * from {@code findByTargetStatus(DEAD)}, and doing so on exactly the endpoint the
+     * exhaustion ERROR tells the operator to press.
+     */
+    @Test
+    @DisplayName("a failed restart of a runtime-less DEAD group never parks it STOPPED (AD-5)")
+    void restart_doesNotParkARuntimelessDeadGroupAsStopped() {
+        BotGroup group = BotGroup.builder()
+                .id("g-dead").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.DEAD).build();
+        when(botGroupService.findById("g-dead")).thenReturn(group);
+        // The start half fails the way it does when the gateway is still sick.
+        when(environmentService.findById("env-1"))
+                .thenThrow(new IllegalStateException("auth gateway returned 503"));
+
+        assertThatThrownBy(() -> service.restart("g-dead"))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(group.getTargetStatus())
+                .as("the group stays DEAD, so auto-recovery can still see it")
+                .isEqualTo(BotGroupStatus.DEAD);
+        verify(botGroupService, never()).save(any(BotGroup.class));
+    }
+
+    @Test
+    @DisplayName("a failed restart restores the status its own stop overwrote — no silent opt-out (AD-5)")
+    void restart_restoresThePriorStatusWhenTheStartHalfFails() {
+        BotGroup group = BotGroup.builder()
+                .id("g-live").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(0).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.ACTIVE).build();
+        when(botGroupService.findById("g-live")).thenReturn(group);
+        when(environmentService.findById("env-1"))
+                .thenThrow(new IllegalStateException("auth gateway returned 503"));
+
+        // With a live runtime the internal stop takes the (unchanged) teardown path,
+        // which does persist STOPPED. The restore is what undoes it.
+        runningGroups(service).put("g-live", new BotGroupRuntime("g-live", 0, "env-1"));
+
+        assertThatThrownBy(() -> service.restart("g-live"))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(group.getTargetStatus())
+                .as("a failed restart is a no-op on persisted intent")
+                .isEqualTo(BotGroupStatus.ACTIVE);
+        // Two writes: the stop's STOPPED and the restore. The point is the last one.
+        verify(botGroupService, times(2)).save(any(BotGroup.class));
+    }
+
+    @Test
+    @DisplayName("a failed restart of a group the operator had already parked leaves it STOPPED")
+    void restart_leavesAnAlreadyStoppedGroupAlone() {
+        // The restore must not manufacture intent: STOPPED before ⇒ STOPPED after.
+        BotGroup group = BotGroup.builder()
+                .id("g-parked").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.STOPPED).build();
+        when(botGroupService.findById("g-parked")).thenReturn(group);
+        when(environmentService.findById("env-1"))
+                .thenThrow(new IllegalStateException("auth gateway returned 503"));
+
+        assertThatThrownBy(() -> service.restart("g-parked"))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(group.getTargetStatus()).isEqualTo(BotGroupStatus.STOPPED);
+        verify(botGroupService, never()).save(any(BotGroup.class));
+    }
+
     /* ----- DEAD_GROUP_AUTO_RECOVERY Phase 3: startForRecovery (AD-1, AD-5) ----- */
 
     @Test

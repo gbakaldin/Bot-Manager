@@ -943,6 +943,28 @@ public class BotGroupBehaviorService {
      * runtime is unchanged.
      */
     public void stop(String id) {
+        stop(id, true);
+    }
+
+    /**
+     * {@link #stop(String)}, with the Phase 2 runtime-less park made optional.
+     *
+     * @param parkRuntimeless whether a group with no in-memory runtime should have
+     *        {@code STOPPED} persisted for it. True for the operator {@code /stop}
+     *        entry point, where persisting the intent is the whole point.
+     *        <b>False for {@link #restart(String)}</b>: restart's internal stop is a
+     *        teardown step, not a statement of intent, and under AD-5 a persisted
+     *        {@code STOPPED} is a permanent opt-out from auto-recovery. A
+     *        {@code /restart} whose start half throws — the common case for exactly
+     *        the groups being restarted here, since the exhaustion ERROR points the
+     *        operator at this endpoint while the gateway may still be sick — would
+     *        otherwise leave the group parked {@code STOPPED} where it used to be
+     *        left {@code DEAD}: silently opted out of the recovery that told the
+     *        operator to press the button, invisible to {@code findByTargetStatus(DEAD)}
+     *        and to every dead-group signal that reads the persisted status, with
+     *        nothing logged to say so.
+     */
+    private void stop(String id, boolean parkRuntimeless) {
         // Same per-group lock as start() (AD-5) so an operator Stop cannot race a
         // Start's reclaim. restart() calls stop() then start() sequentially
         // (non-nested), so there is no reentrancy/deadlock concern.
@@ -951,6 +973,12 @@ public class BotGroupBehaviorService {
         try {
             BotGroupRuntime runtime = runningGroups.get(id);
             if (runtime == null) {
+                if (!parkRuntimeless) {
+                    // restart()'s teardown step: there is nothing to tear down and
+                    // nothing to say. Pre-Phase-2 behaviour, deliberately.
+                    log.warn("Bot group {} is not running", id);
+                    return;
+                }
                 // No runtime to tear down, but the operator's intent still has to
                 // land in Mongo — see the javadoc. findById throws
                 // ResourceNotFoundException for an unknown id; the only REST caller
@@ -1112,10 +1140,27 @@ public class BotGroupBehaviorService {
      * environment, auth gateway outage) should be investigated before retrying;
      * blindly re-issuing {@code /restart} will mechanically re-run the
      * {@code stop} + {@code start} sequence and is likely to fail the same way.
+     * <p>
+     * <b>A failed restart never leaves the group opted out of auto-recovery</b>
+     * (DEAD_GROUP_AUTO_RECOVERY AD-5). {@code STOPPED} became a permanent opt-out,
+     * and {@code restart} is {@code stop} then {@code start} — so on the unhappy
+     * path the internal stop's {@code STOPPED} was the last thing written, and the
+     * group was disabled for the very feature whose exhaustion ERROR sends operators
+     * to this endpoint. Two things stop that: the internal stop does not park a
+     * runtime-less group (see {@link #stop(String, boolean)}), and a start that
+     * throws restores whatever the persisted status was before the restart began.
+     * A failed restart is therefore a no-op on persisted intent, which is what it
+     * always looked like.
      */
     public void restart(String id) {
         log.info("Restarting bot group {}", id);
-        stop(id);
+
+        // Read before the stop: this is the intent to restore if the start half
+        // throws. A group that was already STOPPED stays STOPPED — the restore only
+        // ever undoes a STOPPED that this method's own stop() wrote.
+        BotGroupStatus statusBeforeRestart = statusBeforeRestart(id);
+
+        stop(id, false);
 
         // Brief pause before restart (uses virtual thread, no platform thread blocked)
         try {
@@ -1124,7 +1169,12 @@ public class BotGroupBehaviorService {
             Thread.currentThread().interrupt();
         }
 
-        start(id);
+        try {
+            start(id);
+        } catch (RuntimeException e) {
+            restoreStatusAfterFailedRestart(id, statusBeforeRestart);
+            throw e;
+        }
 
         // Verify post-start runtime is populated. If start() produced zero bots
         // despite a non-zero botCount, surface that as an exception. The controller
@@ -1137,6 +1187,55 @@ public class BotGroupBehaviorService {
             throw new IllegalStateException(String.format(
                     "Restart of group %s produced %d/%d bots; check logs and %s metric for cause",
                     id, alive, group.getBotCount(), BotMetrics.BOT_CREATION_FAILURES_TOTAL));
+        }
+    }
+
+    /**
+     * The persisted {@code targetStatus} to put back if a {@code /restart}'s start
+     * half throws. Best-effort: an unreadable group simply yields {@code null} and
+     * no restore is attempted, because the start is about to fail on the same read
+     * anyway.
+     */
+    private BotGroupStatus statusBeforeRestart(String id) {
+        try {
+            return botGroupService.findById(id).getTargetStatus();
+        } catch (Exception e) {
+            log.debug("Cannot read bot group {} before restart: {}", id, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Undo the {@code STOPPED} that {@code restart}'s internal {@code stop} wrote,
+     * when the start half failed (DEAD_GROUP_AUTO_RECOVERY AD-5).
+     * <p>
+     * Only ever fires on the exact shape it is there for: the persisted status is
+     * {@code STOPPED} <em>now</em> and was something else before. It is deliberately
+     * not a general "restore on failure" — a group the operator had genuinely parked
+     * stays parked, and a start that persisted {@code ACTIVE} or the zero-bot guard's
+     * {@code DEAD} is left alone, because those are statements the start path made on
+     * purpose.
+     * <p>
+     * Failing to restore is logged and swallowed: the caller is already propagating
+     * the real failure, and replacing it with a Mongo error would hide the cause.
+     */
+    private void restoreStatusAfterFailedRestart(String id, BotGroupStatus statusBeforeRestart) {
+        if (statusBeforeRestart == null || statusBeforeRestart == BotGroupStatus.STOPPED) {
+            return;
+        }
+        try {
+            BotGroup group = botGroupService.findById(id);
+            if (group.getTargetStatus() != BotGroupStatus.STOPPED) {
+                return;
+            }
+            log.warn("Restart of bot group {} failed after its stop persisted STOPPED — "
+                            + "restoring targetStatus={} so the group is not silently opted out "
+                            + "of auto-recovery", id, statusBeforeRestart);
+            group.setTargetStatus(statusBeforeRestart);
+            botGroupService.save(group);
+        } catch (Exception e) {
+            log.error("Could not restore targetStatus={} for bot group {} after a failed restart: {}",
+                    statusBeforeRestart, id, e.getMessage(), e);
         }
     }
 
