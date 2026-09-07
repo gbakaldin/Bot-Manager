@@ -51,6 +51,7 @@ import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -116,6 +117,17 @@ class BotGroupBehaviorServiceTest {
         try {
             service.shutdown();
         } catch (Exception ignored) {
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, ReentrantLock> groupLocks() {
+        try {
+            Field f = BotGroupBehaviorService.class.getDeclaredField("groupLocks");
+            f.setAccessible(true);
+            return (Map<String, ReentrantLock>) f.get(service);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
@@ -1043,6 +1055,11 @@ class BotGroupBehaviorServiceTest {
 
                 BotGroup group = BotGroup.builder().id("g-1").name("Group").build();
                 when(botGroupService.findById("g-1")).thenReturn(group);
+                // handleBotGroupDeath now re-checks the runtime's identity against
+                // runningGroups under the group lock, which is the production
+                // precondition: monitorHealth only runs from a live runtime's own
+                // health monitor.
+                runningGroups().put("g-1", runtime);
 
                 invokePrivateMonitorHealth(service, runtime);
 
@@ -1074,6 +1091,73 @@ class BotGroupBehaviorServiceTest {
                 verify(botGroupService, never()).save(any(BotGroup.class));
             } finally {
                 runtime.getExecutor().shutdownNow();
+            }
+        }
+
+        /**
+         * DEAD_GROUP_AUTO_RECOVERY: handleBotGroupDeath used to take no lock, so a
+         * monitor tick sitting between its findById and its save when an operator's
+         * stop() landed could leave Mongo at DEAD with no runtime — a fully eligible
+         * recovery candidate for a group the operator had just stopped, and the one
+         * AD-5 hole that needs no PATCH. It now tryLocks, and losing the lock means
+         * a start or a stop owns the status, so this tick has nothing to say.
+         */
+        @Test
+        @DisplayName("Should not touch the group when a start/stop holds the per-group lock")
+        void shouldNotWriteWhileAnotherLifecycleOperationHoldsTheLock() throws Exception {
+            BotGroupRuntime runtime = new BotGroupRuntime("g-locked", 5, "env-1");
+            ReentrantLock lock = new ReentrantLock();
+            try {
+                Bot d1 = mockBot(BotStatus.DEAD, false);
+                Bot d2 = mockBot(BotStatus.DEAD, false);
+                Bot d3 = mockBot(BotStatus.DEAD, false);
+                Bot d4 = mockBot(BotStatus.DEAD, false);
+                Bot alive = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
+                putBots(runtime, List.of(d1, d2, d3, d4, alive));
+                runningGroups().put("g-locked", runtime);
+                groupLocks().put("g-locked", lock);
+
+                // Somebody else — a stop() mid-teardown — is holding it.
+                Thread holder = new Thread(lock::lock);
+                holder.start();
+                holder.join();
+
+                invokePrivateMonitorHealth(service, runtime);
+
+                assertThat(runtime.isGroupDead())
+                        .as("the lock holder decides this group's fate, not the monitor")
+                        .isFalse();
+                verify(botGroupService, never()).save(any(BotGroup.class));
+            } finally {
+                // The holder thread has exited, so the lock can never be released;
+                // dropping the entry is how the fixture is cleaned up.
+                groupLocks().remove("g-locked");
+                runningGroups().remove("g-locked");
+                runtime.getExecutor().shutdownNow();
+            }
+        }
+
+        @Test
+        @DisplayName("Should not re-mark a runtime that has already been torn down or replaced")
+        void shouldNotMarkATornDownRuntime() {
+            // Re-marking would re-open a groupDeadSince window that stopAllBots has
+            // already credited and closed, and nothing would ever credit it again.
+            BotGroupRuntime stale = new BotGroupRuntime("g-stale", 5, "env-1");
+            try {
+                Bot d1 = mockBot(BotStatus.DEAD, false);
+                Bot d2 = mockBot(BotStatus.DEAD, false);
+                Bot d3 = mockBot(BotStatus.DEAD, false);
+                Bot d4 = mockBot(BotStatus.DEAD, false);
+                Bot alive = mockBot(BotStatus.CONNECTION_AUTHENTICATED, true);
+                putBots(stale, List.of(d1, d2, d3, d4, alive));
+                // Deliberately NOT in runningGroups: stop() removed it already.
+
+                invokePrivateMonitorHealth(service, stale);
+
+                assertThat(stale.isGroupDead()).isFalse();
+                verify(botGroupService, never()).save(any(BotGroup.class));
+            } finally {
+                stale.getExecutor().shutdownNow();
             }
         }
 

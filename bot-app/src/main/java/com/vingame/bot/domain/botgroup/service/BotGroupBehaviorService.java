@@ -197,6 +197,15 @@ public class BotGroupBehaviorService {
     // start() each acquire/release sequentially (non-nested, no reentrancy).
     private final ConcurrentHashMap<String, ReentrantLock> groupLocks = new ConcurrentHashMap<>();
 
+    /**
+     * How long {@link #handleBotGroupDeath} waits for the per-group lock before
+     * giving up. Short on purpose: {@code stop()} holds that lock for up to 30 s
+     * inside {@code stopAllBots}, and the monitor thread must not park behind its
+     * own shutdown. Giving up is safe — whoever holds the lock is a start or a stop,
+     * and both write the group's status themselves.
+     */
+    private static final long DEATH_LOCK_TIMEOUT_SECONDS = 2;
+
     @Autowired
     public BotGroupBehaviorService(
             BotGroupService botGroupService,
@@ -2260,20 +2269,73 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Handle bot group death - mark as DEAD and update database
+     * Handle bot group death — mark the runtime DEAD and persist
+     * {@code targetStatus=DEAD}.
+     *
+     * <p><b>Takes the per-group lock</b> (DEAD_GROUP_AUTO_RECOVERY). It never used
+     * to, and it runs on the health-monitor thread while {@code stop()} writes
+     * {@code STOPPED} only <em>after</em> {@code teardownRuntimeMemory} returns. A
+     * monitor tick sitting between its own {@code findById} and {@code save} when an
+     * operator's Stop lands would leave Mongo at {@code DEAD} with no runtime — a
+     * fully eligible recovery candidate for a group the operator just stopped, and
+     * the one AD-5 hole that needs no PATCH to reach. It is narrow (the losing order
+     * requires the tick to be mid-flight at {@code shutdownNow}, survive the
+     * interrupt, and be slower than one {@code findById} plus one {@code save}), it
+     * is pre-existing, and only its <em>consequence</em> is new — but the consequence
+     * is that autonomous recovery restarts money-spending bots against operator
+     * intent, so the race is closed rather than documented.
+     *
+     * <p><b>{@code tryLock} with a short timeout, never a bare {@code lock()}.</b>
+     * {@code stop()} holds this lock while {@code stopAllBots} waits up to 30 s on
+     * the bot executor and then calls {@code healthMonitor.shutdownNow()}. Blocking
+     * here uninterruptibly would park the monitor thread behind its own shutdown for
+     * that whole window. Failing to acquire is not a lost update either: the lock is
+     * held by a {@code start} or a {@code stop}, and both of those write the group's
+     * status themselves — whatever they decide is more recent than this tick's
+     * opinion. The runtime is left untouched in that case, so the next tick (if there
+     * is one; the monitor may be being shut down) simply re-evaluates.
+     *
+     * <p>Under the lock, the runtime is re-checked for identity against
+     * {@code runningGroups}: a runtime that has been torn down or replaced must not
+     * be re-marked DEAD, which would re-open a {@code groupDeadSince} window that
+     * {@code stopAllBots} has already credited and closed, and which nothing would
+     * ever credit again.
      */
     private void handleBotGroupDeath(BotGroupRuntime runtime) {
-        log.error("Bot group {} has been marked as DEAD due to repeated failures", runtime.getGroupId());
-
-        runtime.markAsDead();
-
+        String id = runtime.getGroupId();
+        ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
+        boolean held = false;
         try {
-            BotGroup group = botGroupService.findById(runtime.getGroupId());
-            group.setTargetStatus(BotGroupStatus.DEAD);
-            group.setLastFailureReason("Multiple bot disconnections detected");
-            botGroupService.save(group);
-        } catch (Exception e) {
-            log.error("Failed to update database for dead bot group {}: {}", runtime.getGroupId(), e.getMessage());
+            held = lock.tryLock(DEATH_LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (!held) {
+            log.warn("Bot group {} looks DEAD but a start/stop holds its lock — leaving the "
+                    + "status to that operation", id);
+            return;
+        }
+        try {
+            if (runningGroups.get(id) != runtime) {
+                log.warn("Bot group {} looks DEAD but its runtime has already been torn down "
+                        + "or replaced — not marking it", id);
+                return;
+            }
+
+            log.error("Bot group {} has been marked as DEAD due to repeated failures", id);
+
+            runtime.markAsDead();
+
+            try {
+                BotGroup group = botGroupService.findById(id);
+                group.setTargetStatus(BotGroupStatus.DEAD);
+                group.setLastFailureReason("Multiple bot disconnections detected");
+                botGroupService.save(group);
+            } catch (Exception e) {
+                log.error("Failed to update database for dead bot group {}: {}", id, e.getMessage());
+            }
+        } finally {
+            lock.unlock();
         }
     }
 
