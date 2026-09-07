@@ -578,12 +578,12 @@ class DeadGroupRecoverySchedulerTest {
      * EPOCH}, so on the first tick after a mass death the tie-break <em>is</em> the
      * ordering, and it is {@code lastStoppedAt ?: lastStartedAt}, oldest first.
      * <p>
-     * <b>QA note:</b> there is no persisted died-at stamp, and
+     * <b>Note what it measures:</b> there is no persisted died-at stamp, and
      * {@code handleBotGroupDeath} writes neither timestamp, while every successful
      * start nulls {@code lastStoppedAt}. So for a group that died in flight this
-     * resolves to {@code lastStartedAt} — "started longest ago", not "dead longest",
-     * which is what the method's javadoc claims. It is only a tie-break, but the two
-     * orders are not the same one.
+     * resolves to {@code lastStartedAt} — "started longest ago", not "dead longest".
+     * The two orders are not the same one, and {@code deadSince}'s javadoc now says
+     * so rather than claiming the second.
      */
     @Test
     @DisplayName("the earliest-due tie-break is lastStoppedAt ?: lastStartedAt, oldest first — it beats the id tie-break")
@@ -622,22 +622,22 @@ class DeadGroupRecoverySchedulerTest {
     }
 
     /**
-     * <b>QA FINDING (AD-8).</b> A success is charged to the budget but never emits
-     * the hand-off, and {@code expireStates} only resets a state for a group that has
-     * <em>stopped being a candidate</em>. So a group whose <em>final</em> budgeted
-     * attempt succeeds and which then re-dies inside the settle window is skipped on
-     * every subsequent tick with a DEBUG line only: no further attempt, no
-     * {@code group_recovery_exhausted_total}, and no ERROR — the exact hand-off AD-8
-     * promises, and the trigger for Phase 4's
-     * {@code EnvironmentGroupRecoveryExhausted} rule.
+     * The budget can be spent by a <em>success</em>: an attempt that works still
+     * charges the attempt (deliberate anti-flap — see {@code attempt()}), so a group
+     * whose <em>final</em> budgeted attempt succeeds and which then re-dies inside
+     * the settle window arrives at the next tick with the budget gone and
+     * {@code recordFailure} never having run.
      * <p>
-     * The group is not invisible — it is DEAD, so {@code EnvironmentGroupDead} still
-     * fires — but the recovery-specific signal is missing. Pinned as current
-     * behaviour; see {@code docs/reviews/DEAD_GROUP_AUTO_RECOVERY/qa.md}.
+     * That used to leave it skipped forever on a DEBUG line — which, since
+     * LOG_VOLUME_TIERING Phase 4, never reaches Loki — with no
+     * {@code group_recovery_exhausted_total} and no ERROR, so Phase 4's
+     * {@code EnvironmentGroupRecoveryExhausted} rule could not fire for the one case
+     * AD-8's budget exists to bound. The hand-off is now reported from the skip
+     * branch as well, still exactly once.
      */
     @Test
-    @DisplayName("QA FINDING: a success on the final attempt, then a re-death, is never retried and never reports exhaustion")
-    void successOnTheFinalAttemptThenReDeathIsSilentlyAbandoned() {
+    @DisplayName("a success on the final attempt, then a re-death, still hands off exactly once (AD-8)")
+    void successOnTheFinalAttemptThenReDeathStillReportsExhaustion() {
         persistedDead(deadGroup("g1"));
         envIsHealthy();
         when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(false, true));
@@ -655,10 +655,40 @@ class DeadGroupRecoverySchedulerTest {
         verify(behaviorService, times(2)).startForRecovery("g1");
         assertThat(attempts(DeadGroupRecoveryScheduler.OUTCOME_SUCCESS)).isEqualTo(1d);
         assertThat(lines(Level.ERROR))
-                .as("current behaviour — AD-8's hand-off ERROR is never emitted here")
-                .isEmpty();
-        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL).counter())
-                .as("current behaviour — no exhaustion counter, so the Phase 4 alert cannot fire")
-                .isNull();
+                .as("one hand-off, however the budget was spent — six ticks later, still one")
+                .hasSize(1);
+        assertThat(lines(Level.ERROR).get(0))
+                .contains("auto-recovery exhausted after 2 attempts — operator action required");
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL)
+                .tags("botGroupId", "g1", "environmentId", "env-1", "product", "116")
+                .counter().count())
+                .as("the Phase 4 alert routes on this series, so it needs the tags too")
+                .isEqualTo(1d);
+    }
+
+    @Test
+    @DisplayName("a success charges the attempt budget — a flap inside the settle window cannot mint a new one")
+    void aSuccessChargesTheBudget() {
+        // The judgement call, asserted so it is a decision rather than an artefact:
+        // refunding a successful attempt would restart the whole table on every flap,
+        // which is the group-scale version of the reconnect hot loop AD-8 bounds.
+        // Only a recovery that holds for settle-minutes earns a fresh budget, and
+        // that is covered by budgetResetsAfterTheSettleWindow.
+        persistedDead(deadGroup("g1"));
+        envIsHealthy();
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(true));
+        lenient().when(behaviorService.getRunningBotCountForGroup("g1")).thenReturn(20);
+        DeadGroupRecoveryScheduler scheduler = scheduler(true, 6, 1, 0);
+
+        scheduler.reconcileAll(T0);
+        scheduler.reconcileAll(T0.plusSeconds(60));
+
+        List<String> attemptLines = lines(Level.INFO).stream()
+                .filter(l -> l.contains("auto-recovery attempt")).toList();
+        assertThat(attemptLines).hasSize(2);
+        assertThat(attemptLines.get(0)).contains("attempt 1/6");
+        assertThat(attemptLines.get(1))
+                .as("the second attempt is 2/6, not 1/6 — the success was charged")
+                .contains("attempt 2/6");
     }
 }

@@ -10,6 +10,7 @@ import com.vingame.bot.infrastructure.probe.EnvironmentProbeScheduler;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
@@ -221,7 +222,17 @@ public class DeadGroupRecoveryScheduler {
             RecoveryState state = states.get(group.getId());
 
             if (state != null && state.attempts >= maxAttempts) {
-                // Exhausted (AD-8): already reported, already handed to a human.
+                // Exhausted (AD-8). The hand-off is reported from here, not only
+                // from recordFailure, because the budget can also be spent by a
+                // *success*: an attempt that succeeds still charges the attempt (see
+                // attempt()), so a group whose final budgeted attempt worked and
+                // which then re-died inside the settle window arrives here with the
+                // budget gone and nothing ever reported. Before this it was skipped
+                // forever on a DEBUG line — which since LOG_VOLUME_TIERING Phase 4
+                // never reaches Loki — with no group_recovery_exhausted_total and no
+                // ERROR, so Phase 4's EnvironmentGroupRecoveryExhausted rule could
+                // not fire for the one case AD-8's budget exists to bound.
+                reportExhaustionOnce(state, group);
                 log.debug("Recovery: group {} has spent its {}-attempt budget — waiting for an operator",
                         group.getId(), maxAttempts);
                 continue;
@@ -240,12 +251,14 @@ public class DeadGroupRecoveryScheduler {
             due.add(new Due(group, nextDue, deadSince(group)));
         }
 
-        // Earliest-due first (AD-9). The tie-break is how long the group has been
-        // down, oldest first; the id is the final tie-break purely so the order is
-        // deterministic. Ordering by due time is what makes the rotation fair: a
-        // group that just failed carries the largest deadline and goes last.
+        // Earliest-due first (AD-9). Ordering by due time is what makes the rotation
+        // fair: a group that just failed carries the largest deadline and goes last.
+        // The tie-break is deadSince() — read its javadoc before trusting the name,
+        // it is time-since-last-start for an in-flight death — oldest first, nulls
+        // last; the id is the final tie-break purely so the order is deterministic.
         due.sort(Comparator.comparing((Due d) -> d.nextDue)
-                .thenComparing(d -> d.deadSince)
+                .thenComparing(d -> d.deadSince,
+                        Comparator.nullsLast(Comparator.naturalOrder()))
                 .thenComparing(d -> d.group.getId()));
 
         int limit = Math.min(maxPerTick, due.size());
@@ -301,6 +314,17 @@ public class DeadGroupRecoveryScheduler {
             long seconds = Duration.ofNanos(System.nanoTime() - startedAtNanos).toSeconds();
 
             if (up) {
+                // A success charges the attempt, deliberately (AD-8). The
+                // alternative — refunding it — makes the budget unbounded for
+                // exactly the failure mode it exists to bound: a group that comes up
+                // and dies again inside the settle window would restart the whole
+                // 6-attempt table on every flap, which is the group-scale version of
+                // the reconnect hot loop this feature is modelled on. So a
+                // "recovery" that does not hold is not a recovery, and only one that
+                // survives settle-minutes earns a fresh budget (expireStates). The
+                // cost of this choice is that the budget can be spent by a success,
+                // which is why the hand-off is also reported from the skip branch in
+                // reconcileAll — it must not be possible to exhaust silently.
                 state.attempts = attemptNumber;
                 state.lastSuccess = now;
                 state.nextDue = now.plus(backoffAfter(attemptNumber));
@@ -343,20 +367,65 @@ public class DeadGroupRecoveryScheduler {
                     wait.toMinutes());
         }
 
-        if (attemptNumber >= maxAttempts && !state.exhaustedReported) {
-            state.exhaustedReported = true;
-            botMetrics.incGroupRecoveryExhausted();
-            log.error("group {} ({}): auto-recovery exhausted after {} attempts — operator action "
-                            + "required (POST /api/v1/bot-group/{}/restart)",
-                    group.getId(), group.getName(), maxAttempts, group.getId());
+        if (attemptNumber >= maxAttempts) {
+            reportExhaustionOnce(state, group);
         }
     }
 
     /**
-     * Budget reset and map hygiene, in one rule: a group that is no longer a
-     * candidate has been resolved by somebody — a successful recovery, a manual
-     * {@code /start} or {@code /restart}, or an operator parking it {@code STOPPED} —
-     * so its state is dropped and the next death episode starts with a fresh budget.
+     * The single hand-off per death episode (AD-8): one ERROR and one
+     * {@code group_recovery_exhausted_total}, then the group is left alone until an
+     * operator acts. Idempotent through {@code exhaustedReported}.
+     * <p>
+     * Called from two places, which is the point: from {@link #recordFailure} when
+     * the last attempt fails, and from the skip branch in {@link #reconcileAll} when
+     * the budget turns out to be spent without that having happened — the shape a
+     * successful final attempt followed by a re-death produces.
+     * <p>
+     * Sets the group MDC itself when it does not already have it, so the counter
+     * carries AD-13's tags from either call site. {@code recordFailure} runs inside
+     * {@code attempt}'s MDC scope and re-setting the same values there is a no-op;
+     * the clear is skipped in that case so it cannot wipe the caller's context
+     * mid-attempt.
+     */
+    private void reportExhaustionOnce(RecoveryState state, BotGroup group) {
+        if (state.exhaustedReported) {
+            return;
+        }
+        state.exhaustedReported = true;
+
+        boolean ownsMdc = !group.getId().equals(MDC.get(BotMdc.BOT_GROUP_ID));
+        if (ownsMdc) {
+            BotMdc.setGroupContext(group.getId(), group.getEnvironmentId(),
+                    resolveProduct(group.getEnvironmentId()));
+        }
+        try {
+            botMetrics.incGroupRecoveryExhausted();
+            log.error("group {} ({}): auto-recovery exhausted after {} attempts — operator action "
+                            + "required (POST /api/v1/bot-group/{}/restart)",
+                    group.getId(), group.getName(), maxAttempts, group.getId());
+        } finally {
+            if (ownsMdc) {
+                BotMdc.clear();
+            }
+        }
+    }
+
+    /**
+     * Budget reset and map hygiene, in one rule: <b>a group that has stopped being a
+     * candidate</b> has its state dropped, so the next death episode starts with a
+     * fresh budget.
+     * <p>
+     * "Stopped being a candidate" is what the code keys on, and it is narrower than
+     * "somebody resolved it". A <em>successful</em> recovery, a successful manual
+     * {@code /start} or {@code /restart}, and an operator parking it {@code STOPPED}
+     * all qualify. A <em>failed</em> manual {@code /start} does not: it leaves
+     * {@code targetStatus=DEAD}, so the group is still a candidate and still carries
+     * whatever budget it had spent. That is deliberate — an operator pressing Start
+     * on a group whose environment is still broken is not new information — but it
+     * means a group can sit exhausted across operator attempts, which is why
+     * exhaustion is reported (once) from the skip branch rather than only when the
+     * last attempt fails.
      * <p>
      * The one exception is the settle window (AD-8's {@code settle-minutes}): for
      * that long after a success the state is retained, so a group that "recovers"
@@ -391,21 +460,40 @@ public class DeadGroupRecoveryScheduler {
     }
 
     /**
-     * How long the group has been down, as a tie-break only. There is no persisted
-     * "died at" stamp — {@code handleBotGroupDeath} writes {@code targetStatus} and
-     * {@code lastFailureReason} and nothing else — so this is the best available
-     * proxy, and an unknown value sorts last rather than pretending to be old.
+     * The tie-break key: {@code lastStoppedAt ?: lastStartedAt}, {@code null} when
+     * the group has neither.
+     *
+     * <p><b>It is not "how long the group has been down", and the name is the best
+     * available lie.</b> There is no persisted died-at stamp:
+     * {@code handleBotGroupDeath} writes {@code targetStatus} and
+     * {@code lastFailureReason} and neither timestamp, while every successful start
+     * does {@code setLastStoppedAt(null)}. So for a group that died <em>in flight</em>
+     * — the case this whole feature exists for — {@code lastStoppedAt} is null and
+     * this resolves to {@code lastStartedAt}: <b>time since last start</b>, not time
+     * dead. A group that ran three days and died a minute ago therefore sorts ahead
+     * of one started an hour ago and dead for fifty-nine minutes.
+     *
+     * <p>That is tolerable because it is only a tie-break — except that every fresh
+     * candidate carries {@code nextDue == EPOCH}, so on the first tick after a mass
+     * death (the incident shape: one environment, several groups, all dead at once)
+     * every candidate ties and <em>this</em> decides the order. It rotates fairly
+     * either way, which is the property AD-9 actually needs; the ordering is just not
+     * the one the old javadoc claimed.
+     *
+     * <p>Null rather than {@code LocalDateTime.MAX}: the sort applies
+     * {@code nullsLast}, so "unknown" sorts last without a magic value that then has
+     * to be special-cased again at render time.
      */
     private static LocalDateTime deadSince(BotGroup group) {
         if (group.getLastStoppedAt() != null) {
             return group.getLastStoppedAt();
         }
-        return group.getLastStartedAt() != null ? group.getLastStartedAt() : LocalDateTime.MAX;
+        return group.getLastStartedAt();
     }
 
     private static String deadSinceText(BotGroup group) {
         LocalDateTime since = deadSince(group);
-        return since == LocalDateTime.MAX ? "unknown" : since.toString();
+        return since == null ? "unknown" : since.toString();
     }
 
     /**
@@ -432,7 +520,10 @@ public class DeadGroupRecoveryScheduler {
         return value == null ? "" : value;
     }
 
-    /** A candidate that is due, with its sort keys. */
+    /**
+     * A candidate that is due, with its sort keys. {@code deadSince} is nullable —
+     * see {@link #deadSince(BotGroup)} for what it does and does not measure.
+     */
     private record Due(BotGroup group, Instant nextDue, LocalDateTime deadSince) {
     }
 
