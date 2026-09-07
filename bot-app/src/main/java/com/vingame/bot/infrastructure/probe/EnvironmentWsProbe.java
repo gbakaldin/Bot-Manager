@@ -13,12 +13,12 @@ import java.net.http.WebSocket;
 import java.net.http.WebSocketHandshakeException;
 import java.nio.channels.UnresolvedAddressException;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -50,15 +50,39 @@ import java.util.concurrent.TimeoutException;
 public class EnvironmentWsProbe {
 
     /**
-     * Header names {@link WebSocket.Builder#header} rejects with
-     * {@link IllegalArgumentException}. A probe that blindly forwarded
-     * {@code Environment.headers} would fail 100% of the time on any environment
-     * that sets one and would look exactly like an outage — so they are filtered,
-     * not caught and ignored. Compared lower-case; {@code sec-websocket-*} is
-     * matched by prefix.
+     * Header names the JDK refuses to send on a WebSocket upgrade. A probe that
+     * blindly forwarded {@code Environment.headers} would fail 100% of the time on
+     * any environment that sets one and would look exactly like an outage — so they
+     * are filtered, not caught and ignored. Compared lower-case;
+     * {@code sec-websocket-*} is matched by prefix.
+     *
+     * <p><b>Where the rejection actually comes from</b> — not, despite appearances,
+     * from {@code WebSocket.Builder#header}, which only records the pair.
+     * {@code sec-websocket-*} is rejected inside {@code OpeningHandshake}'s
+     * constructor and the other five by {@code HttpRequest.Builder.header} against
+     * {@code jdk.internal.net.http.common.Utils.DISALLOWED_HEADERS_SET}
+     * ({@code connection}, {@code content-length}, {@code expect}, {@code host},
+     * {@code upgrade}). Both happen during {@code buildAsync}, which is why an
+     * unfiltered name would surface at the generic {@code RuntimeException} arm of
+     * {@link #probe} rather than at the {@code builder.header} call — an
+     * {@code Outcome.ERROR} that no amount of origin health could ever clear.
+     * {@code expect} is in the list for that reason and no other: it is unlikely in
+     * today's data and it is one word.
+     *
+     * <p><b>{@code Host} is stripped, and every environment configures one.</b>
+     * {@code EnvironmentService.validateAndMergeWsHeaders} <em>rejects</em> an
+     * environment that supplies no {@code Host} and {@code Origin}, so this filter
+     * fires on 100% of environments. The consequence is real and is accepted here:
+     * on an environment whose configured {@code Host} differs from the URL
+     * authority, <b>the probe reaches a different vhost than the bots do</b>, and
+     * with AD-2's {@code status < 500 ⇒ healthy} a default vhost answering 404 while
+     * the real origin is down reads as "serving again" and authorises attempts. The
+     * cost of that is one budgeted attempt (AD-8); the mechanical escape hatch, if it
+     * ever matters, is the {@code jdk.httpclient.allowRestrictedHeaders=host} net
+     * property, which would let this filter pass {@code Host} through.
      */
     private static final Set<String> RESTRICTED_HEADERS = Set.of(
-            "host", "connection", "upgrade", "content-length");
+            "host", "connection", "upgrade", "content-length", "expect");
 
     private static final String RESTRICTED_PREFIX = "sec-websocket-";
 
@@ -126,20 +150,23 @@ public class EnvironmentWsProbe {
     public ProbeResult probe(String wsUrl, Map<String, String> headers) {
         long startNanos = System.nanoTime();
         WebSocket webSocket = null;
+        CompletableFuture<WebSocket> handshake = null;
         try {
             WebSocket.Builder builder = httpClient.newWebSocketBuilder()
                     .connectTimeout(timeout);
             applyHeaders(builder, wsUrl, headers);
 
-            webSocket = builder.buildAsync(URI.create(wsUrl), NOOP_LISTENER)
-                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            handshake = builder.buildAsync(URI.create(wsUrl), NOOP_LISTENER);
+            webSocket = handshake.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             return new ProbeResult(Outcome.OPEN, elapsedMillis(startNanos), "handshake completed");
         } catch (ExecutionException e) {
             return classify(e.getCause(), elapsedMillis(startNanos));
         } catch (TimeoutException e) {
+            abandon(handshake);
             return new ProbeResult(Outcome.TIMEOUT, elapsedMillis(startNanos),
                     "no response within " + timeout.toMillis() + "ms");
         } catch (InterruptedException e) {
+            abandon(handshake);
             Thread.currentThread().interrupt();
             return new ProbeResult(Outcome.ERROR, elapsedMillis(startNanos), "interrupted");
         } catch (RuntimeException e) {
@@ -156,13 +183,49 @@ public class EnvironmentWsProbe {
     }
 
     /**
+     * Give up on a handshake that has not completed, without leaking it.
+     * <p>
+     * {@code get(timeout)} does <b>not</b> cancel the underlying task, so a bare
+     * timeout return would drop the future on the floor: if the handshake completed
+     * a moment later the JDK would hold an open WebSocket with a no-op listener that
+     * nobody ever aborts, plus its connection-pool entry, until the peer or an idle
+     * timer killed it. That fires once per tick per URL against exactly the sort of
+     * degraded origin this component exists to watch — up to 60 leaked sockets an
+     * hour per sick environment, for as long as it stays sick, in the JVM whose last
+     * outage (2026-06-30) was unbounded reconnect threads.
+     * <p>
+     * Cancel <em>and</em> abort-on-completion, because the two are not
+     * interchangeable: cancel loses the race if the WebSocket is already constructed,
+     * and {@code whenComplete} alone would let a hung connect keep running.
+     */
+    private static void abandon(CompletableFuture<WebSocket> handshake) {
+        if (handshake == null) {
+            return;
+        }
+        handshake.cancel(true);
+        handshake.whenComplete((ws, error) -> {
+            if (ws != null) {
+                ws.abort();
+            }
+        });
+    }
+
+    /**
      * Classify the cause of a failed handshake (AD-2). Package-private so the
      * classification test can feed it synthetic causes with no network.
      */
     ProbeResult classify(Throwable cause, long latencyMillis) {
         if (cause instanceof WebSocketHandshakeException handshake) {
-            int status = handshake.getResponse() != null
-                    ? handshake.getResponse().statusCode() : 0;
+            if (handshake.getResponse() == null) {
+                // No response to read a status from. This used to fall through as
+                // status 0, and 0 < 500, so it classified HTTP_4XX and therefore
+                // *healthy* — the one unclassifiable condition in this class that
+                // landed on the side which authorises a recovery attempt, printing
+                // "HTTP 0" as its evidence. Every other unknown is ERROR; so is this.
+                return new ProbeResult(Outcome.ERROR, latencyMillis,
+                        "handshake failed with no response");
+            }
+            int status = handshake.getResponse().statusCode();
             Outcome outcome = status < 500 ? Outcome.HTTP_4XX : Outcome.HTTP_5XX;
             return new ProbeResult(outcome, latencyMillis, "HTTP " + status);
         }
@@ -189,20 +252,21 @@ public class EnvironmentWsProbe {
         if (headers == null || headers.isEmpty()) {
             return;
         }
-        List<String> skipped = new ArrayList<>(2);
         for (Map.Entry<String, String> entry : headers.entrySet()) {
             String name = entry.getKey();
-            if (name == null || entry.getValue() == null) {
-                continue;
-            }
-            if (isRestricted(name)) {
-                skipped.add(name);
+            if (name == null || entry.getValue() == null || isRestricted(name)) {
                 continue;
             }
             builder.header(name, entry.getValue());
         }
-        if (!skipped.isEmpty() && skippedHeadersLogged.add(wsUrl)) {
-            log.debug("ws probe {}: skipping restricted header(s) {}", wsUrl, skipped);
+        if (!skippedHeadersLogged.contains(wsUrl)) {
+            // Read through restrictedNames rather than accumulating a second list in
+            // the loop above: the test asserts that method, and a private copy of the
+            // same filter is a copy that can drift from the loop that runs.
+            List<String> skipped = restrictedNames(headers);
+            if (!skipped.isEmpty() && skippedHeadersLogged.add(wsUrl)) {
+                log.debug("ws probe {}: skipping restricted header(s) {}", wsUrl, skipped);
+            }
         }
     }
 
@@ -213,8 +277,10 @@ public class EnvironmentWsProbe {
     }
 
     /**
-     * The header names of {@code headers} this probe would skip, in encounter
-     * order. Exposed for tests and for the DEBUG line above.
+     * The header names of {@code headers} this probe skips, in encounter order.
+     * Used by {@link #applyHeaders} for its once-per-URL DEBUG line, and by the
+     * classification test — the same method in both, so the test cannot be asserting
+     * a filter the production path does not use.
      */
     static List<String> restrictedNames(Map<String, String> headers) {
         if (headers == null || headers.isEmpty()) {

@@ -98,6 +98,18 @@ class EnvironmentWsProbeClassificationTest {
     }
 
     @Test
+    @DisplayName("a handshake failure with no response → ERROR, not the healthy side")
+    void handshakeWithNoResponseIsError() {
+        // Read status 0, and 0 < 500, this used to classify HTTP_4XX — healthy, and
+        // therefore able to authorise a recovery attempt — with "HTTP 0" as its
+        // evidence. Every other unclassifiable condition in this class is ERROR.
+        ProbeResult r = probe.classify(new WebSocketHandshakeException(null), 7);
+        assertThat(r.outcome()).isEqualTo(Outcome.ERROR);
+        assertThat(r.healthy()).isFalse();
+        assertThat(r.detail()).doesNotContain("HTTP 0");
+    }
+
+    @Test
     @DisplayName("only OPEN and HTTP_4XX are healthy")
     void healthyPredicate() {
         assertThat(new ProbeResult(Outcome.OPEN, 1, "ok").healthy()).isTrue();
@@ -124,11 +136,16 @@ class EnvironmentWsProbeClassificationTest {
         headers.put("Connection", "Upgrade");
         headers.put("Sec-WebSocket-Key", "abc");
         headers.put("Content-Length", "0");
+        // Utils.DISALLOWED_HEADERS_SET is {connection, content-length, expect, host,
+        // upgrade}; an environment carrying Expect would otherwise make every probe
+        // throw at buildAsync, so that environment could never be healthy and could
+        // never recover, with only an outcome="error" series to explain it.
+        headers.put("Expect", "100-continue");
         headers.put("X-Custom", "keep-me");
         headers.put("User-Agent", "keep-me-too");
 
         assertThat(EnvironmentWsProbe.restrictedNames(headers))
-                .containsExactly("Host", "Connection", "Sec-WebSocket-Key", "Content-Length");
+                .containsExactly("Host", "Connection", "Sec-WebSocket-Key", "Content-Length", "Expect");
         assertThat(EnvironmentWsProbe.isRestricted("upgrade")).isTrue();
         assertThat(EnvironmentWsProbe.isRestricted("X-Custom")).isFalse();
         assertThat(EnvironmentWsProbe.restrictedNames(null)).isEmpty();
