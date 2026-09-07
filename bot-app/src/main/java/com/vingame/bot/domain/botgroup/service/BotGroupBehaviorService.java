@@ -26,6 +26,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.RecoveryEligibility;
 import com.vingame.bot.domain.botgroup.sort.BotGroupSortRow;
 import com.vingame.bot.domain.botgroup.sort.BotGroupSorter;
 import com.vingame.bot.domain.brand.model.BrandCode;
@@ -55,6 +56,7 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -157,6 +159,19 @@ public class BotGroupBehaviorService {
      */
     @Value("${bot.deposit.amount:1000000000}")
     private long depositAmount;
+
+    /**
+     * Business wall-clock zone the activation windows are interpreted in — the same
+     * single app-wide value {@code ActivationScheduler} reads. Needed here only by
+     * {@link #startForRecovery(String)}, which re-asserts the recovery predicate
+     * (and therefore a SCHEDULED group's window) under the group lock.
+     * <p>
+     * The initialiser is not redundant: Spring overwrites it, but the Mockito unit
+     * tests construct this service directly and would otherwise pass {@code null}
+     * into {@code ZoneId.of}.
+     */
+    @Value("${bot.activation.zone:Asia/Ho_Chi_Minh}")
+    private String activationZone = "Asia/Ho_Chi_Minh";
 
     /**
      * Scheduler for timed operations (scheduled restarts, etc.)
@@ -276,6 +291,67 @@ public class BotGroupBehaviorService {
         lock.lock();
         try {
             startLocked(id);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Start a bot group on behalf of the auto-recovery reconciler
+     * (DEAD_GROUP_AUTO_RECOVERY AD-1). <b>The one and only new entry point this
+     * feature adds</b>: it is deliberately a thin wrapper over the existing
+     * {@link #startLocked(String)} — same lock, same reclaim, same rebuild — so
+     * recovery cannot drift into a second lifecycle path. Everything the teardown
+     * owes (crediting the open group-dead window exactly once, shutting the health
+     * monitor, the periodic-logout scheduler and the per-bot watchdogs) is already
+     * done there and is not repeated here.
+     * <p>
+     * The rebuild <b>re-authenticates existing accounts</b>. It never registers a
+     * user, never deposits, and never recreates the Mongo group — registration lives
+     * only in {@code BotGroupService.save} and is unreachable from any start path.
+     * <p>
+     * <b>Why not just call {@link #start(String)}:</b> the reconciler decided this
+     * group was a recovery candidate on a previous line of code, possibly seconds
+     * ago. Between that decision and this call an operator may have issued
+     * {@code POST /stop} (→ {@code targetStatus=STOPPED}, the AD-5 opt-out) or a
+     * manual {@code /start}. Re-reading the persisted group and re-asserting
+     * {@link RecoveryEligibility} <em>inside</em> the lock is what closes that
+     * window; {@code start()} would act on the stale decision.
+     * <p>
+     * Nothing is caught: the caller isolates each group in its own try/catch and
+     * needs the exception to classify the attempt as {@code outcome="error"}.
+     *
+     * @return whether the group actually came up — a live ACTIVE runtime with at
+     *         least one running bot. {@code false} also covers "no longer eligible",
+     *         which is a skip, not a failure the caller should charge to the budget
+     *         differently: both simply mean the group is not running.
+     */
+    public boolean startForRecovery(String id) {
+        ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            BotGroup persisted = botGroupService.findById(id);
+            BotGroupRuntime runtime = runningGroups.get(id);
+            BotGroupStatus runtimeStatus = runtime != null ? runtime.getActualStatus() : null;
+            boolean runtimeGroupDead = runtime != null && runtime.isGroupDead();
+
+            if (!RecoveryEligibility.isCandidate(
+                    persisted.getTargetStatus(), persisted.getActivationMode(),
+                    persisted.getActivationWindow(), persisted.getBotCount(),
+                    runtimeStatus, runtimeGroupDead,
+                    Instant.now(), ZoneId.of(activationZone))) {
+                log.info("Bot group {} is no longer a recovery candidate under the lock "
+                                + "(targetStatus={}, activationMode={}, runtime={}) — not starting",
+                        id, persisted.getTargetStatus(), persisted.getActivationMode(), runtimeStatus);
+                return false;
+            }
+
+            startLocked(id);
+
+            BotGroupRuntime rebuilt = runningGroups.get(id);
+            return rebuilt != null
+                    && rebuilt.getActualStatus() == BotGroupStatus.ACTIVE
+                    && rebuilt.getRunningBotCount() > 0;
         } finally {
             lock.unlock();
         }

@@ -43,6 +43,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
@@ -930,6 +931,128 @@ class BotGroupBehaviorServiceRestartTest {
         assertThat(infos)
                 .as("the with-runtime path must never take the runtime-less branch")
                 .noneMatch(m -> m.contains("has no runtime"));
+    }
+
+    /* ----- DEAD_GROUP_AUTO_RECOVERY Phase 3: startForRecovery (AD-1, AD-5) ----- */
+
+    @Test
+    @DisplayName("startForRecovery() refuses a STOPPED group — the AD-5 opt-out is re-asserted under the lock")
+    void startForRecovery_reAssertsEligibilityUnderLock() {
+        // The reconciler decided this group was a candidate on a previous tick; by the
+        // time the lock is taken an operator has pressed Stop. Nothing may start.
+        BotGroup parked = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.STOPPED).build();
+        when(botGroupService.findById("g-1")).thenReturn(parked);
+
+        boolean up = service.startForRecovery("g-1");
+
+        assertThat(up).isFalse();
+        verify(botFactory, never()).createBot(anyString(), any(BotConfiguration.class));
+        verify(botGroupService, never()).save(any(BotGroup.class));
+        assertThat(runningGroups(service).get("g-1")).isNull();
+    }
+
+    @Test
+    @DisplayName("startForRecovery() on a DEAD group runs the existing reclaim + rebuild and reports it came up")
+    void startForRecovery_rebuildsThroughTheExistingStartPath() throws Exception {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.DEAD).build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        // Hold every bot task inside the runtime executor so getRunningBotCount() is
+        // deterministic: the return value of startForRecovery is what the reconciler
+        // classifies as success vs failure, so it cannot be asserted against a race.
+        CountDownLatch hold = new CountDownLatch(1);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> {
+                    Bot b = stubBot("bot" + System.nanoTime());
+                    lenient().when(b.getConfiguration()).thenAnswer(c -> {
+                        hold.await();
+                        return null;
+                    });
+                    return b;
+                });
+
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 3, "env-1");
+        dead.markAsDead();
+        runningGroups(service).put("g-1", dead);
+
+        try {
+            boolean up = service.startForRecovery("g-1");
+
+            assertThat(up).as("ACTIVE runtime with live bots").isTrue();
+            verify(botFactory, times(3)).createBot(anyString(), any(BotConfiguration.class));
+            BotGroupRuntime rebuilt = runningGroups(service).get("g-1");
+            assertThat(rebuilt).isNotSameAs(dead);
+            assertThat(rebuilt.getActualStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+
+            ArgumentCaptor<BotGroup> saved = ArgumentCaptor.forClass(BotGroup.class);
+            verify(botGroupService).save(saved.capture());
+            assertThat(saved.getValue().getTargetStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+        } finally {
+            hold.countDown();
+            service.stop("g-1");
+        }
+    }
+
+    @Test
+    @DisplayName("startForRecovery() re-authenticates existing accounts — NO registration, NO deposit, NO new group")
+    void startForRecovery_neverRegistersOrDeposits() {
+        // The money invariant. Recovery reuses the accounts the group already owns;
+        // registering or depositing again would spend real money on every recovery.
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.DEAD).build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> stubBot("bot" + System.nanoTime()));
+
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 3, "env-1");
+        dead.markAsDead();
+        runningGroups(service).put("g-1", dead);
+
+        List<LogEvent> events;
+        try {
+            events = captureBehaviorServiceLogs(() -> service.startForRecovery("g-1"));
+
+            // The only account-facing collaborator is createBot — the re-auth path,
+            // once per already-existing account.
+            verify(botFactory, times(3)).createBot(anyString(), any(BotConfiguration.class));
+
+            // Registration is structurally unreachable: BotGroupService.save only
+            // registers users when the group's id is null (a NEW group). Every save on
+            // this path carries the existing id, so no save can create accounts.
+            ArgumentCaptor<BotGroup> saved = ArgumentCaptor.forClass(BotGroup.class);
+            verify(botGroupService, atLeast(1)).save(saved.capture());
+            assertThat(saved.getAllValues()).allSatisfy(g ->
+                    assertThat(g.getId()).as("recovery must never save a new (id-less) group")
+                            .isEqualTo("g-1"));
+
+            boolean sawRegistrationOrDeposit = events.stream()
+                    .map(e -> e.getMessage().getFormattedMessage().toLowerCase())
+                    .anyMatch(m -> m.contains("registr") || m.contains("deposit"));
+            assertThat(sawRegistrationOrDeposit)
+                    .as("recovery must not register or deposit — re-auth only")
+                    .isFalse();
+        } finally {
+            service.stop("g-1");
+        }
     }
 
     /**
