@@ -89,6 +89,13 @@ public class BotMetrics {
     // drain"). Same per-bot tag shape as the other bot_* counters (AD-3).
     public static final String BOT_MONEY_DRAINED_TOTAL = "bot_money_drained_total";
 
+    // DEAD_GROUP_AUTO_RECOVERY AD-13 — group-scoped recovery counters. Same shape as
+    // GROUP_DEAD_SECONDS_TOTAL above: tagged from mdcTags() under the recovery
+    // scheduler's per-group MDC, and NOT bot_-prefixed, so BotMdcTagsMeterFilter
+    // leaves them alone. Their rate is a function of incidents, never of fleet size.
+    public static final String GROUP_RECOVERY_ATTEMPTS_TOTAL = "group_recovery_attempts_total";
+    public static final String GROUP_RECOVERY_EXHAUSTED_TOTAL = "group_recovery_exhausted_total";
+
     private final MeterRegistry registry;
 
     public BotMetrics(MeterRegistry registry) {
@@ -416,5 +423,39 @@ public class BotMetrics {
                 .tags(mdcTags())
                 .register(registry)
                 .increment(seconds);
+    }
+
+    /**
+     * Count one auto-recovery attempt on a DEAD bot group
+     * (DEAD_GROUP_AUTO_RECOVERY AD-13). {@code outcome} is bounded:
+     * {@code success | failed | error} — respectively "the group came back up",
+     * "the start path ran but the group is still not ACTIVE with live bots", and
+     * "the start path threw".
+     * <p>
+     * Called under the recovery scheduler's per-group MDC, so the series carries
+     * {@code botGroupId} / {@code environmentId} / {@code product} exactly like
+     * {@code group_dead_seconds_total}. <b>No series exists until an attempt is
+     * actually made</b>, which is what makes "shipped inert" observable: with
+     * {@code bot.recovery.enabled=false} this is never called.
+     */
+    public void incGroupRecoveryAttempt(String outcome) {
+        Counter.builder(GROUP_RECOVERY_ATTEMPTS_TOTAL)
+                .tag("outcome", outcome)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * Count one bot group whose recovery attempt budget is spent
+     * (DEAD_GROUP_AUTO_RECOVERY AD-8). Fires once per death episode, at the end of
+     * it: the group is left alone from here until an operator acts, so this is the
+     * hand-off signal a human is expected to answer.
+     */
+    public void incGroupRecoveryExhausted() {
+        Counter.builder(GROUP_RECOVERY_EXHAUSTED_TOTAL)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
     }
 }
