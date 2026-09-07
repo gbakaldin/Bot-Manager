@@ -163,6 +163,23 @@ public class EnvironmentProbeScheduler {
         return state != null && state.consecutiveHealthy() >= healthyStreak;
     }
 
+    /**
+     * How many consecutive healthy probes {@code environmentId} currently has to its
+     * name, or {@code 0} if it is not being probed. {@link #isHealthy(String)} is
+     * this value against the configured threshold; the raw count exists so the Phase
+     * 3 attempt line can report the evidence it is acting on, which is what the plan
+     * specifies (<em>"env &lt;envId&gt; healthy for &lt;k&gt; probes"</em>) and what
+     * makes the INFO line stand alone in Grafana.
+     */
+    public int healthyStreak(String environmentId) {
+        String url = envUrls.get(environmentId);
+        if (url == null) {
+            return 0;
+        }
+        ProbeState state = states.get(url);
+        return state == null ? 0 : state.consecutiveHealthy();
+    }
+
     private void probeAllQuietly() {
         try {
             probeAll();

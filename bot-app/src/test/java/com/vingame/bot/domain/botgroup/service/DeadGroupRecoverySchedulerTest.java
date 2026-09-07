@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.service;
 
+import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.ActivationWindow;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
@@ -25,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.stubbing.Answer;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -34,6 +36,7 @@ import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -158,8 +161,49 @@ class DeadGroupRecoverySchedulerTest {
 
     private void envIsHealthy() {
         lenient().when(probeScheduler.isHealthy("env-1")).thenReturn(true);
+        lenient().when(probeScheduler.healthyStreak("env-1")).thenReturn(2);
         lenient().when(environmentService.findById("env-1")).thenReturn(Environment.builder()
                 .id("env-1").name("TIP staging").productCode(ProductCode.P_116).build());
+    }
+
+    /**
+     * A {@code startForRecovery} stub that <b>clears this thread's MDC</b> before it
+     * returns, because the real one does: every path through {@code startLocked}
+     * calls {@code BotMdc.clear()} on the caller thread — the reclaim path's
+     * {@code teardownRuntimeMemory}, the build path's {@code createBotsInParallel}
+     * result loop, and the failure path's outer {@code finally}. A stub that leaves
+     * the MDC alone cannot see AD-13's tags going missing, which is exactly how the
+     * first version of {@code successIsLoggedAndCounted} passed against a scheduler
+     * that registered both counters with an empty {@code mdcTags()}.
+     *
+     * @param results the value for each successive call; the last one repeats
+     */
+    private static Answer<Boolean> startsClearingMdc(boolean... results) {
+        AtomicInteger call = new AtomicInteger();
+        return invocation -> {
+            BotMdc.clear();
+            return results[Math.min(call.getAndIncrement(), results.length - 1)];
+        };
+    }
+
+    /**
+     * The throwing counterpart. {@code startLocked} clears the MDC on its failure
+     * path too whenever a runtime was registered, so the {@code outcome="error"}
+     * series has the same tagging hazard as the other two.
+     */
+    private static Answer<Boolean> throwsClearingMdc(RuntimeException error) {
+        return invocation -> {
+            BotMdc.clear();
+            throw error;
+        };
+    }
+
+    /** The AD-13 tag set every {@code group_recovery_*} series must carry. */
+    private io.micrometer.core.instrument.Counter taggedAttempt(String outcome) {
+        return registry.find(BotMetrics.GROUP_RECOVERY_ATTEMPTS_TOTAL)
+                .tags("outcome", outcome, "botGroupId", "g1",
+                        "environmentId", "env-1", "product", "116")
+                .counter();
     }
 
     private List<String> lines(Level level) {
@@ -288,7 +332,7 @@ class DeadGroupRecoverySchedulerTest {
         // The budget is intact: the moment the origin comes back, attempt 1 of 6 runs.
         when(probeScheduler.isHealthy("env-1")).thenReturn(true);
         envIsHealthy();
-        when(behaviorService.startForRecovery("g1")).thenReturn(true);
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(true));
         when(behaviorService.getRunningBotCountForGroup("g1")).thenReturn(20);
 
         scheduler.reconcileAll(T0.plusSeconds(600));
@@ -303,7 +347,7 @@ class DeadGroupRecoverySchedulerTest {
     void atMostMaxPerTickPerTick() {
         persistedDead(deadGroup("g1"), deadGroup("g2"), deadGroup("g3"));
         envIsHealthy();
-        when(behaviorService.startForRecovery(anyString())).thenReturn(false);
+        when(behaviorService.startForRecovery(anyString())).thenAnswer(startsClearingMdc(false));
         lenient().when(behaviorService.getActualStatus(anyString())).thenReturn(BotGroupStatus.STOPPED);
 
         scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
@@ -317,7 +361,7 @@ class DeadGroupRecoverySchedulerTest {
     void earliestDueOrderingRotates() {
         persistedDead(deadGroup("g1"), deadGroup("g2"));
         envIsHealthy();
-        when(behaviorService.startForRecovery(anyString())).thenReturn(false);
+        when(behaviorService.startForRecovery(anyString())).thenAnswer(startsClearingMdc(false));
         lenient().when(behaviorService.getActualStatus(anyString())).thenReturn(BotGroupStatus.STOPPED);
         DeadGroupRecoveryScheduler scheduler = scheduler(true, 6, 1, 2, 5);
 
@@ -335,7 +379,7 @@ class DeadGroupRecoverySchedulerTest {
     void backoffAdvancesOnFailure() {
         persistedDead(deadGroup("g1"));
         envIsHealthy();
-        when(behaviorService.startForRecovery("g1")).thenReturn(false);
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(false));
         lenient().when(behaviorService.getActualStatus("g1")).thenReturn(BotGroupStatus.STOPPED);
         DeadGroupRecoveryScheduler scheduler = scheduler(true, 6, 1, 2, 5);
 
@@ -365,7 +409,7 @@ class DeadGroupRecoverySchedulerTest {
     void budgetExhaustsOnceAndThenStops() {
         persistedDead(deadGroup("g1"));
         envIsHealthy();
-        when(behaviorService.startForRecovery("g1")).thenReturn(false);
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(false));
         lenient().when(behaviorService.getActualStatus("g1")).thenReturn(BotGroupStatus.STOPPED);
         // backoff 0 ⇒ due on every tick, so the whole episode runs without a clock.
         DeadGroupRecoveryScheduler scheduler = scheduler(true, 3, 1, 0);
@@ -393,7 +437,7 @@ class DeadGroupRecoverySchedulerTest {
     void successIsLoggedAndCounted() {
         persistedDead(deadGroup("g1"));
         envIsHealthy();
-        when(behaviorService.startForRecovery("g1")).thenReturn(true);
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(true));
         when(behaviorService.getRunningBotCountForGroup("g1")).thenReturn(19);
 
         scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
@@ -405,13 +449,13 @@ class DeadGroupRecoverySchedulerTest {
         assertThat(lines(Level.INFO).get(1))
                 .contains("auto-recovery succeeded — 19/20 bots up");
 
-        // AD-13: group-scoped tags from MDC, exactly like group_dead_seconds_total.
-        var counter = registry.find(BotMetrics.GROUP_RECOVERY_ATTEMPTS_TOTAL)
-                .tags("outcome", "success", "botGroupId", "g1",
-                        "environmentId", "env-1", "product", "116")
-                .counter();
-        assertThat(counter).isNotNull();
-        assertThat(counter.count()).isEqualTo(1d);
+        // AD-13: group-scoped tags from MDC, exactly like group_dead_seconds_total —
+        // and asserted against a stub that clears the MDC the way startLocked does,
+        // so the re-assert in attempt() is what makes this pass.
+        assertThat(taggedAttempt("success"))
+                .as("the success counter must survive startLocked clearing the MDC")
+                .isNotNull();
+        assertThat(taggedAttempt("success").count()).isEqualTo(1d);
     }
 
     @Test
@@ -420,7 +464,7 @@ class DeadGroupRecoverySchedulerTest {
         persistedDead(deadGroup("g1"));
         envIsHealthy();
         when(behaviorService.startForRecovery("g1"))
-                .thenThrow(new IllegalStateException("auth gateway returned 503"));
+                .thenAnswer(throwsClearingMdc(new IllegalStateException("auth gateway returned 503")));
 
         scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
 
@@ -430,6 +474,45 @@ class DeadGroupRecoverySchedulerTest {
         assertThat(error.getMessage().getFormattedMessage())
                 .contains("auto-recovery attempt 1/6 failed", "auth gateway returned 503");
         assertThat(error.getThrown()).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    @DisplayName("the failed, error and exhausted series carry the AD-13 tags too, not just success")
+    void everyRecoverySeriesIsMdcTagged() {
+        // The MDC loss was not uniform: startLocked clears it on the reclaim and
+        // build paths and on the failure path once a runtime was registered, but a
+        // throw before runningGroups.put never reaches a clear(). One counter name
+        // with two series shapes is worse than one wrong shape, so all three
+        // outcomes plus the exhaustion counter are asserted with the full tag set.
+        persistedDead(deadGroup("g1"));
+        envIsHealthy();
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(false));
+        lenient().when(behaviorService.getActualStatus("g1")).thenReturn(BotGroupStatus.STOPPED);
+        DeadGroupRecoveryScheduler failing = scheduler(true, 2, 1, 0);
+
+        failing.reconcileAll(T0);
+        failing.reconcileAll(T0.plusSeconds(60));
+
+        assertThat(taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_FAILED)).isNotNull();
+        assertThat(taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_FAILED).count()).isEqualTo(2d);
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL)
+                .tags("botGroupId", "g1", "environmentId", "env-1", "product", "116").counter())
+                .as("the hand-off counter is what Phase 4's alert routes on — it needs the product tag")
+                .isNotNull();
+    }
+
+    @Test
+    @DisplayName("a thrown start still registers outcome=error with the group tags")
+    void errorSeriesIsMdcTagged() {
+        persistedDead(deadGroup("g1"));
+        envIsHealthy();
+        when(behaviorService.startForRecovery("g1"))
+                .thenAnswer(throwsClearingMdc(new IllegalStateException("auth gateway returned 503")));
+
+        scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
+
+        assertThat(taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_ERROR)).isNotNull();
+        assertThat(taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_ERROR).count()).isEqualTo(1d);
     }
 
     /* ---------------- budget reset (AD-8 / settle) ---------------- */
@@ -446,7 +529,7 @@ class DeadGroupRecoverySchedulerTest {
                 List.of(deadGroup("g1")));  // t0 + 25m  — dies again, fresh budget
         when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of());
         envIsHealthy();
-        when(behaviorService.startForRecovery("g1")).thenReturn(true);
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(true));
         when(behaviorService.getRunningBotCountForGroup("g1")).thenReturn(20);
         DeadGroupRecoveryScheduler scheduler = scheduler(true, 6, 1, 2, 5);
 
@@ -472,7 +555,7 @@ class DeadGroupRecoverySchedulerTest {
     void backoffIndexClampsToTheLastEntry() {
         persistedDead(deadGroup("g1"));
         envIsHealthy();
-        when(behaviorService.startForRecovery("g1")).thenReturn(false);
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(false));
         lenient().when(behaviorService.getActualStatus("g1")).thenReturn(BotGroupStatus.STOPPED);
         // Four attempts against a two-entry table: the clamp must supply the 3rd and 4th.
         DeadGroupRecoveryScheduler scheduler = scheduler(true, 4, 1, 1, 2);
@@ -511,7 +594,7 @@ class DeadGroupRecoverySchedulerTest {
                 deadGroup("g-a").toBuilder().lastStartedAt(base.plusHours(3)).build(),
                 deadGroup("g-z").toBuilder().lastStartedAt(base).build());
         envIsHealthy();
-        when(behaviorService.startForRecovery(anyString())).thenReturn(false);
+        when(behaviorService.startForRecovery(anyString())).thenAnswer(startsClearingMdc(false));
         lenient().when(behaviorService.getActualStatus(anyString())).thenReturn(BotGroupStatus.STOPPED);
 
         scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
@@ -529,7 +612,7 @@ class DeadGroupRecoverySchedulerTest {
                 deadGroup("g-stopped").toBuilder()
                         .lastStoppedAt(base).lastStartedAt(base.plusHours(5)).build());
         envIsHealthy();
-        when(behaviorService.startForRecovery(anyString())).thenReturn(false);
+        when(behaviorService.startForRecovery(anyString())).thenAnswer(startsClearingMdc(false));
         lenient().when(behaviorService.getActualStatus(anyString())).thenReturn(BotGroupStatus.STOPPED);
 
         scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
@@ -557,7 +640,7 @@ class DeadGroupRecoverySchedulerTest {
     void successOnTheFinalAttemptThenReDeathIsSilentlyAbandoned() {
         persistedDead(deadGroup("g1"));
         envIsHealthy();
-        when(behaviorService.startForRecovery("g1")).thenReturn(false, true);
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(false, true));
         lenient().when(behaviorService.getActualStatus("g1")).thenReturn(BotGroupStatus.STOPPED);
         lenient().when(behaviorService.getRunningBotCountForGroup("g1")).thenReturn(20);
         // backoff 0 ⇒ due on every tick; budget 2 ⇒ attempt 2 is the last one.

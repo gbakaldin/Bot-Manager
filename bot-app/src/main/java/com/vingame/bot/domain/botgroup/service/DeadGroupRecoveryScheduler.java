@@ -259,21 +259,45 @@ public class DeadGroupRecoveryScheduler {
      * survive any failure of this group (mirrors {@code ActivationScheduler}).
      * Group MDC is set around the whole attempt so every line and both counters
      * carry {@code botGroupId} / {@code environmentId} / {@code product}.
+     *
+     * <p><b>The MDC has to be re-asserted after {@code startForRecovery} returns</b>,
+     * and that is not defensive tidying. Every path through {@code startLocked} calls
+     * {@link BotMdc#clear()} on <em>this</em> thread before returning — the reclaim
+     * path's {@code teardownRuntimeMemory}, the normal build path's
+     * {@code createBotsInParallel} result loop, and the failure path's outer
+     * {@code finally} — and {@code clear()} removes the keys outright, with no
+     * save/restore. Without the re-assert, {@code incGroupRecoveryAttempt} and
+     * {@code incGroupRecoveryExhausted} register through an empty {@code mdcTags()},
+     * so AD-13's {@code botGroupId} / {@code environmentId} / {@code product} never
+     * land; {@code BotMdcTagsMeterFilter} is no safety net either, because it only
+     * touches {@code bot_}-prefixed names. Worse, the loss is not uniform — a
+     * {@code startLocked} that throws before {@code runningGroups.put} never reaches
+     * a {@code clear()} — so one counter name would carry two different series
+     * shapes.
      */
     private void attempt(BotGroup group, Instant now) {
         String id = group.getId();
         RecoveryState state = states.computeIfAbsent(id, k -> new RecoveryState());
         int attemptNumber = state.attempts + 1;
+        String product = resolveProduct(group.getEnvironmentId());
 
-        BotMdc.setGroupContext(id, group.getEnvironmentId(), resolveProduct(group.getEnvironmentId()));
+        BotMdc.setGroupContext(id, group.getEnvironmentId(), product);
         long startedAtNanos = System.nanoTime();
         try {
-            log.info("group {} ({}): auto-recovery attempt {}/{} — env {} probe-healthy, "
+            log.info("group {} ({}): auto-recovery attempt {}/{} — env {} healthy for {} probe(s), "
                             + "dead since {}, reason \"{}\"",
                     id, group.getName(), attemptNumber, maxAttempts, group.getEnvironmentId(),
+                    probeScheduler.healthyStreak(group.getEnvironmentId()),
                     deadSinceText(group), nullSafe(group.getLastFailureReason()));
 
-            boolean up = behaviorService.startForRecovery(id);
+            boolean up;
+            try {
+                up = behaviorService.startForRecovery(id);
+            } finally {
+                // See the javadoc: startLocked cleared our MDC on the way out, on
+                // every path including the one that throws.
+                BotMdc.setGroupContext(id, group.getEnvironmentId(), product);
+            }
             long seconds = Duration.ofNanos(System.nanoTime() - startedAtNanos).toSeconds();
 
             if (up) {
