@@ -316,8 +316,19 @@ public class BotGroupBehaviorService {
      * done there and is not repeated here.
      * <p>
      * The rebuild <b>re-authenticates existing accounts</b>. It never registers a
-     * user, never deposits, and never recreates the Mongo group — registration lives
-     * only in {@code BotGroupService.save} and is unreachable from any start path.
+     * user and never recreates the Mongo group — registration lives only in
+     * {@code BotGroupService.save}, gated on a null id, and every save on this path
+     * carries the group's existing id, so it is structurally unreachable.
+     * <p>
+     * <b>It "never deposits" only in the sense that it adds no deposit a manual
+     * {@code /restart} would not make.</b> The recovery <em>code</em> moves no money.
+     * The recovered <em>group</em> can: {@code startLocked} builds its
+     * {@code BotBehaviorConfig} with {@code autoDepositEnabled(group.isAutoDepositEnabled())},
+     * so a bot in an auto-deposit group tops up from its own play loop once its
+     * balance falls below minimum — exactly as it would after an operator pressed
+     * Restart, which is the right standard and the one the plan's V9 states. Read
+     * "recovery cannot move money" into this and you will be wrong about a group with
+     * auto-deposit on.
      * <p>
      * <b>Why not just call {@link #start(String)}:</b> the reconciler decided this
      * group was a recovery candidate on a previous line of code, possibly seconds

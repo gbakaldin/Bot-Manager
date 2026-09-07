@@ -1080,8 +1080,28 @@ class BotGroupBehaviorServiceRestartTest {
         }
     }
 
+    /**
+     * The money invariant, and what it actually is.
+     * <p>
+     * <b>Registration is proved structurally.</b> {@code registerUsers} has one call
+     * site, inside {@code if (isNewGroup)} in {@code BotGroupService.save}, and
+     * {@code isNewGroup} is "id is null or empty". Every save captured here carries
+     * {@code "g-1"}, so the branch is provably not taken.
+     * <p>
+     * <b>Deposits are a different claim and the old assertion did not make it.</b>
+     * The test used to scan captured log lines for "registr"/"deposit" — an
+     * assertion that could never have failed: the appender attaches to
+     * {@code BotGroupBehaviorService}'s logger, and registration lines come from
+     * {@code BotGroupService} and deposit lines from {@code Bot}, both of which are
+     * mocks here and log nothing at all. What replaces it is the fact that decides
+     * whether a recovered bot can move money: the {@code BotBehaviorConfig} handed to
+     * every bot carries the group's own {@code autoDepositEnabled}, unchanged and
+     * unforced. Recovery adds no deposit a manual {@code /restart} would not make —
+     * which is the honest form of "never deposits", and is what
+     * {@code startForRecovery}'s javadoc now says.
+     */
     @Test
-    @DisplayName("startForRecovery() re-authenticates existing accounts — NO registration, NO deposit, NO new group")
+    @DisplayName("startForRecovery() re-authenticates existing accounts — NO registration, NO new group, deposit behaviour unchanged")
     void startForRecovery_neverRegistersOrDeposits() {
         // The money invariant. Recovery reuses the accounts the group already owns;
         // registering or depositing again would spend real money on every recovery.
@@ -1103,13 +1123,14 @@ class BotGroupBehaviorServiceRestartTest {
         dead.markAsDead();
         runningGroups(service).put("g-1", dead);
 
-        List<LogEvent> events;
         try {
-            events = captureBehaviorServiceLogs(() -> service.startForRecovery("g-1"));
+            service.startForRecovery("g-1");
 
             // The only account-facing collaborator is createBot — the re-auth path,
             // once per already-existing account.
-            verify(botFactory, times(3)).createBot(anyString(), any(BotConfiguration.class));
+            ArgumentCaptor<BotConfiguration> configs =
+                    ArgumentCaptor.forClass(BotConfiguration.class);
+            verify(botFactory, times(3)).createBot(anyString(), configs.capture());
 
             // Registration is structurally unreachable: BotGroupService.save only
             // registers users when the group's id is null (a NEW group). Every save on
@@ -1120,12 +1141,15 @@ class BotGroupBehaviorServiceRestartTest {
                     assertThat(g.getId()).as("recovery must never save a new (id-less) group")
                             .isEqualTo("g-1"));
 
-            boolean sawRegistrationOrDeposit = events.stream()
-                    .map(e -> e.getMessage().getFormattedMessage().toLowerCase())
-                    .anyMatch(m -> m.contains("registr") || m.contains("deposit"));
-            assertThat(sawRegistrationOrDeposit)
-                    .as("recovery must not register or deposit — re-auth only")
-                    .isFalse();
+            // Deposit behaviour is the group's own, neither forced on nor altered:
+            // autoDepositEnabled defaults false on this group, so these bots cannot
+            // top up at all. (A group with the flag on would top up exactly as after
+            // a manual /restart — see the javadoc; that is the invariant, not
+            // "recovery cannot move money".)
+            assertThat(configs.getAllValues()).allSatisfy(c ->
+                    assertThat(c.getBehaviorConfig().isAutoDepositEnabled())
+                            .as("recovery passes through the group's own auto-deposit setting")
+                            .isEqualTo(group.isAutoDepositEnabled()));
         } finally {
             service.stop("g-1");
         }
