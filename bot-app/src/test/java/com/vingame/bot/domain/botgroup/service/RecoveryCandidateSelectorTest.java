@@ -110,35 +110,25 @@ class RecoveryCandidateSelectorTest {
     }
 
     /**
-     * <b>QA FINDING (DEAD_GROUP_AUTO_RECOVERY, AD-5).</b> This test pins behaviour
-     * that contradicts the feature's own stated invariant, so that any change to it
-     * is deliberate rather than accidental.
-     * <p>
-     * AD-3 condition 2 is a <em>disjunction</em> — {@code persistedTarget == DEAD}
-     * <b>or</b> {@code runtimeGroupDead} — so a row an operator parked
-     * {@code STOPPED} still qualifies as long as a DEAD in-memory runtime for it
-     * survives. AD-5 says the {@code STOPPED} opt-out is absolute; in this one shape
-     * it is not, and the group is handed to {@code startForRecovery}, which
-     * re-asserts the same predicate and therefore also passes it.
-     * <p>
-     * Reachability is narrow (see {@code docs/reviews/DEAD_GROUP_AUTO_RECOVERY/qa.md}):
-     * a real {@code POST /stop} removes the runtime from the map under the group
-     * lock before persisting {@code STOPPED}, so it cannot produce this pair. The
-     * known routes are a {@code PATCH {"targetStatus":"STOPPED"}} and a failed Mongo
-     * write inside {@code startLocked}'s zero-bot guard. The fix, if taken, is to
-     * make condition 2 reject {@code STOPPED} outright rather than only requiring
-     * "not DEAD".
+     * The AD-5 opt-out, driven through the <em>selector</em> rather than the
+     * predicate — because this union is the path that actually produces the shape.
+     * A {@code STOPPED} row never appears in {@code findByTargetStatus(DEAD)}; it
+     * enters through {@code listDeadRuntimeGroupIds()}, is re-read by id, and is then
+     * evaluated with {@code runtimeStatus = DEAD}. Before the explicit condition-2a
+     * veto it satisfied condition 2's second disjunct and was selected, and
+     * {@code startForRecovery} re-asserts the same predicate, so nothing downstream
+     * caught it either.
      */
     @Test
-    @DisplayName("QA FINDING: a STOPPED row with a lingering DEAD runtime is still selected (AD-5 gap)")
-    void stoppedRowWithDeadRuntimeIsStillSelected() {
+    @DisplayName("a STOPPED row with a lingering DEAD runtime is never selected (AD-5)")
+    void stoppedRowWithDeadRuntimeIsNotSelected() {
         when(repository.findByTargetStatus(BotGroupStatus.DEAD)).thenReturn(List.of());
         when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of("g3"));
         when(repository.findById("g3")).thenReturn(Optional.of(group("g3", BotGroupStatus.STOPPED)));
 
         assertThat(selectIds())
-                .as("current behaviour — AD-5 says this should be empty")
-                .containsExactly("g3");
+                .as("the operator opt-out survives a lingering DEAD runtime")
+                .isEmpty();
     }
 
     @Test

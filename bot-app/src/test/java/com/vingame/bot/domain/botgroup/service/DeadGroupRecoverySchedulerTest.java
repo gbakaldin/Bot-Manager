@@ -214,6 +214,35 @@ class DeadGroupRecoverySchedulerTest {
         assertThat(lines(Level.INFO)).isEmpty();
     }
 
+    /**
+     * The other route to a {@code STOPPED} candidate, and the one that actually
+     * produces it: not the DEAD query — a {@code STOPPED} row is not in it — but the
+     * AD-4 union over the in-memory DEAD runtimes, which re-reads the row by id and
+     * evaluates it with {@code runtimeStatus = DEAD}. Before {@code RecoveryEligibility}
+     * gained its explicit condition-2a veto this passed the disjunction, and
+     * {@code startForRecovery} re-asserts the same predicate, so there was no second
+     * gate behind it.
+     */
+    @Test
+    @DisplayName("a STOPPED row that enters through the dead-runtime union is never attempted either (AD-5)")
+    void stoppedGroupReachedThroughTheDeadRuntimeUnionIsNeverAttempted() {
+        BotGroup stopped = deadGroup("g1").toBuilder()
+                .targetStatus(BotGroupStatus.STOPPED)
+                .build();
+        when(repository.findByTargetStatus(BotGroupStatus.DEAD)).thenReturn(List.of());
+        when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of("g1"));
+        when(repository.findById("g1")).thenReturn(java.util.Optional.of(stopped));
+        DeadGroupRecoveryScheduler scheduler = scheduler(true, 6, 1, 2, 5);
+
+        for (int i = 0; i < 5; i++) {
+            scheduler.reconcileAll(T0.plusSeconds(i * 3600L));
+        }
+
+        verify(behaviorService, never()).startForRecovery(anyString());
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_ATTEMPTS_TOTAL).counters()).isEmpty();
+        assertThat(lines(Level.INFO)).isEmpty();
+    }
+
     @Test
     @DisplayName("a MANUAL_OFF group is never attempted")
     void manualOffIsNeverAttempted() {

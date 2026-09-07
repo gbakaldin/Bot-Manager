@@ -28,9 +28,13 @@ public final class RecoveryEligibility {
      * AD-3 conditions 2-6, in the order they are evaluated.
      *
      * <ol start="2">
-     *   <li>persisted {@code targetStatus == DEAD}, <b>or</b> a live runtime that
-     *       reports itself dead — the second disjunct covers the case where
-     *       {@code handleBotGroupDeath}'s DB save threw and its {@code catch}
+     *   <li>a persisted {@code targetStatus == STOPPED} <b>vetoes unconditionally</b>,
+     *       whichever disjunct below holds: {@code STOPPED} is the operator opt-out
+     *       and AD-5 makes it permanent. See the note under this list — the veto is
+     *       not implied by the disjunction and has to be written out;</li>
+     *   <li>otherwise, persisted {@code targetStatus == DEAD}, <b>or</b> a live
+     *       runtime that reports itself dead — the second disjunct covers the case
+     *       where {@code handleBotGroupDeath}'s DB save threw and its {@code catch}
      *       swallowed the failure, leaving memory DEAD and Mongo ACTIVE;</li>
      *   <li><b>not</b> a live runtime whose {@code actualStatus} is
      *       {@link BotGroupStatus#ACTIVE} — a running group is not dead no matter
@@ -43,6 +47,21 @@ public final class RecoveryEligibility {
      *       window;</li>
      *   <li>{@code botCount > 0} — there is nothing to rebuild otherwise.</li>
      * </ol>
+     *
+     * <p><b>Why the {@code STOPPED} veto is explicit rather than implied.</b> The
+     * disjunction only asks "not DEAD"; it never asks "not STOPPED". A persisted
+     * {@code STOPPED} row that still owns a lingering DEAD in-memory runtime
+     * therefore satisfies it through the second disjunct — and a lingering DEAD
+     * runtime is the <em>ordinary</em> post-death state, since both
+     * {@code handleBotGroupDeath} and {@code startLocked}'s zero-bot guard leave the
+     * runtime in {@code runningGroups} on purpose. Two known routes produce the pair:
+     * a {@code PATCH {"targetStatus":"STOPPED"}}, and a lost Mongo write in the
+     * zero-bot guard, which marks the runtime DEAD, keeps it in the map and only then
+     * saves. Neither is exotic, and no whole-program reachability argument may stand
+     * in for the one operator opt-out from a feature that autonomously starts
+     * money-spending bots: a future change to {@code stop()}, to the mapper, or a new
+     * bulk status endpoint would invalidate such an argument silently, with no test
+     * failing.
      *
      * @param persistedTarget the group's persisted {@code targetStatus} (nullable)
      * @param mode            persisted activation mode; {@code null} = legacy group
@@ -64,6 +83,15 @@ public final class RecoveryEligibility {
                                       ZoneId zone) {
         // (3) a live, ACTIVE runtime beats any persisted status.
         if (runtimeStatus == BotGroupStatus.ACTIVE) {
+            return false;
+        }
+        // (2a) STOPPED is the operator opt-out and it is permanent (AD-5). It vetoes
+        // unconditionally, ahead of condition 2's disjunction: a persisted STOPPED
+        // with a lingering DEAD runtime otherwise satisfies that disjunction through
+        // its second arm, and a lingering DEAD runtime is the ordinary post-death
+        // state. Vetoing here costs nothing the disjunction was there for — the
+        // swallowed-save case it exists to catch is persisted ACTIVE + runtime DEAD.
+        if (persistedTarget == BotGroupStatus.STOPPED) {
             return false;
         }
         // (2) dead in the DB, or dead in memory.

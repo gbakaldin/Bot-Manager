@@ -55,7 +55,10 @@ import java.util.concurrent.TimeUnit;
  *       <em>persisted</em> {@code targetStatus} so a group that died before this JVM
  *       started is visible (AD-4). <b>{@code STOPPED} is the opt-out and it is
  *       permanent</b> (AD-5): a group an operator stopped fails the predicate
- *       forever, and there is no other way to express "leave it down".</li>
+ *       forever, and there is no other way to express "leave it down". That is
+ *       enforced by {@code RecoveryEligibility}'s explicit condition-2a veto rather
+ *       than inferred from condition 2's disjunction, which only asks "not DEAD" —
+ *       see the note on that class.</li>
  *   <li>{@link EnvironmentProbeScheduler#isHealthy(String)} — positive evidence that
  *       the environment is serving again, and only after
  *       {@code bot.recovery.probe.healthy-streak} consecutive healthy probes (AD-12).

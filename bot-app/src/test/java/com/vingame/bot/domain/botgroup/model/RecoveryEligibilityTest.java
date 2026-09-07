@@ -118,24 +118,36 @@ class RecoveryEligibilityTest {
     }
 
     /**
-     * <b>QA FINDING (AD-5).</b> Condition 2 is a disjunction, so it only asks "not
-     * DEAD" — it never asks "not STOPPED". A row an operator parked {@code STOPPED}
-     * therefore still qualifies while a DEAD in-memory runtime for it survives, and
-     * AD-5's "the opt-out is absolute" does not hold in that one shape.
+     * The shape the explicit condition-2a veto exists for. Condition 2 on its own is
+     * a disjunction — it asks "not DEAD", never "not STOPPED" — so a row an operator
+     * parked {@code STOPPED} would qualify through the second disjunct for as long as
+     * a DEAD in-memory runtime for it survives. A lingering DEAD runtime is the
+     * ordinary post-death state (both {@code handleBotGroupDeath} and the zero-bot
+     * start guard leave it in {@code runningGroups} deliberately), and the pair is
+     * reachable through a {@code PATCH {"targetStatus":"STOPPED"}} and through a lost
+     * Mongo write in the zero-bot guard.
      * <p>
-     * Pinned as the current behaviour rather than the intended one so a future fix
-     * has to change this assertion on purpose. See
-     * {@code docs/reviews/DEAD_GROUP_AUTO_RECOVERY/qa.md} for the reachability
-     * analysis and {@code RecoveryCandidateSelectorTest} for the same shape driven
-     * through the real selector.
+     * This is the AD-5 invariant an operator's intent depends on, so it is asserted
+     * against the predicate rather than against a reachability argument.
+     * {@code RecoveryCandidateSelectorTest} and {@code DeadGroupRecoverySchedulerTest}
+     * drive the same shape through the real selector and the real reconciler.
      */
     @Test
-    @DisplayName("QA FINDING: persisted STOPPED + a DEAD runtime → still a candidate (AD-5 gap)")
-    void stoppedWithDeadRuntimeIsStillACandidate() {
+    @DisplayName("persisted STOPPED + a DEAD runtime → still not a candidate (AD-5 is absolute)")
+    void stoppedWithADeadRuntimeIsStillNeverACandidate() {
         assertThat(candidate(BotGroupStatus.STOPPED, null, null, 20,
                 BotGroupStatus.DEAD, true, 12))
-                .as("current behaviour — AD-5 says this should be false")
-                .isTrue();
+                .as("STOPPED vetoes unconditionally, whichever disjunct of condition 2 holds")
+                .isFalse();
+    }
+
+    @Test
+    @DisplayName("the veto does not swallow condition 2's purpose: ACTIVE + a DEAD runtime is still a candidate")
+    void theStoppedVetoDoesNotBreakTheSwallowedSaveCase() {
+        // The disjunct exists for handleBotGroupDeath's swallowed save — persisted
+        // ACTIVE, runtime DEAD. Vetoing STOPPED must leave that fully covered.
+        assertThat(candidate(BotGroupStatus.ACTIVE, null, null, 20,
+                BotGroupStatus.DEAD, true, 12)).isTrue();
     }
 
     @Test
