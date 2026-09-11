@@ -6,6 +6,7 @@ import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.TaiXiuEndGameMessage;
 import com.vingame.bot.domain.bot.message.taixiu.TaiXiuStartGameMessage;
 import com.vingame.bot.domain.bot.message.taixiu.TaiXiuSubscribeMessage;
+import com.vingame.bot.domain.bot.message.taixiu.Win79TaiXiuMessageTypes;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -35,13 +36,14 @@ class TaiXiuMessageTypesTest {
     private static final ProductCode CAPTURED_PRODUCT = ProductCode.P_116;
 
     /**
-     * The two Tai Xiu providers, wired as the component scan wires them. Discovery
+     * The three Tai Xiu providers, wired as the component scan wires them. Discovery
      * itself is covered by {@code MessageTypesRegistryTest} / {@code MessageTypesCoverageTest};
      * what is under test here is the per-product resolution and the throw.
      */
     private static final MessageTypesRegistry REGISTRY = new MessageTypesRegistry(
             List.of(), List.of(),
-            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()));
+            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes(),
+                    new Win79TaiXiuMessageTypes()));
 
     @Test
     @DisplayName("Base cmd literals are 1005/1002/1004 (inbound) + 1000 (bet, outbound)")
@@ -61,6 +63,38 @@ class TaiXiuMessageTypesTest {
         assertThat(types.startGameCmd()).isEqualTo(1002);
         assertThat(types.endGameCmd()).isEqualTo(1004);
         assertThat(types.betCmd()).isEqualTo(1000);
+    }
+
+    @Test
+    @DisplayName("P_119 (Win79) resolves — without this, a TAI_XIU group for 119 cannot start at all")
+    void resolveWin79Provider() {
+        TaiXiuMessageTypes types = REGISTRY.taiXiu("119");
+
+        assertThat(types).isInstanceOf(Win79TaiXiuMessageTypes.class);
+        // Inbound classes are reused verbatim, exactly as the 114 provider does.
+        assertThat(types.subscribeType()).isEqualTo(TaiXiuSubscribeMessage.class);
+        assertThat(types.startGameType()).isEqualTo(TaiXiuStartGameMessage.class);
+        assertThat(types.endGameType()).isEqualTo(TaiXiuEndGameMessage.class);
+    }
+
+    @Test
+    @DisplayName("P_119 carries the interface defaults (116 shape) — UNVERIFIED against a captured frame")
+    void win79ProviderUsesDefaultKnobs() {
+        TaiXiuMessageTypes types = REGISTRY.taiXiu("119");
+
+        // These two knobs are the ONLY product-specific surface for Tai Xiu, and
+        // neither has been confirmed against a real 119 Tai Xiu frame. This test
+        // documents the assumption so that changing it is a deliberate act with a
+        // failing test to update, not a silent edit.
+        //
+        // If 119 turns out to be offset 100: expect 1105/1102/1104/1100 here and
+        // flip cmdOffset() in Win79TaiXiuMessageTypes.
+        assertThat(types.cmdOffset()).isZero();
+        assertThat(types.subscribeCmd()).isEqualTo(1005);
+        assertThat(types.startGameCmd()).isEqualTo(1002);
+        assertThat(types.endGameCmd()).isEqualTo(1004);
+        assertThat(types.betCmd()).isEqualTo(1000);
+        assertThat(types.emitsAutoBetFlag()).isFalse();
     }
 
     @Test
@@ -151,7 +185,7 @@ class TaiXiuMessageTypesTest {
 
     @ParameterizedTest(name = "taiXiu({0}) -> IllegalArgumentException")
     @EnumSource(value = ProductCode.class,
-            names = {"P_066", "P_097", "P_098", "P_103", "P_105", "P_118", "P_119", "P_222"})
+            names = {"P_066", "P_097", "P_098", "P_103", "P_105", "P_118", "P_222"})
     @DisplayName("taiXiu throws 'not yet implemented' for unimplemented product codes")
     void resolveTaiXiuThrowsForUnimplemented(ProductCode productCode) {
         assertThatThrownBy(() -> REGISTRY.taiXiu(productCode.getCode()))

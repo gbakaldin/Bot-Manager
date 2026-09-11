@@ -150,21 +150,28 @@ class MessageTypesRegistryTest {
     /* ---- what the scan did and did not pick up ---- */
 
     /**
-     * The AD-23 behaviour-identity pin: the registry registers <em>exactly</em> what
-     * {@code GameMessageTypesResolver}'s three switches returned, no more and no less.
-     * Deliberately a hardcoded set — shipping a brand must be a conscious edit here,
-     * because "which products have a provider" is the one observable this sub-phase
-     * promises not to change by accident. Together with the one inventory line in
-     * {@code MessageTypesCoverageTest} it is the whole cost of a new product; nothing in
-     * {@code src/main} outside the new provider itself has to change.
+     * The AD-23 behaviour-identity pin: the registry registers <em>exactly</em> the
+     * declared set, no more and no less. Deliberately a hardcoded set — shipping a
+     * brand must be a conscious edit here, because "which products have a provider"
+     * is the one observable this sub-phase promises not to change by accident.
+     * Together with the one inventory line in {@code MessageTypesCoverageTest} it is
+     * the whole cost of a new product; nothing in {@code src/main} outside the new
+     * provider itself has to change.
+     * <p>
+     * <b>Neither row is still exactly what {@code GameMessageTypesResolver}'s switch
+     * returned</b>, and deliberately so. {@code "119"} was added to both on 2026-09-10 —
+     * {@code Win79GameMessageTypes} and {@code Win79TaiXiuMessageTypes} — the first
+     * providers registered after the resolver was retired. Without them a group for
+     * P_119 of the corresponding type cannot be created at all: {@code BotFactory}
+     * throws on the bot thread before authentication.
      */
     @Test
-    @DisplayName("The scan registers exactly the products the resolver's switch handled")
+    @DisplayName("The scan registers exactly the declared product set")
     void scanRegistersExactlyThePreviousSwitchArms() {
         assertThat(registry.registeredBettingMiniProducts())
-                .containsExactlyInAnyOrder("097", "098", "116", "118");
+                .containsExactlyInAnyOrder("097", "098", "116", "118", "119");
         assertThat(registry.registeredTaiXiuProducts())
-                .containsExactlyInAnyOrder("114", "116");
+                .containsExactlyInAnyOrder("114", "116", "119");
     }
 
     /**

@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Pins the JSON wire shape produced by the three brand-specific login requests.
+ * Pins the JSON wire shape produced by the brand-specific login requests.
  * <p>
  * These shapes are the source of {@code TIP_LOGIN_JSON_SHAPE_DEPLOY} and
  * {@code TIP_GWMS_PATHS_DEPLOY} incidents in 2026 — a {@code @JsonProperty}
@@ -68,6 +68,71 @@ class LoginRequestSerializationTest {
 
             // Catches a future drop of @JsonProperty("app_id") / @JsonProperty("aff_id")
             // / @JsonProperty("fg") that would silently flip the wire shape.
+            assertThat(json.has("appId")).isFalse();
+            assertThat(json.has("affId")).isFalse();
+            assertThat(json.has("fingerprint")).isFalse();
+        }
+    }
+
+    @Nested
+    @DisplayName("Win79LoginRequest (P_119)")
+    class Win79Shape {
+
+        private Win79LoginRequest req() {
+            return new Win79LoginRequest("dave", "pw77", "w79.club", "fp-119", "10.0.0.4");
+        }
+
+        @Test
+        @DisplayName("emits ip — the field whose absence made the gwms gateway reject P_119 logins")
+        void win79LoginRequest_emitsIp() {
+            JsonNode json = mapper.valueToTree(req());
+
+            // Regression pin for the 2026-09-10 finding: P_119 was routed to
+            // DefaultLoginRequest, which has no ip field, and the gateway answered
+            // {"status":"INVALID","message":"Invalid data. Required {ip}, ..."}.
+            assertThat(json.has("ip")).isTrue();
+            assertThat(json.get("ip").asText()).isEqualTo("10.0.0.4");
+        }
+
+        @Test
+        @DisplayName("brand-static fields match Bot-collection.http's gwms login shape")
+        void win79LoginRequest_serializesWithExpectedStaticFields() {
+            JsonNode json = mapper.valueToTree(req());
+
+            assertThat(json.get("os").asText()).isEqualTo("OS X");
+            assertThat(json.get("device").asText()).isEqualTo("Computer");
+            assertThat(json.get("browser").asText()).isEqualTo("chrome");
+            assertThat(json.get("aff_id").asText()).isEqualTo("");
+            assertThat(json.get("apVer").asText()).isEqualTo("0.0.490");
+            assertThat(json.get("version").asText()).isEqualTo("0.0.490");
+        }
+
+        @Test
+        @DisplayName("app_id is constructor-supplied, not brand-static like its siblings")
+        void win79LoginRequest_appIdComesFromConstructor() {
+            JsonNode json = mapper.valueToTree(req());
+
+            // ProductCode.P_119.getAppId() is null, so EnvironmentClientRegistry
+            // falls back to Environment.appId — the value must flow through, not
+            // be hardcoded the way Tip/Bom/B52/Rik do it.
+            assertThat(json.get("app_id").asText()).isEqualTo("w79.club");
+        }
+
+        @Test
+        @DisplayName("constructor-supplied fields propagate to JSON unchanged")
+        void win79LoginRequest_propagatesConstructorFields() {
+            JsonNode json = mapper.valueToTree(req());
+
+            assertThat(json.get("username").asText()).isEqualTo("dave");
+            assertThat(json.get("password").asText()).isEqualTo("pw77");
+            assertThat(json.get("fg").asText()).isEqualTo("fp-119");
+        }
+
+        @Test
+        @DisplayName("does not emit camelCase variants of snake_case fields")
+        void win79LoginRequest_doesNotEmitCamelCaseVariants() {
+            JsonNode json = mapper.valueToTree(req());
+
             assertThat(json.has("appId")).isFalse();
             assertThat(json.has("affId")).isFalse();
             assertThat(json.has("fingerprint")).isFalse();

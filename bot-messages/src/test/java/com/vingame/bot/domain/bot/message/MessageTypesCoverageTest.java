@@ -61,12 +61,11 @@ class MessageTypesCoverageTest {
             "103",  // P_103 HIT
             "105",  // P_105 IWIN
             "114",  // P_114 RIK   — has a TAI_XIU provider, not a betting-mini one
-            "119",  // P_119 WIN79 — the AVIATOR_BOT / Avatar crash-game target
             "222"); // P_222 BKK WIN
 
     /** Products with no {@code TAI_XIU} provider — the resolver's other throw arm. */
     private static final Set<String> TAI_XIU_NOT_YET_IMPLEMENTED = Set.of(
-            "066", "097", "098", "103", "105", "118", "119", "222");
+            "066", "097", "098", "103", "105", "118", "222");
 
     /**
      * Game types that have no message-types lookup at all. {@code BotFactory}'s own

@@ -4,6 +4,7 @@ import com.vingame.bot.domain.bot.auth.B52LoginRequest;
 import com.vingame.bot.domain.bot.auth.BomLoginRequest;
 import com.vingame.bot.domain.bot.auth.RikLoginRequest;
 import com.vingame.bot.domain.bot.auth.TipLoginRequest;
+import com.vingame.bot.domain.bot.auth.Win79LoginRequest;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.websocketparser.auth.AuthContext;
@@ -95,7 +96,7 @@ class AuthStrategyFactoryTest {
     }
 
     @ParameterizedTest(name = "{0} → DefaultLoginRequest")
-    @EnumSource(value = ProductCode.class, names = {"P_066", "P_103", "P_105", "P_118", "P_119", "P_222"})
+    @EnumSource(value = ProductCode.class, names = {"P_066", "P_103", "P_105", "P_118", "P_222"})
     @DisplayName("standard products produce a DefaultLoginRequest")
     void getAuthProfile_loginRequestFactoryReturnsDefaultLoginRequest_forStandardProducts(ProductCode pc) {
         AuthProfile profile = factory.getAuthProfile(envFor(pc));
@@ -108,6 +109,26 @@ class AuthStrategyFactoryTest {
         assertThat(dlr.getPassword()).isEqualTo("hunter2");
         assertThat(dlr.getApp_id()).isEqualTo("bc114097");
         assertThat(dlr.getFg()).isEqualTo("fp-abc");
+    }
+
+    @Test
+    @DisplayName("P_119 (Win79) produces a Win79LoginRequest carrying ip — the gwms gateway rejects a body without it")
+    void getAuthProfile_loginRequestFactoryReturnsWin79LoginRequest_forP119() {
+        AuthProfile profile = factory.getAuthProfile(envFor(ProductCode.P_119));
+
+        LoginRequest loginRequest = profile.loginRequestFactory().apply(fakeAuthContext());
+
+        assertThat(loginRequest).isInstanceOf(Win79LoginRequest.class);
+        Win79LoginRequest win79 = (Win79LoginRequest) loginRequest;
+        assertThat(win79.getUsername()).isEqualTo("alice");
+        assertThat(win79.getPassword()).isEqualTo("hunter2");
+        assertThat(win79.getFingerprint()).isEqualTo("fp-abc");
+        // The whole point of the class: DefaultLoginRequest has no ip field and
+        // the gateway answers {"status":"INVALID","message":"... Required {ip} ..."}.
+        assertThat(win79.getIp()).isEqualTo(BOT_IP);
+        // Unlike its four siblings, app_id is ctx-driven — ProductCode.P_119.appId
+        // is null, so the value comes from Environment.appId.
+        assertThat(win79.getAppId()).isEqualTo("bc114097");
     }
 
     @Test
