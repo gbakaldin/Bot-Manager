@@ -498,12 +498,22 @@ public class DeadGroupRecoveryScheduler {
      * {@code attempt}'s MDC scope and re-setting the same values there is a no-op;
      * the clear is skipped in that case so it cannot wipe the caller's context
      * mid-attempt.
+     * <p>
+     * <b>The flag records a report that completed, not one that was started.</b> It
+     * used to be set before the emit, which turned any throw out of
+     * {@code incGroupRecoveryExhausted} — a meter registration Micrometer rejects,
+     * say — into permanent silence: the counter never moved, the ERROR was never
+     * logged, and the guard then suppressed every later chance to say so. An
+     * idempotence guard must not be able to convert a transient failure into a lost
+     * signal, least of all this one, which is the single thing this feature hands to
+     * a human. The retry costs nothing: the group stays a candidate, the skip branch
+     * in {@link #evaluateCandidate} calls this again on the next tick, and a duplicate
+     * ERROR would in any case be a far cheaper defect than a missing one.
      */
     private void reportExhaustionOnce(RecoveryState state, BotGroup group) {
         if (state.exhaustedReported) {
             return;
         }
-        state.exhaustedReported = true;
 
         boolean ownsMdc = !group.getId().equals(MDC.get(BotMdc.BOT_GROUP_ID));
         if (ownsMdc) {
@@ -515,6 +525,8 @@ public class DeadGroupRecoveryScheduler {
             log.error("group {} ({}): auto-recovery exhausted after {} attempts — operator action "
                             + "required (POST /api/v1/bot-group/{}/restart)",
                     group.getId(), group.getName(), maxAttempts, group.getId());
+            // Only now: both halves of the hand-off are out.
+            state.exhaustedReported = true;
         } finally {
             if (ownsMdc) {
                 BotMdc.clear();
@@ -659,7 +671,11 @@ public class DeadGroupRecoveryScheduler {
         /** When the last successful recovery happened, for the settle window. */
         Instant lastSuccess;
 
-        /** Whether the one hand-off ERROR + counter has already been emitted. */
+        /**
+         * Whether the one hand-off ERROR + counter has already been emitted —
+         * <b>emitted</b>, not attempted. Set only after both halves are out, so a
+         * throw from the counter does not silence the episode for good.
+         */
         boolean exhaustedReported;
     }
 }

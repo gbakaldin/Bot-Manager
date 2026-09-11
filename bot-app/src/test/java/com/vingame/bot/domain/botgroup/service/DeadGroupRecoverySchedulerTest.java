@@ -863,6 +863,88 @@ class DeadGroupRecoverySchedulerTest {
                 .collect(java.util.stream.Collectors.toSet());
     }
 
+    /**
+     * <b>The idempotence guard must record a hand-off that happened, not one that was
+     * tried.</b>
+     *
+     * <p>{@code exhaustedReported} used to be set before the emit. A throw out of
+     * {@code incGroupRecoveryExhausted} — a meter registration Micrometer rejects,
+     * say — therefore lost the counter <em>and</em> the ERROR, permanently, for that
+     * death episode: the flag was already burned, so every later tick took the early
+     * return. That converts a transient failure into a silence on the one signal this
+     * whole feature hands to a human.
+     *
+     * <p>Driven through the skip branch, which is where the hand-off comes from when
+     * the budget was spent by a <em>success</em>: one attempt succeeds (budget 1), the
+     * next tick finds the budget gone and reports exhaustion — and the first such
+     * report throws. The tick after that must still deliver it.
+     */
+    @Test
+    @DisplayName("a throw from the exhaustion counter does not burn the one-shot hand-off")
+    void theHandOffSurvivesAFailedFirstEmit() {
+        ThrowsOnceMetrics flaky = new ThrowsOnceMetrics(registry);
+        botMetrics = flaky;
+
+        persistedDead(deadGroup("g1"));
+        envIsHealthy();
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(true));
+        when(behaviorService.getRunningBotCountForGroup("g1")).thenReturn(20);
+
+        DeadGroupRecoveryScheduler scheduler = scheduler(true, 1, 1, 0);
+
+        // Tick 1: the single budgeted attempt succeeds and spends the budget.
+        scheduler.reconcileAll(T0);
+        // Tick 2: budget gone ⇒ the skip branch reports exhaustion, and the counter throws.
+        scheduler.reconcileAll(T0.plusSeconds(60));
+
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL).counter().count())
+                .as("the emit threw, so nothing was counted")
+                .isZero();
+        assertThat(lines(Level.ERROR))
+                .as("and nothing was said either — the throw took the ERROR with it")
+                .noneMatch(line -> line.contains("auto-recovery exhausted"));
+
+        // Tick 3: the guard must not have been burned by the failed attempt.
+        scheduler.reconcileAll(T0.plusSeconds(120));
+
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL).counter().count())
+                .as("the hand-off must be delivered once the transient failure clears")
+                .isEqualTo(1d);
+        assertThat(lines(Level.ERROR))
+                .anyMatch(line -> line.contains("group g1 (group-g1): auto-recovery exhausted after 1 attempts"));
+        assertThat(flaky.exhaustionCalls.get()).isEqualTo(2);
+
+        // Tick 4: and it is still exactly once.
+        scheduler.reconcileAll(T0.plusSeconds(180));
+
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL).counter().count())
+                .isEqualTo(1d);
+        assertThat(lines(Level.ERROR).stream()
+                .filter(line -> line.contains("auto-recovery exhausted")).count())
+                .as("one hand-off per death episode, not one per tick")
+                .isEqualTo(1L);
+    }
+
+    /**
+     * A {@link BotMetrics} whose exhaustion counter fails the first time and works
+     * afterwards — the shape of a transient registry failure.
+     */
+    private static final class ThrowsOnceMetrics extends BotMetrics {
+        private final AtomicInteger exhaustionCalls = new AtomicInteger();
+
+        private ThrowsOnceMetrics(io.micrometer.core.instrument.MeterRegistry registry) {
+            super(registry);
+        }
+
+        @Override
+        public void incGroupRecoveryExhausted() {
+            if (exhaustionCalls.incrementAndGet() == 1) {
+                throw new IllegalStateException("registry rejected the meter");
+            }
+            super.incGroupRecoveryExhausted();
+        }
+    }
+
     /* ---------------- one bad row must not disable the fleet (round-3 finding 3) ---------------- */
 
     /**
