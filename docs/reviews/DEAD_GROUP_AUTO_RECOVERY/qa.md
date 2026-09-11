@@ -285,3 +285,143 @@ side-effect worth knowing: `restart()` on a runtime-less group now performs an e
 ## Failures
 
 None. `mvn test` → 1224 run, 0 failures, 0 errors, 0 skipped.
+
+---
+
+# QA — DEAD_GROUP_AUTO_RECOVERY — **Phase 4** (alerting, docs, staging enable)
+
+Commits reviewed: `9214902` (alert rules), `4543734` (compose switch), `6457e59`
+(CLAUDE.md), plus `a07e103` (WIN79 P_119 providers, carried on the same branch).
+
+**Verdict:** PASS
+**Build:** `mvn clean install -Dmaven.javadoc.skip=true` → **2,106 tests, 0 failures,
+0 errors, 0 skipped**, `BUILD SUCCESS` across all five modules.
+
+## The build-number discrepancy in Dev's report, resolved
+
+Dev's detail said "2,098 tests, 0 failures"; its closing line said "Build: PASS
+(`mvn clean install -DskipTests`)". **The detail is right and the closing line is a
+mislabel** — I ran the full build myself, before touching anything:
+
+| Module | Tests |
+|---|---|
+| Bot - API | 138 |
+| Bot - Strategies | 126 |
+| Bot - Messages | 167 |
+| Bot - Engine | 431 |
+| Bot - Application | 1,236 |
+| **Total (branch as landed)** | **2,098 — 0 failures, 0 errors, 0 skipped** |
+
+No `-DskipTests` anywhere in the run, and `grep -c "Tests are skipped"` on the log is
+`0`. With my additions the application module goes 1,236 → 1,244 and the total to
+**2,106**, still green. (Note the Phase 1-3 verdict above quotes `1224`, which was the
+**bot-app module** count under `mvn test`, not the reactor total — the two numbers are
+not comparable.)
+
+## Tests added / updated
+
+- `bot-app/src/test/java/com/vingame/bot/domain/botgroup/service/RecoveryKillSwitchWiringTest.java`
+  — **new, 3 tests.** The Phase 4 switch, pinned across the two files that must agree:
+  compose passes `BOT_RECOVERY_ENABLED=${BOT_RECOVERY_ENABLED:-false}` on the
+  `bot-manager` service; `application.properties` still declares
+  `bot.recovery.enabled=false` **exactly once**; and the SCREAMING_SNAKE name
+  relaxed-binds to the dotted property `DeadGroupRecoveryScheduler` reads (the
+  `LoggingLevelOverrideTest.EnvVarRelaxedBinding` idiom, no Spring context).
+- `bot-app/src/test/java/com/vingame/bot/domain/botgroup/service/RecoveryAlertRuleWiringTest.java`
+  — **new, 4 tests.** `EnvironmentGroupRecoveryFlapping` selects
+  `group_recovery_attempts_total{outcome=...}` with the value equal to
+  `DeadGroupRecoveryScheduler.OUTCOME_SUCCESS` (this is why the class lives in that
+  package — the constant is package-private); `EnvironmentGroupRecoveryExhausted` reads
+  `BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL` through `increase(...)` and is `critical`;
+  `EnvironmentGroupDead`'s description no longer contains any "(does not|never|cannot)
+  recover" claim and does name auto-recovery and the `STOPPED` opt-out; and its
+  `for: 5m` is unchanged (AD-15).
+- `bot-app/src/test/java/com/vingame/bot/infrastructure/observability/AlertRuleMetricsTest.java`
+  — **+1 test**, reusing the existing fixture (no new fixture, no god object):
+  `everyLabelMatcherSelectsAnEmittedValue` — every **equality** label matcher on an
+  application metric must select a value that appears in the rendered exposition.
+  Equality only; `!=`, `=~`, `!~` are out of scope by design (`bot_messages_total`'s
+  `cmd=~"startGame|spin"` is a legitimate union). It covers 5 selectors today
+  (`EnvironmentAuthDown`, `EnvironmentLoginFailing`, `EnvironmentDeadBotRatioHigh`,
+  `GameNoRounds`, `EnvironmentGroupRecoveryFlapping`) and has a non-vacuity floor.
+
+**All eight were mutation-checked**, not just observed green. With
+`BOT_RECOVERY_ENABLED` deleted from compose, `bot.recovery.enabled` flipped to `true`,
+`outcome="success"` drifted to `"succeeded"`, and the old "does not recover on its own"
+sentence restored, the run is **5 failures** — one per mutation, each naming the file to
+fix. The working tree was restored afterwards (`git checkout --`, verified clean).
+
+## Coverage of the diff
+
+| Phase 4 change | Test | What is pinned |
+|---|---|---|
+| `docker-compose.yml` `BOT_RECOVERY_ENABLED` | `RecoveryKillSwitchWiringTest` (new) | presence on `bot-manager`, the `${...:-false}` form, and that the name binds |
+| `application.properties` `bot.recovery.enabled=false` | `RecoveryKillSwitchWiringTest` (new) | single declaration, value `false` — Phase 5 not taken |
+| `prometheus/alerts.yml` `EnvironmentGroupRecoveryExhausted` | `RecoveryAlertRuleWiringTest` (new), `AlertRuleMetricsTest`, `AlertRulesAudienceTest`, `AlertmanagerRoutingTest` | counter name + `increase()` + `critical`/`product`; metric exists in a real exposition; `$labels.*` resolve; reaches the VipTalk receiver |
+| `prometheus/alerts.yml` `EnvironmentGroupRecoveryFlapping` | same four | plus the `outcome` **label value** against the scheduler's own constant |
+| `EnvironmentGroupDead` description + `for:` | `RecoveryAlertRuleWiringTest` (new) | the falsified claim cannot drift back; the 5 m window is not widened |
+| `alertmanager/alertmanager.yml` (comment-only change) | `AlertmanagerRoutingTest` | unchanged routing still delivers every rule, including the two new ones, to VipTalk |
+| `CLAUDE.md` subsection | — | prose; read it against the code by hand, see below |
+
+The two existing generic guards already cover the new rules **without anyone editing
+them**, so I did not duplicate them: `AlertRulesAudienceTest` enumerates every alerting
+rule and demands `labels.audience` (both new rules declare `product`), and
+`AlertmanagerRoutingTest.everyAlertRuleStillReachesVipTalk` enumerates `alerts.yml` and
+proves both fall through the parent route to the `viptalk` receiver — which is exactly
+the claim `9214902`'s new alertmanager.yml comment makes.
+
+I also read the CLAUDE.md subsection against the shipped code. Every falsifiable
+statement in it checks out: compose form and property default (now tested), probe
+independent of the flag (`EnvironmentProbeScheduler` takes no `enabled` flag), the
+`STOPPED` veto being explicit rather than inferred (`a411ac6`), the success-charges-budget
+rule and the dual hand-off sites (`4236614`), and "five gaps, not six".
+
+## Findings from the earlier phases: status
+
+`F1` (STOPPED + lingering DEAD runtime was still a candidate) and `F2` (silent
+exhaustion after a success on the final attempt) were the two items the Phase 1-3
+verdict marked **blocking for Phase 4**. Both are now fixed on the branch — `a411ac6`
+and `4236614` — and the tests that pinned the defective behaviour have been inverted to
+pin the fix. Nothing in Phase 4 reopens either. `F3` is closed by `f4a436b`
+(`handleBotGroupDeath` takes the per-group lock with `tryLock(2, SECONDS)`).
+
+## Gaps
+
+- **Nothing here proves the flag actually turns recovery on.** The build can prove the
+  switch exists, is spelled right, binds, and ships off. It cannot prove that a box's
+  `.env` sets it — that file is uncommitted by design. **The boot line
+  `Dead-group recovery scheduler ... enabled=true` is the only confirmation**, and it is
+  a mandatory releaser check on every host this goes to.
+- **The other nine `bot.recovery.*` keys are still untested as *values*.** I pinned only
+  `enabled`, because it is the one whose wrong value is dangerous rather than merely
+  suboptimal. `backoff-minutes` binding as `int[]` is still only covered transitively by
+  `ApplicationContextLoadsTest` at the compiled default — an override typo'd in `.env`
+  (V11's short form asks for exactly that) fails at context refresh, loudly, which is
+  acceptable.
+- **PromQL semantics are still unverified by the build.** These tests check that the
+  rules select metrics and label values we emit; they do not run `promtool` and cannot
+  tell you that `increase(...[6h]) >= 3` fires when you expect. V11b remains the real
+  check that Prometheus loads both rules.
+- **`env_ws_probe_*` has no alert rule**, so the Phase 4 alerting surface says nothing
+  about an environment that never becomes probe-healthy. That is by design (the group
+  stays DEAD and `EnvironmentGroupDead` keeps firing), but it means "recovery never
+  attempted" and "recovery attempted and failing" are distinguishable only from
+  `group_recovery_attempts_total` and the logs — which the corrected
+  `EnvironmentGroupDead` description does now tell the operator.
+- **Straight-to-prod skips V8-V11.** Everything in this feature's behavioural
+  verification is a staging procedure that manufactures a DEAD group; the plan
+  explicitly forbids doing that on a live prod fleet (V12: "run V0a, V0b, V1 and this
+  step only"). So on Prod-Bot, with `BOT_RECOVERY_ENABLED=true` and no soak, the first
+  real exercise of the reconciler will be a real incident. The unit suite covers the
+  decision logic densely (43 tests across `RecoveryEligibilityTest` (16),
+  `RecoveryCandidateSelectorTest` (7) and `DeadGroupRecoverySchedulerTest` (20), plus
+  the `startForRecovery` cases in `BotGroupBehaviorServiceRestartTest`) and the money
+  invariant is asserted structurally, but **no test exercises the enabled reconciler
+  against a live gateway.** That is a deployment risk, not a test gap I can close; the
+  mitigations that exist are the four opt-outs (`STOPPED`, `MANUAL_OFF`, closed window,
+  `BOT_RECOVERY_ENABLED=false`) and `max-per-tick=1`.
+
+## Failures
+
+None. `mvn clean install -Dmaven.javadoc.skip=true` → 2,106 run, 0 failures, 0 errors,
+0 skipped.
