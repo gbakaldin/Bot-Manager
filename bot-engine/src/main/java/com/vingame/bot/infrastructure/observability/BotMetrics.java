@@ -474,6 +474,15 @@ public class BotMetrics {
      * {@code outcome} values are passed in rather than hard-coded here because the
      * scheduler owns that vocabulary.
      *
+     * <p><b>The tag <em>keys</em> must also be the same on every group's series, and
+     * that is the caller's job</b>: {@code mdcTags()} skips an absent or empty MDC
+     * value, so a group whose {@code product} could not be resolved would register a
+     * two-key shape. Micrometer does not object — it registers both — but the
+     * Prometheus exposition keeps only the first key set seen under a metric name and
+     * silently omits every later shape, for the life of the JVM. That is why
+     * {@code DeadGroupRecoveryScheduler} substitutes a placeholder
+     * ({@code TAG_UNRESOLVED}) instead of passing a null through.
+     *
      * <p>Nothing is registered while {@code bot.recovery.enabled} is false — the
      * reconciler never reaches an attempt, so "shipped inert" is unchanged.
      */

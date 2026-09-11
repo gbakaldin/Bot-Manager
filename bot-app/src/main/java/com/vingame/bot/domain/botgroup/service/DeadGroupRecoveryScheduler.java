@@ -112,6 +112,38 @@ public class DeadGroupRecoveryScheduler {
     /** The start path threw. */
     static final String OUTCOME_ERROR = "error";
 
+    /**
+     * The placeholder every recovery meter tag carries when the real value cannot be
+     * resolved, so that the tag <b>key</b> set of {@code group_recovery_*} is the same
+     * three names on every series, always.
+     *
+     * <p><b>A dropped key is not a smaller series, it is an invisible one.</b> Against
+     * this project's {@code micrometer-registry-prometheus} a same-name meter with a
+     * different label-key set does <em>not</em> throw: it registers happily, and then
+     * the first key set registered under that name wins the exposition for the lifetime
+     * of the JVM while every later shape is silently omitted from {@code scrape()} — no
+     * exception, no warning, nothing in the logs. {@link #resolveProduct} swallows a
+     * Mongo failure to a DEBUG line, and a Mongo blip during the incident that killed
+     * the group is not exotic, so one ill-timed attempt could otherwise fix the
+     * two-key shape first and leave every other group's hand-off counter unexported
+     * for the life of the process. That is precisely the alert
+     * {@code BotMetrics.initGroupRecoverySeries} exists to keep firing.
+     *
+     * <p>An alert routed on {@code product="unknown"} has no matching child route and
+     * falls through to the default VipTalk receiver, which is strictly better than an
+     * alert that does not exist.
+     */
+    static final String TAG_UNRESOLVED = "unknown";
+
+    /**
+     * A tag value that is safe to hand to {@link BotMdc#setGroupContext}: null and
+     * empty both become {@link #TAG_UNRESOLVED}, because {@code setGroupContext} skips
+     * nulls and {@code BotMetrics.mdcTags()} skips empties — either one drops the key.
+     */
+    private static String tagValue(String value) {
+        return value == null || value.isEmpty() ? TAG_UNRESOLVED : value;
+    }
+
     private final BotGroupRepository botGroupRepository;
     private final BotGroupBehaviorService behaviorService;
     private final EnvironmentService environmentService;
@@ -352,9 +384,13 @@ public class DeadGroupRecoveryScheduler {
         String id = group.getId();
         RecoveryState state = states.computeIfAbsent(id, k -> new RecoveryState());
         int attemptNumber = state.attempts + 1;
+        // Both values are placeholder-substituted rather than passed raw: the tag KEY
+        // set of every group_recovery_* series has to be the same three names or the
+        // odd one out vanishes from the exposition. See TAG_UNRESOLVED.
         String product = resolveProduct(group.getEnvironmentId());
+        String environmentTag = tagValue(group.getEnvironmentId());
 
-        BotMdc.setGroupContext(id, group.getEnvironmentId(), product);
+        BotMdc.setGroupContext(id, environmentTag, product);
         // Materialise all four group_recovery_* series at zero under this group's
         // tags BEFORE anything can increment one. A counter that first appears at 1
         // is invisible to increase(), which is what EnvironmentGroupRecoveryExhausted
@@ -376,8 +412,9 @@ public class DeadGroupRecoveryScheduler {
                 up = behaviorService.startForRecovery(id);
             } finally {
                 // See the javadoc: startLocked cleared our MDC on the way out, on
-                // every path including the one that throws.
-                BotMdc.setGroupContext(id, group.getEnvironmentId(), product);
+                // every path including the one that throws. Same two locals as the
+                // first call, so the re-assert cannot change the tag set.
+                BotMdc.setGroupContext(id, environmentTag, product);
             }
             long seconds = Duration.ofNanos(System.nanoTime() - startedAtNanos).toSeconds();
 
@@ -470,7 +507,7 @@ public class DeadGroupRecoveryScheduler {
 
         boolean ownsMdc = !group.getId().equals(MDC.get(BotMdc.BOT_GROUP_ID));
         if (ownsMdc) {
-            BotMdc.setGroupContext(group.getId(), group.getEnvironmentId(),
+            BotMdc.setGroupContext(group.getId(), tagValue(group.getEnvironmentId()),
                     resolveProduct(group.getEnvironmentId()));
         }
         try {
@@ -573,20 +610,27 @@ public class DeadGroupRecoveryScheduler {
     /**
      * The product label for this group's meters and MDC. Resolved from the
      * environment, like every other {@code product} label in the app; a missing or
-     * unreadable environment simply drops the label rather than failing the attempt
-     * (the attempt itself will fail on its own, loudly, inside {@code startLocked}).
+     * unreadable environment does not fail the attempt (the attempt itself will fail
+     * on its own, loudly, inside {@code startLocked}).
+     *
+     * <p><b>Never null.</b> All four of its failure routes — no environment id, no
+     * such environment, no {@code productCode} on it, and any exception from the
+     * lookup — return {@link #TAG_UNRESOLVED} rather than dropping the tag, because a
+     * {@code group_recovery_*} series with a different label-key set is omitted from
+     * the Prometheus exposition without a word. Read TAG_UNRESOLVED's javadoc before
+     * "simplifying" this back to a null.
      */
     private String resolveProduct(String environmentId) {
         if (environmentId == null) {
-            return null;
+            return TAG_UNRESOLVED;
         }
         try {
             Environment environment = environmentService.findById(environmentId);
             return environment != null && environment.getProductCode() != null
-                    ? environment.getProductCode().getCode() : null;
+                    ? environment.getProductCode().getCode() : TAG_UNRESOLVED;
         } catch (Exception e) {
             log.debug("Cannot resolve environment {} for recovery MDC: {}", environmentId, e.getMessage());
-            return null;
+            return TAG_UNRESOLVED;
         }
     }
 

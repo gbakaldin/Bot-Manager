@@ -143,10 +143,14 @@ class DeadGroupRecoverySchedulerTest {
     }
 
     private static BotGroup deadGroup(String id) {
+        return deadGroup(id, "env-1");
+    }
+
+    private static BotGroup deadGroup(String id, String environmentId) {
         return BotGroup.builder()
                 .id(id)
                 .name("group-" + id)
-                .environmentId("env-1")
+                .environmentId(environmentId)
                 .botCount(20)
                 .targetStatus(BotGroupStatus.DEAD)
                 .lastFailureReason("Multiple bot disconnections detected")
@@ -788,6 +792,75 @@ class DeadGroupRecoverySchedulerTest {
                 .containsExactlyInAnyOrderElementsOf(
                         taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_FAILED).getId().getTags()
                                 .stream().filter(t -> !"outcome".equals(t.getKey())).toList());
+    }
+
+    /**
+     * <b>The tag KEY set must be the same on every group's series, whatever the
+     * environment lookup does.</b> This is the other half of pre-registration, and it
+     * is silent rather than loud.
+     *
+     * <p>Micrometer does not reject a same-name meter with a different label-key set —
+     * it registers both, and the Prometheus exposition then keeps only the key set
+     * that was registered <em>first</em> under that name and omits every later shape,
+     * for the lifetime of the JVM, with no exception and no log line. {@code
+     * resolveProduct} swallows any failure of {@code environmentService.findById} to a
+     * DEBUG line, and a Mongo blip during the incident that killed the group is not an
+     * exotic condition — so one ill-timed attempt could fix the two-key shape and
+     * leave every other group's {@code group_recovery_exhausted_total} unexported,
+     * which is exactly the alert pre-registration exists to keep firing.
+     *
+     * <p>Two groups in one tick: {@code g1}'s environment resolves to product 116,
+     * {@code g2}'s lookup throws. Both must produce the same three tag keys.
+     */
+    @Test
+    @DisplayName("an unresolvable product does not drop the tag — every group_recovery_* series has the same tag keys")
+    void everyRecoverySeriesCarriesTheSameTagKeysEvenWhenTheProductCannotBeResolved() {
+        when(repository.findByTargetStatus(BotGroupStatus.DEAD))
+                .thenReturn(List.of(deadGroup("g1", "env-1"), deadGroup("g2", "env-2")));
+        when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of());
+        when(probeScheduler.isHealthy(anyString())).thenReturn(true);
+        lenient().when(probeScheduler.healthyStreak(anyString())).thenReturn(2);
+        when(environmentService.findById("env-1")).thenReturn(Environment.builder()
+                .id("env-1").name("TIP staging").productCode(ProductCode.P_116).build());
+        when(environmentService.findById("env-2"))
+                .thenThrow(new IllegalStateException("mongo is mid-failover"));
+        when(behaviorService.startForRecovery(anyString())).thenAnswer(startsClearingMdc(false));
+
+        // budget 1 ⇒ both groups attempt, fail and exhaust inside this one tick, so
+        // every series is both pre-registered and incremented.
+        scheduler(true, 1, 2, 0).reconcileAll(T0);
+
+        assertThat(tagKeySets(BotMetrics.GROUP_RECOVERY_ATTEMPTS_TOTAL))
+                .as("one label-key shape for group_recovery_attempts_total — a second "
+                        + "shape is silently dropped from the Prometheus exposition")
+                .containsExactly(List.of("botGroupId", "environmentId", "outcome", "product"));
+        assertThat(tagKeySets(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL))
+                .as("one label-key shape for group_recovery_exhausted_total")
+                .containsExactly(List.of("botGroupId", "environmentId", "product"));
+
+        // And the group whose product could not be resolved is present, tagged with
+        // the placeholder — an alert on product="unknown" falls through to the default
+        // receiver, which beats an alert that does not exist.
+        io.micrometer.core.instrument.Counter unresolved =
+                registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL)
+                        .tags("botGroupId", "g2", "environmentId", "env-2",
+                                "product", DeadGroupRecoveryScheduler.TAG_UNRESOLVED)
+                        .counter();
+        assertThat(unresolved).isNotNull();
+        assertThat(unresolved.count()).isEqualTo(1d);
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL).counters())
+                .as("one exhaustion series per group, no stray shapes")
+                .hasSize(2);
+    }
+
+    /** The distinct sorted tag-key lists registered under one metric name. */
+    private Set<List<String>> tagKeySets(String meterName) {
+        return registry.find(meterName).counters().stream()
+                .map(c -> c.getId().getTags().stream()
+                        .map(io.micrometer.core.instrument.Tag::getKey)
+                        .sorted()
+                        .toList())
+                .collect(java.util.stream.Collectors.toSet());
     }
 
     /* ---------------- one bad row must not disable the fleet (round-3 finding 3) ---------------- */
