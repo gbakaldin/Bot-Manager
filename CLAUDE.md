@@ -469,6 +469,89 @@ declare.
   version dimension, so two live plugin versions are not expressible under them.
   Both are step-5 decisions, recorded in Amendment A8.
 
+### A DEAD bot group restarts itself — `bot.recovery.enabled`
+
+`docs/plans/DEAD_GROUP_AUTO_RECOVERY.md`. A transient upstream outage longer than the
+per-bot reconnect budget (7 backoffs x 10 cycles ~= **51 minutes**, `Bot.java:38,47`)
+used to convert into an **indefinite** one: every bot goes DEAD, the group crosses
+`bot.group.dead.threshold` (0.80), `handleBotGroupDeath` persists `targetStatus=DEAD`,
+and **nothing in the codebase ever retried** — the activation reconciler resolves `NONE`
+for a dead target and `onStartup` only auto-starts `ACTIVE`. That is how TIP/116 staging
+sat dead for **three days** ending in a manual `/restart` that took 60 seconds. The
+mechanism was never missing; only the trigger was.
+
+- **`DeadGroupRecoveryScheduler`** (60 s virtual-thread tick) is driven by the
+  **persisted `targetStatus == DEAD`**, not by `runningGroups`. That is deliberate: a
+  group that died *before* the current JVM started is absent from the in-memory map, so
+  it reports `groups_dead_by_env = 0` and never fires `EnvironmentGroupDead` — the case
+  with the longest downtime is exactly the one a memory-driven reconciler would miss.
+  In-memory DEAD runtimes are unioned in for the case where the death's DB write threw.
+- **It only ever calls the path an operator's `/restart` calls.**
+  `BotGroupBehaviorService.startForRecovery` takes the same per-group `ReentrantLock`,
+  **re-reads the group inside the lock** and re-asserts eligibility (closing the window
+  where a `/stop` lands between decision and action), then calls the existing
+  `startLocked`. Existing accounts are **re-authenticated**; nothing registers users,
+  nothing deposits, no DB group is recreated. There is no second lifecycle path.
+- **It is gated on positive evidence, not on a timer.** `EnvironmentWsProbe` does an
+  **anonymous** JDK-`HttpClient` WebSocket upgrade against `Environment.webSocketMiniUrl`
+  — the URL *every* bot uses whatever the game type (`BotFactory.java:146`;
+  `webSocketCardUrl` is never used to build a client). Healthy = an HTTP 101 **or any
+  completed response < 500**, because the fault being detected is "origin gone, edge
+  synthesising a 502", and a well-formed 401/403 proves something is parsing our request
+  (AD-2). `bot.recovery.probe.healthy-streak=2` means ~60 s of sustained health, and an
+  ACTIVE sibling group on the same environment with an open socket short-circuits the
+  probe entirely (outcome `live_sibling`, AD-10). The probe touches no bot account, no
+  token, no money — if anything auth-shaped becomes reachable from it, that is a defect.
+- **The probe runs whether or not `bot.recovery.enabled` is set**; the flag gates the
+  *reconciler* only. So an instance with recovery off still publishes
+  `env_ws_probe_total` / `env_ws_probe_healthy` and shows what recovery would have done.
+  Zero probe traffic when there are no candidates, which is the normal state.
+- **`STOPPED` is the opt-out, and it is the only one.** `POST /{id}/stop` →
+  `targetStatus=STOPPED` → never a candidate again, whatever the runtime says (the veto
+  is explicit in `RecoveryEligibility`, not inferred). `MANUAL_OFF` and a `SCHEDULED`
+  group outside its window are equally ineligible. There is **no per-group or
+  per-environment opt-out field** and deliberately so (AD-5) — "keep this group running
+  but never recover it" is not a requirement anyone has. Two consequences of making
+  `STOPPED` load-bearing: `stop()` now **persists `STOPPED` for a runtime-less group**
+  instead of returning a bare WARN, and `restart()`'s internal stop does **not** (a
+  teardown step is not a statement of intent) and restores the prior status if its start
+  half throws — otherwise a failed `/restart`, which is exactly what the exhaustion ERROR
+  tells an operator to run, would silently opt the group out for good.
+- **The attempt budget is what bounds the blast radius**: `max-attempts=6`,
+  `backoff-minutes=2,5,15,30,60,60` (~2 h across five gaps, not six), `max-per-tick=1`.
+  Budget is spent **only on attempts**, and an attempt happens only while the probe reads
+  healthy — an environment down for six hours costs **zero** budget and simply waits.
+  What the budget bounds is "the environment answers and the group still will not come
+  up", the group-scale analogue of `MAX_RECONNECT_CYCLES`. A **success also charges** the
+  budget (it resets after `settle-minutes=10` of staying up), so exhaustion can follow a
+  flap; both the failure path and the exhausted-skip path emit the ERROR +
+  `group_recovery_exhausted_total`, because exhausting silently is the one outcome that
+  must be impossible. Any manual `/start` / `/restart` resets it, as does a JVM restart —
+  state is in-memory by design (AD-11).
+- **Staggering is structural, not a rate limiter.** One single-threaded reconciler, one
+  attempt per tick, earliest-due first: ten dead groups recover over ten minutes and a
+  permanently failing group cannot starve the others. The tick **blocks** for the whole
+  duration of one group start — that *is* the serialisation, so nothing time-sensitive
+  may be added to it. That is why the probe has its own scheduler.
+- **`EnvironmentGroupDead` now often resolves on its own**, and its `for: 5m` is
+  unchanged on purpose (AD-15): a self-heal inside 5 minutes silently prevents the page,
+  which is the point, and one after 5 minutes fires-then-resolves, which is the honest
+  record. Repetition is what must stay visible, so `prometheus/alerts.yml` adds
+  `EnvironmentGroupRecoveryFlapping` (>= 3 successes in 6 h, warning) and
+  `EnvironmentGroupRecoveryExhausted` (critical — nothing will try again until a human
+  acts). Neither needs an Alertmanager route: with no matching child they fall through to
+  the `viptalk` receiver, and only a `continue: true` child would have needed a mandatory
+  `viptalk` sibling.
+- **Shipped off, switched outside the jar.** `bot.recovery.enabled=false` in
+  `application.properties`; `docker-compose.yml` passes
+  `BOT_RECOVERY_ENABLED=${BOT_RECOVERY_ENABLED:-false}` (Spring relaxed-binds it), so
+  turning recovery on or off on one box is a `docker compose up -d bot-manager`, not a
+  rebuild. Set it in the uncommitted `secrets.env`/`.env` merge, never in the compose
+  file.
+- **A group parked below the threshold is not covered.** At `dead.threshold=0.80` a group
+  can sit at 79% DEAD forever without being DEAD, so it is not a recovery candidate;
+  `EnvironmentDeadBotRatioHigh` is the signal for that shape. Unchanged by this feature.
+
 ### Token Naming Reference
 
 The same token is called different things in different contexts — this is a known mess:
@@ -763,6 +846,13 @@ rather than expecting all of them to move at once.
   create/PATCH; `start`/`stop` are unchanged (manual actions park a SCHEDULED group
   as `MANUAL_ON`/`MANUAL_OFF`).
 - [x] Periodic logout logic - one bot per group logs out per hour (round-robin), configurable via `application.properties` (environment-dependent)
+- [x] DEAD groups recover without an operator — `DEAD_GROUP_RESTART` made a DEAD group
+  one-click restartable (the `start()` reclaim path); `DEAD_GROUP_AUTO_RECOVERY` supplies
+  the missing **trigger**, so a group that died during an upstream outage restarts itself
+  once an anonymous WebSocket probe says the environment is serving again, bounded by a
+  6-attempt budget and opted out of by `STOPPED`. See "A DEAD bot group restarts itself"
+  under Architecture. Reading the old framing — that a DEAD group is restored only by a
+  human pressing `/restart` — as still-current is what a three-day staging outage cost.
 
 **Code Quality:**
 - [ ] Add more unit and component tests
