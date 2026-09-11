@@ -47,8 +47,14 @@
 # `EnvironmentDeadBotRatioHigh`. A small group inside a large environment could
 # therefore die without moving that ratio past 0.2. `EnvironmentGroupDead` is the
 # first-class replacement, built on the new labelled `groups_dead_by_env` sibling
-# of `groups_dead_currently` — a DEAD group never recovers on its own and must be
-# restarted by an operator, so it warrants its own alert, not a corner of a ratio.
+# of `groups_dead_currently` — a DEAD group stops betting entirely, so it warrants
+# its own alert, not a corner of a ratio. (That sentence used to end "a DEAD group
+# never recovers on its own and must be restarted by an operator".
+# DEAD_GROUP_AUTO_RECOVERY falsified it: a DEAD group now restarts itself once the
+# environment probe reports healthy, bounded by an attempt budget. What is still
+# true is that a DEAD group is not betting, and that an operator is still the only
+# thing that ends the failure the budget hands off — see
+# `EnvironmentGroupRecoveryExhausted` below.)
 #
 # THRESHOLDS ARE FIRST GUESSES. 0.5 / 0.8 socket ratios, the 0.5 auth-failure
 # ratio, the >= 5 sample floors, the 0.2 dead-bot ratio, the host disk / RAM / CPU
@@ -207,9 +213,18 @@ groups:
       # is already actionable, whatever fraction of the environment it is.
       #
       # for: 5m, not 10m: the state is already debounced upstream (the health monitor
-      # only marks a group DEAD after consecutive failed checks) and it never clears
-      # by itself — a DEAD group stays DEAD until an operator restarts it. The window
-      # exists only so an operator-initiated restart in progress does not page anyone.
+      # only marks a group DEAD after consecutive failed checks). The window exists so
+      # that a restart already in progress does not page anyone — originally an
+      # operator-initiated one, and since DEAD_GROUP_AUTO_RECOVERY an automatic one too.
+      #
+      # The window is DELIBERATELY unchanged by auto-recovery (AD-15). A self-heal
+      # inside 5 minutes silently prevents the page, which is the point of the feature;
+      # a self-heal after 5 minutes fires this alert and then resolves it, which is the
+      # correct record of "it broke and healed". Widening `for:` to hide the second case
+      # would equally hide a group that never comes back. What must NOT be hidden is
+      # repetition, and that is what the two rules below are for: read a
+      # firing-then-resolving pair here as "possibly self-healed", then check
+      # EnvironmentGroupRecoveryFlapping.
       - alert: EnvironmentGroupDead
         expr: groups_dead_by_env > 0
         for: 5m
@@ -219,7 +234,60 @@ groups:
           audience: product
         annotations:
           summary: "{{ $value }} bot group(s) DEAD on env {{ $labels.environmentId }}"
-          description: "A DEAD group does not recover on its own and stops betting entirely — it must be restarted (POST /api/v1/bot-group/{id}/restart, which rebuilds the runtime and reuses the existing accounts). Check EnvironmentSocketDown / EnvironmentAuthDown first: if the cause is still present the group will die again."
+          description: "A DEAD group stops betting entirely. Auto-recovery will restart it by itself — rebuilding the runtime and reusing the existing accounts, no new users and no new deposits — as soon as the environment WebSocket probe reports healthy, so this alert may resolve without anyone acting. Still firing after ~10 minutes means recovery is failing or the environment is still down: check EnvironmentSocketDown / EnvironmentAuthDown for the cause, and env_ws_probe_healthy plus the `auto-recovery attempt` log lines for which of the two it is. The manual path is unchanged (POST /api/v1/bot-group/{id}/restart); POST /{id}/stop parks a group as STOPPED, which is the opt-out from auto-recovery."
+
+      # DEAD_GROUP_AUTO_RECOVERY AD-8 / AD-15 — the hand-off to a human, and the one
+      # recovery state nothing else gets out of. The attempt budget (6 attempts,
+      # 2/5/15/30/60 minutes apart) is spent ONLY on attempts, and an attempt is made
+      # only while the environment probe reads healthy — so exhaustion never means "the
+      # environment was down for two hours". It means the environment ANSWERED and the
+      # group still would not come up, ~2 hours after it died. Nothing will try again
+      # until an operator acts. Hence critical, where the flapping rule below is only a
+      # warning: this is the state in which the fleet has given up and said so.
+      #
+      # increase(...[15m]) > 0, not a gauge: exhaustion is an EVENT and the counter
+      # moves at most once per death episode. 15m is far longer than the 60s recovery
+      # tick, so the alert survives long enough to be grouped, delivered and read, and
+      # then resolves on its own — which here means "we stopped trying", NOT "fixed".
+      # The group is still DEAD and EnvironmentGroupDead is what keeps saying so.
+      #
+      # The counter is tagged from the recovery scheduler's group MDC (AD-13), so it
+      # carries botGroupId, environmentId and product — which is what lets a rule about
+      # a single group route to that product's room rather than the ops room.
+      - alert: EnvironmentGroupRecoveryExhausted
+        expr: increase(group_recovery_exhausted_total[15m]) > 0
+        labels:
+          job: bot-manager
+          severity: critical
+          audience: product
+        annotations:
+          summary: "Auto-recovery gave up on bot group {{ $labels.botGroupId }} (env {{ $labels.environmentId }})"
+          description: "The recovery attempt budget is spent: every attempt ran against an environment the probe called healthy, and the group still did not come up. Nothing will attempt it again until a human does — POST /api/v1/bot-group/{id}/restart, which also resets the budget once it succeeds. The per-attempt `auto-recovery attempt n/6 failed` WARN lines carry the reason; check EnvironmentAuthDown before retrying, since a gateway that answers but rejects logins produces exactly this shape."
+
+      # DEAD_GROUP_AUTO_RECOVERY AD-15 — recovery working repeatedly is not the same as
+      # recovery working. A group that dies and heals three times in six hours has an
+      # environment that keeps breaking, and every cycle costs a full per-bot reconnect
+      # budget (~51 minutes of a group not betting) before the group is even a recovery
+      # candidate. Each of those cycles can resolve inside EnvironmentGroupDead's
+      # `for: 5m` and page nobody — that suppression is deliberate (AD-15), so the
+      # repetition it hides needs a rule of its own, or the feature quietly converts a
+      # visible outage into an invisible one.
+      #
+      # >= 3 in [6h]: one or two recoveries across a working day is a flaky upstream
+      # nobody would act on; three inside six hours is a pattern. The window is per
+      # SERIES, i.e. per group — three different groups recovering once each is an
+      # environment story EnvironmentGroupDead already tells. `for: 5m` only debounces
+      # the evaluation; the condition it debounces is already six hours wide.
+      - alert: EnvironmentGroupRecoveryFlapping
+        expr: increase(group_recovery_attempts_total{outcome="success"}[6h]) >= 3
+        for: 5m
+        labels:
+          job: bot-manager
+          severity: warning
+          audience: product
+        annotations:
+          summary: "Bot group {{ $labels.botGroupId }} has auto-recovered {{ $value }} times in 6h (env {{ $labels.environmentId }})"
+          description: "Auto-recovery keeps succeeding, which means something keeps killing this group — recovery is treating a symptom. Each cycle burns the per-bot reconnect budget (~51 minutes of no betting) before recovery is even attempted, so the group is idle far longer than the DEAD windows suggest. Find the cause: EnvironmentSocketDown / EnvironmentAuthDown, the game server, or subscriber pruning. If the group must stay down while that is investigated, POST /api/v1/bot-group/{id}/stop parks it as STOPPED, which is the opt-out from auto-recovery."
 
       # A2b — login/auth gateway down. verifytoken.aspx runs on every authoritative
       # balance fetch, so this counter moves continuously while bots play; that is

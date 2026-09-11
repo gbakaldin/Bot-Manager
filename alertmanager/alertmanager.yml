@@ -80,9 +80,21 @@ route:
         - alertname = "BotManagerDown"
       receiver: viptalk
 
-    # A DEAD group never recovers on its own, and the logs explaining why it died are
-    # the ones a cheap retention is most likely to have swept by the time anyone
-    # looks. Hence evidence, plus the MANDATORY viptalk sibling.
+    # The logs explaining why a group died are the ones a cheap retention is most
+    # likely to have swept by the time anyone looks. Hence evidence, plus the
+    # MANDATORY viptalk sibling.
+    #
+    # This pair matters MORE since DEAD_GROUP_AUTO_RECOVERY, not less: a group that
+    # recovers by itself resolves this alert without a human ever opening the box, so
+    # the pinned files are now sometimes the only record that anything happened. It is
+    # also why the two recovery rules (EnvironmentGroupRecoveryExhausted,
+    # EnvironmentGroupRecoveryFlapping) get NO route of their own — both can only fire
+    # for a group whose death already fired EnvironmentGroupDead and already pinned the
+    # window, hours earlier, and a route here that promoted again would pin the
+    # post-incident tail instead of the incident. With no matching child they fall
+    # through to the parent `viptalk` receiver, which is the delivery every ordinary
+    # alert gets; AlertmanagerRoutingTest.everyAlertRuleStillReachesVipTalk enumerates
+    # prometheus/alerts.yml and proves it for them without anyone editing this file.
     - matchers:
         - alertname = "EnvironmentGroupDead"
       receiver: evidence

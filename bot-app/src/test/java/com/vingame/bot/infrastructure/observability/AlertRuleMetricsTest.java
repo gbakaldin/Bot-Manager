@@ -137,6 +137,18 @@ class AlertRuleMetricsTest {
         metrics.incVerifyToken(false);
         MDC.clear();
 
+        // --- the group-scoped recovery counters (DEAD_GROUP_AUTO_RECOVERY AD-13),
+        // emitted under the recovery scheduler's GROUP MDC: botGroupId, environmentId
+        // and product, and no bot identity, because no bot exists yet when a dead group
+        // is being recovered. EnvironmentGroupRecoveryExhausted and
+        // EnvironmentGroupRecoveryFlapping read them BARE, so their tag set is the
+        // alert's label set — which is what makes `audience: product` routable and
+        // {{ $labels.botGroupId }} render a group id instead of `<no value>`.
+        BotMdc.setGroupContext("group-uuid-1", "env-uuid-1", "116");
+        metrics.incGroupRecoveryAttempt("success");
+        metrics.incGroupRecoveryExhausted();
+        MDC.clear();
+
         // --- the log4j2 queue meters, registered exactly as AsyncQueueMetrics does at
         // startup, against the real LoggerContext this build runs on. LogQueueSaturated
         // reads them bare and renders {{ $labels.appender }}, so both the metric names
