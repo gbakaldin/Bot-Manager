@@ -43,9 +43,13 @@ import java.util.concurrent.TimeUnit;
  * the existing per-group lock and calls the existing {@code startLocked} reclaim
  * path — the same one a manual {@code /restart} uses and the same one that ended the
  * incident in ~60 seconds. That path <b>re-authenticates existing accounts</b>: it
- * never registers a user, never deposits, never recreates the Mongo group. A bug in
- * that direction would spend real money, which is why the boundary is one method and
- * not a second lifecycle.
+ * never registers a user and never recreates the Mongo group, and it adds no deposit
+ * a manual {@code /restart} would not make — the recovery code moves no money, but a
+ * recovered group with {@code autoDepositEnabled} still tops its bots up from their
+ * own play loop, exactly as it would after an operator pressed Restart. See
+ * {@link BotGroupBehaviorService#startForRecovery(String)}'s javadoc, which spells the
+ * distinction out. A bug in that direction would spend real money, which is why the
+ * boundary is one method and not a second lifecycle.
  *
  * <h2>The five gates before anything starts</h2>
  * <ol>
