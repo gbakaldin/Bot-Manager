@@ -222,6 +222,23 @@ class AlertRuleMetricsTest {
         return kept;
     }
 
+    /** All values the scraped series of {@code metric} carry for label {@code label}. */
+    private Set<String> scrapedLabelValues(String metric, String label) {
+        Set<String> values = new LinkedHashSet<>();
+        for (String line : scrape.split("\n")) {
+            if (line.startsWith("#")) continue;
+            Matcher m = Pattern.compile("^" + Pattern.quote(metric) + "\\{([^}]*)}").matcher(line);
+            if (!m.find()) continue;
+            for (String pair : m.group(1).split(",")) {
+                int eq = pair.indexOf('=');
+                if (eq <= 0) continue;
+                if (!pair.substring(0, eq).strip().equals(label)) continue;
+                values.add(pair.substring(eq + 1).strip().replaceAll("^\"|\"$", ""));
+            }
+        }
+        return values;
+    }
+
     /** All label names present on the scraped series of {@code metric}. */
     private Set<String> scrapedLabels(String metric) {
         Set<String> labels = new LinkedHashSet<>();
@@ -421,6 +438,57 @@ class AlertRuleMetricsTest {
     private static boolean hasTopLevelAnd(String expr) {
         String flat = expr.replace('\n', ' ');
         return !firstTopLevelAndOperand(expr).equals(flat);
+    }
+
+    @Test
+    @DisplayName("every equality label matcher selects a value the application really emits")
+    void everyLabelMatcherSelectsAnEmittedValue() {
+        // The sibling of everyReferencedApplicationMetricExists, one level down. A rule
+        // over a metric that exists but a label VALUE that does not — `outcome="succeeded"`,
+        // `status="DEAD_BOT"` — is exactly as silent as a typo'd metric name: an empty
+        // vector, forever, reported by nothing. promtool cannot see it either, because the
+        // expression parses perfectly.
+        //
+        // DEAD_GROUP_AUTO_RECOVERY made this worth pinning generically:
+        // EnvironmentGroupRecoveryFlapping's whole meaning lives in
+        // `{outcome="success"}` — without the selector it counts failed attempts as
+        // self-heals, and with the wrong one it counts nothing at all. The same shape
+        // already carries EnvironmentAuthDown, EnvironmentLoginFailing and
+        // EnvironmentDeadBotRatioHigh.
+        //
+        // Equality matchers only. `!=`, `=~` and `!~` are deliberately out of scope: a
+        // regex may legitimately name values this fixture does not render (bot_messages_total
+        // cmd=~"startGame|spin" is a union across two game families), and a negative matcher
+        // is about absence.
+        Pattern selector = Pattern.compile("([a-zA-Z_:][a-zA-Z0-9_:]*)\\{([^}]*)}");
+        Pattern equality = Pattern.compile("([a-zA-Z_][a-zA-Z0-9_]*)\\s*=\\s*\"([^\"]*)\"");
+        int checked = 0;
+        for (Rule rule : rules()) {
+            Matcher m = selector.matcher(rule.expr());
+            while (m.find()) {
+                String metric = m.group(1);
+                if (PROMQL_WORDS.contains(metric) || isExternal(metric) || !isExposed(metric)) continue;
+                Matcher pair = equality.matcher(m.group(2));
+                while (pair.find()) {
+                    String label = pair.group(1);
+                    String value = pair.group(2);
+                    checked++;
+                    assertThat(scrapedLabelValues(metric, label))
+                            .as("rule %s selects %s{%s=\"%s\"}, but no series this "
+                                    + "application emits carries that value for that label "
+                                    + "— the rule evaluates to an empty vector forever and "
+                                    + "never reports that it is doing so", rule.name(),
+                                    metric, label, value)
+                            .contains(value);
+                }
+            }
+        }
+        assertThat(checked)
+                .as("the guard must not go vacuous: the outcome/status selectors on "
+                        + "EnvironmentAuthDown, EnvironmentLoginFailing, "
+                        + "EnvironmentDeadBotRatioHigh, GameNoRounds and "
+                        + "EnvironmentGroupRecoveryFlapping are why it exists")
+                .isGreaterThanOrEqualTo(4);
     }
 
     @Test
