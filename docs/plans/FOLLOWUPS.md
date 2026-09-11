@@ -122,6 +122,38 @@ This is a running list of production bugs and code seams identified while expand
 - **Destination:** `src/test/resources/messages/<product>/<type>.json`.
 - **RESOLVED:** Phase 7 QA pass (mvn test green at 263 tests). User hand-crafted all 15 fixtures (3 products × 5 message types) under `src/test/resources/messages/{bom,nohu,b52}/`. Distinct offsets chosen per product (BOM=2000 → cmd 5000s, Nohu=4000 → cmd 7000s, B52=6000 → cmd 9000s) so the cross-product polymorphism guard test can verify a BOM-only mapper rejects a Nohu fixture with `InvalidTypeIdException`. Tests added: `BomGameMessageTypesTest` (6), `NohuGameMessageTypesTest` (5), `B52GameMessageTypesTest` (5), plus one CMD-arithmetic regression check in `GameMessageTypesResolverTest`.
 
+### P10 — `monitorHealth` computes the dead ratio over the bots that exist, not the bots there should be
+
+- **File:** `bot-app/src/main/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorService.java`,
+  `monitorHealth` (~`:2260-2290`).
+- **What:** the death test is `dead / bots.size() >= bot.group.dead.threshold`, where
+  `bots` is `runtime.getBotInstances()` — the bots that were successfully *created*. It is
+  never compared against `group.getBotCount()`, the size the group is configured to be.
+  The method also early-returns on an empty list.
+- **Impact:** a group that started with only a fraction of its bots is permanently
+  healthy in the health monitor's eyes. A 50-bot group holding 1 live bot reads `0/1`
+  dead — 0% — so it never crosses the threshold, never goes DEAD, never becomes a
+  recovery candidate and never fires `EnvironmentGroupDead`. Nothing else compares live
+  bots to configured bots either: no rule in `prometheus/alerts.yml` does, and
+  `bots_managed_by_env` counts what exists. The group simply bets at 2% of its size,
+  indefinitely, reported by nothing.
+- **Surfaced by:** `docs/reviews/DEAD_GROUP_AUTO_RECOVERY/review.md`, round 3, second
+  `[bug]` finding. Auto-recovery made it reachable unattended — a partial rebuild at
+  3 a.m. lands in exactly this state — but the bug is older and wider than recovery:
+  the same shape follows any partial manual `/start` or `/restart`, e.g. the
+  PING-before-AUTH race.
+- **Not fixed with the recovery pass, deliberately.** `startForRecovery`'s success
+  predicate was made proportional to `botCount` (see `isRecovered`), which stops
+  *recovery* from recording a partial rebuild as a success. `monitorHealth` is
+  fleet-wide health-monitoring surface on the path of every running group, and was left
+  alone hours before a prod push rather than rewritten.
+- **Action:** decide whether the denominator should be `max(bots.size(), group.getBotCount())`
+  or whether "runtime is far below configured size" deserves its own signal (a
+  `bots_configured_by_env` gauge plus a ratio rule would make it visible without
+  changing the death semantics of every group at once). Either way it needs its own
+  test pass over `BotGroupBehaviorServiceTest`'s dead-threshold cases, which currently
+  all start from a fully-built group.
+
 ## Test-quality follow-ups
 
 ### T1 — `BotGroupRuntime.stopAllBots` not covered

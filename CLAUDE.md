@@ -491,7 +491,13 @@ mechanism was never missing; only the trigger was.
   **re-reads the group inside the lock** and re-asserts eligibility (closing the window
   where a `/stop` lands between decision and action), then calls the existing
   `startLocked`. Existing accounts are **re-authenticated**; nothing registers users,
-  nothing deposits, no DB group is recreated. There is no second lifecycle path.
+  no DB group is recreated. There is no second lifecycle path. **On deposits, say it
+  precisely**: the recovery *code* moves no money, but `startLocked` rebuilds the
+  group's `BotBehaviorConfig` with its own `autoDepositEnabled`, so a recovered
+  auto-deposit group tops its bots up from their own play loop
+  (`BettingMiniGameBot.onNewSession`) exactly as it would after a manual `/restart`.
+  "Recovery never deposits" is false read literally, and it is written that way in
+  `startForRecovery`'s javadoc for the same reason.
 - **It is gated on positive evidence, not on a timer.** `EnvironmentWsProbe` does an
   **anonymous** JDK-`HttpClient` WebSocket upgrade against `Environment.webSocketMiniUrl`
   — the URL *every* bot uses whatever the game type (`BotFactory.java:146`;
@@ -542,6 +548,28 @@ mechanism was never missing; only the trigger was.
   acts). Neither needs an Alertmanager route: with no matching child they fall through to
   the `viptalk` receiver, and only a `continue: true` child would have needed a mandatory
   `viptalk` sibling.
+- **Both of those rules only work because the counters are pre-registered at zero.**
+  `BotMetrics.initGroupRecoverySeries`, called at the top of every attempt under the
+  group MDC, materialises all four `group_recovery_*` series at `0` before anything can
+  increment one. A Micrometer counter registered lazily at increment time first appears
+  at `1` and stays at `1`; `increase()` over samples that are all `1` is `last - first
+  = 0` and Prometheus' counter-start extrapolation is gated on `resultValue > 0`, so
+  `EnvironmentGroupRecoveryExhausted` (`> 0`) could **never** fire on a group's first
+  exhaustion — the only one that normally happens, since the budget is in-memory — and
+  `EnvironmentGroupRecoveryFlapping`'s documented `>= 3` silently meant 4. **Do not
+  make these counters lazy again**, and do not "simplify" `initGroupRecoverySeries`
+  away: the tags must come from the same MDC the increments use, or it registers a
+  second series and fixes nothing.
+- **"Recovered" is proportional, not `> 0`.** `startForRecovery` reports success only
+  if the rebuilt runtime is ACTIVE **and** holds strictly more live bots than
+  `bot.group.dead.threshold` leaves a live group (> 20% of the *configured* `botCount`
+  at the shipped 0.80). A 50-bot group that authenticates one bot is
+  `outcome="failed"`: it charges an attempt and is retried on the backoff, instead of
+  being recorded as recovered, dropped from the candidate set with its budget unspent
+  and left running at 2% of its size. Nothing else would have caught that — no rule
+  compares live bots to configured bots, and `monitorHealth` computes its dead ratio
+  over the bots that exist rather than the bots there should be (a separate latent bug,
+  logged in `docs/plans/FOLLOWUPS.md`).
 - **Shipped off, switched outside the jar.** `bot.recovery.enabled=false` in
   `application.properties`; `docker-compose.yml` passes
   `BOT_RECOVERY_ENABLED=${BOT_RECOVERY_ENABLED:-false}` (Spring relaxed-binds it), so
