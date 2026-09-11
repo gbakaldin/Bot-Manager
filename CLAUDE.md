@@ -560,16 +560,21 @@ mechanism was never missing; only the trigger was.
   make these counters lazy again**, and do not "simplify" `initGroupRecoverySeries`
   away: the tags must come from the same MDC the increments use, or it registers a
   second series and fixes nothing.
-- **"Recovered" is proportional, not `> 0`.** `startForRecovery` reports success only
-  if the rebuilt runtime is ACTIVE **and** holds strictly more live bots than
-  `bot.group.dead.threshold` leaves a live group (> 20% of the *configured* `botCount`
-  at the shipped 0.80). A 50-bot group that authenticates one bot is
-  `outcome="failed"`: it charges an attempt and is retried on the backoff, instead of
-  being recorded as recovered, dropped from the candidate set with its budget unspent
-  and left running at 2% of its size. Nothing else would have caught that — no rule
-  compares live bots to configured bots, and `monitorHealth` computes its dead ratio
-  over the bots that exist rather than the bots there should be (a separate latent bug,
-  logged in `docs/plans/FOLLOWUPS.md`).
+- **"Recovered" means ACTIVE with at least one bot, and a partial rebuild is one of
+  them.** `startForRecovery` returns true for an ACTIVE runtime with
+  `runningBotCount > 0`, so a 50-bot group that authenticates one bot is
+  `outcome="success"` and the INFO line reads `1/50 bots up`. A proportional predicate
+  (`> (1 - bot.group.dead.threshold) * botCount`) was written and **reverted**, because
+  it changes the label and nothing else: a partial start is a *successful*
+  `startLocked`, which persists `targetStatus=ACTIVE` and leaves an ACTIVE runtime, so
+  `RecoveryEligibility` vetoes on ACTIVE and `RecoveryCandidateSelector` stops selecting
+  the group. There is no next attempt to charge the budget to, no exhaustion and no
+  hand-off ERROR — `expireStates` even refunds the attempt, since the settle window is
+  keyed on `lastSuccess` and `recordFailure` never sets it. **Do not "fix" this in the
+  predicate again.** The barrier is the ACTIVE persist, not the success test; a real fix
+  has to tear the partial rebuild down or retain recovery state past it, and it is
+  written up as P10 in `docs/plans/FOLLOWUPS.md` together with why nothing else notices
+  (`monitorHealth` divides by the bots that exist, so 1/1 alive reads healthy forever).
 - **Shipped off, switched outside the jar.** `bot.recovery.enabled=false` in
   `application.properties`; `docker-compose.yml` passes
   `BOT_RECOVERY_ENABLED=${BOT_RECOVERY_ENABLED:-false}` (Spring relaxed-binds it), so
@@ -586,11 +591,35 @@ The same token is called different things in different contexts — this is a kn
 
 | Internal name | Register response field | `verifytoken` `?token=` param | Role |
 |---|---|---|---|
-| `authToken` | `session_id` | `token` | WebSocket authentication, `X-TOKEN` for user update |
-| `agencyToken` | `token` | — | Monetary ops |
+| `authToken` | `session_id` | `token` | `verifytoken` balance reads, `X-TOKEN` for user update |
+| `agencyToken` | `token` | — | Monetary ops **and the WebSocket AUTH frame** |
 | `jwtToken` (token2) | _(not yet in register response)_ | — | Merging JWT; will eventually replace both above |
 
 `token2` / `jwtToken` is in active development and currently works alongside the other two. Once migration is complete it will replace both `authToken` and `agencyToken`.
+
+**The WS AUTH frame carries `agencyToken`, not `authToken`.** This row said
+"WebSocket authentication" against `authToken` for a long time and was simply
+wrong — `VingameWebSocketClient:341` builds
+`AuthMessage.builder().accessToken(agencyToken)`, and a live 119 exchange
+confirms it: the accepted `accessToken` is the `18-…`-prefixed agency value.
+Sending `session_id` instead is rejected with `[1,false,100,"",null,null]`.
+The name collision is what makes this so easy to get backwards — the register/login
+response calls the agency token `token` and the auth token `session_id`, i.e. the
+*opposite* of the internal names.
+
+The exact accepted frame shape, for reference (119, 2026-09-10):
+
+```
+OUT [1,"MiniGame","","",{"agentId":"1","accessToken":"18-…","reconnect":false}]
+IN  [1,true,0,"62w3al2R","MiniGame",null]
+```
+
+`agentId` is the **string** `"1"`, not the number — that is what `AuthMessage`
+emits and what the server accepts. Note the reference client
+`dev-w79-avatar.js` additionally sends `ib:true` and an unquoted `agentId`; the
+exchange above proves **neither is required**, so no ws-parser change is needed
+to reach a 119 socket. `ib` appears nowhere in this codebase and its meaning is
+not documented anywhere we control.
 
 ### Parallel Execution
 

@@ -341,11 +341,24 @@ public class BotGroupBehaviorService {
      * Nothing is caught: the caller isolates each group in its own try/catch and
      * needs the exception to classify the attempt as {@code outcome="error"}.
      *
-     * @return whether the group actually came up — a live ACTIVE runtime holding
-     *         enough bots to clear the {@link #isRecovered} line. {@code false} also
-     *         covers "no longer eligible", which is a skip, not a failure the caller
-     *         should charge to the budget differently: both simply mean the group is
-     *         not running.
+     * @return whether the group actually came up — a live ACTIVE runtime with at
+     *         least one running bot. {@code false} also covers "no longer eligible",
+     *         which is a skip, not a failure the caller should charge to the budget
+     *         differently: both simply mean the group is not running.
+     *         <p>
+     *         <b>That is a deliberately low bar, and it is not a health check.</b> A
+     *         rebuild that authenticated one bot of fifty reports success here. A
+     *         proportional predicate was tried and reverted because it buys nothing:
+     *         a partial start is a <em>successful</em> {@code startLocked}, so it has
+     *         already persisted {@code targetStatus=ACTIVE} and left an ACTIVE
+     *         runtime by the time this returns, and {@code RecoveryEligibility} then
+     *         vetoes on ACTIVE while {@code RecoveryCandidateSelector} stops
+     *         selecting the group at all. Whatever this method answers, the group is
+     *         out of the candidate set and there is no next attempt; the only thing a
+     *         stricter predicate changes is the label on the counter and the text of
+     *         the log line. The degraded group itself is
+     *         {@code docs/plans/FOLLOWUPS.md} P10, which records what a real fix has
+     *         to do.
      */
     public boolean startForRecovery(String id) {
         ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
@@ -372,50 +385,10 @@ public class BotGroupBehaviorService {
             BotGroupRuntime rebuilt = runningGroups.get(id);
             return rebuilt != null
                     && rebuilt.getActualStatus() == BotGroupStatus.ACTIVE
-                    && isRecovered(rebuilt.getRunningBotCount(), persisted.getBotCount());
+                    && rebuilt.getRunningBotCount() > 0;
         } finally {
             lock.unlock();
         }
-    }
-
-    /**
-     * What "recovered" means, as a decision rather than an accident.
-     *
-     * <p>A rebuild is a recovery only if it brought up <b>strictly more</b> bots than
-     * {@code bot.group.dead.threshold} leaves a live group: at the shipped 0.80, more
-     * than 20% of the group's <em>configured</em> {@code botCount}. This deliberately
-     * reuses the existing notion of "this group is functionally dead" instead of
-     * inventing a second constant — a group the health monitor would declare DEAD the
-     * moment it looked at it has not been recovered.
-     *
-     * <p>The predicate it replaces was {@code runningBotCount > 0}, under which a
-     * 50-bot group that authenticated <b>one</b> bot counted as recovered:
-     * {@code createBotsInParallel} swallows per-bot failures and {@code startLocked}'s
-     * viability guard only catches the zero-bot case, so the reconciler recorded
-     * {@code outcome="success"}, stopped selecting the group, left {@code targetStatus}
-     * ACTIVE and never used the rest of its budget. Nothing else would have reported
-     * it: no rule compares live bots to configured bots, and {@code monitorHealth}
-     * computes its dead ratio over the bots that exist rather than the bots there
-     * should be, so 1/1 alive reads healthy forever. Partial authentication is a shape
-     * this codebase meets routinely (the PING-before-AUTH race), and auto-recovery is
-     * what makes it happen unattended.
-     *
-     * <p><b>The cost is a real change in budget semantics</b>: a partial start is now
-     * {@code outcome="failed"}, so it charges an attempt and the group is retried on
-     * the backoff instead of being abandoned in a degraded state. That is the intent —
-     * the budget exists to be spent on a group that is not up.
-     *
-     * @param runningBotCount live bots in the rebuilt runtime
-     * @param configuredBotCount the group's persisted {@code botCount}, which is the
-     *                           size it is supposed to be — not the size it managed
-     */
-    private boolean isRecovered(long runningBotCount, int configuredBotCount) {
-        if (runningBotCount <= 0) {
-            return false;
-        }
-        // configuredBotCount <= 0 is a group that is not supposed to have bots; the
-        // > 0 test above has already answered for it.
-        return runningBotCount > (1.0d - deadBotGroupThreshold) * configuredBotCount;
     }
 
     private void startLocked(String id) {

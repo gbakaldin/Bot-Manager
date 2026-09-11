@@ -122,7 +122,88 @@ This is a running list of production bugs and code seams identified while expand
 - **Destination:** `src/test/resources/messages/<product>/<type>.json`.
 - **RESOLVED:** Phase 7 QA pass (mvn test green at 263 tests). User hand-crafted all 15 fixtures (3 products × 5 message types) under `src/test/resources/messages/{bom,nohu,b52}/`. Distinct offsets chosen per product (BOM=2000 → cmd 5000s, Nohu=4000 → cmd 7000s, B52=6000 → cmd 9000s) so the cross-product polymorphism guard test can verify a BOM-only mapper rejects a Nohu fixture with `InvalidTypeIdException`. Tests added: `BomGameMessageTypesTest` (6), `NohuGameMessageTypesTest` (5), `B52GameMessageTypesTest` (5), plus one CMD-arithmetic regression check in `GameMessageTypesResolverTest`.
 
-### P10 — `monitorHealth` computes the dead ratio over the bots that exist, not the bots there should be
+### P9 — `jackson-databind` pinned to 2.15.2 while `jackson-annotations` is 2.20
+
+- **File:** `pom.xml:43-45` (`<jackson.databind.version>2.15.2`, `<jackson.core.version>2.15.2`,
+  `<jackson.annotations.version>2.20`), applied via `dependencyManagement` at `pom.xml:70-84`.
+- **Origin:** commit `92469f5` ("build: split into parent aggregator + bot-app child module").
+  No comment or commit-message rationale records *why* Spring Boot 3.4.0's managed Jackson
+  (2.18.x) was overridden. Whether the pin is load-bearing or vestigial is unknown.
+- **What it does today.** `ProductCode` is `@JsonFormat(shape = OBJECT)` with a single-arg
+  `@JsonCreator fromCode(String)`, compiled with `-parameters` so the parameter name `code`
+  survives in the bytecode. Spring Boot always registers `ParameterNamesModule`, which gives
+  that creator an implicit name — and **databind 2.15.2 infers such a creator as PROPERTIES
+  mode**, requiring `START_OBJECT`. Jackson 2.16+ fixed the inference. Net effect:
+
+  | Request body | 2.15.2 (deployed) | 2.18.2 (local/tests) |
+  |---|---|---|
+  | `"productCode": "119"` | **400** `Malformed request body` | accepted |
+  | `"productCode": {"code":"119"}` | accepted | accepted |
+
+- **Impact — the dangerous part is not the 400.** It is that **local tests can parse REST
+  bodies differently from production**, because the test classpath and the deployed classpath
+  disagree on databind. A body that a `@WebMvcTest` accepts can 400 on the box, and neither
+  side looks wrong in isolation. Separately, `databind 2.15.2` alongside `annotations 2.20`
+  (five minor versions ahead) is an unsupported pairing in its own right.
+- **Surfaced by:** 2026-09-10, creating the `119 Staging` environment. `POST /api/v1/environment/`
+  rejected `"productCode":"119"` with
+  `Input mismatch reading Enum ...: properties-based @JsonCreator ... expects JSON Object
+  (JsonToken.START_OBJECT), got JsonToken.VALUE_STRING`, while the same class and mapper
+  configuration accepted it locally under 2.18.2. The deployed `ProductCode.class` was
+  confirmed **byte-identical** (md5) to the working tree, isolating the variable to the
+  Jackson version.
+- **Action:** Decided 2026-09-10 to **note, not fix** — no build change now. When revisited:
+  (a) establish whether the 2.15.2 pin is still needed at all, and (b) if the wire contract
+  should accept the bare string again, `@JsonCreator(mode = JsonCreator.Mode.DELEGATING)` on
+  `fromCode` restores it under 2.15.2 while leaving the `shape = OBJECT` output unchanged.
+  Note the object form `{"code":"119"}` works under **both** versions and is what the UI
+  already sends, so it is the safe shape for any hand-written payload today.
+
+### P10 — a partial rebuild is abandoned ACTIVE at a fraction of its size, and nothing can see it
+
+Two defects that only matter together. The first makes the state reachable, the second
+makes it invisible, and a third makes it unfixable from the recovery side alone.
+
+**P10a — `startLocked` persists `ACTIVE` for any non-zero bot count, so a degraded group
+leaves the recovery candidate set.**
+
+- **File:** `bot-app/src/main/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorService.java`,
+  `startLocked` (the `setTargetStatus(ACTIVE)` + `save` at the end of the build path),
+  read together with `startForRecovery`, `RecoveryEligibility` and
+  `RecoveryCandidateSelector`.
+- **What:** `createBotsInParallel` swallows per-bot failures and `startLocked`'s
+  viability guard only catches the **zero**-bot case. One bot of fifty is therefore a
+  *successful* start: `targetStatus=ACTIVE` is persisted and the runtime stays in
+  `runningGroups` with `actualStatus=ACTIVE`.
+- **Why it is the barrier, and not the success predicate.** Auto-recovery's
+  `startForRecovery` classifies the attempt *after* that persist has already happened.
+  On the next tick `RecoveryCandidateSelector` selects `targetStatus == DEAD` ∪ DEAD
+  runtimes — the group is in neither — and `RecoveryEligibility` vetoes on
+  `runtimeStatus == ACTIVE` in any case. So the group is gone from the candidate set
+  **whatever the predicate answered**, and `expireStates` then drops its `RecoveryState`
+  (the settle window is keyed on `lastSuccess`, which `recordFailure` never sets),
+  refunding the attempt. There is no retry, no budget spend, no exhaustion and no
+  hand-off ERROR.
+- **This was tried the other way and reverted** (`0d46c33`, reverted on the final pass of
+  the branch). Making "recovered" proportional to `botCount` changes the counter label
+  from `success` to `failed` and the wording of one log line, and nothing else — with the
+  side effect that the flap shape (partial rebuild → survivor dies → DEAD → **fresh**
+  6-attempt budget) recycles forever while producing neither an `outcome="success"` for
+  `EnvironmentGroupRecoveryFlapping` nor an exhaustion for
+  `EnvironmentGroupRecoveryExhausted`, i.e. strictly less visible than what it replaced.
+  **Any real fix has to change the state, not the test**: either tear the partial rebuild
+  down and re-persist `DEAD` before returning (the group stays a candidate, the budget is
+  genuinely spent, the hand-off fires — but it trades "betting at 2%" for "not betting at
+  all", which is a money decision), or retain `RecoveryState` past an ACTIVE persist so
+  the budget accumulates across episodes and the hand-off can still be reached.
+- **Realistic trigger on this fleet, today.** The PING-before-AUTH race leaves **2-4
+  survivors per 100** while it is active, and `pom.xml` still pins the ws-parser version
+  that has it (3.0.5). Against the 50-bot prod group that is 1-2 bots. So the first time
+  auto-recovery fires on Prod-Bot during exactly the condition it exists for, this is the
+  most likely outcome.
+
+**P10b — `monitorHealth` computes the dead ratio over the bots that exist, not the bots
+there should be.**
 
 - **File:** `bot-app/src/main/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorService.java`,
   `monitorHealth` (~`:2260-2290`).
@@ -130,29 +211,69 @@ This is a running list of production bugs and code seams identified while expand
   `bots` is `runtime.getBotInstances()` — the bots that were successfully *created*. It is
   never compared against `group.getBotCount()`, the size the group is configured to be.
   The method also early-returns on an empty list.
-- **Impact:** a group that started with only a fraction of its bots is permanently
-  healthy in the health monitor's eyes. A 50-bot group holding 1 live bot reads `0/1`
-  dead — 0% — so it never crosses the threshold, never goes DEAD, never becomes a
-  recovery candidate and never fires `EnvironmentGroupDead`. Nothing else compares live
-  bots to configured bots either: no rule in `prometheus/alerts.yml` does, and
-  `bots_managed_by_env` counts what exists. The group simply bets at 2% of its size,
-  indefinitely, reported by nothing.
-- **Surfaced by:** `docs/reviews/DEAD_GROUP_AUTO_RECOVERY/review.md`, round 3, second
-  `[bug]` finding. Auto-recovery made it reachable unattended — a partial rebuild at
-  3 a.m. lands in exactly this state — but the bug is older and wider than recovery:
-  the same shape follows any partial manual `/start` or `/restart`, e.g. the
-  PING-before-AUTH race.
-- **Not fixed with the recovery pass, deliberately.** `startForRecovery`'s success
-  predicate was made proportional to `botCount` (see `isRecovered`), which stops
-  *recovery* from recording a partial rebuild as a success. `monitorHealth` is
-  fleet-wide health-monitoring surface on the path of every running group, and was left
-  alone hours before a prod push rather than rewritten.
-- **Action:** decide whether the denominator should be `max(bots.size(), group.getBotCount())`
-  or whether "runtime is far below configured size" deserves its own signal (a
-  `bots_configured_by_env` gauge plus a ratio rule would make it visible without
-  changing the death semantics of every group at once). Either way it needs its own
-  test pass over `BotGroupBehaviorServiceTest`'s dead-threshold cases, which currently
-  all start from a fully-built group.
+- **Impact:** this is why P10a is silent rather than self-correcting. A 50-bot group
+  holding 1 live bot reads `0/1` dead — 0% — so it never crosses the threshold, never goes
+  DEAD, never becomes a recovery candidate again and never fires `EnvironmentGroupDead`.
+  Nothing else compares live bots to configured bots either: no rule in
+  `prometheus/alerts.yml` does, and `bots_managed_by_env` counts what exists. The group
+  simply bets at 2% of its size, indefinitely, reported by nothing.
+- **Older and wider than recovery.** The same shape follows any partial manual `/start`
+  or `/restart`. Auto-recovery only made it reachable unattended, at 3 a.m.
+
+**Surfaced by:** `docs/reviews/DEAD_GROUP_AUTO_RECOVERY/review.md` round 3 (second `[bug]`)
+and round 4 (the `[bug]`), and `docs/reviews/DEAD_GROUP_AUTO_RECOVERY/compliance.md` D-1,
+which reached the same conclusion independently.
+
+**Not fixed on the recovery branch, deliberately.** `monitorHealth` is fleet-wide
+health-monitoring surface on the path of every running group, and the teardown option
+touches a money path; neither was going to be done in the hours before a prod push. What
+shipped instead is an honest `OUTCOME_SUCCESS` javadoc, an honest `startForRecovery`
+`@return`, and the `CLAUDE.md` entry pointing here.
+
+**Action:**
+1. Decide P10a's shape — teardown-and-re-persist-DEAD vs. retaining `RecoveryState` past
+   an ACTIVE persist — and note that the first one needs its own test pass because it is
+   a new way for a money group to end up stopped.
+2. Decide P10b's denominator: `max(bots.size(), group.getBotCount())`, or leave the death
+   semantics alone and give "runtime is far below configured size" its own signal (a
+   `bots_configured_by_env` gauge plus a ratio rule makes it visible without changing when
+   every group in the fleet dies). Either way it needs its own test pass over
+   `BotGroupBehaviorServiceTest`'s dead-threshold cases, which currently all start from a
+   fully-built group.
+3. Whichever is chosen, revisit the ws-parser pin: if the PING-before-AUTH race is fixed
+   upstream the dominant trigger for P10a goes away and the priority drops.
+
+### P11 — `RecoveryCandidateSelector.select` is not isolated per group
+
+- **File:** `bot-app/src/main/java/com/vingame/bot/domain/botgroup/service/RecoveryCandidateSelector.java:73-93`,
+  called from `DeadGroupRecoveryScheduler:221` and from `EnvironmentProbeScheduler`.
+- **What:** the candidate *evaluation* loop in `DeadGroupRecoveryScheduler` is wrapped in
+  a per-group try/catch (`93a632c`); selection itself, one frame above, still iterates
+  every group in one unprotected `for` loop and evaluates a predicate that can throw on a
+  malformed document.
+- **Impact:** one bad row disables auto-recovery **fleet-wide** for as long as it exists,
+  with a single uninformative ERROR from `reconcileQuietly` every 60 s. Same blast radius
+  as the null-`environmentId` bug that was just fixed, one frame to the left.
+- **Fix:** three lines — try/catch/continue around the loop body, logging the group id.
+  Consider logging the first occurrence per id at ERROR and the repeats at DEBUG; at
+  1,440 ERROR lines/day/row this goes to Loki on track 1.
+- **Surfaced by:** review round 4, third `[smell]`. Explicitly kept out of the final
+  recovery pass to hold scope before a prod push.
+
+### P12 — `ActivationWindow.isActiveAt` NPEs on a half-filled window
+
+- **File:** `bot-app/src/main/java/com/vingame/bot/domain/botgroup/model/ActivationWindow.java:65`
+  (`from.isBefore(to)`), reached from `RecoveryEligibility.isCandidate` condition 5 and
+  from `ActivationScheduler`.
+- **What:** `ActivationWindow`'s fields carry no bean validation at all (`BotGroupDTO`'s
+  `activationWindow` is a bare field and there is no `ActivationWindowDTO`), so a
+  `SCHEDULED` group with `from` or `to` null is exactly as reachable as the null
+  `environmentId` row that was guarded. It throws NPE.
+- **Impact:** today one such row breaks *recovery* ticks and not *activation* ticks,
+  because `ActivationScheduler` evaluates the same predicate inside its own per-group try
+  — the reverse of what you would guess. P11 would equalise them; validating the window
+  on the DTO removes the class.
+- **Surfaced by:** review round 4, third `[smell]`. Deferred with P11.
 
 ## Test-quality follow-ups
 

@@ -428,10 +428,10 @@ public class BotMetrics {
     /**
      * Count one auto-recovery attempt on a DEAD bot group
      * (DEAD_GROUP_AUTO_RECOVERY AD-13). {@code outcome} is bounded:
-     * {@code success | failed | error} — respectively "the group came back up with
-     * enough of its configured bots to clear the dead threshold", "the start path ran
-     * and the group is still not up, including a partial rebuild that came up too
-     * small", and "the start path threw".
+     * {@code success | failed | error} — respectively "the group came back up: an
+     * ACTIVE runtime with at least one running bot, which includes a rebuild that
+     * only authenticated a fraction of the group", "the start path ran and the group
+     * is still not up", and "the start path threw".
      * <p>
      * Called under the recovery scheduler's per-group MDC, so the series carries
      * {@code botGroupId} / {@code environmentId} / {@code product} exactly like

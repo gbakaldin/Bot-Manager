@@ -92,18 +92,21 @@ import java.util.concurrent.TimeUnit;
 public class DeadGroupRecoveryScheduler {
 
     /**
-     * The group came back up: an ACTIVE runtime holding more live bots than
-     * {@code bot.group.dead.threshold} leaves a live group — see
-     * {@code BotGroupBehaviorService.isRecovered}. A rebuild that authenticated a
-     * handful of a large group's accounts is NOT this.
+     * The group came back up: an ACTIVE runtime with at least one running bot.
+     * <p>
+     * <b>A partial rebuild counts as this</b> — a 50-bot group that authenticated one
+     * bot is a success here, and the INFO line says {@code 1/50 bots up}. That is not
+     * an oversight in the predicate: a partial start is a <em>successful</em>
+     * {@code startLocked}, which has already persisted {@code targetStatus=ACTIVE}
+     * and left an ACTIVE runtime, so the group is out of the candidate set before the
+     * outcome is classified and no stricter predicate here can produce another
+     * attempt. A proportional predicate was tried and reverted for exactly that
+     * reason. The degraded group is {@code docs/plans/FOLLOWUPS.md} P10, which is
+     * where a fix has to live.
      */
     static final String OUTCOME_SUCCESS = "success";
 
-    /**
-     * The start path ran and the group is still not up — including the partial case,
-     * where it came up too small to count. A partial start charges an attempt and is
-     * retried on the backoff.
-     */
+    /** The start path ran and the group is still not up. */
     static final String OUTCOME_FAILED = "failed";
 
     /** The start path threw. */
@@ -422,12 +425,18 @@ public class DeadGroupRecoveryScheduler {
         state.nextDue = now.plus(wait);
         botMetrics.incGroupRecoveryAttempt(outcome);
 
+        // "backoff {}m", not "next attempt in {}m". The backoff is a fact about this
+        // group's state (nextDue was just moved); a next attempt is not, because
+        // "failed" also covers the group that was no longer eligible under the lock
+        // — an operator pressing Stop between the tick's decision and its action
+        // leaves a group that is not a candidate any more and will never be retried.
+        // Do not promise the operator an attempt this class cannot guarantee.
         if (error != null) {
-            log.error("group {} ({}): auto-recovery attempt {}/{} failed ({}) — next attempt in {}m",
+            log.error("group {} ({}): auto-recovery attempt {}/{} failed ({}) — backoff {}m",
                     group.getId(), group.getName(), attemptNumber, maxAttempts, detail,
                     wait.toMinutes(), error);
         } else {
-            log.warn("group {} ({}): auto-recovery attempt {}/{} failed ({}) — next attempt in {}m",
+            log.warn("group {} ({}): auto-recovery attempt {}/{} failed ({}) — backoff {}m",
                     group.getId(), group.getName(), attemptNumber, maxAttempts, detail,
                     wait.toMinutes());
         }

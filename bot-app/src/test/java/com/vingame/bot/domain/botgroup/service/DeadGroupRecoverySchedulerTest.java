@@ -398,8 +398,8 @@ class DeadGroupRecoverySchedulerTest {
 
         assertThat(lines(Level.WARN)).hasSize(3);
         assertThat(lines(Level.WARN).get(0))
-                .contains("auto-recovery attempt 1/6 failed", "next attempt in 2m");
-        assertThat(lines(Level.WARN).get(1)).contains("next attempt in 5m");
+                .contains("auto-recovery attempt 1/6 failed", "backoff 2m");
+        assertThat(lines(Level.WARN).get(1)).contains("backoff 5m");
     }
 
     /* ---------------- exhaustion (AD-8) ---------------- */
@@ -567,10 +567,10 @@ class DeadGroupRecoverySchedulerTest {
 
         verify(behaviorService, times(4)).startForRecovery("g1");
         assertThat(lines(Level.WARN)).hasSize(4);
-        assertThat(lines(Level.WARN).get(0)).contains("next attempt in 1m");
-        assertThat(lines(Level.WARN).get(1)).contains("next attempt in 2m");
-        assertThat(lines(Level.WARN).get(2)).contains("next attempt in 2m");
-        assertThat(lines(Level.WARN).get(3)).contains("next attempt in 2m");
+        assertThat(lines(Level.WARN).get(0)).contains("backoff 1m");
+        assertThat(lines(Level.WARN).get(1)).contains("backoff 2m");
+        assertThat(lines(Level.WARN).get(2)).contains("backoff 2m");
+        assertThat(lines(Level.WARN).get(3)).contains("backoff 2m");
     }
 
     /**
