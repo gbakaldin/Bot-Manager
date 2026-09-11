@@ -91,10 +91,19 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class DeadGroupRecoveryScheduler {
 
-    /** The group came back up: ACTIVE runtime with at least one running bot. */
+    /**
+     * The group came back up: an ACTIVE runtime holding more live bots than
+     * {@code bot.group.dead.threshold} leaves a live group — see
+     * {@code BotGroupBehaviorService.isRecovered}. A rebuild that authenticated a
+     * handful of a large group's accounts is NOT this.
+     */
     static final String OUTCOME_SUCCESS = "success";
 
-    /** The start path ran and the group is still not up. */
+    /**
+     * The start path ran and the group is still not up — including the partial case,
+     * where it came up too small to count. A partial start charges an attempt and is
+     * retried on the backoff.
+     */
     static final String OUTCOME_FAILED = "failed";
 
     /** The start path threw. */

@@ -1252,4 +1252,129 @@ class BotGroupBehaviorServiceRestartTest {
             return new ArrayList<>(events);
         }
     }
+
+    /* ----- round-3 review finding 2: what "recovered" means ----- */
+
+    /**
+     * A rebuild that brings up a handful of a large group's bots is <b>not</b> a
+     * recovery, and must not be recorded as one.
+     *
+     * <p>The predicate used to be {@code runningBotCount > 0}. Under it, a 10-bot group
+     * that authenticated one bot returned {@code true}: the reconciler counted
+     * {@code outcome="success"}, stopped selecting the group, left the remaining attempt
+     * budget unspent and {@code targetStatus} ACTIVE — and nothing downstream reports the
+     * group is running at a tenth of its size, because no alert rule compares live bots
+     * to configured bots and {@code monitorHealth} computes its dead ratio over the bots
+     * that exist rather than the bots there should be. Partial authentication is a shape
+     * this codebase meets routinely (the PING-before-AUTH race); auto-recovery is what
+     * makes it happen unattended at 3 a.m.
+     *
+     * <p>The line is {@code bot.group.dead.threshold} (0.80), i.e. strictly more than
+     * 20% of the configured {@code botCount} — the existing notion of "this group is
+     * functionally dead", reused rather than re-invented.
+     */
+    @Test
+    @DisplayName("startForRecovery() reports FAILURE when the rebuild comes up below the dead threshold")
+    void startForRecovery_reportsFailureOnAPartialRebuild() {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(10).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.DEAD).build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+
+        // One bot authenticates, nine fail — createBotsInParallel swallows the
+        // failures, exactly as it does against a gateway that is rejecting logins.
+        CountDownLatch hold = new CountDownLatch(1);
+        AtomicLong created = new AtomicLong();
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> {
+                    if (created.incrementAndGet() > 1) {
+                        throw new IllegalStateException("auth gateway rejected the login");
+                    }
+                    Bot b = stubBot("bot-survivor");
+                    lenient().when(b.getConfiguration()).thenAnswer(c -> {
+                        hold.await();
+                        return null;
+                    });
+                    return b;
+                });
+
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 10, "env-1");
+        dead.markAsDead();
+        runningGroups(service).put("g-1", dead);
+
+        try {
+            boolean up = service.startForRecovery("g-1");
+
+            assertThat(up)
+                    .as("1 of 10 bots is not a recovered group — the reconciler must charge "
+                            + "this attempt and retry on the backoff")
+                    .isFalse();
+            // And the false is the predicate's doing, not a dead or missing runtime:
+            // the group really did come up, just far too small.
+            BotGroupRuntime rebuilt = runningGroups(service).get("g-1");
+            assertThat(rebuilt.getActualStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+            assertThat(rebuilt.getRunningBotCount()).isEqualTo(1L);
+        } finally {
+            hold.countDown();
+            service.stop("g-1");
+        }
+    }
+
+    /**
+     * The other side of the same line: the threshold is {@code bot.group.dead.threshold},
+     * not "every configured bot". A group that comes up with more than 20% of its bots is
+     * a group the health monitor would not call dead, so recovery reports success and
+     * stops spending budget on it. Three of ten clears 2.0; two would not.
+     */
+    @Test
+    @DisplayName("startForRecovery() reports success once the rebuild clears the dead threshold, not only at full strength")
+    void startForRecovery_succeedsAboveTheThresholdWithoutEveryBot() {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(10).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.DEAD).build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+
+        CountDownLatch hold = new CountDownLatch(1);
+        AtomicLong created = new AtomicLong();
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> {
+                    if (created.incrementAndGet() > 3) {
+                        throw new IllegalStateException("auth gateway rejected the login");
+                    }
+                    Bot b = stubBot("bot-" + created.get());
+                    lenient().when(b.getConfiguration()).thenAnswer(c -> {
+                        hold.await();
+                        return null;
+                    });
+                    return b;
+                });
+
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 10, "env-1");
+        dead.markAsDead();
+        runningGroups(service).put("g-1", dead);
+
+        try {
+            assertThat(service.startForRecovery("g-1"))
+                    .as("3/10 is above the 0.80 dead threshold's 20% floor")
+                    .isTrue();
+            assertThat(runningGroups(service).get("g-1").getRunningBotCount()).isEqualTo(3L);
+        } finally {
+            hold.countDown();
+            service.stop("g-1");
+        }
+    }
 }
