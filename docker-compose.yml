@@ -67,6 +67,23 @@ services:
       # log4j2.properties, mutating the existing LoggerConfig in place -- the
       # additivity=false and both appenderRefs of that logger survive.
       - LOGGING_LEVEL_COM_VINGAME_BOT=${BOT_LOG_LEVEL:-INFO}
+      # DEAD_GROUP_AUTO_RECOVERY AD-6 / Phase 4 — the kill switch for autonomous
+      # restarts of DEAD bot groups. Spring relaxed-binds this name to the
+      # `bot.recovery.enabled` property and applies it OVER application.properties,
+      # where the compiled default is still `false`.
+      #
+      # The switch lives HERE rather than in the jar on purpose: turning recovery on
+      # or off is then `docker compose up -d bot-manager` on one box, not a rebuild
+      # and a fleet redeploy, and one instance can run with it on while the others do
+      # not. It gates the RECONCILER only — the environment WebSocket probe and its
+      # env_ws_probe_* metrics run either way, so an instance with recovery off still
+      # shows what recovery WOULD have done.
+      #
+      # Default `false` is the shipped posture until Phase 5 flips the compiled
+      # default to true; the `${...:-false}` form stays after that flip so
+      # BOT_RECOVERY_ENABLED=false remains the emergency stop. Set it per box in
+      # secrets.env/.env (the uncommitted merge) — never here.
+      - BOT_RECOVERY_ENABLED=${BOT_RECOVERY_ENABLED:-false}
       # Level for the WebSocket Parser library (LOG_VOLUME_TIERING Phase 4,
       # AD-32). Since Phase 4 this logger has its own LoggerConfig with
       # additivity = false, routed to track 2 (logs/detail/detail.log) alone --
