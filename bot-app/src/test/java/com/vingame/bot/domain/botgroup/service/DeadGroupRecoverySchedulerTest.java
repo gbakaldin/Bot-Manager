@@ -691,4 +691,102 @@ class DeadGroupRecoverySchedulerTest {
                 .as("the second attempt is 2/6, not 1/6 — the success was charged")
                 .contains("attempt 2/6");
     }
+
+    /* ---------------- the series have to exist before they move (round-3 finding 1) ---------------- */
+
+    /**
+     * The counters an alert reads must be <b>materialised at zero</b> by the first
+     * attempt, not registered lazily by their first increment.
+     *
+     * <p>This is a Prometheus fact rather than a tidiness one.
+     * {@code EnvironmentGroupRecoveryExhausted} is
+     * {@code increase(group_recovery_exhausted_total[15m]) > 0}, and
+     * {@code group_recovery_exhausted_total} moves at most once per death episode. A
+     * series registered at increment time is therefore absent, then {@code 1}, then
+     * {@code 1} forever: {@code increase()} is {@code last - first == 0}, and the
+     * counter-start extrapolation that would otherwise rescue it is gated on
+     * {@code resultValue > 0}. The rule reads {@code 0} for ever and the hand-off —
+     * the one signal that says "auto-recovery has given up, a human must act" — is
+     * never delivered on a group's <em>first</em> exhaustion, which, with the budget
+     * held in memory, is the only one that normally happens.
+     * {@code EnvironmentGroupRecoveryFlapping}'s {@code >= 3} had the same defect one
+     * degree milder: from a series first seen at {@code 1} it needed a fourth
+     * self-heal.
+     *
+     * <p>So: one successful attempt, and all four series must already be on the
+     * registry — three of them still at zero.
+     */
+    @Test
+    @DisplayName("the first attempt materialises every group_recovery_* series at zero, so increase() can see the first increment")
+    void everyRecoverySeriesIsMaterialisedAtZeroByTheFirstAttempt() {
+        persistedDead(deadGroup("g1"));
+        envIsHealthy();
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(true));
+        when(behaviorService.getRunningBotCountForGroup("g1")).thenReturn(20);
+
+        scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
+
+        io.micrometer.core.instrument.Counter exhausted =
+                registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL)
+                        .tags("botGroupId", "g1", "environmentId", "env-1", "product", "116")
+                        .counter();
+        assertThat(exhausted)
+                .as("group_recovery_exhausted_total must exist from the first attempt — a "
+                        + "counter whose first scraped sample is 1 is invisible to increase()")
+                .isNotNull();
+        assertThat(exhausted.count()).isZero();
+
+        // The outcomes that did not happen exist too, so the flapping rule's >= 3
+        // counts from 0 rather than from the first success.
+        assertThat(taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_FAILED)).isNotNull();
+        assertThat(taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_FAILED).count()).isZero();
+        assertThat(taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_ERROR)).isNotNull();
+        assertThat(taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_ERROR).count()).isZero();
+        assertThat(taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_SUCCESS).count()).isEqualTo(1d);
+    }
+
+    /**
+     * The pre-registration is worthless if it lands on a different label set: two
+     * series named {@code group_recovery_exhausted_total} differing in one tag are
+     * two series to Prometheus, and the one the alert watches is still the one that
+     * appears at {@code 1}. So the zero-valued series and the incremented one must
+     * carry <b>identical</b> tags, not merely overlapping ones.
+     */
+    @Test
+    @DisplayName("the pre-registered series carries exactly the tags the real increment carries")
+    void thePreRegisteredSeriesSharesTheIncrementsTagSet() {
+        persistedDead(deadGroup("g1"));
+        envIsHealthy();
+        when(behaviorService.startForRecovery("g1")).thenAnswer(startsClearingMdc(false));
+        lenient().when(behaviorService.getActualStatus("g1")).thenReturn(BotGroupStatus.STOPPED);
+        // budget 1 ⇒ the single attempt fails and exhausts, so the same series is
+        // first pre-registered and then incremented.
+        scheduler(true, 1, 1, 0).reconcileAll(T0);
+
+        io.micrometer.core.instrument.Counter exhausted =
+                registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL).counter();
+        io.micrometer.core.instrument.Counter succeeded =
+                registry.find(BotMetrics.GROUP_RECOVERY_ATTEMPTS_TOTAL)
+                        .tags("outcome", DeadGroupRecoveryScheduler.OUTCOME_SUCCESS).counter();
+
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_EXHAUSTED_TOTAL).counters())
+                .as("one exhaustion series, not one pre-registered and one incremented")
+                .hasSize(1);
+        assertThat(exhausted.count()).isEqualTo(1d);
+        // The success series was only ever pre-registered; it must be tagged like the
+        // failure that really happened, minus the outcome.
+        assertThat(succeeded.getId().getTags())
+                .containsExactlyInAnyOrderElementsOf(
+                        taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_FAILED).getId().getTags()
+                                .stream()
+                                .map(t -> "outcome".equals(t.getKey())
+                                        ? io.micrometer.core.instrument.Tag.of("outcome",
+                                                DeadGroupRecoveryScheduler.OUTCOME_SUCCESS)
+                                        : t)
+                                .toList());
+        assertThat(exhausted.getId().getTags())
+                .containsExactlyInAnyOrderElementsOf(
+                        taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_FAILED).getId().getTags()
+                                .stream().filter(t -> !"outcome".equals(t.getKey())).toList());
+    }
 }

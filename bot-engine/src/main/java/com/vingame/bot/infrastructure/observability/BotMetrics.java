@@ -428,15 +428,18 @@ public class BotMetrics {
     /**
      * Count one auto-recovery attempt on a DEAD bot group
      * (DEAD_GROUP_AUTO_RECOVERY AD-13). {@code outcome} is bounded:
-     * {@code success | failed | error} — respectively "the group came back up",
-     * "the start path ran but the group is still not ACTIVE with live bots", and
-     * "the start path threw".
+     * {@code success | failed | error} — respectively "the group came back up with
+     * enough of its configured bots to clear the dead threshold", "the start path ran
+     * and the group is still not up, including a partial rebuild that came up too
+     * small", and "the start path threw".
      * <p>
      * Called under the recovery scheduler's per-group MDC, so the series carries
      * {@code botGroupId} / {@code environmentId} / {@code product} exactly like
      * {@code group_dead_seconds_total}. <b>No series exists until an attempt is
      * actually made</b>, which is what makes "shipped inert" observable: with
-     * {@code bot.recovery.enabled=false} this is never called.
+     * {@code bot.recovery.enabled=false} this is never called. Once an attempt does
+     * happen, <em>all</em> of this counter's outcomes appear at once, at zero — see
+     * {@link #initGroupRecoverySeries(String...)}.
      */
     public void incGroupRecoveryAttempt(String outcome) {
         Counter.builder(GROUP_RECOVERY_ATTEMPTS_TOTAL)
@@ -447,10 +450,57 @@ public class BotMetrics {
     }
 
     /**
+     * Materialise every {@code group_recovery_*} series for the group whose MDC is
+     * currently set, at zero, before any of them can be incremented. Called once at
+     * the top of every recovery attempt.
+     *
+     * <p><b>This is what makes the Phase 4 alert rules able to fire at all, and it is
+     * not tidiness.</b> A Micrometer counter does not exist until it is registered,
+     * and registering it at increment time means its very first scraped sample is
+     * {@code 1}. {@code increase(group_recovery_exhausted_total[15m])} over a window
+     * whose samples are all {@code 1} is {@code last - first == 0}; Prometheus'
+     * counter-start extrapolation cannot rescue it either, because that correction is
+     * gated on {@code resultValue > 0}. So {@code EnvironmentGroupRecoveryExhausted}
+     * ({@code > 0}) could never fire on a group's <em>first</em> exhaustion — the only
+     * one that normally happens, since the state is in-memory and a JVM restart resets
+     * it — and {@code EnvironmentGroupRecoveryFlapping} ({@code >= 3}) silently needed
+     * a fourth self-heal. Pre-registering at zero makes the first real increment a
+     * visible {@code 0 -> 1} step, which is what both rules read.
+     *
+     * <p><b>The tags must match the later increments exactly</b> or this registers a
+     * second series and fixes nothing: {@link #mdcTags()} derives them from MDC, so
+     * this must be called under the same group MDC ({@code botGroupId} /
+     * {@code environmentId} / {@code product}) the increments run under. The
+     * {@code outcome} values are passed in rather than hard-coded here because the
+     * scheduler owns that vocabulary.
+     *
+     * <p>Nothing is registered while {@code bot.recovery.enabled} is false — the
+     * reconciler never reaches an attempt, so "shipped inert" is unchanged.
+     */
+    public void initGroupRecoverySeries(String... outcomes) {
+        Tags tags = mdcTags();
+        for (String outcome : outcomes) {
+            // register() alone creates the counter at 0.0 and is idempotent: the
+            // second call returns the same meter rather than resetting it.
+            Counter.builder(GROUP_RECOVERY_ATTEMPTS_TOTAL)
+                    .tag("outcome", outcome)
+                    .tags(tags)
+                    .register(registry);
+        }
+        Counter.builder(GROUP_RECOVERY_EXHAUSTED_TOTAL)
+                .tags(tags)
+                .register(registry);
+    }
+
+    /**
      * Count one bot group whose recovery attempt budget is spent
      * (DEAD_GROUP_AUTO_RECOVERY AD-8). Fires once per death episode, at the end of
      * it: the group is left alone from here until an operator acts, so this is the
      * hand-off signal a human is expected to answer.
+     * <p>
+     * The series it moves already exists at zero — see
+     * {@link #initGroupRecoverySeries(String...)}, without which the alert that reads
+     * this counter cannot fire on a first exhaustion.
      */
     public void incGroupRecoveryExhausted() {
         Counter.builder(GROUP_RECOVERY_EXHAUSTED_TOTAL)

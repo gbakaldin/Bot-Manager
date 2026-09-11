@@ -249,7 +249,20 @@ groups:
       # moves at most once per death episode. 15m is far longer than the 60s recovery
       # tick, so the alert survives long enough to be grouped, delivered and read, and
       # then resolves on its own — which here means "we stopped trying", NOT "fixed".
-      # The group is still DEAD and EnvironmentGroupDead is what keeps saying so.
+      # The group is still DEAD and EnvironmentGroupDead is what keeps saying so —
+      # except for a group that died before this JVM started, which has no runtime and
+      # therefore no groups_dead_by_env, i.e. exactly the longest-down case. So this
+      # rule is the ONLY signal for it and it has to work on the first exhaustion.
+      #
+      # That is only true because the app pre-registers the series at ZERO on the
+      # group's first recovery attempt (BotMetrics.initGroupRecoverySeries). A
+      # Micrometer counter registered lazily at increment time first appears at 1 and
+      # stays at 1 — increase() over samples that are all 1 is last-first = 0, and
+      # Prometheus' counter-start extrapolation is gated on resultValue > 0, so it
+      # never applies. This rule would then read 0 forever and fire only on a SECOND
+      # exhaustion of the same label set, which a JVM restart resets anyway. If the
+      # pre-registration is ever removed, this expression silently goes dead; the
+      # build guards it (AlertRuleMetricsTest).
       #
       # The counter is tagged from the recovery scheduler's group MDC (AD-13), so it
       # carries botGroupId, environmentId and product — which is what lets a rule about
@@ -278,6 +291,15 @@ groups:
       # SERIES, i.e. per group — three different groups recovering once each is an
       # environment story EnvironmentGroupDead already tells. `for: 5m` only debounces
       # the evaluation; the condition it debounces is already six hours wide.
+      #
+      # >= 3 means 3, and that also depends on the pre-registration described on the
+      # rule above: outcome="success" is materialised at 0 on the group's FIRST
+      # recovery attempt, so increase() measures 0 -> 3. Against a series that first
+      # appeared at 1 — the shape a lazily-registered counter produces — increase()
+      # computes last-first = 2 and extrapolates to at most 3.0, so the documented
+      # threshold of three self-heals silently required a FOURTH. Since recovery state
+      # is in-memory and the series goes stale on restart, "fresh series" is the
+      # common case, not the exotic one.
       - alert: EnvironmentGroupRecoveryFlapping
         expr: increase(group_recovery_attempts_total{outcome="success"}[6h]) >= 3
         for: 5m

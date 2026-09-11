@@ -219,36 +219,10 @@ public class DeadGroupRecoveryScheduler {
 
         List<Due> due = new ArrayList<>();
         for (BotGroup group : candidates) {
-            RecoveryState state = states.get(group.getId());
-
-            if (state != null && state.attempts >= maxAttempts) {
-                // Exhausted (AD-8). The hand-off is reported from here, not only
-                // from recordFailure, because the budget can also be spent by a
-                // *success*: an attempt that succeeds still charges the attempt (see
-                // attempt()), so a group whose final budgeted attempt worked and
-                // which then re-died inside the settle window arrives here with the
-                // budget gone and nothing ever reported. Before this it was skipped
-                // forever on a DEBUG line — which since LOG_VOLUME_TIERING Phase 4
-                // never reaches Loki — with no group_recovery_exhausted_total and no
-                // ERROR, so Phase 4's EnvironmentGroupRecoveryExhausted rule could
-                // not fire for the one case AD-8's budget exists to bound.
-                reportExhaustionOnce(state, group);
-                log.debug("Recovery: group {} has spent its {}-attempt budget — waiting for an operator",
-                        group.getId(), maxAttempts);
-                continue;
+            Due candidate = evaluateCandidate(group, now);
+            if (candidate != null) {
+                due.add(candidate);
             }
-            if (!probeScheduler.isHealthy(group.getEnvironmentId())) {
-                // No positive evidence the origin is back. Costs no budget (AD-8).
-                log.debug("Recovery: group {} skipped — env {} is not probe-healthy",
-                        group.getId(), group.getEnvironmentId());
-                continue;
-            }
-            Instant nextDue = state == null ? Instant.EPOCH : state.nextDue;
-            if (nextDue.isAfter(now)) {
-                log.debug("Recovery: group {} skipped — next attempt due {}", group.getId(), nextDue);
-                continue;
-            }
-            due.add(new Due(group, nextDue, deadSince(group)));
         }
 
         // Earliest-due first (AD-9). Ordering by due time is what makes the rotation
@@ -265,6 +239,44 @@ public class DeadGroupRecoveryScheduler {
         for (int i = 0; i < limit; i++) {
             attempt(due.get(i).group, now);
         }
+    }
+
+    /**
+     * Decide whether one candidate is due for an attempt on this tick, or {@code null}
+     * if it is not. Extracted from {@code reconcileAll} so each candidate can be
+     * isolated in its own try/catch.
+     */
+    private Due evaluateCandidate(BotGroup group, Instant now) {
+        RecoveryState state = states.get(group.getId());
+
+        if (state != null && state.attempts >= maxAttempts) {
+            // Exhausted (AD-8). The hand-off is reported from here, not only
+            // from recordFailure, because the budget can also be spent by a
+            // *success*: an attempt that succeeds still charges the attempt (see
+            // attempt()), so a group whose final budgeted attempt worked and
+            // which then re-died inside the settle window arrives here with the
+            // budget gone and nothing ever reported. Before this it was skipped
+            // forever on a DEBUG line — which since LOG_VOLUME_TIERING Phase 4
+            // never reaches Loki — with no group_recovery_exhausted_total and no
+            // ERROR, so Phase 4's EnvironmentGroupRecoveryExhausted rule could
+            // not fire for the one case AD-8's budget exists to bound.
+            reportExhaustionOnce(state, group);
+            log.debug("Recovery: group {} has spent its {}-attempt budget — waiting for an operator",
+                    group.getId(), maxAttempts);
+            return null;
+        }
+        if (!probeScheduler.isHealthy(group.getEnvironmentId())) {
+            // No positive evidence the origin is back. Costs no budget (AD-8).
+            log.debug("Recovery: group {} skipped — env {} is not probe-healthy",
+                    group.getId(), group.getEnvironmentId());
+            return null;
+        }
+        Instant nextDue = state == null ? Instant.EPOCH : state.nextDue;
+        if (nextDue.isAfter(now)) {
+            log.debug("Recovery: group {} skipped — next attempt due {}", group.getId(), nextDue);
+            return null;
+        }
+        return new Due(group, nextDue, deadSince(group));
     }
 
     /**
@@ -295,6 +307,14 @@ public class DeadGroupRecoveryScheduler {
         String product = resolveProduct(group.getEnvironmentId());
 
         BotMdc.setGroupContext(id, group.getEnvironmentId(), product);
+        // Materialise all four group_recovery_* series at zero under this group's
+        // tags BEFORE anything can increment one. A counter that first appears at 1
+        // is invisible to increase(), which is what EnvironmentGroupRecoveryExhausted
+        // and EnvironmentGroupRecoveryFlapping read — see
+        // BotMetrics.initGroupRecoverySeries. This is the only place it can be done
+        // correctly: it must run under the same MDC the increments use, and an
+        // attempt always precedes both an outcome and an exhaustion for a group.
+        botMetrics.initGroupRecoverySeries(OUTCOME_SUCCESS, OUTCOME_FAILED, OUTCOME_ERROR);
         long startedAtNanos = System.nanoTime();
         try {
             log.info("group {} ({}): auto-recovery attempt {}/{} — env {} healthy for {} probe(s), "

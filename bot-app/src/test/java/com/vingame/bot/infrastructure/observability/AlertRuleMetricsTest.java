@@ -145,6 +145,11 @@ class AlertRuleMetricsTest {
         // alert's label set — which is what makes `audience: product` routable and
         // {{ $labels.botGroupId }} render a group id instead of `<no value>`.
         BotMdc.setGroupContext("group-uuid-1", "env-uuid-1", "116");
+        // Exactly the order DeadGroupRecoveryScheduler.attempt() uses: materialise
+        // every series at zero first, then increment the one that happened. See
+        // theRecoveryCountersExistBeforeTheyMove below for why that order is the
+        // difference between these two rules working and reading 0 forever.
+        metrics.initGroupRecoverySeries("success", "failed", "error");
         metrics.incGroupRecoveryAttempt("success");
         metrics.incGroupRecoveryExhausted();
         MDC.clear();
@@ -574,5 +579,57 @@ class AlertRuleMetricsTest {
             }
         }
         return flat;
+    }
+
+    @Test
+    @DisplayName("the recovery counters are scraped at 0 before they move, or their rules read 0 forever")
+    void theRecoveryCountersExistBeforeTheyMove() {
+        // Round-3 review finding 1. EnvironmentGroupRecoveryExhausted is
+        // `increase(group_recovery_exhausted_total[15m]) > 0` over a counter that moves
+        // at most ONCE per death episode. Registered lazily at increment time, that
+        // series is absent, then 1, then 1 — increase() is last-first = 0, and
+        // Prometheus' counter-start extrapolation is gated on resultValue > 0, so it
+        // never applies. The rule yields 0 for ever and the hand-off ("auto-recovery
+        // has given up, a human must act") is never delivered for a group's FIRST
+        // exhaustion, which is the only one that normally happens: the budget is
+        // in-memory and a JVM restart resets it. EnvironmentGroupRecoveryFlapping's
+        // `>= 3` had the milder form of the same defect — from a series first seen at
+        // 1 it needed a fourth self-heal.
+        //
+        // Nothing else in this file can see that: every other test here asks whether a
+        // series and its labels EXIST, and the defect is about WHEN. So this one
+        // renders a fresh exposition the way the scheduler's first attempt does — only
+        // the pre-registration, no increment at all — and asserts the zero samples are
+        // really scraped.
+        PrometheusMeterRegistry fresh = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        fresh.config().meterFilter(new BotMdcTagsMeterFilter());
+        try {
+            BotMdc.setGroupContext("group-uuid-1", "env-uuid-1", "116");
+            new BotMetrics(fresh).initGroupRecoverySeries("success", "failed", "error");
+            MDC.clear();
+            String firstAttempt = fresh.scrape();
+
+            assertThat(firstAttempt)
+                    .as("the hand-off counter must be scrapeable at 0 from the first "
+                            + "attempt — a counter whose first sample is 1 is invisible "
+                            + "to increase()")
+                    .containsPattern("(?m)^group_recovery_exhausted_total\\{[^}]*} 0\\.0$");
+            assertThat(firstAttempt)
+                    .as("outcome=\"success\" too, or EnvironmentGroupRecoveryFlapping's "
+                            + ">= 3 silently means 4")
+                    .containsPattern(
+                            "(?m)^group_recovery_attempts_total\\{[^}]*outcome=\"success\"[^}]*} 0\\.0$");
+
+            // And the zero series must carry the labels the rules route and render on,
+            // which is also the label set the later increment will use.
+            for (String line : firstAttempt.split("\n")) {
+                if (!line.startsWith("group_recovery_")) continue;
+                assertThat(line).contains("botGroupId=\"group-uuid-1\"",
+                        "environmentId=\"env-uuid-1\"", "product=\"116\"");
+            }
+        } finally {
+            MDC.clear();
+            fresh.close();
+        }
     }
 }
