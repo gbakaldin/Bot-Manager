@@ -789,4 +789,72 @@ class DeadGroupRecoverySchedulerTest {
                         taggedAttempt(DeadGroupRecoveryScheduler.OUTCOME_FAILED).getId().getTags()
                                 .stream().filter(t -> !"outcome".equals(t.getKey())).toList());
     }
+
+    /* ---------------- one bad row must not disable the fleet (round-3 finding 3) ---------------- */
+
+    /**
+     * A candidate with no {@code environmentId} used to take the whole tick down —
+     * every tick, for as long as the row existed.
+     *
+     * <p>{@code EnvironmentProbeScheduler.isHealthy} does {@code envUrls.get(id)} on a
+     * {@code ConcurrentHashMap}, which throws on a null key, and the candidate loop had
+     * no per-group try/catch: the NPE escaped to {@code reconcileQuietly}, which logged
+     * one ERROR naming nothing and returned, so <b>no</b> group was attempted — the
+     * healthy ones included. The row is reachable: {@code @NotBlank} on
+     * {@code BotGroupDTO.environmentId} is {@code OnCreate}-only, and the sibling probe
+     * scheduler already guards exactly this input.
+     *
+     * <p>The probe mock is stubbed to throw <em>because the real one does</em>; that is
+     * pinned by {@code EnvironmentProbeSchedulerTest.isHealthyThrowsOnANullEnvironmentId},
+     * so this stub cannot quietly stop modelling reality.
+     */
+    @Test
+    @DisplayName("a candidate with no environmentId is skipped, and the rest of the tick still runs")
+    void aCandidateWithNoEnvironmentDoesNotAbortTheTick() {
+        BotGroup broken = deadGroup("g-broken").toBuilder().environmentId(null).build();
+        persistedDead(broken, deadGroup("g-ok"));
+        envIsHealthy();
+        // lenient(): with the guard in place this stub is never reached, and that is
+        // precisely the assertion. Remove the guard and it fires, taking the tick.
+        lenient().when(probeScheduler.isHealthy(null)).thenThrow(
+                new NullPointerException("ConcurrentHashMap forbids a null key"));
+        when(behaviorService.startForRecovery("g-ok")).thenAnswer(startsClearingMdc(true));
+        when(behaviorService.getRunningBotCountForGroup("g-ok")).thenReturn(20);
+
+        scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
+
+        verify(behaviorService).startForRecovery("g-ok");
+        verify(behaviorService, never()).startForRecovery("g-broken");
+        assertThat(lines(Level.ERROR))
+                .as("skipping a malformed row is not an error the operator must act on")
+                .isEmpty();
+    }
+
+    /**
+     * The general form of the same property: whatever a candidate's evaluation throws,
+     * it costs that candidate and nothing else. The null environment is one instance;
+     * the guard exists so the next one is not another fleet-wide outage.
+     */
+    @Test
+    @DisplayName("an evaluation that throws for one group is isolated to that group")
+    void anEvaluationThrowIsIsolatedToItsGroup() {
+        persistedDead(deadGroup("g-boom"), deadGroup("g-ok").toBuilder()
+                .environmentId("env-2").build());
+        lenient().when(probeScheduler.isHealthy("env-1"))
+                .thenThrow(new IllegalStateException("probe registry is mid-rebuild"));
+        lenient().when(probeScheduler.isHealthy("env-2")).thenReturn(true);
+        lenient().when(probeScheduler.healthyStreak("env-2")).thenReturn(2);
+        lenient().when(environmentService.findById("env-2")).thenReturn(Environment.builder()
+                .id("env-2").name("TIP staging").productCode(ProductCode.P_116).build());
+        when(behaviorService.startForRecovery("g-ok")).thenAnswer(startsClearingMdc(true));
+        when(behaviorService.getRunningBotCountForGroup("g-ok")).thenReturn(20);
+
+        scheduler(true, 6, 1, 2, 5).reconcileAll(T0);
+
+        verify(behaviorService).startForRecovery("g-ok");
+        verify(behaviorService, never()).startForRecovery("g-boom");
+        assertThat(lines(Level.ERROR))
+                .as("the failing group is named, which the old tick-level ERROR never was")
+                .anyMatch(l -> l.contains("skipping group g-boom"));
+    }
 }

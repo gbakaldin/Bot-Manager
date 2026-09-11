@@ -228,9 +228,21 @@ public class DeadGroupRecoveryScheduler {
 
         List<Due> due = new ArrayList<>();
         for (BotGroup group : candidates) {
-            Due candidate = evaluateCandidate(group, now);
-            if (candidate != null) {
-                due.add(candidate);
+            // Per-candidate isolation, mirroring ActivationScheduler: one malformed
+            // group must not be able to abort the tick for every other group. It is
+            // not hypothetical — evaluation reads collaborators (the probe registry,
+            // the state map) against document fields that Mongo does not guarantee,
+            // and this loop runs again from scratch every 60 s, so an escape here
+            // disables auto-recovery fleet-wide for as long as the bad row exists,
+            // with a single ERROR that names nothing.
+            try {
+                Due candidate = evaluateCandidate(group, now);
+                if (candidate != null) {
+                    due.add(candidate);
+                }
+            } catch (Exception e) {
+                log.error("Recovery: skipping group {} — evaluation failed: {}",
+                        group.getId(), e.getMessage(), e);
             }
         }
 
@@ -246,7 +258,19 @@ public class DeadGroupRecoveryScheduler {
 
         int limit = Math.min(maxPerTick, due.size());
         for (int i = 0; i < limit; i++) {
-            attempt(due.get(i).group, now);
+            BotGroup group = due.get(i).group;
+            try {
+                attempt(group, now);
+            } catch (Exception e) {
+                // attempt() classifies every failure of the START into an outcome,
+                // but its own bookkeeping can still throw — a meter registration
+                // rejected by Micrometer, say — from inside its catch block, where
+                // nothing catches it again. With max-per-tick > 1 that would cost the
+                // remaining due groups their tick, so the isolation its javadoc
+                // promises is asserted here rather than assumed.
+                log.error("Recovery: attempt on group {} failed outside the start path: {}",
+                        group.getId(), e.getMessage(), e);
+            }
         }
     }
 
@@ -272,6 +296,18 @@ public class DeadGroupRecoveryScheduler {
             reportExhaustionOnce(state, group);
             log.debug("Recovery: group {} has spent its {}-attempt budget — waiting for an operator",
                     group.getId(), maxAttempts);
+            return null;
+        }
+        if (group.getEnvironmentId() == null) {
+            // Same guard, and the same wording, as the sibling probe scheduler's:
+            // a group with no environment is not probed, so it can never be
+            // probe-healthy, and there is nothing to start it against either
+            // (startLocked rejects it with a BadRequestException). Without this the
+            // isHealthy call below throws — ConcurrentHashMap forbids a null key —
+            // and takes the whole tick with it. @NotBlank on
+            // BotGroupDTO.environmentId is OnCreate-only, so PATCH and
+            // pre-validation documents are both open routes to such a row.
+            log.debug("Recovery: group {} has no environment — not a candidate", group.getId());
             return null;
         }
         if (!probeScheduler.isHealthy(group.getEnvironmentId())) {

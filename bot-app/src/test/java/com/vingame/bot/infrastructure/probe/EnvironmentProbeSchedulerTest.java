@@ -33,6 +33,7 @@ import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -370,5 +371,29 @@ class EnvironmentProbeSchedulerTest {
 
         assertThat(scheduler.isHealthy("env-1")).isFalse();
         assertThat(registry.find(EnvironmentProbeScheduler.ENV_WS_PROBE_HEALTHY).gauges()).isEmpty();
+    }
+
+    /**
+     * {@code isHealthy(null)} <b>throws</b>, and the recovery reconciler's null guard
+     * is why that is survivable.
+     *
+     * <p>{@code envUrls} is a {@code ConcurrentHashMap}, which forbids a null key, so
+     * this is not a defensive-programming opinion — it is the contract of the
+     * collaborator {@code DeadGroupRecoveryScheduler} calls once per candidate per
+     * tick. A group with no {@code environmentId} is reachable ({@code @NotBlank} on
+     * {@code BotGroupDTO.environmentId} is {@code OnCreate}-only), and before the
+     * guard one such row aborted every recovery tick for the whole fleet.
+     *
+     * <p>This test exists to keep
+     * {@code DeadGroupRecoverySchedulerTest.aCandidateWithNoEnvironmentDoesNotAbortTheTick}
+     * honest: that test stubs a mock to throw here, and a stub that stopped matching
+     * reality would make it prove nothing. If this class is ever made null-tolerant,
+     * this test fails and points at the one that has to be revisited.
+     */
+    @Test
+    @DisplayName("isHealthy(null) throws — the fact the recovery scheduler's null guard exists for")
+    void isHealthyThrowsOnANullEnvironmentId() {
+        assertThatThrownBy(() -> scheduler.isHealthy(null))
+                .isInstanceOf(NullPointerException.class);
     }
 }
