@@ -491,6 +491,10 @@ happens and the boot lines are present).
 
 ### Phase 4 — Alerting, docs, and staging enable
 
+> **Amended — three of this phase's instructions were wrong or under-specified, and
+> the staging enable it names became a *prod* enable by user decision. See
+> Amendments B1, B2, B3 and C at the bottom of this document.**
+
 1. `/Users/gleb/IdeaProjects/Bot/prometheus/alerts.yml`, group `bot-manager-environment`:
    - **Correct** the `EnvironmentGroupDead` description (`:222`) — it must no longer claim a
      DEAD group never recovers; state instead that auto-recovery will attempt it when the
@@ -513,11 +517,18 @@ happens and the boot lines are present).
 3. `/Users/gleb/IdeaProjects/Bot/CLAUDE.md` — a short subsection under Architecture
    describing the recovery trigger, the `STOPPED`-is-the-opt-out rule, and the budget; and
    fix the Backlog line that still frames DEAD-group restart as purely manual.
+   **Amended — no such Backlog line exists; the entry is *added*, not corrected. See
+   Amendment B2.**
 
 **Phase 4 verification:** steps V8-V11 (the end-to-end recovery, the opt-out, and the
 exhaustion path), run on staging with the flag on.
 
 ### Phase 5 — Flip the compiled default, and prod
+
+> **Amended — step 3 happened first and without the soak. The flag was enabled directly on
+> `Prod-Bot` on 2026-09-11 through the uncommitted `.env`, in the same release as Phase 4,
+> with no staging soak; the compiled default below is untouched and step 1 is all that is
+> left of this phase. See Amendment C.**
 
 After ≥ 72 h of staging soak with no unexplained recovery:
 1. `application.properties`: `bot.recovery.enabled=true`; compose keeps
@@ -893,3 +904,137 @@ never spuriously reject a live runtime in production.
   `group_recovery_exhausted_total`) is emitted from the exhausted-skip branch as well as
   from `recordFailure` (`4236614`) — it must not be possible to exhaust silently.
 - **`handleBotGroupDeath`'s `tryLock`.** Accepted; see A2.
+
+---
+
+## Amendment — 2026-09-11 (Phase 4 compliance)
+
+Phase 4 landed in `9214902`, `4543734`, `6457e59`. Three of its instructions were wrong or
+under-specified against the repository as it actually is, and one sequencing decision was
+taken by the user against what this plan prescribes. All four are recorded here; the text
+above is left in place with pointers, not rewritten.
+
+### B1 — Phase 4 step 1 names only `AlertRulesAudienceTest`. Adding a rule costs more than that
+
+The Findings section (`AlertRulesAudienceTest` bullet) and Phase 4 step 1 both imply that
+`labels.audience` is the whole build-time contract for a new alerting rule. It is not.
+`bot-app/src/test/java/com/vingame/bot/infrastructure/observability/AlertRuleMetricsTest.java`
+renders a Prometheus exposition from the real `BotMetrics` / `InfoGaugeRefresher` /
+`BotMdcTagsMeterFilter` and holds every rule in `prometheus/alerts.yml` against it. The two
+new rules failed it **three ways**, and the failure was reproduced during compliance by
+removing the fixture Dev added and re-running the class: 8 tests, 3 failures.
+
+1. `everyReferencedApplicationMetricExists` — `group_recovery_attempts_total` and
+   `group_recovery_exhausted_total` appear in no exposition the fixture renders, because
+   nothing in the fixture had ever emitted them. A rule over a metric no series carries
+   evaluates to an empty vector forever and never reports that it is doing so.
+2. `annotationLabelsSurviveTheRulesAggregation` — `{{ $labels.botGroupId }}` in
+   `EnvironmentGroupRecoveryExhausted` has no label to render, and Go templates publish
+   `<no value>` into a product room rather than failing.
+3. `productRoutedRulesKeepTheProductLabel` — both rules are `audience: product` and read
+   their counter bare, so the counter's own tags are the alert's labels; without an
+   emission under group MDC there is no `product` / `environmentId` to route by.
+
+**The rule this plan should have stated:** *a new alerting rule over an application metric
+is not done until `AlertRuleMetricsTest`'s fixture emits that metric with the tag set the
+rule's `expr`, annotations and `audience` depend on.* For a group-scoped counter that means
+one `BotMdc.setGroupContext(...)` + increment pair in `AlertRuleMetricsTest.setUp`, which is
+what `9214902` added. `AlertRulesAudienceTest` and `AlertmanagerRoutingTest` remain
+necessary and remain insufficient.
+
+This generalises past this feature: every future phase that adds a rule pays the same cost,
+and the plan that omits it will send Dev into the same wall.
+
+### B2 — Phase 4 step 3's "fix the Backlog line that still frames DEAD-group restart as purely manual" has no referent
+
+There is no such line. `CLAUDE.md` at the branch point (`a07e103`) contains no Backlog entry
+about DEAD-group restart at all: `git log --all -S"DEAD_GROUP_RESTART" -- CLAUDE.md` and
+`-S"one-click restartable"` both return only `6457e59`, this phase's own commit, and the
+Backlog section's only restart-adjacent entries are the unrelated open bug "Restart
+lifecycle bug — bots that authenticated cleanly ... fail on `/restart`" and "Review
+`Bot.java` methods". DEAD_GROUP_RESTART shipped without ever touching CLAUDE.md, so the
+manual framing this plan set out to correct lived **only** in the alert descriptions
+(`prometheus/alerts.yml` and `alertmanager/alertmanager.yml`) and in CLAUDE.md's silence.
+
+**Step 3 is corrected to:** *add* a `[x]` Backlog entry recording that DEAD groups now
+recover without an operator, naming both plans and pointing at the new Architecture
+subsection. `6457e59` does exactly that and is accepted. A future reader looking for the
+"corrected" line will not find one, and should not go looking.
+
+### B3 — `alerts.yml:222` was the right line, and it was not the only one
+
+The line reference is accurate: at `a07e103`, `prometheus/alerts.yml:222` is
+`EnvironmentGroupDead`'s `description`, and it opened "A DEAD group does not recover on its
+own". What the step missed is that **the same falsified claim is asserted three more times
+in the same repository**, twice of them within fifteen lines of the line it names:
+
+- `alerts.yml:208-212` — the `for: 5m` rationale comment: *"it never clears by itself — a
+  DEAD group stays DEAD until an operator restarts it. The window exists only so an
+  operator-initiated restart in progress does not page anyone."* This is the load-bearing
+  one. Phase 4 step 1 says to leave `for: 5m` alone (AD-15) and AD-15 is right, but the
+  comment that **justifies** `for: 5m` justifies it from a premise this feature deletes.
+  Corrected in place, keeping `for: 5m` and stating the real reason it is unchanged.
+- `alerts.yml:47-51` — the file header's rationale for why `EnvironmentGroupDead` exists at
+  all ends on the same sentence.
+- `alertmanager/alertmanager.yml:83-85` — the evidence-route comment quotes it as the
+  route's rationale, and that rationale genuinely changes direction: a self-healing group
+  resolves the alert without a human ever opening the box, so the pinned files become
+  *more* important, not less.
+
+**Step 1 is corrected to:** correct the description **and** every comment that derives from
+it — `alerts.yml:208-212`, `alerts.yml:47-51`, `alertmanager/alertmanager.yml`'s evidence
+route. `9214902` does all four. `expr` and `for: 5m` are untouched, as AD-15 requires.
+
+### C — Phase 5's staging soak was bypassed for the prod enable of 2026-09-11 (user decision)
+
+**This plan sequences Phase 4 and Phase 5 as: enable on staging → soak ≥ 72 h with no
+unexplained recovery → review `group_recovery_attempts_total` over the soak window → flip
+the compiled default → deploy to prod.** That is not what happened, and this section exists
+so the record does not read as though it were.
+
+What is actually happening: **Phase 4's switch is being turned on directly on `Prod-Bot`,
+with four live money-making bot groups, in the same release that lands Phase 4, with no
+staging soak at all.** The reconciler will be running enabled for the first time anywhere,
+on prod. The user was shown this sequencing and the fact that it is a first-run, and chose
+it knowingly. It is a deliberate deviation from this plan, not an oversight by Dev or by
+the releaser — nothing in `9214902`, `4543734` or `6457e59` assumes or asks for it.
+
+Two mitigations are real and are why the deviation is defensible:
+
+1. **The compiled default stays `false` — Phase 5 step 1 is NOT taken.**
+   `application.properties:172` still reads `bot.recovery.enabled=false`, so the enable
+   lives only in prod's uncommitted `.env`/`secrets.env` merge as
+   `BOT_RECOVERY_ENABLED=true`. The kill switch is therefore `BOT_RECOVERY_ENABLED=false`
+   + `docker compose up -d bot-manager` — a restart of one container on one box, not a
+   rebuild and not a fleet redeploy. Any other instance that takes this image stays off.
+2. **Phase 4's two alert rules ship in the same release.**
+   `EnvironmentGroupRecoveryFlapping` (≥ 3 successes in 6 h, warning) and
+   `EnvironmentGroupRecoveryExhausted` (any exhaustion, critical) are in
+   `prometheus/alerts.yml` and reach VipTalk through the parent `viptalk` receiver, so the
+   first enabled run is not unwatched.
+
+**Phase 5's remaining content is therefore exactly one step:** flip the compiled default in
+`application.properties` to `true`, keeping compose's `${BOT_RECOVERY_ENABLED:-true}` form
+so the env override stays the emergency stop. Its soak precondition ("after ≥ 72 h of
+staging soak") is **not** satisfied and cannot be retro-fitted by the prod enable: prod
+observation is worth more than staging observation, but it is not the soak this plan asked
+for, and the review of `group_recovery_attempts_total` in Phase 5 step 2 has not been done.
+Whoever takes Phase 5 must decide against real prod data what the soak was meant to
+establish, and record that decision here.
+
+**Phase 4's verification steps are not runnable in this release.** V8, V10 and V11
+manufacture a DEAD group and an unrecoverable throwaway group; the plan forbids that on a
+live prod fleet (V12: "do **not** manufacture a DEAD group on a live prod fleet") and that
+prohibition stands. What is runnable on prod for this enable is: **V0a**, **V0b**, **V1**,
+**V11b**, and **V7's boot line read the other way** — `docker logs bot-manager | grep
+"Dead-group recovery scheduler"` must report `enabled=true`. Add one step that this plan
+never needed while the enable was staging-only:
+
+> **V7p (prod enable only) — know what the first enabled tick will act on, before it acts.**
+> The reconciler is driven by the **persisted** `targetStatus` (AD-4), so every group in
+> prod's Mongo that is `DEAD` today — including ones that died months ago and that nobody
+> intends to bring back — becomes a candidate on the first enabled tick, one per 60 s.
+> Enumerate them **before** the restart that enables the flag, and park anything that
+> should stay down with `POST /api/v1/bot-group/{id}/stop` (Phase 2 makes that persist
+> `STOPPED` for a runtime-less group, which is what makes the opt-out reachable at all).
+> An empty list is the expected answer and is still worth having in writing.

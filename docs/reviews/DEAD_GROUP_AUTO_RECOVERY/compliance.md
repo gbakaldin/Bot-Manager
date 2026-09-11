@@ -201,6 +201,8 @@ Re-verified after the churn, item by item:
 
 ### Phases 4 and 5
 Status: **out of scope by instruction — and still correctly absent.**
+*(Superseded for Phase 4 by the appended "Compliance — DEAD_GROUP_AUTO_RECOVERY, Phase 4"
+section at the bottom of this file, 2026-09-11.)*
 `prometheus/alerts.yml`, `docker-compose.yml` and `CLAUDE.md` are untouched by the branch.
 Confirmed against `git diff --name-only 7d0ec86..HEAD`: 19 files, all of them Phase 1-3
 sources, tests, `application.properties`, `BotMetrics`, and the four docs.
@@ -356,3 +358,269 @@ statement about the code and it is false.
 Accepted shape (`f4a436b`): `tryLock(2, SECONDS)`, an identity re-check against
 `runningGroups` under the lock, and no write when either fails. Rationale and the residual
 behaviour change are in the ruling above.
+
+---
+
+# Compliance — DEAD_GROUP_AUTO_RECOVERY, Phase 4
+
+*Appended 2026-09-11. Everything above is the Phase 1-3 pass and stands unchanged; its
+"Phases 4 and 5 — out of scope by instruction" entry is superseded by this section for
+Phase 4 only.*
+
+Branch: `feature/dead-group-auto-recovery`
+Plan reviewed: `docs/plans/DEAD_GROUP_AUTO_RECOVERY.md` at `c49bd42` (the state Dev worked
+from), re-read top to bottom.
+Diff reviewed: `9214902`, `4543734`, `6457e59` — 5 files, 4 of them config/docs and one a
+test fixture. No production Java changed in this phase.
+Build: `AlertRuleMetricsTest` (8), `AlertRulesAudienceTest` (10), `AlertmanagerRoutingTest`
+(8) re-run here under JDK 21 — all green.
+
+## Verdict
+
+**PLAN_AMENDED**
+
+Phase 4 as landed is faithful to the plan. All three plan steps are implemented; the two
+new rules match the plan's `expr`, `severity` and `audience` character for character; the
+compose switch is the `${...:-false}` shape the plan specified; the CLAUDE.md subsection
+covers every fact Phase 4 step 3 asks for.
+
+Dev reported three places where the plan was wrong or under-specified. **All three were
+verified independently and all three hold** — one of them by reproducing the failure, not
+by reading the commit message. They are plan defects, not Dev drift: in each case the plan
+made a falsifiable claim about this repository and the claim is false. Amended, in a marked
+`## Amendment — 2026-09-11 (Phase 4 compliance)` section at the bottom of the plan plus
+three in-place pointers (B1, B2, B3).
+
+A **fourth** amendment (C) records the user's decision to skip Phase 5's staging soak and
+enable this on prod directly. That is not Dev's deviation and nothing in these three
+commits assumes it; it is recorded so the sequencing does not read as though it happened
+silently.
+
+One item is **not** accepted silently and is listed under Drift: the operator-facing text
+these commits ship re-states a money claim that this branch's own Phase 3 pass had already
+been required to qualify. It is two sentences and no code, it does not block the enable,
+and it must be corrected.
+
+## Phase-by-phase
+
+### Phase 4 step 1 — `prometheus/alerts.yml`
+Status: **implemented**
+
+- `EnvironmentGroupDead` description no longer claims a DEAD group never recovers. The new
+  text says auto-recovery will restart it when the probe reports healthy, that the alert may
+  resolve with nobody acting, that still-firing after ~10 minutes means recovery is failing
+  or the environment is still down, names `env_ws_probe_healthy` and the `auto-recovery
+  attempt` lines as the discriminator, and names `/stop` as the opt-out. That is step 1's
+  full ask plus the two facts an operator actually needs.
+- `expr: groups_dead_by_env > 0` and `for: 5m` are byte-identical to `a07e103`. AD-15 honoured.
+- `EnvironmentGroupRecoveryExhausted`: `increase(group_recovery_exhausted_total[15m]) > 0`,
+  `severity: critical`, `audience: product` — exactly as specified, no `for:` (the plan
+  specified none, and an event counter should not have one).
+- `EnvironmentGroupRecoveryFlapping`:
+  `increase(group_recovery_attempts_total{outcome="success"}[6h]) >= 3`, `for: 5m`,
+  `severity: warning`, `audience: product` — exactly as specified.
+- Neither rule is `audience: both`, so neither needs `public_summary`; `AlertRulesAudienceTest`
+  passes. Neither gets an Alertmanager child route, so both fall through to the parent
+  `viptalk` receiver — `AlertmanagerRoutingTest.everyAlertRuleStillReachesVipTalk`
+  enumerates `alerts.yml` and proves it, and adding a `continue: true` child would have
+  dragged in the mandatory-sibling rule for no gain. Correct call.
+
+### Phase 4 step 2 — `docker-compose.yml`
+Status: **implemented**
+
+`BOT_RECOVERY_ENABLED=${BOT_RECOVERY_ENABLED:-false}` sits next to `BOT_LOG_LEVEL` in the
+`bot-manager` environment block, with a comment that says what it gates (the reconciler,
+never the probe), why it lives outside the jar, and that the value belongs in the
+uncommitted `secrets.env`/`.env` merge. The compiled default in
+`application.properties:172` is still `false`. `deploy.sh` is untouched. Nothing sets the
+value in git, which is correct.
+
+Note for the record: `enabled` is a constructor `@Value` on `DeadGroupRecoveryScheduler`
+and is read once. Flipping it is a container restart, as the plan intends; there is no
+runtime toggle and `/actuator/loggers`-style live flipping does not apply.
+
+### Phase 4 step 3 — `CLAUDE.md`
+Status: **implemented** (with the step itself corrected — Amendment B2)
+
+The new Architecture subsection covers the trigger (persisted `targetStatus`, and *why* not
+`runningGroups`), the evidence gate and the `< 500` predicate, the fact that the probe runs
+whether or not the reconciler does, `STOPPED` as the only opt-out plus the two `stop`/
+`restart` changes that making it load-bearing required, the budget including the fact that a
+success charges it and that both paths emit the hand-off, the structural staggering, the
+alert consequences, the switch, and — usefully — what the feature does **not** cover (a
+group parked at 79% dead). That is more than step 3 asked for and all of it checks out
+against the code.
+
+The Backlog entry is **added**, not corrected, because there was nothing to correct
+(Amendment B2). The commit message says so plainly rather than quietly doing something
+other than what it was told, which is the right handling.
+
+### Phase 5
+Status: **not taken — and deliberately so.** Step 1 (compiled default → `true`) is not in
+this diff and must not be. Steps 2-3 are superseded by Amendment C.
+
+## Verification of Dev's three reports
+
+### 1. `AlertRuleMetricsTest` is absent from the plan — **confirmed, reproduced**
+
+The plan names `AlertRulesAudienceTest` three times (Findings, AD-15, Phase 4 step 1) and
+`AlertRuleMetricsTest` zero times. To test the claim rather than accept it, I removed the
+three fixture lines `9214902` added to `AlertRuleMetricsTest.setUp` and re-ran the class:
+
+```
+Tests run: 8, Failures: 3
+  everyReferencedApplicationMetricExists        — metric in alerts.yml, in no exposition
+  annotationLabelsSurviveTheRulesAggregation    — {{ $labels.botGroupId }} → `<no value>`
+  productRoutedRulesKeepTheProductLabel         — audience: product, no product label
+```
+
+Three failures, exactly the three Dev described, in that shape. The file was restored
+immediately and the working tree is clean. Amendment B1 records the general rule.
+
+### 2. The Backlog line does not exist — **confirmed**
+
+`git show a07e103:CLAUDE.md`, Backlog section: the only restart-adjacent entries are the
+open "Restart lifecycle bug" (`/restart` failing with `ValidationException`, unrelated) and
+"Review `Bot.java` methods". `git log --all -S"DEAD_GROUP_RESTART" -- CLAUDE.md` and
+`-S"one-click restartable" -- CLAUDE.md` each return exactly one commit: `6457e59`, this
+phase's own. DEAD_GROUP_RESTART never touched CLAUDE.md. The manual framing lived only in
+the alert descriptions and in the file's silence. Amendment B2.
+
+### 3. `alerts.yml:222` and the `for: 5m` comment — **both confirmed**
+
+`a07e103:prometheus/alerts.yml:222` *is* the `EnvironmentGroupDead` description and *does*
+open "A DEAD group does not recover on its own" — the reference was accurate. And
+`:208-212` is the `for: 5m` rationale: *"it never clears by itself — a DEAD group stays DEAD
+until an operator restarts it. The window exists only so an operator-initiated restart in
+progress does not page anyone."* Same falsified premise, four lines above the line the plan
+names, justifying the one knob AD-15 tells Dev **not** to change. Correcting the description
+and leaving that comment would have left the rule's stated reason for existing in
+contradiction with the rule's behaviour.
+
+Dev also corrected two further instances the plan did not name — `alerts.yml:47-51` (the
+file header) and `alertmanager/alertmanager.yml`'s evidence-route comment. Both are the same
+sentence, both are comment-only, and the alertmanager one genuinely changes direction
+(evidence pinning matters *more* when a group can self-heal without anyone opening the box).
+In scope. Amendment B3.
+
+## Drift
+
+**One item, docs-only, must be corrected. It does not block the enable.**
+
+`9214902`'s `EnvironmentGroupDead` description tells operators auto-recovery rebuilds the
+runtime "reusing the existing accounts, **no new users and no new deposits**", and
+`6457e59`'s CLAUDE.md says "Existing accounts are re-authenticated; nothing registers users,
+**nothing deposits**, no DB group is recreated."
+
+Unqualified, the deposit half is false, and this branch already knows it is. `a4ee3f2`
+landed precisely this correction on `startForRecovery`'s javadoc after the Phase 1-3 pass,
+and the Phase 1-3 verdict above accepted it in those words: *"never deposits" → "adds no
+deposit a manual `/restart` would not make"*. The javadoc now warns in terms:
+
+> **It "never deposits" only in the sense that it adds no deposit a manual `/restart` would
+> not make.** ... Read "recovery cannot move money" into this and you will be wrong about a
+> group with auto-deposit on.
+
+The mechanism is `BettingMiniGameBot.onNewSession` (`:341-355`, and `SlotMachineBot:178`):
+`if (behavior.isAutoDepositEnabled() && balance < getMinBalance()) deposit()`, evaluated at
+**every new session**, and `startLocked` builds the config with the group's own
+`autoDepositEnabled` (`BotGroupBehaviorService:829`). So a recovered auto-deposit group tops
+up on its first round. The plan's own V9 states the correct standard — "only auto-deposit
+lines if the group has `autoDepositEnabled=true` ... exactly the same lines a manual
+`/restart` produces" — so the plan is right and the text drifted from it.
+
+Why it matters more now than it would have on staging: these two sentences are the
+operator-facing statement of what this feature costs, in a VipTalk product room and in the
+file every future session reads, on a release that enables autonomous restarts on four
+funded prod groups. `tptxg2` is recorded in MEMORY as `autoDeposit off`, so today's prod
+groups are probably unaffected in fact — which is exactly how a claim like this survives
+until the group where it is false.
+
+**Required correction** (no code, no test, two sentences):
+
+- `prometheus/alerts.yml`, `EnvironmentGroupDead.description`: "no new users and no new
+  deposits" → **"no new users, and no deposit a manual `/restart` would not also make — a
+  group with auto-deposit on still tops up when it resumes playing"**.
+- `CLAUDE.md`, the recovery subsection: "nothing deposits" → the same qualification, or
+  simply cite the javadoc's wording.
+
+Everything else in these three commits is faithful.
+
+## Out-of-scope changes
+
+- `alertmanager/alertmanager.yml` (comment-only) and `alerts.yml:47-51` (comment-only) are
+  not named by Phase 4 step 1 but carry the same falsified sentence; correcting them is the
+  step's intent, not an expansion of it. No route, matcher, receiver or `continue:` flag
+  changed — verified line by line.
+- `AlertRuleMetricsTest`'s fixture addition is not named by the plan either, and is
+  mandatory: without it the phase does not build (see above). Amendment B1.
+- Nothing else. The three commits touch 5 files. No production Java, no
+  `application.properties`, no `deploy.sh`.
+- The working tree's unrelated uncommitted files (`Aviator.js`, `bc.js`, the WIN79/119
+  sources, `deploy.sh`, `TaiXiuMessages/*.js`) are unchanged by this phase and unchanged by
+  this review.
+
+## What enabling newly exposes in the already-committed earlier phases
+
+None of these is a defect in the landed code. They are properties of Phases 1-3 that were
+harmless while `bot.recovery.enabled=false` and become live the moment the switch is set —
+which the plan expected to happen on staging, with a soak, and which is now happening on
+prod. Listed so the releaser and the operator can act on them rather than discover them.
+
+1. **The first enabled tick acts on prod's Mongo history, not on today's incidents.** AD-4
+   drives the reconciler off the **persisted** `targetStatus`, which is the feature's best
+   property and, at first enable, its sharpest edge: every group in prod that is `DEAD`
+   today — including any that died long ago and that nobody intends to bring back — is a
+   candidate, one per 60 s, as soon as its environment probes healthy twice. **Enumerate
+   them before the restart that enables the flag and park anything that should stay down
+   with `POST /{id}/stop`.** Added to the plan as verification step **V7p**.
+2. **`BOT_RECOVERY_ENABLED=false` is not a full rollback.** It gates the reconciler only.
+   Three behaviour changes in this image are unconditional: Phase 2's `stop()` persisting
+   `STOPPED` for a runtime-less group, A1's `restart()` status-restore on a failed start
+   half, and A2's `handleBotGroupDeath` now taking the per-group lock with
+   `tryLock(2, SECONDS)` on the health-monitor thread. The last one sits in the death path
+   of four live prod groups and runs whatever the flag says. Reverting those means rolling
+   back the image.
+3. **The probe runs with the flag off, and will run on prod.** By design (the plan requires
+   it), but it means prod's `webSocketMiniUrl` receives an **anonymous, token-less** WS
+   upgrade from the bot host, once per 60 s per URL, whenever a DEAD candidate exists. It is
+   bounded and it touches no account, but it is a new traffic shape from a host whose
+   relationship with the gateway is IP-whitelisting, so it is worth knowing it exists before
+   someone asks what it is.
+4. **A missing/unreadable `Environment` splits the recovery counters.**
+   `DeadGroupRecoveryScheduler.resolveProduct` (`:505-517`) returns `null` on any exception
+   or missing product, `BotMdc.setGroupContext` skips null values, and `mdcTags()` therefore
+   omits the tag — so an attempt taken during a Mongo blip registers a *second* series of
+   `group_recovery_attempts_total` without `product`. Impact is small: `botGroupId` and
+   `environmentId` still land, and Alertmanager's room resolution falls back to
+   `environmentId` → Mongo, so the routing survives. Worth knowing before someone reads two
+   series for one counter as a bug in the fixture that B1 added.
+5. **The zero-bot guard's `DEAD` is a recovery candidate.** `BotGroupBehaviorService:495`
+   marks a group `DEAD` when it starts 0/N bots — a credentials or gateway-auth problem, not
+   an outage. On prod that group will burn all six attempts over ~1 h 52 m and then page
+   `EnvironmentGroupRecoveryExhausted` (critical). That is the designed behaviour and the
+   alert says the right thing; it is simply the most likely first firing of a brand-new
+   critical rule, and it should not be read as a recovery bug.
+
+## Amendments to the plan
+
+Added as a marked `## Amendment — 2026-09-11 (Phase 4 compliance)` section at the bottom of
+`docs/plans/DEAD_GROUP_AUTO_RECOVERY.md`, plus three in-place pointers (Phase 4 heading,
+Phase 4 step 3, Phase 5 heading). Nothing above was rewritten; no AD, eligibility condition,
+budget value, probe predicate or existing verification step changed.
+
+- **B1** — "add an alert rule" in this repo costs an `AlertRuleMetricsTest` fixture emission
+  under the right MDC, not just `labels.audience`. Stated as a standing rule for future
+  phases, because every future rule pays it.
+- **B2** — Phase 4 step 3's Backlog line does not exist; the step is corrected to *add* an
+  entry.
+- **B3** — `alerts.yml:222` was accurate but incomplete: the same falsified sentence is
+  asserted at `:208-212` (the `for: 5m` rationale), at `:47-51` (file header) and in
+  `alertmanager.yml`'s evidence route. Step 1 corrected to name all four.
+- **C** — Phase 5's staging soak was bypassed. Records what the plan sequenced, what is
+  actually happening (prod enable on 2026-09-11, four live groups, first enabled run
+  anywhere, user's knowing decision), the two real mitigations (compiled default stays
+  `false` so the kill switch is a container restart; both alert rules ship with it), that
+  Phase 5's remaining content is one step, and that V8/V10/V11 are not runnable in this
+  release — with the prod-enable verification set spelled out and the new **V7p**
+  pre-enable inventory step added.
