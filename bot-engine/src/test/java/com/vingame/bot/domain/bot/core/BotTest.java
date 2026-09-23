@@ -157,7 +157,7 @@ class BotTest {
             long result = bot.checkBalanceExposed();
 
             assertThat(result).isEqualTo(1_000_000L);
-            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
+            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
         }
 
         @Test
@@ -170,11 +170,11 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("tok");
-            when(apiGatewayClient.getBalance("tok", "fp-1", "botuser1")).thenReturn(4_900_000L);
+            when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(4_900_000L);
 
             bot.checkBalanceExposed();
 
-            verify(apiGatewayClient).getBalance("tok", "fp-1", "botuser1");
+            verify(apiGatewayClient).getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any());
         }
 
         @Test
@@ -190,13 +190,13 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("tok");
-            when(apiGatewayClient.getBalance("tok", "fp-1", "botuser1")).thenReturn(5_000_000L);
+            when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(5_000_000L);
 
             bot.checkBalanceExposed();
 
             // Server says nothing was debited — the local model is corrected back to 5M,
             // which is what makes the freeze observable rather than silent.
-            verify(apiGatewayClient).getBalance("tok", "fp-1", "botuser1");
+            verify(apiGatewayClient).getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any());
             assertThat(bot.getExpectedBalance()).isEqualTo(5_000_000L);
         }
 
@@ -209,7 +209,7 @@ class BotTest {
 
             bot.checkBalanceExposed();
 
-            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
+            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
         }
 
         @Test
@@ -226,14 +226,14 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-token-xyz");
-            when(apiGatewayClient.getBalance("auth-token-xyz", "fp-1", "botuser1")).thenReturn(7_500_000L);
+            when(apiGatewayClient.getBalance(eq("auth-token-xyz"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(7_500_000L);
 
             long result = bot.checkBalanceExposed();
 
             assertThat(result).isEqualTo(7_500_000L);
             assertThat(bot.getLastFetchedBalance()).isEqualTo(7_500_000L);
             assertThat(bot.getExpectedBalance()).isEqualTo(7_500_000L);
-            verify(apiGatewayClient).getBalance("auth-token-xyz", "fp-1", "botuser1");
+            verify(apiGatewayClient).getBalance(eq("auth-token-xyz"), eq("fp-1"), eq("botuser1"), any(), any());
         }
 
         @Test
@@ -242,12 +242,12 @@ class BotTest {
             // Defaults: lastFetchedBalance=-1, expectedCurrentBalance=-100_000_000L. delta = ~100M -> refetch.
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-token");
-            when(apiGatewayClient.getBalance("auth-token", "fp-1", "botuser1")).thenReturn(50_000_000L);
+            when(apiGatewayClient.getBalance(eq("auth-token"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(50_000_000L);
 
             long result = bot.checkBalanceExposed();
 
             assertThat(result).isEqualTo(50_000_000L);
-            verify(apiGatewayClient).getBalance("auth-token", "fp-1", "botuser1");
+            verify(apiGatewayClient).getBalance(eq("auth-token"), eq("fp-1"), eq("botuser1"), any(), any());
         }
     }
 
@@ -263,7 +263,7 @@ class BotTest {
             // default lastFetchedBalance = -1
             bot.deposit();
 
-            verify(apiGatewayClient, never()).deposit(anyString(), anyLong());
+            verify(apiGatewayClient, never()).deposit(anyString(), anyLong(), any(), any());
         }
 
         @Test
@@ -274,14 +274,14 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.deposit("botuser1", 1_000_000_000L)).thenReturn(true);
-            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(999_999_999L);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any())).thenReturn(true);
+            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(999_999_999L);
 
             bot.deposit();
 
             assertThat(bot.getLastFetchedBalance()).isEqualTo(999_999_999L);
             assertThat(bot.getExpectedBalance()).isEqualTo(999_999_999L);
-            verify(apiGatewayClient).getBalance("auth-tok", "fp-1", "botuser1");
+            verify(apiGatewayClient).getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any());
         }
 
         @Test
@@ -290,13 +290,13 @@ class BotTest {
             setLong(bot, "lastFetchedBalance", 1_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
 
-            when(apiGatewayClient.deposit("botuser1", 1_000_000_000L)).thenReturn(false);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any())).thenReturn(false);
 
             bot.deposit();
 
             assertThat(bot.getLastFetchedBalance()).isEqualTo(1_000_000L);
             assertThat(bot.getExpectedBalance()).isEqualTo(1_000_000L);
-            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
+            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
         }
 
         @Test
@@ -306,12 +306,12 @@ class BotTest {
             setLong(bot, "lastFetchedBalance", 1_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
 
-            when(apiGatewayClient.deposit("botuser1", 5_000_000L)).thenReturn(false);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(5_000_000L), any(), any())).thenReturn(false);
 
             bot.deposit();
 
-            verify(apiGatewayClient).deposit("botuser1", 5_000_000L);
-            verify(apiGatewayClient, never()).deposit("botuser1", Bot.DEFAULT_DEPOSIT_AMOUNT);
+            verify(apiGatewayClient).deposit(eq("botuser1"), eq(5_000_000L), any(), any());
+            verify(apiGatewayClient, never()).deposit(eq("botuser1"), eq(Bot.DEFAULT_DEPOSIT_AMOUNT), any(), any());
         }
 
         @Test
@@ -354,11 +354,11 @@ class BotTest {
             setLong(bot, "lastFetchedBalance", 1_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
 
-            when(apiGatewayClient.deposit("botuser1", Bot.DEFAULT_DEPOSIT_AMOUNT)).thenReturn(false);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(Bot.DEFAULT_DEPOSIT_AMOUNT), any(), any())).thenReturn(false);
 
             bot.deposit();
 
-            verify(apiGatewayClient).deposit("botuser1", Bot.DEFAULT_DEPOSIT_AMOUNT);
+            verify(apiGatewayClient).deposit(eq("botuser1"), eq(Bot.DEFAULT_DEPOSIT_AMOUNT), any(), any());
         }
     }
 
@@ -448,7 +448,7 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(7_000_000L);
+            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(7_000_000L);
 
             bot.checkBalanceExposed();
 
@@ -471,7 +471,7 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(8_000_000L);
+            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(8_000_000L);
 
             bot.checkBalanceExposed();
 
@@ -485,7 +485,7 @@ class BotTest {
             // Defaults: lastFetchedBalance = -1 -> anchor only, no drain.
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(50_000_000L);
+            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(50_000_000L);
 
             bot.checkBalanceExposed();
 
@@ -507,7 +507,7 @@ class BotTest {
             long result = bot.checkBalanceExposed();
 
             assertThat(result).isEqualTo(9_500_000L);
-            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
+            verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
             assertThat(drainCounter()).isNull();
             // anchor must be untouched by a cached read
             assertThat(bot.getLastFetchedBalance()).isEqualTo(10_000_000L);
@@ -524,13 +524,13 @@ class BotTest {
 
             // First drop: 10M -> 7M = 3M drain, anchor becomes 7M.
             expected.set(-100_000_000L);
-            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(7_000_000L);
+            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(7_000_000L);
             bot.checkBalanceExposed();
 
             // Second drop computed from the NEW anchor (7M), not the original 10M:
             // 7M -> 5M = 2M, cumulative 5M.
             expected.set(-100_000_000L);
-            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(5_000_000L);
+            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(5_000_000L);
             bot.checkBalanceExposed();
 
             assertThat(drainCounter().count()).isEqualTo(5_000_000.0);
@@ -545,8 +545,8 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.deposit("botuser1", 1_000_000_000L)).thenReturn(true);
-            when(apiGatewayClient.getBalance("auth-tok", "fp-1", "botuser1")).thenReturn(1_005_000_000L);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any())).thenReturn(true);
+            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(1_005_000_000L);
 
             bot.deposit();
 
@@ -571,7 +571,7 @@ class BotTest {
         @Test
         @DisplayName("After initialize(), status reaches CONNECTING (start() is not called)")
         void shouldTransitionToConnecting() {
-            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenReturn(tokens);
             when(tokens.getAgencyToken()).thenReturn("agency1234567890");
             when(tokens.getAuthToken()).thenReturn("auth1234567890abc");
             when(clientFactory.newClient(eq(tokens), eq("botuser1"))).thenReturn(wsClient);
@@ -589,7 +589,7 @@ class BotTest {
             // (Bot.initialize). The fixture's Game is BETTING_MINI / "BauCua" / "g1".
             // mdcSnapshot is captured immediately after BotMdc.set(...) and survives
             // the finally-clear, so it pins exactly what the metric series will carry.
-            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenReturn(tokens);
             when(tokens.getAgencyToken()).thenReturn("agency1234567890");
             when(tokens.getAuthToken()).thenReturn("auth1234567890abc");
             when(clientFactory.newClient(eq(tokens), eq("botuser1"))).thenReturn(wsClient);

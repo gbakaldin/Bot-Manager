@@ -192,7 +192,7 @@ class BotReconnectTest {
                     .thenThrow(new RuntimeException("ws down"));
 
             // After re-auth returns, we stop the bot to break the loop
-            when(apiGatewayClient.authenticate(any())).thenAnswer(inv -> {
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenAnswer(inv -> {
                 // After this call, mark stopped so loop exits
                 Field stoppedF = Bot.class.getDeclaredField("stopped");
                 stoppedF.setAccessible(true);
@@ -204,7 +204,7 @@ class BotReconnectTest {
 
             // Full backoff sequence sleeps (no confirm sleep since tryReconnectWs never returned true)
             assertThat(bot.sleeps).containsExactly(5000L, 10_000L, 30_000L, 60_000L, 60_000L, 60_000L, 60_000L);
-            verify(apiGatewayClient, times(1)).authenticate(any());
+            verify(apiGatewayClient, times(1)).authenticate(any(), any(), any());
         }
     }
 
@@ -230,7 +230,7 @@ class BotReconnectTest {
 
             // Re-auth always succeeds — the "account is fine" case the DEAD-on-throw
             // path never terminates.
-            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenReturn(tokens);
 
             // Every fresh client comes up but never holds — models a WS subchannel that
             // is silently pruned right after connect. tryReconnectWs() returns true (no
@@ -251,8 +251,8 @@ class BotReconnectTest {
             // MAX_RECONNECT_CYCLES = 10: cycles 1..9 re-authenticate; cycle 10 gives up
             // BEFORE re-auth. So authenticate() ran exactly 9 times — proving it is the
             // cap, not an auth failure, that terminated the loop.
-            verify(apiGatewayClient, times(9)).authenticate(any());
-            verify(apiGatewayClient, atLeastOnce()).authenticate(any());
+            verify(apiGatewayClient, times(9)).authenticate(any(), any(), any());
+            verify(apiGatewayClient, atLeastOnce()).authenticate(any(), any(), any());
         }
 
         /**
@@ -271,7 +271,7 @@ class BotReconnectTest {
         void watchdogReentryCannotBypassCap() throws Exception {
             setReconnecting(bot, true);
 
-            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenReturn(tokens);
 
             VingameWebSocketClient closedClient = mock(VingameWebSocketClient.class);
             when(closedClient.isOpen()).thenReturn(false);
@@ -284,7 +284,7 @@ class BotReconnectTest {
             assertThat(getReconnecting(bot)).isFalse();
             // 1 initial re-auth (runAuthThenWsLoop) + 8 in-loop (cycles 2..9) = 9.
             // If runAuthThenWsLoop entered the worker at cycle=0 this would be 10.
-            verify(apiGatewayClient, times(9)).authenticate(any());
+            verify(apiGatewayClient, times(9)).authenticate(any(), any(), any());
         }
 
         /**
@@ -299,7 +299,7 @@ class BotReconnectTest {
         void shouldRecoverWithinCapWithoutDying() throws Exception {
             setReconnecting(bot, true);
 
-            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenReturn(tokens);
 
             VingameWebSocketClient closed = mock(VingameWebSocketClient.class);
             when(closed.isOpen()).thenReturn(false);
@@ -316,7 +316,7 @@ class BotReconnectTest {
             assertThat(bot.getStatus()).isNotEqualTo(BotStatus.DEAD);
             assertThat(getReconnecting(bot)).isFalse();
             // Exactly one re-auth cycle consumed — far below MAX_RECONNECT_CYCLES.
-            verify(apiGatewayClient, times(1)).authenticate(any());
+            verify(apiGatewayClient, times(1)).authenticate(any(), any(), any());
         }
 
         /**
@@ -332,7 +332,7 @@ class BotReconnectTest {
         void deadBotIsNotResurrectedAfterCap() throws Exception {
             setReconnecting(bot, true);
 
-            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenReturn(tokens);
 
             VingameWebSocketClient closedClient = mock(VingameWebSocketClient.class);
             when(closedClient.isOpen()).thenReturn(false);
@@ -342,7 +342,7 @@ class BotReconnectTest {
             invokePrivate("runWsReconnectLoop");
             assertThat(bot.getStatus()).isEqualTo(BotStatus.DEAD);
             assertThat(getReconnecting(bot)).isFalse();
-            verify(apiGatewayClient, times(9)).authenticate(any());
+            verify(apiGatewayClient, times(9)).authenticate(any(), any(), any());
 
             // A late Netty onDisconnect fires after the guard cleared: must be a no-op.
             invokePrivate("onWsDisconnected");
@@ -355,7 +355,7 @@ class BotReconnectTest {
             assertThat(getReconnecting(bot)).isFalse();
 
             // No fresh reconnect loop ran on either path — authenticate() count is unchanged.
-            verify(apiGatewayClient, times(9)).authenticate(any());
+            verify(apiGatewayClient, times(9)).authenticate(any(), any(), any());
         }
     }
 
@@ -370,7 +370,7 @@ class BotReconnectTest {
         void shouldMarkDeadOnFailure() throws Exception {
             setReconnecting(bot, true);
 
-            when(apiGatewayClient.authenticate(any()))
+            when(apiGatewayClient.authenticate(any(), any(), any()))
                     .thenThrow(new RuntimeException("auth server down"));
 
             Method m = Bot.class.getDeclaredMethod("performReauth");
@@ -394,7 +394,7 @@ class BotReconnectTest {
         void shouldReturnAfterSuccessfulReauthAndReconnect() throws Exception {
             setReconnecting(bot, true);
 
-            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenReturn(tokens);
 
             VingameWebSocketClient newClient = mock(VingameWebSocketClient.class);
             when(newClient.isOpen()).thenReturn(true);
@@ -412,7 +412,7 @@ class BotReconnectTest {
         void shouldFallThroughToWsLoopWhenWsFails() throws Exception {
             setReconnecting(bot, true);
 
-            when(apiGatewayClient.authenticate(any())).thenReturn(tokens);
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenReturn(tokens);
 
             // First newClient: returns a client whose isOpen() is false (after confirm)
             // Second newClient (in runWsReconnectLoop): also false; then we mark stopped to break the loop

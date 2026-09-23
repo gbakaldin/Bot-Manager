@@ -4,6 +4,7 @@ import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.GameMsClient;
 import com.vingame.bot.domain.environment.model.Environment;
+import com.vingame.bot.infrastructure.gateway.GatewayBudget;
 import lombok.Getter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -50,6 +51,16 @@ public class EnvironmentClients {
      * Useful for accessing environment-specific settings.
      */
     private final Environment environment;
+
+    /**
+     * This environment's gateway request budget (GATEWAY_REQUEST_BUDGET AD-1).
+     * <p>
+     * The same object {@link #apiGatewayClient} was initialised with — held here so
+     * {@code BotFactory} can wire it into the bot for the WebSocket-upgrade path without
+     * resolving it a second time. One budget per environment for the life of the JVM, so a
+     * rebuild of these clients (a restart, a recovery) keeps the window it was counting.
+     */
+    private final GatewayBudget gatewayBudget;
 
     /**
      * Cleanup method called when environment is removed from registry.

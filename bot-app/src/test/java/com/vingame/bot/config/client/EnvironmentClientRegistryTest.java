@@ -6,6 +6,9 @@ import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.infrastructure.auth.AuthProfile;
 import com.vingame.bot.infrastructure.auth.AuthStrategyFactory;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetSettings;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.netty.channel.EventLoopGroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -56,17 +59,27 @@ class EnvironmentClientRegistryTest {
     @Mock
     private AuthStrategyFactory authStrategyFactory;
 
+    /**
+     * A real budget registry on a throwaway meter registry (GATEWAY_REQUEST_BUDGET). Not a
+     * mock: the interesting property is that the same environment id resolves to the same
+     * budget object, and a mock would answer null and prove nothing.
+     */
+    private GatewayBudgetRegistry gatewayBudgetRegistry;
+
     private EnvironmentClientRegistry registry;
 
     private static final String GAME_MS_URL = "https://gamems.example.test";
 
     @BeforeEach
     void setUp() {
+        gatewayBudgetRegistry = new GatewayBudgetRegistry(
+                GatewayBudgetSettings.defaults(), new SimpleMeterRegistry());
         registry = new EnvironmentClientRegistry(
                 environmentService,
                 eventLoopGroup,
                 apiGatewayClientProvider,
                 authStrategyFactory,
+                gatewayBudgetRegistry,
                 GAME_MS_URL
         );
     }
@@ -142,7 +155,7 @@ class EnvironmentClientRegistryTest {
         registry.getClients("env-1");
 
         ArgumentCaptor<String> appIdCaptor = ArgumentCaptor.forClass(String.class);
-        verify(mockClient).init(anyString(), appIdCaptor.capture(), any(AuthProfile.class));
+        verify(mockClient).init(anyString(), appIdCaptor.capture(), any(AuthProfile.class), any());
         assertThat(appIdCaptor.getValue()).isEqualTo("bc114097");
     }
 
@@ -159,7 +172,7 @@ class EnvironmentClientRegistryTest {
         registry.getClients("env-1");
 
         ArgumentCaptor<String> appIdCaptor = ArgumentCaptor.forClass(String.class);
-        verify(mockClient).init(anyString(), appIdCaptor.capture(), any(AuthProfile.class));
+        verify(mockClient).init(anyString(), appIdCaptor.capture(), any(AuthProfile.class), any());
         assertThat(appIdCaptor.getValue()).isEqualTo("custom-env-appid");
     }
 
@@ -175,7 +188,7 @@ class EnvironmentClientRegistryTest {
         registry.getClients("env-1");
 
         ArgumentCaptor<String> appIdCaptor = ArgumentCaptor.forClass(String.class);
-        verify(mockClient).init(anyString(), appIdCaptor.capture(), any(AuthProfile.class));
+        verify(mockClient).init(anyString(), appIdCaptor.capture(), any(AuthProfile.class), any());
         assertThat(appIdCaptor.getValue()).isEqualTo("env-only-appid");
     }
 

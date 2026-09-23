@@ -12,6 +12,7 @@ import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.bot.infrastructure.gateway.GatewayBudget;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import io.netty.channel.EventLoopGroup;
 import org.junit.jupiter.api.DisplayName;
@@ -71,7 +72,7 @@ class BotFactoryFailLoudTest {
                 mock(ApiGatewayClient.class),
                 mock(GameMsClient.class),
                 mock(ClientFactory.class),
-                env);
+                env, GatewayBudget.UNLIMITED);
     }
 
     private static BotConfiguration configFor(Game game) {

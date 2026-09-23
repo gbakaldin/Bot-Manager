@@ -17,6 +17,8 @@ import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -78,7 +80,7 @@ class BalanceGaugeSemanticsTest {
      * A bot that has connected but has not yet completed a round reports
      * {@code -100,000,000} — the constructor sentinel — because
      * {@code expectedCurrentBalance} is only ever written from a server read inside
-     * {@code checkBalance()} / {@code deposit()}, and both of those run from
+     * {@code checkBalance()} / {@code deposit(any(), any())}, and both of those run from
      * {@code onNewSession()} (betting/Tai Xiu) or the spin path (slot). Until the first
      * round arrives there has been no server read.
      * <p>
@@ -113,20 +115,20 @@ class BalanceGaugeSemanticsTest {
 
         // No server read has happened: the group is eligible for the gauge as soon as the
         // socket is up, which is long before the first round.
-        verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString());
+        verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
     }
 
     @Test
     @DisplayName("the first checkBalance() replaces the sentinel with the authoritative server figure")
     void firstRoundSyncsExpectedToTheServer() {
-        when(apiGatewayClient.getBalance("tok", "fp-1", "botuser1")).thenReturn(DEPOSIT);
+        when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(DEPOSIT);
 
         long balance = bot.checkBalanceExposed();
 
         // lastFetchedBalance starts at -1, so the very first call is always over the
         // threshold and always fetches — which is why the sentinel window is bounded by
         // the first round rather than lasting forever.
-        verify(apiGatewayClient).getBalance("tok", "fp-1", "botuser1");
+        verify(apiGatewayClient).getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any());
         assertThat(balance).isEqualTo(DEPOSIT);
         assertThat(bot.getExpectedBalance()).isEqualTo(DEPOSIT);
     }
@@ -145,7 +147,7 @@ class BalanceGaugeSemanticsTest {
     @Test
     @DisplayName("after the first read, expected stays within 1% of the deposit of server truth")
     void expectedNeverDriftsMoreThanOneSyncBandFromTheServer() {
-        when(apiGatewayClient.getBalance("tok", "fp-1", "botuser1")).thenReturn(DEPOSIT);
+        when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(DEPOSIT);
         bot.checkBalanceExposed();
 
         long syncBand = DEPOSIT / 100; // BALANCE_SYNC_PERCENT_OF_DEPOSIT = 1
@@ -176,14 +178,14 @@ class BalanceGaugeSemanticsTest {
     @Test
     @DisplayName("a bot that stops receiving rounds freezes the number the gauge reads (GameNoRounds' job)")
     void expectedFreezesWhenRoundsStop() {
-        when(apiGatewayClient.getBalance("tok", "fp-1", "botuser1")).thenReturn(DEPOSIT);
+        when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(DEPOSIT);
         bot.checkBalanceExposed();
         assertThat(bot.getExpectedBalance()).isEqualTo(DEPOSIT);
 
         // Rounds stop: no onNewSession, so no checkBalance, so no further server read —
         // whatever the server does to this account from here is invisible to the gauge.
         assertThat(bot.getExpectedBalance()).isEqualTo(DEPOSIT);
-        verify(apiGatewayClient).getBalance("tok", "fp-1", "botuser1");
+        verify(apiGatewayClient).getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any());
     }
 
     @Test

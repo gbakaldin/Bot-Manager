@@ -13,6 +13,7 @@ import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.bot.infrastructure.gateway.GatewayBudget;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -88,7 +89,7 @@ class BotFactoryTaiXiuWiringTest {
                 apiGatewayClient,
                 mock(GameMsClient.class),
                 mock(ClientFactory.class),
-                env);
+                env, GatewayBudget.UNLIMITED);
     }
 
     private static BotConfiguration taiXiuConfig(Game game) {
@@ -127,7 +128,7 @@ class BotFactoryTaiXiuWiringTest {
         when(apiGatewayClient.getApiGateway()).thenReturn("https://gw.example");
         // Stop deterministically at the auth boundary — this fires only if the
         // type switch already selected the TAI_XIU branch and entered initialize().
-        when(apiGatewayClient.authenticate(any())).thenThrow(new AuthSentinel());
+        when(apiGatewayClient.authenticate(any(), any(), any())).thenThrow(new AuthSentinel());
 
         when(clientRegistry.getClients("env-1")).thenReturn(envClientsWith(env, apiGatewayClient));
 

@@ -1,5 +1,7 @@
 package com.vingame.bot.domain.bot.core;
 
+import com.vingame.bot.common.gateway.GatewayRequestScope;
+import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.bot.coordination.JackpotScaler;
@@ -8,6 +10,7 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.bot.infrastructure.gateway.GatewayBudget;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
 import com.vingame.bot.infrastructure.observability.ScopedDebugEscalator;
@@ -50,6 +53,21 @@ public abstract class Bot {
     protected ApiGatewayClient apiGatewayClient;
     protected GameMsClient gameMsClient;
     protected ClientFactory clientFactory;
+
+    /**
+     * This environment's gateway request budget (GATEWAY_REQUEST_BUDGET AD-1) — set via a
+     * builder-style setter by {@code BotFactory}, which reads it off {@code EnvironmentClients}
+     * so a bot and its {@code ApiGatewayClient} can never end up on different budgets.
+     * <p>
+     * Used here for the <b>WebSocket upgrade</b> only: the HTTP requests a bot makes are
+     * already funnelled inside {@code ApiGatewayClient}, and what is left is
+     * {@code client.connect()}, which this class owns. Initialised to
+     * {@link GatewayBudget#UNLIMITED} rather than left null, so a fixture that builds a bot
+     * without Spring behaves exactly as it did before this feature — the same posture as
+     * {@code metrics} and {@code sessionAggregator}, except that the fallback here is a real
+     * object rather than a null check at every call site.
+     */
+    protected GatewayBudget gatewayBudget = GatewayBudget.UNLIMITED;
 
     // Observability — set via builder-style setter (BotFactory wires the singleton bean).
     protected BotMetrics metrics;
@@ -272,6 +290,16 @@ public abstract class Bot {
         return this;
     }
 
+    /**
+     * Wire this bot's environment gateway budget. Null-tolerant: a null resolves to
+     * {@link GatewayBudget#UNLIMITED}, because a bot that silently NPEs on its first
+     * {@code connect()} is a worse outcome than a bot whose WebSocket upgrade is uncounted.
+     */
+    public Bot setGatewayBudget(GatewayBudget gatewayBudget) {
+        this.gatewayBudget = gatewayBudget == null ? GatewayBudget.UNLIMITED : gatewayBudget;
+        return this;
+    }
+
     public Bot initialize() {
         BotMdc.set(
                 configuration.getBotGroupId(),
@@ -303,7 +331,10 @@ public abstract class Bot {
             log.debug("Initializing bot {}", userName);
 
             transitionStatus(BotStatus.AUTHENTICATING);
-            this.tokens = apiGatewayClient.authenticate(credentials);
+            // ESSENTIAL (GATEWAY_REQUEST_BUDGET AD-3): this is the group-start path — /start,
+            // /restart, the startup chain, activation and recovery all reach here — and a bot
+            // that cannot log in does not exist.
+            this.tokens = apiGatewayClient.authenticate(credentials, RequestTier.ESSENTIAL, scope());
             transitionStatus(BotStatus.AUTHENTICATED);
 
             this.client = clientFactory.newClient(tokens, userName);
@@ -314,7 +345,7 @@ public abstract class Bot {
             log.debug("Setting auth tokens [agency: {}..., auth: {}...]",
                      tokens.getAgencyToken().substring(0, 10),
                      tokens.getAuthToken().substring(0, 10));
-            client.connect();
+            connectUnderBudget(RequestTier.ESSENTIAL, client);
 
             log.debug("Bot initialized and connected. Client: {}",
                      System.identityHashCode(client));
@@ -392,7 +423,10 @@ public abstract class Bot {
         this.client = clientFactory.newClient(tokens, userName);
         configureClient(client);
         transitionStatus(BotStatus.CONNECTING);
-        client.connect();
+        // DEFAULT (AD-3): this is the periodic-logout restart — one bot per group per hour,
+        // reusing its existing tokens (no re-login). Nothing is broken and nothing is
+        // starting, so it yields to both other tiers.
+        connectUnderBudget(RequestTier.DEFAULT, client);
         start();
     }
 
@@ -421,14 +455,20 @@ public abstract class Bot {
         // which credited the agency partition the game engine never debits — the
         // P_097/BOM "balance visible but every bet rejected" symptom.
         long depositAmount = resolveDepositAmount();
-        boolean success = apiGatewayClient.deposit(userName, depositAmount);
+        // PRIORITIZED (AD-3), for the deposit and the read that confirms it: a bot that
+        // cannot top up stops betting, but it is already up, so it does not outrank a group
+        // that is still coming up.
+        boolean success = apiGatewayClient.deposit(
+                userName, depositAmount, RequestTier.PRIORITIZED, scope());
         if (success) {
             log.debug("Bot {}: Deposit of {} successful, fetching new balance...", userName, depositAmount);
             if (metrics != null) metrics.incBotAutoDeposit(true);
             recordFetchedBalance(apiGatewayClient.getBalance(
                 getClient().getAuthToken(),
                 credentials.getFingerprint(),
-                userName
+                userName,
+                RequestTier.PRIORITIZED,
+                scope()
             ));
             expectedCurrentBalance.set(lastFetchedBalance);
             log.debug("Bot {}: New balance: {}", userName, expectedCurrentBalance);
@@ -446,10 +486,20 @@ public abstract class Bot {
 
         if (Math.abs(lastFetchedBalance - expectedCurrentBalance.get()) > syncThreshold) {
             log.debug("checkBalance() fetching from server (delta > {})", syncThreshold);
+            // AD-3: the FIRST read (lastFetchedBalance < 0) is ESSENTIAL, every later one is
+            // DEFAULT. The first read is not "the first round" — it is on the start path:
+            // BettingMiniGameBot.onStart calls onNewSession() BEFORE it installs its
+            // scenario, and expectedCurrentBalance is seeded at -100M, so this branch always
+            // fires once per bot at start. A bot whose first read fails never installs its
+            // scenario and becomes a silent zombie; a bot whose drift re-sync is deferred
+            // simply plays on its local estimate for another round.
+            RequestTier tier = lastFetchedBalance < 0 ? RequestTier.ESSENTIAL : RequestTier.DEFAULT;
             recordFetchedBalance(apiGatewayClient.getBalance(
                 getClient().getAuthToken(),
                 credentials.getFingerprint(),
-                userName
+                userName,
+                tier,
+                scope()
             ));
             log.debug("checkBalance() fetched: {}", lastFetchedBalance);
             expectedCurrentBalance.set(lastFetchedBalance);
@@ -783,7 +833,12 @@ public abstract class Bot {
         try {
             log.debug("Bot {}: re-authenticating", userName);
             transitionStatus(BotStatus.AUTHENTICATING);
-            this.tokens = apiGatewayClient.authenticate(credentials);
+            // PRIORITIZED (AD-3): a bot that is already part of a running fleet and is
+            // trying to get back in. Note AD-9 — from Phase 3 a GatewayBudgetException here
+            // must NOT mark the bot DEAD (the catch below does, for every exception today);
+            // it is one failed attempt of the existing backoff loop, because a request the
+            // JVM chose not to send is not a gateway refusal.
+            this.tokens = apiGatewayClient.authenticate(credentials, RequestTier.PRIORITIZED, scope());
             transitionStatus(BotStatus.AUTHENTICATED);
             return true;
         } catch (Exception e) {
@@ -854,7 +909,7 @@ public abstract class Bot {
             this.client = fresh;
             configureClient(fresh);
             transitionStatus(BotStatus.CONNECTING);
-            fresh.connect();
+            connectUnderBudget(RequestTier.PRIORITIZED, fresh);
             beforeReconnect();
             start();
             return true;
@@ -867,6 +922,53 @@ public abstract class Bot {
             closeQuietly(fresh);
             return false;
         }
+    }
+
+    /**
+     * The single WebSocket-upgrade call site (GATEWAY_REQUEST_BUDGET AD-3).
+     * <p>
+     * All three upgrades a bot ever performs go through here, each with its own tier:
+     * {@link RequestTier#ESSENTIAL} from {@link #initialize()}, {@link RequestTier#DEFAULT}
+     * from {@link #restart()} (periodic logout), {@link RequestTier#PRIORITIZED} from
+     * {@link #tryReconnectWs()}. {@code GatewayCallSiteGuardTest} fails the build if a
+     * {@code .connect()} appears anywhere else in this class.
+     * <p>
+     * Whether the upgrade is counted at all is
+     * {@code bot.gateway.budget.count-ws-upgrades} (Open Item 1: the WS hosts may not sit
+     * behind the same Cloudflare rule as the {@code /gwms/v1/*} API host). The decision lives
+     * in the budget rather than here, so the answer, when it arrives, is one flag in one
+     * place instead of a condition at three call sites.
+     * <p>
+     * <b>Cancellation happens before this method runs, never inside it.</b>
+     * {@code VingameWebSocketClient.connect()} swallows {@code InterruptedException} — it
+     * logs, restores the flag, and returns normally with a <em>half-built</em> client — so
+     * interrupting an upgrade in flight does not abort it, it corrupts it. The budget
+     * therefore refuses admission to a cancelled scope and this call is simply never
+     * reached (AD-8).
+     */
+    private void connectUnderBudget(RequestTier tier, VingameWebSocketClient target) {
+        gatewayBudget.runWsUpgrade(tier, scope(), target::connect);
+    }
+
+    /**
+     * This bot's {@link GatewayRequestScope}: who a queued request belongs to, and how the
+     * budget learns it should no longer be sent.
+     * <p>
+     * Cancellation is {@code isStopped()} — a stopped bot's queued login is work nobody
+     * wants any more, and a request that is never admitted is never stamped into the window.
+     * Phase 2's start-attempt registry adds the second half ("the start this bot belongs to
+     * was cancelled"), which is what lets a {@code /stop} unwind a paced start without
+     * waiting it out.
+     * <p>
+     * Null-safe on {@code configuration} for fixtures that reach a gateway call before
+     * {@code setConfiguration} — such a scope simply carries no group and is not cancellable
+     * by group, which is the truth about it.
+     */
+    private GatewayRequestScope scope() {
+        return GatewayRequestScope.forBot(
+                configuration == null ? null : configuration.getBotGroupId(),
+                userName,
+                this::isStopped);
     }
 
     // Hook for subclasses to clean up game state before scenarios are re-added on reconnect

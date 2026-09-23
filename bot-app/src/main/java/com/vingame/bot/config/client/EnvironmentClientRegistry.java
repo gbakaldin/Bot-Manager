@@ -6,6 +6,8 @@ import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.GameMsClient;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
+import com.vingame.bot.infrastructure.gateway.GatewayBudget;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
 import io.netty.channel.EventLoopGroup;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
@@ -39,6 +41,7 @@ public class EnvironmentClientRegistry {
     private final EventLoopGroup eventLoopGroup;
     private final ObjectProvider<ApiGatewayClient> apiGatewayClientProvider;
     private final AuthStrategyFactory authStrategyFactory;
+    private final GatewayBudgetRegistry gatewayBudgetRegistry;
     private final String gameMsUrl;
 
     @Autowired
@@ -47,12 +50,14 @@ public class EnvironmentClientRegistry {
             EventLoopGroup eventLoopGroup,
             ObjectProvider<ApiGatewayClient> apiGatewayClientProvider,
             AuthStrategyFactory authStrategyFactory,
+            GatewayBudgetRegistry gatewayBudgetRegistry,
             @Value("${gamems.url}") String gameMsUrl
     ) {
         this.environmentService = environmentService;
         this.eventLoopGroup = eventLoopGroup;
         this.apiGatewayClientProvider = apiGatewayClientProvider;
         this.authStrategyFactory = authStrategyFactory;
+        this.gatewayBudgetRegistry = gatewayBudgetRegistry;
         this.gameMsUrl = gameMsUrl;
     }
 
@@ -125,8 +130,19 @@ public class EnvironmentClientRegistry {
         String appId = env.getProductCode() != null && env.getProductCode().getAppId() != null
                 ? env.getProductCode().getAppId()
                 : env.getAppId();
+        // GATEWAY_REQUEST_BUDGET AD-1: this registry and the budget registry are keyed
+        // identically (environmentId), so the client, the bots and the metrics all end up on
+        // the same per-environment window. forEnvironment is a computeIfAbsent and is never
+        // evicted, so rebuilding an environment's clients (a restart, a recovery) keeps the
+        // window it was already counting rather than resetting it to zero.
+        GatewayBudget gatewayBudget = gatewayBudgetRegistry.forEnvironment(
+                environmentId,
+                env.getName(),
+                env.getProductCode() != null ? env.getProductCode().getCode() : null);
+
         ApiGatewayClient apiGatewayClient = apiGatewayClientProvider.getObject();
-        apiGatewayClient.init(env.getApiGatewayUrl(), appId, authStrategyFactory.getAuthProfile(env));
+        apiGatewayClient.init(env.getApiGatewayUrl(), appId,
+                authStrategyFactory.getAuthProfile(env), gatewayBudget);
 
         // Create shared GameMsClient (stateless) with global GameMS URL
         GameMsClient gameMsClient = new GameMsClient(gameMsUrl);
@@ -154,7 +170,8 @@ public class EnvironmentClientRegistry {
             apiGatewayClient,
             gameMsClient,
             clientFactory,
-            env
+            env,
+            gatewayBudget
         );
     }
 }

@@ -115,6 +115,11 @@ public class BotGroupBehaviorService {
      * Max number of bots to create/authenticate simultaneously.
      * Controls concurrency to avoid overwhelming the game server's auth endpoint.
      * Configurable via application.properties: bot.creation.parallelism
+     * <p>
+     * This bounds <b>concurrency</b> (how many sockets are open at once), not <b>rate</b>.
+     * Since GATEWAY_REQUEST_BUDGET AD-2 the rate is the per-environment gateway budget's
+     * business, so raising this number no longer raises the request rate against the
+     * gateway — it only makes the admitted requests overlap more.
      */
     @Value("${bot.creation.parallelism:10}")
     private int botCreationParallelism;
@@ -767,8 +772,20 @@ public class BotGroupBehaviorService {
      * Classify a bot-creation failure into a bounded reason tag for
      * {@code bot_creation_failures_total}. Bounded labels keep Prometheus
      * cardinality low. RESTART_LIFECYCLE_FIX Architecture Decision 5.
+     * <p>
+     * The bounded value set is {@code validation | auth | budget | unknown}.
      */
     private static String classifyCreationFailure(Throwable cause) {
+        // GATEWAY_REQUEST_BUDGET AD-9 — a NEW bounded label value, and it must be tested
+        // FIRST. "budget" means this JVM chose not to send the request: the gateway was never
+        // asked, so counting it as "auth" would put a self-imposed pacing decision in the
+        // same bucket as a rejected credential and make EnvironmentLoginFailing fire on our
+        // own throttling. Inert until Phase 3 — nothing throws a GatewayBudgetException while
+        // the facade is in observe mode — and first, rather than last, because the heuristic
+        // below matches on the substring "token" and these messages can carry it.
+        if (cause instanceof com.vingame.bot.common.exception.GatewayBudgetException) {
+            return "budget";
+        }
         // UpstreamLoginException is the typed auth-failure path (API_ERROR_-
         // FORWARDING Phase B). Match it explicitly so it lands in "auth"
         // without depending on the message-substring heuristic below.

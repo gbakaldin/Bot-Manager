@@ -21,6 +21,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -61,7 +62,7 @@ class BotReconnectMdcTest {
         when(apiGw.getApiGateway()).thenReturn("http://gw.test");
         // For triggerFullReconnect path: runAuthThenWsLoop calls performReauth() first.
         // Return tokens (or anything non-throwing) so the loop reaches sleep().
-        when(apiGw.authenticate(org.mockito.ArgumentMatchers.any()))
+        when(apiGw.authenticate(any(), any(), any()))
                 .thenReturn(mock(com.vingame.websocketparser.auth.TokensProvider.class));
 
         BotCredentials credentials = BotCredentials.builder()

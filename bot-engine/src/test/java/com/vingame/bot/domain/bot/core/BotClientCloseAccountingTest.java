@@ -260,7 +260,7 @@ class BotClientCloseAccountingTest {
 
             CountDownLatch reauthEntered = new CountDownLatch(1);
             CountDownLatch releaseReauth = new CountDownLatch(1);
-            when(apiGatewayClient.authenticate(any())).thenAnswer(inv -> {
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenAnswer(inv -> {
                 reauthEntered.countDown();
                 releaseReauth.await(10, TimeUnit.SECONDS);
                 throw new RuntimeException("auth gateway down");
@@ -286,7 +286,7 @@ class BotClientCloseAccountingTest {
             VingameWebSocketClient open = openClient();
             bot.client = open;
 
-            when(apiGatewayClient.authenticate(any()))
+            when(apiGatewayClient.authenticate(any(), any(), any()))
                     .thenThrow(new RuntimeException("auth gateway down"));
 
             bot.triggerFullReconnect("watchdog: no messages");

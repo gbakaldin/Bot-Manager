@@ -3,7 +3,10 @@ package com.vingame.bot.infrastructure.client;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.common.exception.UpstreamLoginException;
+import com.vingame.bot.common.gateway.GatewayRequestScope;
+import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.infrastructure.auth.AuthProfile;
+import com.vingame.bot.infrastructure.gateway.GatewayBudget;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationRequest;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResponse;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
@@ -29,6 +32,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -39,7 +43,21 @@ import java.util.function.Function;
 /**
  * Client for interacting with the API Gateway.
  * This is a prototype-scoped bean - each injection gets a new instance
- * that must be initialized with environment-specific data via {@link #init(String, String)}.
+ * that must be initialized with environment-specific data via
+ * {@link #init(String, String, AuthProfile, GatewayBudget)}.
+ * <p>
+ * <b>Every outbound HTTP request in this class goes through one funnel</b>
+ * ({@link #send(RequestTier, GatewayRequestScope, HttpRequest)}) and therefore through the
+ * environment's {@link GatewayBudget} (GATEWAY_REQUEST_BUDGET). That is what makes the
+ * Cloudflare 1,000-per-5-minutes rule countable at all, and from Phase 3 it is what makes it
+ * enforceable. {@code GatewayCallSiteGuardTest} fails the build if a second
+ * {@code httpClient.send(} appears anywhere in this class — a bypass would be invisible to
+ * every metric and every alert, and would present as a whole-brand auth outage.
+ * <p>
+ * The public methods that make a request take {@code (tier, scope)} from their caller
+ * rather than defaulting them. The tier is a statement of intent that only the caller can
+ * make (a login during a group start is ESSENTIAL; the same login from the reconnect loop is
+ * PRIORITIZED), so there is deliberately no overload that omits it.
  */
 @Slf4j
 @Service
@@ -61,6 +79,11 @@ public class ApiGatewayClient {
      * Max number of users to register simultaneously.
      * Controls concurrency to avoid overwhelming the auth server.
      * Configurable via application.properties: user.registration.parallelism
+     * <p>
+     * This bounds <b>concurrency</b> (how many sockets are open at once), not <b>rate</b>.
+     * Since GATEWAY_REQUEST_BUDGET AD-2 the rate is the environment's
+     * {@link GatewayBudget}'s business, so raising this number no longer raises the request
+     * rate against the gateway — it only makes the admitted requests overlap more.
      */
     @Value("${user.registration.parallelism:10}")
     private int registrationParallelism;
@@ -77,6 +100,16 @@ public class ApiGatewayClient {
     private Function<AuthContext, ? extends LoginRequest> loginRequestFactory;
     private boolean initialized = false;
 
+    /**
+     * This environment's request budget. Every request in this class is admitted through it.
+     * <p>
+     * Defaults to {@link GatewayBudget#UNLIMITED} so a client built by a fixture cannot NPE
+     * on a bot thread; production always receives the per-environment budget through
+     * {@link #init(String, String, AuthProfile, GatewayBudget)} and
+     * {@code EnvironmentClientRegistryBudgetWiringTest} pins that it does.
+     */
+    private GatewayBudget gatewayBudget = GatewayBudget.UNLIMITED;
+
     @Autowired
     public ApiGatewayClient(DisplayNameService displayNameService, BotMetrics metrics) {
         this.displayNameService = displayNameService;
@@ -88,7 +121,9 @@ public class ApiGatewayClient {
      * Initialize the client with environment-specific configuration.
      * Must be called before using any other methods.
      */
-    public ApiGatewayClient init(String apiGateway, String appId, AuthProfile authProfile) {
+    public ApiGatewayClient init(String apiGateway, String appId, AuthProfile authProfile,
+                                GatewayBudget gatewayBudget) {
+        this.gatewayBudget = gatewayBudget == null ? GatewayBudget.UNLIMITED : gatewayBudget;
         this.apiGateway = apiGateway;
         this.appId = appId;
         this.loginPath = authProfile.loginPath();
@@ -101,11 +136,26 @@ public class ApiGatewayClient {
         return this;
     }
 
+    /**
+     * Test seam — initialise without a budget, i.e. with {@link GatewayBudget#UNLIMITED}.
+     * <p>
+     * <b>Not for production.</b> The only production caller is
+     * {@code EnvironmentClientRegistry.createClients}, which must pass the environment's
+     * budget; {@code GatewayCallSiteGuardTest} asserts against the source that it does,
+     * because a client initialised through this overload would send unbudgeted traffic while
+     * every {@code gateway_budget_*} series sat at zero.
+     */
+    ApiGatewayClient init(String apiGateway, String appId, AuthProfile authProfile) {
+        return init(apiGateway, appId, authProfile, GatewayBudget.UNLIMITED);
+    }
+
     /** Backward-compatible overload — uses standard user endpoints and no X-TOKEN. */
-    public ApiGatewayClient init(String apiGateway, String appId, Function<AuthContext, ? extends LoginRequest> loginRequestFactory) {
+    public ApiGatewayClient init(String apiGateway, String appId,
+                                 Function<AuthContext, ? extends LoginRequest> loginRequestFactory,
+                                 GatewayBudget gatewayBudget) {
         return init(apiGateway, appId, new AuthProfile(
                 "/user/login.aspx", "/user/register.aspx", "/user/update.aspx", null, loginRequestFactory
-        ));
+        ), gatewayBudget);
     }
 
     private void checkInitialized() {
@@ -115,12 +165,60 @@ public class ApiGatewayClient {
     }
 
     /**
+     * <b>The single funnel.</b> Every HTTP request this class makes is admitted by the
+     * environment's budget here and nowhere else.
+     * <p>
+     * This is the only {@code httpClient.send(} call site in the class and
+     * {@code GatewayCallSiteGuardTest} keeps it that way. From Phase 4 this is also where
+     * every response is classified before it is parsed, so a Cloudflare block page becomes
+     * "edge block, cf-ray …" instead of {@code Unexpected character ('<')} — the exact
+     * message that was misdiagnosed for an hour on 2026-09-17.
+     * <p>
+     * The caller's checked exceptions are rethrown unwrapped: the funnel must not change the
+     * exception a caller already handles.
+     */
+    private HttpResponse<String> send(RequestTier tier, GatewayRequestScope scope, HttpRequest request)
+            throws IOException, InterruptedException {
+        return underBudget(tier, scope, () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()));
+    }
+
+    /**
+     * The funnel's non-HTTP twin: run {@code call} under the budget and unwrap its checked
+     * exceptions.
+     * <p>
+     * Used for the login, which still goes through the library's {@code AuthClient} until
+     * Phase 4 moves it in-repo (AD-12) — the library parses the body as JSON before anything
+     * else, so neither the status code nor the {@code server} / {@code cf-ray} headers
+     * survive, which is why block detection on the most exposed request has to wait for that
+     * move. It costs the edge a request either way, so it is counted from Phase 1.
+     */
+    private <T> T underBudget(RequestTier tier, GatewayRequestScope scope, Callable<T> call)
+            throws IOException, InterruptedException {
+        try {
+            return gatewayBudget.execute(tier, scope, call);
+        } catch (IOException | InterruptedException | RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            // GatewayBudget.execute declares `throws Exception` for the general case. Every
+            // call passed in here throws only IOException or InterruptedException, so
+            // anything else came out of the budget layer itself and is a bug there — not a
+            // gateway failure, and it must not be reported as one.
+            throw new IllegalStateException(
+                    "Unexpected checked exception from the gateway budget funnel", e);
+        }
+    }
+
+    /**
      * Authenticate a bot with the given credentials.
      *
      * @param credentials Bot credentials (username, password, fingerprint)
+     * @param tier        why this login matters: {@link RequestTier#ESSENTIAL} on the start
+     *                    path ({@code Bot.initialize}), {@link RequestTier#PRIORITIZED} from
+     *                    the reconnect loop's re-auth. Only the caller knows which.
+     * @param scope       the bot this login is for, and how to learn it has been called off
      * @return TokensProvider containing agencyToken, authToken, and jwtToken
      */
-    public TokensProvider authenticate(BotCredentials credentials) {
+    public TokensProvider authenticate(BotCredentials credentials, RequestTier tier, GatewayRequestScope scope) {
         checkInitialized();
 
         AuthContext ctx = new AuthContext(
@@ -142,11 +240,23 @@ public class ApiGatewayClient {
         }
 
         try {
-            TokensProvider tokens = new AuthClient(ctx, loginRequestFactory).authenticate();
+            TokensProvider tokens = underBudget(tier, scope,
+                    () -> new AuthClient(ctx, loginRequestFactory).authenticate());
             log.debug("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
                     tokens.getAgencyToken(), tokens.getAuthToken(), tokens.getJwtToken());
             metrics.incLogin(true);
             return tokens;
+        } catch (IOException | InterruptedException e) {
+            // Unreachable today: the library's authenticate() throws only unchecked, and the
+            // funnel rethrows the caller's checked exceptions unwrapped. Declared so that
+            // Phase 4's in-repo login (which does own the HTTP call, and does throw these)
+            // lands without changing this method's contract.
+            metrics.incLogin(false);
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            throw new UpstreamLoginException(
+                    "Login failed for user '" + credentials.getUsername() + "': " + e.getMessage(), e);
         } catch (RuntimeException e) {
             // Counter increment must not change error semantics — BotFactory relies on
             // the exception propagating up so the bot creation pipeline records the failure.
@@ -307,7 +417,12 @@ public class ApiGatewayClient {
                 .timeout(Duration.ofSeconds(10))
                 .build();
 
-        HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+        // DEFAULT tier (AD-3): registration is the work whose deferral costs nothing that is
+        // not recoverable. The scope carries the username PREFIX, which is the only identity
+        // a registration has — it runs inside BotGroupService.save, before any bot of the
+        // group exists, so there is no botGroupId to cancel it by.
+        HttpResponse<String> response = send(RequestTier.DEFAULT,
+                GatewayRequestScope.registration(userNamePrefix), httpRequest);
         String responseBody = response.body();
         log.debug("[Register] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
@@ -352,15 +467,20 @@ public class ApiGatewayClient {
                     .timeout(Duration.ofSeconds(10))
                     .build();
 
-            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            // DEFAULT tier, registration scope (AD-3). The identity available here is the
+            // full username rather than the prefix — this is called from the retry loop, one
+            // user at a time, and the username is what an operator greps when a bot ends up
+            // nameless (a nameless account stalls the ziczac round engine).
+            HttpResponse<String> response = send(RequestTier.DEFAULT,
+                    GatewayRequestScope.registration(username), httpRequest);
             String responseBody = response.body();
             log.debug("[UpdateFullname] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
             JsonNode responseJson = mapper.readTree(responseBody);
             String status = responseJson.has("status") ? responseJson.get("status").asText() : null;
 
-            if ("INVALID".equals(status)) {
-                log.warn("Display name '{}' is already taken", displayName);
+            if (isDisplayNameTaken(status)) {
+                log.debug("Display name '{}' is already taken ({})", displayName, status);
                 return false;
             }
 
@@ -375,6 +495,22 @@ public class ApiGatewayClient {
         } catch (IOException | InterruptedException e) {
             throw new RuntimeException("Failed to set display name: " + displayName, e);
         }
+    }
+
+    /**
+     * Whether an {@code update-fullname} response status means "that name is taken,
+     * pick another" — the only outcome {@link #setDisplayNameWithRetry} should re-roll on.
+     * <p>
+     * Gateways are not uniform here: some answer {@code INVALID}, the RIK/P_114 gateway
+     * ({@code api-gwrik.sgame.us}) answers {@code EXISTED} with HTTP-style code 409 and
+     * "Tên hiển thị đã được sử dụng". Before {@code EXISTED} was recognised it fell
+     * through to the generic throw, which aborted the retry loop on the first
+     * collision — 19 of 100 bots in a 2026-09-18 group registered nameless, and the
+     * ziczac room froze until they were named by hand (a nameless account in the room
+     * stalls the round engine).
+     */
+    static boolean isDisplayNameTaken(String status) {
+        return "INVALID".equals(status) || "EXISTED".equals(status);
     }
 
     /**
@@ -421,9 +557,13 @@ public class ApiGatewayClient {
      *
      * @param username Bot username to credit
      * @param amount   Amount to deposit
+     * @param tier     {@link RequestTier#PRIORITIZED} from {@code Bot.deposit} — a bot that
+     *                 cannot top up stops betting, but it is already up, so it does not
+     *                 outrank a group that is coming up
+     * @param scope    the bot this deposit is for
      * @return true if the deposit succeeded (HTTP 200)
      */
-    public boolean deposit(String username, long amount) {
+    public boolean deposit(String username, long amount, RequestTier tier, GatewayRequestScope scope) {
         checkInitialized();
         try {
             Object body = java.util.Map.of("username", username, "amount", amount);
@@ -440,7 +580,7 @@ public class ApiGatewayClient {
                     .timeout(Duration.ofSeconds(10))
                     .build();
 
-            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = send(tier, scope, httpRequest);
             String responseBody = response.body();
             boolean success = response.statusCode() == 200;
             if (success) {
@@ -462,9 +602,15 @@ public class ApiGatewayClient {
      * @param authToken   Authentication token
      * @param fingerprint User's fingerprint
      * @param username    Username (for logging)
+     * @param tier        {@link RequestTier#ESSENTIAL} for a bot's <b>first</b> read (it is on
+     *                    the start path and a bot that fails it never installs its scenario),
+     *                    {@link RequestTier#PRIORITIZED} for the read that confirms a deposit,
+     *                    {@link RequestTier#DEFAULT} for a drift re-sync
+     * @param scope       the bot this read is for
      * @return User's main balance
      */
-    public long getBalance(String authToken, String fingerprint, String username) {
+    public long getBalance(String authToken, String fingerprint, String username,
+                           RequestTier tier, GatewayRequestScope scope) {
         checkInitialized();
         try {
             Thread.sleep(500);
@@ -481,7 +627,7 @@ public class ApiGatewayClient {
                     .timeout(Duration.ofSeconds(10))
                     .build();
 
-            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> response = send(tier, scope, httpRequest);
             String responseBody = response.body();
             log.debug("[VerifyToken] response HTTP {} | body: {}", response.statusCode(), responseBody);
 

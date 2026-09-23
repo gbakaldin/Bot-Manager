@@ -19,6 +19,10 @@ import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.brand.model.ProductCode;
+import com.vingame.bot.config.client.EnvironmentClientRegistry;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetMode;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetSettings;
 import com.vingame.bot.infrastructure.notification.VipTalkClient;
 import com.vingame.bot.infrastructure.observability.InfoGaugeRefresher;
 import org.junit.jupiter.api.DisplayName;
@@ -28,6 +32,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.ApplicationContext;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Arrays;
 
@@ -173,7 +178,13 @@ class ApplicationContextLoadsTest {
         // provider goes *missing* under Starter's scan; "exactly these products and no
         // others" is already pinned once, in bot-messages, and a second copy here would
         // be a file every future brand has to touch for no extra protection.
-        assertThat(registry.registeredBettingMiniProducts()).contains("097", "098", "116", "118");
+        // "114" is here because it is the newest provider (RikGameMessageTypes,
+        // RIK_114_BETTING_MINI) and a newly added provider is exactly the one at risk
+        // of being reachable from bot-messages' bare package scan while unreachable
+        // from Starter's — the single thing this assertion uniquely proves. The plan
+        // records this edit as not *required*, since the check is a superset; it is
+        // one string and it is not exact-set duplication.
+        assertThat(registry.registeredBettingMiniProducts()).contains("097", "098", "114", "116", "118");
         assertThat(registry.registeredTaiXiuProducts()).contains("114", "116");
         assertThat(registry.hasSlotProvider()).isTrue();
 
@@ -192,6 +203,44 @@ class ApplicationContextLoadsTest {
         // @Autowired-ambiguity risk today (single constructor), but this is the class
         // of change that crash-looped VipTalkClient — assert the bean actually wires.
         assertThat(context.getBean(BotFactory.class)).isNotNull();
+    }
+
+    @Test
+    @DisplayName("the gateway request budget binds from configuration and ships in observe mode")
+    void gatewayBudgetIsWiredAndObserveOnly() {
+        // GATEWAY_REQUEST_BUDGET. Three things only a real refresh can prove:
+        //
+        // 1. The settings bean BINDS. Its constructor validates the whole policy and throws
+        //    IllegalStateException on a non-monotonic or over-cap combination, so a bad default
+        //    is a crash loop on the host — exactly the class of defect this test file exists for.
+        //    It also binds five Durations from strings like `5m` and `0`, which no unit test of
+        //    the record can exercise.
+        // 2. The bound values are the SHIPPED ones. The defaults live in three places
+        //    (application.properties, GatewayBudgetConfig's @Value fallbacks, and
+        //    GatewayBudgetSettings.defaults()), and a box whose real ceiling is not the one the
+        //    plan reasoned about is a box that can still be Cloudflare-blocked.
+        // 3. The mode is `observe`. Phase 1 must not pace anything anywhere; an `enforce`
+        //    default shipped by accident would be a behaviour change on ten prod environments.
+        GatewayBudgetSettings settings = context.getBean(GatewayBudgetSettings.class);
+        assertThat(settings)
+                .as("the bound settings must equal the shipped defaults — if these have drifted, "
+                        + "fix the properties file or defaults(), do not relax this assertion")
+                .isEqualTo(GatewayBudgetSettings.defaults());
+        assertThat(settings.mode()).isEqualTo(GatewayBudgetMode.OBSERVE);
+
+        // The registry is a @Component with a @PostConstruct that logs the startup posture, so
+        // getBean() returning also proves that hook ran without throwing.
+        GatewayBudgetRegistry budgetRegistry = context.getBean(GatewayBudgetRegistry.class);
+        assertThat(budgetRegistry.settings()).isSameAs(settings);
+        assertThat(budgetRegistry.size())
+                .as("no environment has clients yet, so no budget and no gateway_budget_* series")
+                .isZero();
+
+        // And it is the SAME registry EnvironmentClientRegistry resolves budgets from. Two
+        // registry beans would each count part of the traffic, and the window would read low.
+        assertThat(ReflectionTestUtils.getField(
+                context.getBean(EnvironmentClientRegistry.class), "gatewayBudgetRegistry"))
+                .isSameAs(budgetRegistry);
     }
 
     @Test

@@ -176,7 +176,7 @@ class PerBotInitLogLevelTest {
         when(tokens.getAuthToken()).thenReturn("auth1234567890abc");
         ApiGatewayClient apiGw = mock(ApiGatewayClient.class);
         when(apiGw.getApiGateway()).thenReturn("http://gw.test");
-        when(apiGw.authenticate(any())).thenReturn(tokens);
+        when(apiGw.authenticate(any(), any(), any())).thenReturn(tokens);
         ClientFactory clientFactory = mock(ClientFactory.class);
         when(clientFactory.newClient(any(), anyString())).thenReturn(wsClient);
 

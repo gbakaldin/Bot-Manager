@@ -160,8 +160,16 @@ public class BotFactory {
         Bot bot = switch (game.getGameType()) {
             case BETTING_MINI -> {
                 BettingMiniGameBot bettingBot = new BettingMiniGameBot();
+                // .forGame(game) is the game dimension the registry key lacks
+                // (RIK_114_ZICZAC AD-3): the registry still answers one provider per
+                // (gameType, product), and that provider decides whether it serves
+                // this particular game itself. Defaults to `this` for every provider
+                // that does not specialise, so this is a no-op everywhere except
+                // P_114's ziczacPlugin. THIS IS THE ONLY CALL SITE — a second
+                // bettingMini(...) lookup that forgets forGame silently falls back to
+                // the generic provider, and ziczac's winnings go back to zero.
                 bettingBot.setMessageTypes(
-                        messageTypesRegistry.bettingMini(productKey(env)));
+                        messageTypesRegistry.bettingMini(productKey(env)).forGame(game));
                 // Wire the strategy registry so initializeSubclass() can build the
                 // per-bot BettingStrategy for configuration.strategyId.
                 bettingBot.setStrategyFactory(strategyFactory);
@@ -196,6 +204,12 @@ public class BotFactory {
                 environmentClients.getGameMsClient(),
                 freshClientFactory
             )
+            // GATEWAY_REQUEST_BUDGET AD-1. Wired immediately after setClients, and from the
+            // SAME EnvironmentClients the ApiGatewayClient came from, so a bot's WebSocket
+            // upgrades and its HTTP requests are counted against one window and cannot
+            // diverge. Note that freshClientFactory above is per-bot by design
+            // (RESTART_LIFECYCLE_FIX) while the budget is deliberately per-environment.
+            .setGatewayBudget(environmentClients.getGatewayBudget())
             .setConfiguration(configuration)
             .setMetrics(botMetrics)
             .setSessionAggregator(sessionAggregator)
