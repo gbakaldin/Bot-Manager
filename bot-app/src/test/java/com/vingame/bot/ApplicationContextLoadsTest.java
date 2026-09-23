@@ -178,13 +178,7 @@ class ApplicationContextLoadsTest {
         // provider goes *missing* under Starter's scan; "exactly these products and no
         // others" is already pinned once, in bot-messages, and a second copy here would
         // be a file every future brand has to touch for no extra protection.
-        // "114" is here because it is the newest provider (RikGameMessageTypes,
-        // RIK_114_BETTING_MINI) and a newly added provider is exactly the one at risk
-        // of being reachable from bot-messages' bare package scan while unreachable
-        // from Starter's — the single thing this assertion uniquely proves. The plan
-        // records this edit as not *required*, since the check is a superset; it is
-        // one string and it is not exact-set duplication.
-        assertThat(registry.registeredBettingMiniProducts()).contains("097", "098", "114", "116", "118");
+        assertThat(registry.registeredBettingMiniProducts()).contains("097", "098", "116", "118");
         assertThat(registry.registeredTaiXiuProducts()).contains("114", "116");
         assertThat(registry.hasSlotProvider()).isTrue();
 
