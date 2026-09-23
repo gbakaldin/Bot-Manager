@@ -103,6 +103,18 @@ services:
       # does not exist it creates a fresh one with NO appenders -- which would
       # silently delete the detail track.
       - LOGGING_LEVEL_COM_VINGAME_WEBSOCKETPARSER=${WSPARSER_LOG_LEVEL:-INFO}
+      # GATEWAY_REQUEST_BUDGET AD-23 — observe | enforce for the per-environment
+      # Cloudflare request budget. Spring relaxed-binds this name to the
+      # `bot.gateway.budget.mode` property, where the compiled default is `observe`.
+      #
+      # Here rather than in the jar for the same reason BOT_RECOVERY_ENABLED is: turning
+      # pacing on or off is then `docker compose up -d bot-manager` on one box, not a
+      # rebuild and a fleet redeploy, and one instance can pace while the others do not.
+      # `observe` counts, tags and publishes the window and refuses NOTHING, which is what
+      # makes it safe on prod on day one; `enforce` does the pacing and arrives with
+      # Phase 3 (until then an enforce instance logs a WARN saying it is not enforcing).
+      # Set it per box in secrets.env/.env (the uncommitted merge) — never here.
+      - BOT_GATEWAY_BUDGET_MODE=${GATEWAY_BUDGET_MODE:-observe}
     depends_on:
       mongo:
         condition: service_healthy
