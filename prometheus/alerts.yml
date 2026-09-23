@@ -425,6 +425,44 @@ groups:
           summary: "Group {{ $labels.groupName }} average balance at {{ $value | humanizePercentage }} of its deposit"
           description: "Auto-deposit is OFF for this group, so it will not top itself up. Fund it or enable auto-deposit before the bots stop betting."
 
+      # GATEWAY_REQUEST_BUDGET AD-20 — the per-environment Cloudflare request window.
+      #
+      # Cloudflare rate-limits every gwms gateway at 1,000 requests / 5 min / source IP, and
+      # a breach is not a slow-down: the edge answers an HTML 403 block page to EVERY request
+      # from this host for that gateway, so the whole brand cannot log in, re-authenticate,
+      # read a balance or deposit — and the one observed block (2026-09-17, ~1,140 requests)
+      # had not aged out after a full hour, while every reconnect loop in the fleet kept
+      # feeding it. 900 is the app's own hard cap; 800 is the point at which an operator
+      # should know a window is filling.
+      #
+      # Read BARE, so the gauge's own labels (environmentId, product) are the alert's labels.
+      # That is deliberate: this is a per-environment fact, and `sum` over environments would
+      # hide the one that is about to be blocked behind nine that are idle.
+      #
+      # for: 1m and not 5m. The window is 5 minutes wide, so a sustained-for-5-minutes
+      # condition is already most of a breach; one minute above 800 is the earliest honest
+      # signal that is not a single scrape's noise.
+      #
+      # audience: internal. Nothing is broken for a player yet — this is the warning that
+      # precedes GatewayEdgeBlocked (Phase 4), which IS audience: product because at that
+      # point no bot on the brand can re-auth. Neither needs an Alertmanager route: with no
+      # matching child route they fall through to the viptalk receiver, and only a
+      # `continue: true` child would have required a mandatory viptalk sibling.
+      #
+      # While bot.gateway.budget.mode=observe (the shipped default) NOTHING is paced, so this
+      # firing means requests really are going out at that rate and the only protection is
+      # that someone reads it. That is the whole purpose of the observe phase.
+      - alert: GatewayBudgetNearCap
+        expr: gateway_budget_window_requests > 800
+        for: 1m
+        labels:
+          job: bot-manager
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "Environment {{ $labels.environmentId }} has sent {{ $value }} gateway requests in the last 5 minutes (cap 900, Cloudflare blocks at 1000)"
+          description: "This is the run-up to a whole-brand auth outage. In observe mode nothing is being paced — check what is driving it (a large group start, a reconnect storm, a bulk registration, or scripts/bulk-create-accounts.py running from this same host, which the app's budget cannot see) and stagger it. gateway_budget_requests_total by tier says which class of request it is; the 5-minute fleet rollup line carries the same window per environment."
+
   - name: bot-manager-jvm
     rules:
       # The thread-leak sawtooth (resolved by the ws-parser 3.0.5 bump) showed as

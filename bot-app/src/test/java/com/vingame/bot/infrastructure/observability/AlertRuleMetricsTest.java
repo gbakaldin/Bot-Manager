@@ -9,6 +9,8 @@ import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvStatus
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GameStatusKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GroupBalance;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetSettings;
 import com.vingame.bot.infrastructure.logging.AsyncQueueMeterFixture;
 import io.micrometer.prometheusmetrics.PrometheusConfig;
 import io.micrometer.prometheusmetrics.PrometheusMeterRegistry;
@@ -153,6 +155,17 @@ class AlertRuleMetricsTest {
         metrics.incGroupRecoveryAttempt("success");
         metrics.incGroupRecoveryExhausted();
         MDC.clear();
+
+        // --- the per-environment gateway request budget (GATEWAY_REQUEST_BUDGET AD-20),
+        // created exactly as EnvironmentClientRegistry creates it: one per environment id,
+        // tagged EXPLICITLY with {environmentId, product} rather than from bot MDC, because it
+        // is published from the scrape thread and from the probe scheduler, neither of which
+        // has a bot MDC. GatewayBudgetNearCap reads gateway_budget_window_requests BARE and
+        // renders {{ $labels.environmentId }}, so both the metric and that label have to be in
+        // this exposition or the rule is unverifiable here.
+        new GatewayBudgetRegistry(GatewayBudgetSettings.defaults(), registry)
+                .forEnvironment("env-uuid-1", "Staging", "116")
+                .count("ws-probe");
 
         // --- the log4j2 queue meters, registered exactly as AsyncQueueMetrics does at
         // startup, against the real LoggerContext this build runs on. LogQueueSaturated

@@ -5,6 +5,8 @@ import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.GroupHealth;
+import com.vingame.bot.infrastructure.gateway.GatewayBudget;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
@@ -25,8 +27,14 @@ import java.util.concurrent.TimeUnit;
  * Every 5 minutes it emits <b>one line per running environment</b>:
  * <pre>
  *   env &lt;id&gt; (&lt;name&gt;, product 116): groups=3, bots=150, connected=148, dead=2,
- *                                    deadGroups=0, rounds=412, staked=12345678
+ *                                    deadGroups=0, rounds=412, staked=12345678,
+ *                                    gateway=137/900 queued=0/0/0 circuit=closed
  * </pre>
+ * The {@code gateway=…} fragment is the environment's live gateway request window
+ * (GATEWAY_REQUEST_BUDGET AD-20): requests in the current sliding window against the hard
+ * cap, then the three tier queue depths (ESSENTIAL/PRIORITIZED/DEFAULT) and the Cloudflare
+ * circuit state. It is rendered by {@code GatewayBudget.Snapshot.describeForRollup()} so the
+ * string an operator greps has exactly one definition.
  * and <b>a second line only for a group that is not clean</b> — any DEAD or RECONNECTING
  * bot, or the group itself marked DEAD:
  * <pre>
@@ -59,12 +67,15 @@ public class FleetRollupLogger {
 
     private final BotGroupBehaviorService behaviorService;
     private final SessionAggregationService sessionAggregationService;
+    private final GatewayBudgetRegistry gatewayBudgetRegistry;
     private ScheduledExecutorService scheduler;
 
     public FleetRollupLogger(BotGroupBehaviorService behaviorService,
-                             SessionAggregationService sessionAggregationService) {
+                             SessionAggregationService sessionAggregationService,
+                             GatewayBudgetRegistry gatewayBudgetRegistry) {
         this.behaviorService = behaviorService;
         this.sessionAggregationService = sessionAggregationService;
+        this.gatewayBudgetRegistry = gatewayBudgetRegistry;
     }
 
     @PostConstruct
@@ -163,10 +174,18 @@ public class FleetRollupLogger {
             // demotions below them safe. The null botGroupId is skipped, not written:
             // an environment line has no group, and "botGroupId: null" in the JSON
             // document is a different thing from the key being absent.
+            // GATEWAY_REQUEST_BUDGET AD-20: the live request window rides the line that is
+            // emitted anyway, so the one number this feature exists to bound is visible in
+            // Grafana at INFO without adding a line class whose rate scales with anything.
+            // snapshotOrEmpty, not forEnvironment: reading must not conjure a budget (and
+            // with it a fresh set of gateway_budget_* series) as a side effect.
+            GatewayBudget.Snapshot budget = gatewayBudgetRegistry.snapshotOrEmpty(
+                    envId, info != null ? info.environmentName() : null, product);
+
             BotMdc.setGroupContext(null, envId, product);
             try {
                 log.info("env {} ({}, product {}): groups={}, bots={}, connected={}, dead={}, "
-                                + "deadGroups={}, rounds={}, staked={}",
+                                + "deadGroups={}, rounds={}, staked={}, {}",
                         envId,
                         info != null ? info.environmentName() : "?",
                         product != null ? product : "?",
@@ -175,7 +194,8 @@ public class FleetRollupLogger {
                         openWs.getOrDefault(key, 0),
                         deadBotsByEnv.getOrDefault(envId, 0),
                         deadGroups.getOrDefault(key, 0),
-                        activity[0], activity[1]);
+                        activity[0], activity[1],
+                        budget.describeForRollup());
             } finally {
                 BotMdc.clear();
             }

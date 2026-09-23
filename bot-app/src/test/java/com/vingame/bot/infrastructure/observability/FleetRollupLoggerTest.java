@@ -1,6 +1,9 @@
 package com.vingame.bot.infrastructure.observability;
 
 import com.vingame.bot.common.logging.BotMdc;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetSettings;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvKey;
@@ -57,6 +60,7 @@ class FleetRollupLoggerTest {
     private SessionAggregationService sessionAggregationService;
     private FleetRollupLogger rollup;
 
+    private GatewayBudgetRegistry gatewayBudgetRegistry;
     private CapturingAppender appender;
     private LoggerContext ctx;
     private LoggerConfig loggerConfig;
@@ -66,7 +70,11 @@ class FleetRollupLoggerTest {
     void setUp() {
         behaviorService = mock(BotGroupBehaviorService.class);
         sessionAggregationService = mock(SessionAggregationService.class);
-        rollup = new FleetRollupLogger(behaviorService, sessionAggregationService);
+        // A real budget registry, not a mock: the gateway fragment of the env line is read
+        // through snapshotOrEmpty, and a mock would answer null and assert nothing.
+        gatewayBudgetRegistry = new GatewayBudgetRegistry(
+                GatewayBudgetSettings.defaults(), new SimpleMeterRegistry());
+        rollup = new FleetRollupLogger(behaviorService, sessionAggregationService, gatewayBudgetRegistry);
 
         appender = new CapturingAppender();
         appender.start();
@@ -126,7 +134,35 @@ class FleetRollupLoggerTest {
                 .contains("bots=150")
                 .contains("connected=150")
                 .contains("dead=0")
-                .contains("deadGroups=0");
+                .contains("deadGroups=0")
+                // GATEWAY_REQUEST_BUDGET AD-20. No budget exists for env-1 in this fixture, and
+                // the line still carries the fragment with the configured hard cap: reading the
+                // rollup must not CREATE a budget (and with it a fresh set of gateway_budget_*
+                // series), and an operator who greps for `gateway=` must not have to work out
+                // whether a missing fragment means "idle" or "feature not deployed".
+                .contains("gateway=0/900 queued=0/0/0 circuit=closed");
+    }
+
+    @Test
+    @DisplayName("the env line carries the environment's live gateway request window")
+    void theEnvironmentLineCarriesTheGatewayWindow() {
+        when(behaviorService.listGroupHealth()).thenReturn(List.of(healthy("g1", "alpha", "env-1")));
+        stubEnv("env-1", "prod-116", 50, 50, 0);
+        when(sessionAggregationService.drainRollup()).thenReturn(List.of());
+
+        // Spend four requests on this environment the way a starting group would.
+        var budget = gatewayBudgetRegistry.forEnvironment("env-1", "prod-116", "116");
+        for (int i = 0; i < 4; i++) {
+            budget.count("fixture");
+        }
+
+        rollup.rollupOnce();
+
+        // This is the one number the whole feature exists to bound, on the INFO line that is
+        // emitted anyway — which is what makes it visible in Loki without adding a line class
+        // whose rate scales with bot count or round rate.
+        assertThat(lines()).hasSize(1);
+        assertThat(lines().get(0)).contains("gateway=4/900 queued=0/0/0 circuit=closed");
     }
 
     @Test

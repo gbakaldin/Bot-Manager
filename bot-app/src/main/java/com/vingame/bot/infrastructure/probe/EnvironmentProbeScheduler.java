@@ -7,6 +7,7 @@ import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.RecoveryCandidateSelector;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.MultiGauge;
 import io.micrometer.core.instrument.Tags;
@@ -102,11 +103,18 @@ public class EnvironmentProbeScheduler {
 
     private ScheduledExecutorService prober;
 
+    /**
+     * The per-environment gateway budgets, so a probe that really went out is stamped into
+     * the window it spent (GATEWAY_REQUEST_BUDGET AD-3).
+     */
+    private final GatewayBudgetRegistry gatewayBudgetRegistry;
+
     public EnvironmentProbeScheduler(BotGroupRepository botGroupRepository,
                                      @Lazy BotGroupBehaviorService behaviorService,
                                      EnvironmentService environmentService,
                                      EnvironmentWsProbe probe,
                                      MeterRegistry registry,
+                                     GatewayBudgetRegistry gatewayBudgetRegistry,
                                      @Value("${bot.activation.zone:Asia/Ho_Chi_Minh}") String zone,
                                      @Value("${bot.recovery.probe.tick-seconds:60}") long tickSeconds,
                                      @Value("${bot.recovery.probe.healthy-streak:2}") int healthyStreak) {
@@ -115,6 +123,7 @@ public class EnvironmentProbeScheduler {
         this.environmentService = environmentService;
         this.probe = probe;
         this.registry = registry;
+        this.gatewayBudgetRegistry = gatewayBudgetRegistry;
         this.zone = ZoneId.of(zone);
         this.tickSeconds = tickSeconds;
         this.healthyStreak = healthyStreak;
@@ -256,6 +265,23 @@ public class EnvironmentProbeScheduler {
 
         List<MultiGauge.Row<?>> rows = new ArrayList<>(target.envs.size());
         for (EnvRef env : target.envs.values()) {
+            // GATEWAY_REQUEST_BUDGET AD-3: a probe COUNTS but is never queued. count() stamps
+            // the window without asking for admission, which is the only correct shape for
+            // it — a probe that waited behind a group start could not answer the one question
+            // it exists to answer ("is the edge serving again?").
+            //
+            // Charged to EVERY environment on this target, not just one. Probe targets are
+            // de-duplicated by webSocketMiniUrl, and two environments sharing a socket URL
+            // may still sit behind different API gateway hosts, so there is no single budget
+            // that is the right one. Over-counting is the safe direction: it makes the window
+            // read fuller than it is, never emptier.
+            //
+            // A live-sibling short-circuit sends nothing and is therefore not counted.
+            if (!liveSibling) {
+                gatewayBudgetRegistry
+                        .forEnvironment(env.environmentId(), env.environmentName(), env.product())
+                        .count("ws-probe");
+            }
             registry.counter(ENV_WS_PROBE_TOTAL,
                     "environmentId", nullSafe(env.environmentId()),
                     "product", nullSafe(env.product()),

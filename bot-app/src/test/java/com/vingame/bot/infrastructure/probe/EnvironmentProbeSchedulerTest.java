@@ -11,6 +11,8 @@ import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.infrastructure.probe.EnvironmentWsProbe.Outcome;
 import com.vingame.bot.infrastructure.probe.EnvironmentWsProbe.ProbeResult;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetSettings;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
@@ -101,12 +103,19 @@ class EnvironmentProbeSchedulerTest {
         }
     }
 
+    private GatewayBudgetRegistry gatewayBudgetRegistry;
+
     @BeforeEach
     void setUp() {
         registry = new SimpleMeterRegistry();
         // Do NOT call @PostConstruct start() — that would spin a real prober thread.
+        // A real gateway budget registry (GATEWAY_REQUEST_BUDGET): the probe stamps its own
+        // requests into the window, and the point of interest is that it does so only when a
+        // request actually went out.
+        gatewayBudgetRegistry = new GatewayBudgetRegistry(
+                GatewayBudgetSettings.defaults(), new SimpleMeterRegistry());
         scheduler = new EnvironmentProbeScheduler(repository, behaviorService, environmentService,
-                probe, registry, "Asia/Ho_Chi_Minh", 60L, 2);
+                probe, registry, gatewayBudgetRegistry, "Asia/Ho_Chi_Minh", 60L, 2);
 
         appender = new CapturingAppender();
         appender.start();
