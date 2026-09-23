@@ -229,4 +229,101 @@ class GatewayCallSiteGuardTest {
         assertThat(code).anyMatch(line -> line.contains("forEnvironment("));
         assertThat(code).anyMatch(line -> line.contains("authStrategyFactory.getAuthProfile(env), gatewayBudget)"));
     }
+
+    // ------------------------------------------------------------------ does the guard bite?
+
+    /**
+     * A source-scanning guard has one characteristic failure mode: it passes because it
+     * matches nothing. If {@link #stripCommentsAndLiterals} were a shade too aggressive — one
+     * more state in that hand-rolled scanner and it would be — every assertion above would
+     * read {@code 0} occurrences and the whole class would go green while a second
+     * {@code httpClient.send(} sat in the funnel's file.
+     * <p>
+     * So the scanner is pointed at a synthetic file whose contents are known: three
+     * <em>real</em> offending call sites, and the same four spellings wrapped in a line
+     * comment, a block comment and a string literal. Each rule above must see exactly the
+     * real ones. This is what makes "exactly 1" elsewhere in this class an assertion rather
+     * than a coincidence.
+     */
+    @Test
+    @DisplayName("the scanner counts real call sites and ignores commented and quoted ones")
+    void theScannerHasTeeth(@org.junit.jupiter.api.io.TempDir Path tmp) throws IOException {
+        Path fake = tmp.resolve("Offender.java");
+        Files.writeString(fake, String.join("\n",
+                "package fake;",
+                "/**",
+                " * Javadoc that talks about httpClient.send( and new AuthClient( and .connect()",
+                " * and HttpClient.newHttpClient() without calling any of them.",
+                " */",
+                "class Offender {",
+                "    void real() {",
+                "        httpClient.send(request, handler);        // a real, uncounted send",
+                "        new AuthClient(ctx, factory).authenticate();",
+                "        client.connect();",
+                "        var h = HttpClient.newHttpClient();",
+                "    }",
+                "    void notReal() {",
+                "        // httpClient.send(request, handler);",
+                "        /* new AuthClient(ctx, factory); client.connect(); */",
+                "        log.warn(\"do not add a second httpClient.send( or a .connect() here\");",
+                "        var msg = \"HttpClient.newHttpClient()\";",
+                "    }",
+                "}"));
+
+        List<String> code = codeLines(fake);
+
+        assertThat(occurrences(code, "httpClient.send("))
+                .as("the real send is seen; the commented and the quoted one are not")
+                .isEqualTo(1);
+        assertThat(occurrences(code, "new AuthClient(")).isEqualTo(1);
+        assertThat(code.stream()
+                .filter(line -> line.contains(".connect()") || line.contains("::connect"))
+                .count()).isEqualTo(1);
+        assertThat(occurrences(code, "HttpClient.newHttpClient()")).isEqualTo(1);
+        // And the inverse: a file with only prose about the funnel must score zero, or the
+        // allow-list scan would report every class that documents this feature as an offender.
+        Path prose = tmp.resolve("Prose.java");
+        Files.writeString(prose, String.join("\n",
+                "package fake;",
+                "/** Every request goes through httpClient.send( — see .connect() and HttpClient. */",
+                "class Prose { String s = \"httpClient.send(\"; }"));
+        List<String> proseCode = codeLines(prose);
+        assertThat(occurrences(proseCode, "httpClient.send(")).isZero();
+        assertThat(occurrences(proseCode, "HttpClient.newHttpClient()")).isZero();
+    }
+
+    /**
+     * The funnel is only a funnel if every public method that reaches it takes the tier from
+     * its caller. An overload that defaults the tier would compile, would be picked up by
+     * exactly the call sites in a hurry, and would silently re-introduce the category the
+     * tiers exist to separate (a start-path login and a reconnect login are not the same
+     * request), while every count above still read 1.
+     */
+    @Test
+    @DisplayName("no public ApiGatewayClient request method omits the tier")
+    void noRequestMethodDefaultsItsTier() {
+        List<String> code = codeLines(repoRoot().resolve(API_GATEWAY_CLIENT));
+
+        // Joined, because these signatures wrap: getBalance's parameter list runs onto a
+        // second line and a per-line scan would read the first half only.
+        String joined = String.join(" ", code);
+
+        for (String signature : List.of(
+                "public TokensProvider authenticate(",
+                "public long getBalance(",
+                "public boolean deposit(")) {
+            int first = joined.indexOf(signature);
+            assertThat(first)
+                    .as("%s must still exist — if it was renamed, update this guard", signature)
+                    .isNotNegative();
+            assertThat(joined.indexOf(signature, first + 1))
+                    .as("exactly one declaration of %s — a tier-less overload beside it is how "
+                            + "the tier assignment quietly stops being a decision", signature)
+                    .isEqualTo(-1);
+            int close = joined.indexOf(')', first);
+            assertThat(joined.substring(first, close))
+                    .as("%s must take the caller's RequestTier", signature)
+                    .contains("RequestTier");
+        }
+    }
 }

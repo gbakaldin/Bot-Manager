@@ -405,4 +405,87 @@ class EnvironmentProbeSchedulerTest {
         assertThatThrownBy(() -> scheduler.isHealthy(null))
                 .isInstanceOf(NullPointerException.class);
     }
+
+    // ------------------------------------------------------------------ gateway budget (AD-3)
+
+    private int windowOf(String envId) {
+        var budget = gatewayBudgetRegistry.find(envId);
+        return budget == null ? -1 : budget.snapshot().windowRequests();
+    }
+
+    @Test
+    @DisplayName("a probe that went out is stamped into the environment's window")
+    void aProbeIsChargedToTheWindow() {
+        when(repository.findByTargetStatus(BotGroupStatus.DEAD))
+                .thenReturn(List.of(deadGroup("g1", "env-1")));
+        when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of());
+        when(environmentService.findById("env-1")).thenReturn(environment("env-1", URL));
+        when(probe.probe(eq(URL), any())).thenReturn(OPEN);
+
+        scheduler.probeAll();
+        scheduler.probeAll();
+
+        // The probe is anonymous and never queues, but it still costs the edge a request, and
+        // Cloudflare counts requests rather than intentions. Two ticks, two stamps.
+        assertThat(windowOf("env-1")).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("every environment on a shared socket URL is charged, not just one")
+    void aSharedUrlChargesEveryEnvironment() {
+        when(repository.findByTargetStatus(BotGroupStatus.DEAD))
+                .thenReturn(List.of(deadGroup("g1", "env-1"), deadGroup("g2", "env-2")));
+        when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of());
+        when(environmentService.findById("env-1")).thenReturn(environment("env-1", URL));
+        when(environmentService.findById("env-2")).thenReturn(environment("env-2", URL));
+        when(probe.probe(eq(URL), any())).thenReturn(OPEN);
+
+        scheduler.probeAll();
+
+        // One socket was opened, and both environments are charged for it. Targets are
+        // de-duplicated by webSocketMiniUrl, but two environments sharing a socket URL may
+        // still sit behind different API gateway hosts, so there is no single budget that is
+        // "the right one". Over-counting makes a window read fuller than it is; under-counting
+        // makes it read emptier, which is the direction that ends in a block.
+        verify(probe, times(1)).probe(eq(URL), any());
+        assertThat(windowOf("env-1")).isEqualTo(1);
+        assertThat(windowOf("env-2")).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("a live-sibling short-circuit sends nothing and is charged nothing")
+    void aLiveSiblingIsNotCharged() {
+        when(repository.findByTargetStatus(BotGroupStatus.DEAD))
+                .thenReturn(List.of(deadGroup("g1", "env-1")));
+        when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of());
+        when(environmentService.findById("env-1")).thenReturn(environment("env-1", URL));
+        when(behaviorService.countOpenWsByEnvForActiveRuntimes())
+                .thenReturn(Map.of(new EnvKey("env-1", "116"), 3));
+
+        scheduler.probeAll();
+        scheduler.probeAll();
+
+        // AD-10's short-circuit reads an already-open socket held by an ACTIVE sibling group;
+        // no request leaves the JVM, so stamping the window would inflate the one number the
+        // near-cap alert reads — and it would do so on precisely the environments that are
+        // busiest, which is where the false alarm is most expensive.
+        verify(probe, never()).probe(any(), any());
+        assertThat(counter("env-1", EnvironmentProbeScheduler.OUTCOME_LIVE_SIBLING)).isEqualTo(2d);
+        assertThat(windowOf("env-1"))
+                .as("no budget was even created for env-1, because nothing was sent")
+                .isEqualTo(-1);
+    }
+
+    @Test
+    @DisplayName("no candidate → no probe → no budget and no gateway_budget_* series")
+    void noCandidateCostsNothing() {
+        when(repository.findByTargetStatus(BotGroupStatus.DEAD)).thenReturn(List.of());
+        when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of());
+
+        scheduler.probeAll();
+
+        // The normal state of the fleet. A scheduler that created a budget per environment on
+        // every tick would publish a fleet's worth of window gauges that nothing ever moves.
+        assertThat(gatewayBudgetRegistry.size()).isZero();
+    }
 }

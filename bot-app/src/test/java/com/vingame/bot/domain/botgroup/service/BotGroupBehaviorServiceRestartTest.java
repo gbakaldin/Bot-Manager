@@ -317,6 +317,38 @@ class BotGroupBehaviorServiceRestartTest {
     }
 
     @Test
+    @DisplayName("createBotsInParallel classifies a GatewayBudgetException as reason=\"budget\" (GATEWAY_REQUEST_BUDGET AD-9)")
+    void start_classifiesGatewayBudgetExceptionAsBudgetReason() {
+        // A new bounded label value, and the arm has to sit ABOVE the message-substring
+        // heuristic: "budget" means this JVM chose not to send the request, so the gateway was
+        // never asked. Counting it as "auth" would put our own pacing decision in the same
+        // bucket as a rejected credential and make EnvironmentLoginFailing fire on throttling
+        // we did deliberately. The arm's position matters because these messages can carry the
+        // substring the heuristic matches on ("token") — the typed check has to win.
+        //
+        // Inert in Phase 1 (observe mode never refuses), which is precisely why it needs a test:
+        // there is no staging signal that would reveal it wired to the wrong label.
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(1).namePrefix("bot").password("pass").build();
+        Environment env = Environment.builder().id("env-1").name("env").customZone(true)
+                .miniZoneName("zone").build();
+        Game game = Game.builder().id("game-1").name("BauCua").build();
+
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(env);
+        when(gameService.findById("game-1")).thenReturn(game);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new com.vingame.bot.common.exception.GatewayBudgetExhaustedException(
+                        com.vingame.bot.common.gateway.RequestTier.ESSENTIAL, "env-1",
+                        java.time.Duration.ofSeconds(12)));
+
+        service.start("g-1");
+
+        verify(botMetrics).incBotCreationFailure(eq("budget"));
+    }
+
+    @Test
     @DisplayName("createBotsInParallel increments bot_creation_failures_total with reason=\"unknown\" for non-classified exceptions")
     void start_classifiesGenericRuntimeAsUnknownReason() {
         BotGroup group = BotGroup.builder()

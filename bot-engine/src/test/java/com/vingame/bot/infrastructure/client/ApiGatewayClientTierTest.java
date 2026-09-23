@@ -29,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * a caller passes is the tier that reaches the budget, and that registration requests carry a
  * registration scope (no {@code botGroupId}) rather than a bot's.
  */
+@org.junit.jupiter.api.Timeout(value = 60, unit = java.util.concurrent.TimeUnit.SECONDS)
 @DisplayName("ApiGatewayClient — tier and scope of every request")
 class ApiGatewayClientTierTest {
 
@@ -118,6 +119,17 @@ class ApiGatewayClientTierTest {
     }
 
     @Test
+    // SEPARATE_THREAD, and not the class-level @Timeout, because this is the one test in the
+    // build that can HANG rather than fail. registerUsers acquires a
+    // Semaphore(registrationParallelism); that field is a @Value, so a client built with `new`
+    // has it at 0 and every registration thread parks forever (pre-existing defect, reported
+    // in the QA verdict — the fix belongs in production code, not here). The reflection set in
+    // setUp() is what avoids it; this is the belt to that braces, because a plain @Timeout runs
+    // on the test's own thread and can only report a timeout AFTER the test returns, which a
+    // parked semaphore never does. Without this, one careless edit to setUp() does not fail a
+    // build, it wedges it.
+    @org.junit.jupiter.api.Timeout(value = 30, unit = java.util.concurrent.TimeUnit.SECONDS,
+            threadMode = org.junit.jupiter.api.Timeout.ThreadMode.SEPARATE_THREAD)
     @DisplayName("registerUsers routes every request as DEFAULT with a registration scope")
     void registerUsersIsDefaultWithARegistrationScope() {
         // registerUsers catches per-user failures and reports them in its result, so the
@@ -135,6 +147,31 @@ class ApiGatewayClientTierTest {
                     assertThat(submission.scope().botId()).isEqualTo("authtestws");
                     assertThat(submission.wsUpgrade()).isFalse();
                 });
+    }
+
+    @Test
+    @DisplayName("KNOWN DEFECT: a client built outside Spring has registrationParallelism=0")
+    void registrationParallelismIsZeroOutsideSpring() {
+        // Pre-existing and unrelated to the budget, but it is now load-bearing for this test
+        // file, so it is pinned rather than left as folklore in a setUp() comment.
+        //
+        // registerUsers does `new Semaphore(registrationParallelism)` and then acquire() on
+        // every registration thread. The field is a @Value, so a client the container did not
+        // build carries 0, and Semaphore(0).acquire() parks forever: not a failure, a HANG.
+        // Nothing in production hits it (EnvironmentClientRegistry resolves the bean from the
+        // context), and the fix — a sane floor, or a constructor parameter — belongs in
+        // production code, which QA does not touch.
+        //
+        // If this ever starts failing because the field gained a default, delete this test and
+        // the ReflectionTestUtils line in setUp() together.
+        ApiGatewayClient raw = new ApiGatewayClient(
+                new DisplayNameService(), new BotMetrics(new SimpleMeterRegistry()));
+
+        assertThat(ReflectionTestUtils.getField(raw, "registrationParallelism"))
+                .as("a zero here is why every test that exercises registerUsers outside Spring "
+                        + "must set this field, and why the one that does carries a preemptive "
+                        + "timeout")
+                .isEqualTo(0);
     }
 
     @Test
