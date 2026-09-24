@@ -1267,6 +1267,13 @@ public class BotGroupBehaviorService {
                 .watchdogTimeoutSeconds(watchdogTimeoutSeconds)
                 .strategyId(strategyId)
                 .slotStrategyId(slotStrategyId)
+                // GATEWAY_REQUEST_BUDGET AD-8: how the bot's queued gateway requests learn that
+                // the start they belong to was cancelled. Supplied here rather than in BotFactory
+                // because it must be in place before initialize(), which is where the login, the
+                // WebSocket upgrade and the first balance read happen — the three requests a
+                // /stop most needs to call off — and because BotConfiguration is the last thing
+                // wired before initialize() in the factory's fluent chain.
+                .startCancelled(() -> startAttempts.isCancelled(group.getId()))
                 .build();
 
         // Create bot using factory (authenticates and creates WebSocket client)

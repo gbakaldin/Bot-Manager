@@ -194,6 +194,57 @@ class BotGatewayTierTest {
         org.mockito.Mockito.verify(wsClient, org.mockito.Mockito.atLeastOnce()).connect();
     }
 
+    @Test
+    @DisplayName("the scope is cancelled when the bot is stopped OR its group's start was cancelled")
+    void theScopeCarriesBothHalvesOfCancellation() {
+        // GATEWAY_REQUEST_BUDGET AD-8. The second half is what lets a /stop unwind a paced start:
+        // without it, every one of a 3,000-bot group's queued requests would still be sent after
+        // the operator called the start off, because none of those bots is individually stopped.
+        java.util.concurrent.atomic.AtomicBoolean startCancelled =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        TierBot scoped = new TierBot();
+        scoped.setClients(apiGatewayClient, mock(GameMsClient.class), clientFactory);
+        scoped.setGatewayBudget(budget);
+        scoped.setConfiguration(BotConfiguration.builder()
+                .credentials(BotCredentials.builder()
+                        .username("authtestws9").password("pw").fingerprint("fp").build())
+                .environmentId("env-1").botGroupId("group-1").botIndex(9)
+                .game(Game.builder().id("g1").name("BauCua").pluginName("Plugin")
+                        .gameType(com.vingame.bot.domain.game.model.GameType.BETTING_MINI)
+                        .offset(2000).numberOfOptions(6).build())
+                .zoneName("MiniGame").timeoutMillis(1000L).watchdogTimeoutSeconds(120L)
+                .startCancelled(startCancelled::get)
+                .build());
+
+        scoped.initialize();
+        var scope = upgrades().get(upgrades().size() - 1).scope();
+        assertThat(scope.isCancelled()).as("nothing has been called off yet").isFalse();
+
+        startCancelled.set(true);
+
+        assertThat(scope.isCancelled())
+                .as("the scope asks the supplier every time — a group-level cancel reaches a bot "
+                        + "that is perfectly healthy and not individually stopped")
+                .isTrue();
+    }
+
+    @Test
+    @DisplayName("a configuration with no startCancelled supplier falls back to isStopped alone")
+    void aBotWithNoStartCancelledSupplierIsStillCancellableByStop() {
+        bot.initialize();
+        var scope = upgrades().get(upgrades().size() - 1).scope();
+
+        assertThat(scope.isCancelled()).isFalse();
+
+        // cleanup(), not stop(): stop() closes the socket without setting `stopped` — that
+        // asymmetry is what makes Bot.logout() spawn a spurious reconnect (plan Open Item 10).
+        bot.cleanup();
+
+        assertThat(scope.isCancelled())
+                .as("null supplier must not break the pre-existing half")
+                .isTrue();
+    }
+
     /** Minimal concrete bot; no scenarios, no sleeping. */
     static class TierBot extends Bot {
         @Override protected void initializeSubclass() {}

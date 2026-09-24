@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
@@ -954,11 +955,11 @@ public abstract class Bot {
      * This bot's {@link GatewayRequestScope}: who a queued request belongs to, and how the
      * budget learns it should no longer be sent.
      * <p>
-     * Cancellation is {@code isStopped()} — a stopped bot's queued login is work nobody
-     * wants any more, and a request that is never admitted is never stamped into the window.
-     * Phase 2's start-attempt registry adds the second half ("the start this bot belongs to
-     * was cancelled"), which is what lets a {@code /stop} unwind a paced start without
-     * waiting it out.
+     * Cancellation has two halves, and both are needed: a stopped bot's queued login is work
+     * nobody wants any more, and so is <em>every</em> queued request of a group whose start has
+     * been called off — that second half is what lets a {@code /stop} unwind a paced start
+     * instead of waiting out its up-to-50 minutes. A request that is never admitted is never
+     * stamped into the window, because it never left the JVM.
      * <p>
      * Null-safe on {@code configuration} for fixtures that reach a gateway call before
      * {@code setConfiguration} — such a scope simply carries no group and is not cancellable
@@ -968,7 +969,25 @@ public abstract class Bot {
         return GatewayRequestScope.forBot(
                 configuration == null ? null : configuration.getBotGroupId(),
                 userName,
-                this::isStopped);
+                this::requestCancelled);
+    }
+
+    /**
+     * Whether a queued gateway request of this bot's should still be sent: no if the bot has
+     * been stopped, and no if the group start it belongs to has been cancelled
+     * (GATEWAY_REQUEST_BUDGET AD-8).
+     * <p>
+     * A method rather than a composed lambda so {@link #scope()} — called once per gateway
+     * request — allocates one method reference instead of a fresh closure chain, and so the
+     * null-guard for a configuration-less fixture lives in one readable place.
+     */
+    private boolean requestCancelled() {
+        if (isStopped()) {
+            return true;
+        }
+        BooleanSupplier startCancelled =
+                configuration == null ? null : configuration.getStartCancelled();
+        return startCancelled != null && startCancelled.getAsBoolean();
     }
 
     // Hook for subclasses to clean up game state before scenarios are re-added on reconnect

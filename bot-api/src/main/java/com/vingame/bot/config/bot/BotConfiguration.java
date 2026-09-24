@@ -7,6 +7,8 @@ import com.vingame.bot.domain.game.model.Game;
 import lombok.Builder;
 import lombok.Value;
 
+import java.util.function.BooleanSupplier;
+
 /**
  * Immutable value object containing complete bot configuration.
  * Combines runtime credentials with behavior settings and environment linkage.
@@ -137,6 +139,26 @@ public class BotConfiguration {
      * where the builder starts setting it.
      */
     String pluginVersion;
+
+    /**
+     * Whether the group start this bot belongs to has been called off
+     * (GATEWAY_REQUEST_BUDGET AD-8). {@code null} for a bot that belongs to no tracked start —
+     * a fixture, ad-hoc tooling — and then only {@code Bot.isStopped()} governs cancellation.
+     * <p>
+     * <b>Why a supplier on the configuration rather than data.</b> The predicate has to be in
+     * place <em>before</em> {@code initialize()}, because the login, the WebSocket upgrade and
+     * the first balance read all happen inside it, and those are exactly the queued requests a
+     * {@code /stop} needs to call off. {@code setConfiguration} is the last wiring step before
+     * {@code initialize()} in {@code BotFactory}'s fluent chain, so this is where it can be
+     * supplied without the engine knowing that {@code StartAttemptRegistry} — a {@code bot-app}
+     * class — exists.
+     * <p>
+     * It is asked, not told: cancellation cannot be an interrupt, because
+     * {@code CompletableFuture.join()} is uninterruptible and
+     * {@code VingameWebSocketClient.connect()} swallows {@code InterruptedException} and returns
+     * a half-built client. See {@code GatewayRequestScope}.
+     */
+    BooleanSupplier startCancelled;
 
     /**
      * The numeric product code to label this bot's meters and MDC with, or {@code null}
