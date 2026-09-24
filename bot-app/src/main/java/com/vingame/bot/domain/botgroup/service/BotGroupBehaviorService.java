@@ -1001,12 +1001,16 @@ public class BotGroupBehaviorService {
                 // started on this branch, so stopAllBots only closes the empty executor
                 // and credits the window. Set the group MDC so the dead-seconds
                 // increment is tagged with botGroupId/environmentId, mirroring stop().
+                // snapshot/restore, not clear (Q3): this runs on the async start's thread, which
+                // set the group MDC so the lines below — including the "started 0/N bots" ERROR —
+                // are attributable. A bare clear() would drop that scope and untag them.
+                Map<String, String> outerMdc = BotMdc.snapshot();
                 BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId(),
                         runtime.getProduct());
                 try {
                     runtime.stopAllBots(botMetrics);
                 } finally {
-                    BotMdc.clear();
+                    BotMdc.restore(outerMdc);
                 }
                 group.setTargetStatus(BotGroupStatus.DEAD);
                 String zeroBotReason = "Started 0/" + group.getBotCount() + " bots — all bot creations failed";
@@ -1057,6 +1061,7 @@ public class BotGroupBehaviorService {
             if (!started) {
                 BotGroupRuntime failedRuntime = runningGroups.remove(id);
                 if (failedRuntime != null) {
+                    Map<String, String> outerMdc = BotMdc.snapshot();
                     try {
                         // Re-apply group MDC so any group-level dead-seconds
                         // increment ends up tagged with
@@ -1074,7 +1079,11 @@ public class BotGroupBehaviorService {
                             groupLifecycleAggregator.evictGroup(failedRuntime.getGroupId());
                             scopedDebugEscalator.evictGroup(failedRuntime.getGroupId());
                         } finally {
-                            BotMdc.clear();
+                            // restore, not clear (Q3): the two log lines at the end of this block
+                            // — the failed-start ERROR and the cancelled-start INFO — are the only
+                            // report an asynchronous build ever makes, and clearing here sent them
+                            // to Loki with no botGroupId to filter on.
+                            BotMdc.restore(outerMdc);
                         }
                     } catch (Exception cleanupEx) {
                         // Pass cleanupEx as the final arg so SLF4J attaches
@@ -1151,12 +1160,27 @@ public class BotGroupBehaviorService {
                         if (startAttempts.isCancelled(group.getId())) {
                             return null;
                         }
-                        return createSingleBot(group, environment, game, botIndex, strategyAssignment);
+                        Bot created = createSingleBot(group, environment, game, botIndex,
+                                strategyAssignment);
+                        // Counted HERE, in the task, and not in the join loop below (R8, and what
+                        // AD-17 asked for). The join loop walks futures in INDEX order, so one slow
+                        // bot at index 5 pinned botsUp at 4 no matter how many later bots were
+                        // already up — and botsUp exists precisely so an operator can tell a slow
+                        // build from a stuck one on a path where 33-50 minutes is normal. Lying in
+                        // the "stuck" direction is the one thing it must not do.
+                        startAttempts.botUp(group.getId());
+                        return created;
+                    } catch (RuntimeException e) {
+                        startAttempts.botFailed(group.getId());
+                        throw e;
                     } finally {
                         semaphore.release();
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
+                    // Counted too: an interrupted creation is a bot that did not come up, and the
+                    // join loop no longer counts anything.
+                    startAttempts.botFailed(group.getId());
                     throw new RuntimeException("Bot creation interrupted", e);
                 } finally {
                     BotMdc.clear();
@@ -1179,6 +1203,7 @@ public class BotGroupBehaviorService {
         // goal and leaving the counter unroutable to a product room.
         // Mirror the same try/finally pattern used by start()'s outer catch
         // (lines 251-256) and stop() (lines 422-427).
+        Map<String, String> outerMdc = BotMdc.snapshot();
         BotMdc.setGroupContext(group.getId(), group.getEnvironmentId(), product);
         try {
             for (int i = 0; i < futures.size(); i++) {
@@ -1190,9 +1215,6 @@ public class BotGroupBehaviorService {
                         continue;
                     }
                     bots.add(bot);
-                    // Progress for GET /{id}/status while the group is STARTING. A no-op when
-                    // there is no tracked attempt (a direct start(), a fixture).
-                    startAttempts.botUp(group.getId());
                 } catch (Exception e) {
                     // Unwrap CompletionException → real cause; users care about the
                     // actual auth/validation failure, not the wrapper.
@@ -1201,12 +1223,17 @@ public class BotGroupBehaviorService {
                             i + 1, botCount, group.getId(), group.getEnvironmentId(),
                             cause.toString(), cause);
                     botMetrics.incBotCreationFailure(classifyCreationFailure(cause));
-                    startAttempts.botFailed(group.getId());
                     errors.add(e);
                 }
             }
         } finally {
-            BotMdc.clear();
+            // restore, not clear (Q3). This method is called from the async start's thread, which
+            // set a group scope precisely so the lines that follow are attributable — "started
+            // successfully", the cancelled-build INFO, and the async-failure ERROR that is the
+            // only place that failure is ever reported. It is also called from the daisy-chain and
+            // the recovery tick, which run several groups in sequence, so leaving the context set
+            // is not an option either: the next group's lines would carry this group's id.
+            BotMdc.restore(outerMdc);
         }
 
         if (!errors.isEmpty()) {
@@ -1566,15 +1593,18 @@ public class BotGroupBehaviorService {
      */
     private void teardownRuntimeMemory(String id, BotGroupRuntime runtime) {
         // Set group MDC so the group-level dead-seconds increment (if a DEAD
-        // window is open) is tagged with botGroupId/environmentId. Cleared in the
-        // finally so we don't leak MDC into the caller thread.
+        // window is open) is tagged with botGroupId/environmentId. Restored (not cleared) in the
+        // finally so we neither leak this group's context into the caller thread nor drop the
+        // caller's own scope — a restart's rebuild and a cancelled start both log after this
+        // point, on a thread that set a group scope for exactly that reason (Q3).
+        Map<String, String> outerMdc = BotMdc.snapshot();
         BotMdc.setGroupContext(runtime.getGroupId(), runtime.getEnvironmentId(),
                 runtime.getProduct());
         try {
             // Stop all bots and shutdown executor + monitor + logout scheduler
             runtime.stopAllBots(botMetrics);
         } finally {
-            BotMdc.clear();
+            BotMdc.restore(outerMdc);
         }
 
         // Drop this group's aggregated-session entries immediately so nothing dangles
@@ -2505,6 +2535,19 @@ public class BotGroupBehaviorService {
      * so a fleet of silently evicted bots reads as a live sibling. The short-circuit
      * is cheap positive evidence, not a proof of origin health; the cost of it being
      * wrong is one budgeted attempt (AD-8).
+     * <p>
+     * <b>A group whose start is in flight is not counted here, and that is deliberate</b>
+     * (GATEWAY_REQUEST_BUDGET A1's consumer audit, QA's Q6). Runtimes are born
+     * {@code STARTING} since Phase 2, so for the duration of a build — minutes today, tens of
+     * minutes once gateway requests are paced — a group with sockets already open stops being
+     * an AD-10 live sibling and recovery falls back to its anonymous WS probe. That is the safe
+     * direction and it costs one probe: a half-built group's sockets are the weakest possible
+     * evidence that the <em>origin</em> is serving, which is the thing the probe exists to
+     * establish independently. Widening the filter to include {@code STARTING} would also
+     * re-open the hazard two paragraphs above from the other end, since a reclaim rebuild of the
+     * very group being recovered passes through {@code STARTING}. Expect
+     * {@code outcome="live_sibling"} to disappear from a large fleet start; that is this, not a
+     * regression.
      */
     public Map<EnvKey, Integer> countOpenWsByEnvForActiveRuntimes() {
         Map<EnvKey, Integer> counts = new LinkedHashMap<>();

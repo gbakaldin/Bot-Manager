@@ -4,6 +4,7 @@ import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.model.StartOrigin;
@@ -17,6 +18,13 @@ import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
 import com.vingame.bot.infrastructure.observability.ScopedDebugEscalator;
 import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.LoggerConfig;
+import org.apache.logging.log4j.core.layout.PatternLayout;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -29,7 +37,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.reflect.Field;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -359,6 +369,105 @@ class BotGroupBehaviorServiceAsyncStartTest {
                 .as("the RESTART_LIFECYCLE_FIX zero-bot signal is kept — it just cannot be an "
                         + "HTTP status any more")
                 .contains("produced 0/2 bots");
+    }
+
+    @Test
+    @DisplayName("botsUp follows the bots that are up, not the slowest index (R8)")
+    void progressIsNotPinnedByOneSlowBot() throws Exception {
+        // Parallelism 3 with a 5-bot group. Bot 1 is held; bots 2 and 3 complete. While bot 1 is
+        // still in flight, botsUp must already read 2 — the index-ordered join loop reported 0,
+        // because it cannot get past future[0]. On a path where 33-50 minutes is a normal
+        // duration, a progress field that lies in the "stuck" direction is worse than no field.
+        ReflectionTestUtils.setField(service, "botCreationParallelism", 3);
+        BotGroup group = group(5);
+        CountDownLatch firstEntered = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        CountDownLatch othersDone = new CountDownLatch(2);
+        AtomicLong created = new AtomicLong();
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(environment());
+        when(gameService.findById("game-1")).thenReturn(game());
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class))).thenAnswer(inv -> {
+            if (created.incrementAndGet() == 1) {
+                firstEntered.countDown();
+                assertThat(releaseFirst.await(10, TimeUnit.SECONDS)).isTrue();
+            } else {
+                othersDone.countDown();
+            }
+            return stubBot("bot" + System.nanoTime());
+        });
+
+        service.startAsync("g-1", StartOrigin.REST, () -> { });
+        assertThat(firstEntered.await(10, TimeUnit.SECONDS)).isTrue();
+        assertThat(othersDone.await(10, TimeUnit.SECONDS)).isTrue();
+
+        awaitTrue("progress reflects the bots that are actually up",
+                () -> service.getStartBotsUp("g-1") != null && service.getStartBotsUp("g-1") >= 2);
+
+        releaseFirst.countDown();
+        awaitNoStartInFlight();
+        assertThat(service.getStartBotsUp("g-1")).isEqualTo(5);
+    }
+
+    @Test
+    @DisplayName("the async-failure ERROR keeps the group MDC it was given (Q3)")
+    void theAsyncFailureErrorCarriesTheGroupMdc() {
+        // The MDC set on the build thread is what makes the async lifecycle lines attributable in
+        // Loki, and this ERROR is the only place an asynchronous failure is reported at all.
+        // createBotsInParallel's finally used to clear() the whole MDC, so the lines after it —
+        // this one included — reached track 1 with no botGroupId to filter on.
+        BotGroup group = group(2);
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(environment());
+        when(gameService.findById("game-1")).thenReturn(game());
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new IllegalStateException("auth refused"));
+
+        List<LogEvent> events = captureWithMdc(() -> {
+            service.restartAsync("g-1", StartOrigin.REST, () -> { });
+            awaitNoStartInFlight();
+        });
+
+        LogEvent asyncFailure = events.stream()
+                .filter(e -> e.getLevel() == Level.ERROR)
+                .filter(e -> e.getMessage().getFormattedMessage().contains("Asynchronous restart"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("the async-failure ERROR was not emitted"));
+
+        assertThat((String) asyncFailure.getContextData().getValue(BotMdc.BOT_GROUP_ID))
+                .isEqualTo("g-1");
+        assertThat((String) asyncFailure.getContextData().getValue(BotMdc.ENVIRONMENT_ID))
+                .isEqualTo("env-1");
+    }
+
+    /** Capture {@link BotGroupBehaviorService}'s events, MDC included, while {@code action} runs. */
+    private static List<LogEvent> captureWithMdc(Runnable action) {
+        List<LogEvent> events = new CopyOnWriteArrayList<>();
+        AbstractAppender appender = new AbstractAppender(
+                "AsyncMdcAppender-" + System.nanoTime(), null,
+                PatternLayout.createDefaultLayout(), false, null) {
+            @Override
+            public void append(LogEvent event) {
+                events.add(event.toImmutable());
+            }
+        };
+        appender.start();
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        LoggerConfig loggerConfig =
+                ctx.getConfiguration().getLoggerConfig(BotGroupBehaviorService.class.getName());
+        Level prev = loggerConfig.getLevel();
+        loggerConfig.addAppender(appender, Level.ALL, null);
+        loggerConfig.setLevel(Level.ALL);
+        ctx.updateLoggers();
+        try {
+            action.run();
+        } finally {
+            loggerConfig.removeAppender(appender.getName());
+            loggerConfig.setLevel(prev);
+            ctx.updateLoggers();
+            appender.stop();
+        }
+        return events;
     }
 
     // ------------------------------------------------------------------ helpers

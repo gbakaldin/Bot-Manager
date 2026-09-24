@@ -2,7 +2,9 @@ package com.vingame.bot.common.logging;
 
 import org.slf4j.MDC;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Utility for managing bot-specific MDC (Mapped Diagnostic Context) keys.
@@ -132,18 +134,49 @@ public final class BotMdc {
     public static final List<String> GROUP_LEVEL_KEYS =
             List.of(BOT_GROUP_ID, ENVIRONMENT_ID, PRODUCT, GAME_TYPE, GAME_ID, GAME_NAME);
 
+    /** Every key this class owns, i.e. exactly what {@link #clear()} removes. */
+    private static final List<String> ALL_KEYS = List.of(
+            BOT_GROUP_ID, BOT_ID, ENVIRONMENT_ID, PRODUCT, GAME_TYPE, GAME_ID, GAME_NAME,
+            BOT_USER_NAME, PLUGIN_VERSION);
+
     /**
      * Clear all bot-related MDC keys.
+     * <p>
+     * <b>Use {@link #snapshot()} + {@link #restore(Map)} instead when the scope you are leaving
+     * is nested inside another one.</b> {@code clear()} is absolute: a {@code finally} that calls
+     * it drops whatever the caller had set, and every line emitted after it on that thread is
+     * untagged — which is how the group context of an asynchronous start went missing from the
+     * one ERROR line that reports the start's failure (GATEWAY_REQUEST_BUDGET Q3).
      */
     public static void clear() {
-        MDC.remove(BOT_GROUP_ID);
-        MDC.remove(BOT_ID);
-        MDC.remove(ENVIRONMENT_ID);
-        MDC.remove(PRODUCT);
-        MDC.remove(GAME_TYPE);
-        MDC.remove(GAME_ID);
-        MDC.remove(GAME_NAME);
-        MDC.remove(BOT_USER_NAME);
-        MDC.remove(PLUGIN_VERSION);
+        ALL_KEYS.forEach(MDC::remove);
+    }
+
+    /**
+     * The MDC keys this class owns that are currently set, for a scope that has to be restored
+     * rather than cleared. Absent keys stay absent (see {@link #setGroupContext(String, String,
+     * String)} on why "absent" and "present and null" are different).
+     */
+    public static Map<String, String> snapshot() {
+        Map<String, String> saved = new LinkedHashMap<>();
+        for (String key : ALL_KEYS) {
+            String value = MDC.get(key);
+            if (value != null) {
+                saved.put(key, value);
+            }
+        }
+        return saved;
+    }
+
+    /**
+     * Put back exactly the context {@link #snapshot()} returned, dropping anything set in
+     * between. {@code restore(snapshot())} around an inner scope is the nesting-safe form of
+     * {@code clear()}.
+     */
+    public static void restore(Map<String, String> saved) {
+        clear();
+        if (saved != null) {
+            saved.forEach(MDC::put);
+        }
     }
 }
