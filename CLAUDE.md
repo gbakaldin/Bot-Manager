@@ -669,12 +669,21 @@ mapper.registerSubtypes(messageTypes.getTypeRegistrations(offset, game.isMd5()))
 | POST | `/` | Create new bot group |
 | PATCH | `/{id}` | Update bot group |
 | DELETE | `/{id}` | Delete bot group |
-| POST | `/{id}/start` | Start all bots in group |
+| POST | `/{id}/start` | **Accept** a start — 200 + `BotGroupStatusDTO`, bots come up in the background |
 | POST | `/{id}/stop` | Stop all bots in group |
-| POST | `/{id}/restart` | Restart all bots in group |
+| POST | `/{id}/restart` | **Accept** a restart — 200 + `BotGroupStatusDTO`, same async shape as `/start` |
 | POST | `/{id}/schedule-restart` | Schedule a restart |
 | GET | `/{id}/health` | Per-group bot health (public-facing UI feature) |
 | GET | `/{id}/status` | Target vs actual status |
+
+**`/start` and `/restart` are asynchronous** since GATEWAY_REQUEST_BUDGET Phase 2. The
+200 means *accepted*, not *finished*: the group's `actualStatus` becomes `STARTING` and
+the caller polls `GET /{id}/status`, whose `botsUp` / `botCount` / `lastError` fields
+carry the progress. Under the request budget a large group legitimately takes many
+minutes to come up, which is why the HTTP call no longer waits for it. `STARTING` is an
+**in-memory `actualStatus` value only and is never persisted** — a `targetStatus`
+document holding it would fail an older jar's `findByTargetStatus(ACTIVE)` on boot and
+break rollback. The synchronous 404 and the two 400s still happen before acceptance.
 
 There is **no `GET /api/v1/bot-group/`** and no `POST /filter/` — listing is
 `POST /{envId}/filter` with a JSON body, and the old rows in this table returned

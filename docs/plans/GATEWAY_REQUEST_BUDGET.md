@@ -7,11 +7,14 @@
 > (the `{type, msg}` envelope this plan extends with two new statuses) and
 > `docs/plans/LOG_VOLUME_TIERING.md` (every log line this plan adds obeys its tier rule).
 >
-> A later plan, **ASYNC_REGISTRATION** (not written yet), will turn `BotGroupService.save`'s
-> registration into a persisted, budget-paced background job. This plan leaves registration
-> synchronous and only gives it a typed rejection — see AD-19 and Open Item 4.
+> ~~A later plan, **ASYNC_REGISTRATION** (not written yet), will turn
+> `BotGroupService.save`'s registration into a persisted, budget-paced background job.~~
+> **Folded into this plan as Phase 4 on 2026-09-23 (user decision): there is to be no
+> synchronous registration at all. See Amendment A2 / AD-19a.**
 
-Dated section: **2026-09-22**.
+Dated section: **2026-09-22**, amended **2026-09-23** — **read Amendments A1-A9 at the bottom
+first**: Phase 1 has shipped, Phases 2-5 are renumbered, and AD-15/AD-17/AD-19 are amended or
+superseded.
 
 ---
 
@@ -366,6 +369,10 @@ therefore reachable from the first second of a restart, whatever the fleet size.
 is the CEO's "daisy-chain, never burst" literally; it also gives each group a complete start
 rather than every group a partial one. Per-group isolation (`try/catch` per start) is kept.
 
+> **AD-15 amended — the ack is `200`, not `202` (user decision, Open Item 3). Everything else
+> in AD-15 stands, including "accepted, not finished". See Amendment A3. Original text
+> follows.**
+
 **AD-15 — `POST /{id}/start` and `POST /{id}/restart` answer `202 Accepted` with a
 `BotGroupStatusDTO`; the work runs on a virtual thread; `ActivationScheduler` START and
 `scheduleRestart` use the same async entry.**
@@ -394,6 +401,12 @@ same.
 
 **AD-17 — Progress is an additive, nullable `startAttempt` block on `BotGroupStatusDTO` and
 `BotGroupHealthDTO`; no enum value is added.**
+
+> **Superseded by AD-17a — the user chose the enum (Open Item 2). `BotGroupStatus` gains
+> three appended constants, the `startAttempt` block and `StartAttemptDTO` are dropped, and
+> progress moves to named scalar fields. `StartAttemptRegistry` survives. See Amendment A1.**
+
+**AD-17 (superseded text follows).**
 `StartAttemptDTO { origin, phase: PENDING|BUILDING|STARTING_BOTS, botsUp, botsFailed,
 botsTotal, startedAt, elapsedSeconds, lastError }`. `botsUp`/`botsFailed` are incremented in
 the per-bot creation task (`createBotsInParallel`'s lambda, `:705-720`), looked up by group
@@ -413,6 +426,12 @@ estimated <m> min`. The rollup line (AD-20) shows the live window.
 
 **AD-19 — Registration stays synchronous in this plan; it paces, and its complete failure
 on budget is a 429.**
+
+> **Superseded by AD-19a — there is to be no synchronous registration at all (user decision,
+> Open Item 4). ASYNC_REGISTRATION is folded into this plan as Phase 4; the 429 stopgap is
+> deleted. See Amendment A2.**
+
+**AD-19 (superseded text follows).**
 `registerSingleUser` and `setDisplayName` run as DEFAULT with an explicit wait override
 `bot.gateway.budget.registration.max-wait` (15 m) so an admitted registration finishes rather
 than half-finishes when a group start floods the window mid-way. `registerUsers` keeps its
@@ -486,11 +505,20 @@ staging for a week.
 
 ## Plan
 
+> **Amended 2026-09-23 — Phase 1 has shipped; Phases 2-5 are renumbered and Phase 4 (async
+> registration) is new. The authoritative phase list and the release gating are in
+> Amendment A6/A7 at the bottom of this document. The sections below are the original text,
+> kept for the record; where they disagree with A6, A6 wins.**
+
 Phases are ordered so each ships alone. Phase 2 (async start) is independent of the budget
 and is deliberately **before** enforcement: enforcing on a fleet whose `/start` blocks the
 HTTP thread would trade a Cloudflare block for a gateway timeout.
 
 ### Phase 1 — Facade in observe mode, every call site tagged, metrics and near-cap alert
+
+> **SHIPPED** — commits `7c7c3b1`..`b741d92` on `feature/gateway-request-budget`; QA, review
+> and compliance all PASS (`docs/reviews/GATEWAY_REQUEST_BUDGET/`). Not deployed: nothing
+> ships until Phase 5 is complete (A7).
 
 **Changes**
 1. `bot-api`: `RequestTier` enum (AD-3); `GatewayRequestScope` record (AD-8);
@@ -543,6 +571,9 @@ HTTP thread would trade a Cloudflare block for a gateway timeout.
 
 ### Phase 2 — Async start/restart, startup daisy-chain, progress
 
+> **Amended — see A6 Phase 2 for the change list Dev implements (200 + DTO, `STARTING`, no
+> `StartAttemptDTO`).**
+
 **Changes**
 1. `StartAttemptRegistry` (`bot-app`, `domain/botgroup/service`): `begin(id, origin)`
    (`putIfAbsent`), `progress(id)`, `cancel(id)`, `finish(id, error)`, `lastError(id)`;
@@ -578,6 +609,9 @@ HTTP thread would trade a Cloudflare block for a gateway timeout.
   are still synchronous; `runWithManualOverride` restores the mode on async failure.
 
 ### Phase 3 — Enforcement behind `mode=enforce`
+
+> **Amended — the change list below is too narrow. See A6 Phase 3 for the nine items Dev
+> implements, including the `authenticate` rewrap defect (A4) the compliance pass found.**
 
 **Changes**
 1. `SlidingWindowGatewayBudget`: the three waiter queues, `admitWaiters()`, per-tier
@@ -628,6 +662,8 @@ HTTP thread would trade a Cloudflare block for a gateway timeout.
 
 ### Phase 4 — Cloudflare block detection, circuit breaker, login in-repo
 
+> **Renumbered to Phase 5.** Async registration is the new Phase 4. See A6.
+
 **Changes**
 1. `CloudflareBlockDetector` (`bot-engine`, `infrastructure/gateway`) per AD-13, both entry
    points; fixture = `docs/reviews/WIN79_119_PROD_ACCOUNTS/cf-block-raw.txt` copied into test
@@ -666,6 +702,9 @@ HTTP thread would trade a Cloudflare block for a gateway timeout.
 - `PerBotInfoLogGuardTest` / log-level tests: no new INFO in `Bot`/`ApiGatewayClient`.
 
 ### Phase 5 — Escalation harness, docs, default flip, prod
+
+> **Renumbered to Phase 6, and the escalation harness moves to Phase 3** so the cap is proven
+> before the single deployment. See A6.
 
 **Changes**
 1. `GatewayBudgetEscalationIT` (`bot-engine`, JUnit `@Tag("stub-gateway")`, excluded from the
@@ -760,6 +799,10 @@ HTTP thread would trade a Cloudflare block for a gateway timeout.
 
 ## Open Items
 
+> **Amended 2026-09-23 — Open Items 2, 3, 4 and 5 are CLOSED by user decision and Item 1 is
+> answered provisionally. See Amendment A9 for the closing state of every item and for what
+> is still needed from the user. The list below is the original text.**
+
 1. **Do WS upgrades count toward the Cloudflare rule?** The WS hosts
    (`…-sock.stgame.win`, `s009-ws-proxy-119.stgame.win`) may or may not sit behind the same
    rate-limit rule as the `/gwms/v1/*` API host. Default `count-ws-upgrades=true` is the
@@ -843,6 +886,8 @@ Expect: `Prometheus Server is Healthy.` and `"database":"ok"`.
 
 ### Phase 1 — observe mode
 
+> Runs at the single deployment like every other block; see A7 for the order.
+
 **V1a — budget wired and in observe.**
 ```bash
 docker logs bot-manager 2>&1 | grep -E "Gateway budget registry started \(mode=observe"
@@ -880,6 +925,9 @@ curl -s http://<bot-1>:8085/actuator/prometheus | grep -E '^gateway_budget_wait_
 Expect: `< 0.01` (observe mode never parks).
 
 ### Phase 2 — async start
+
+> **Amended — `202` is now `200` and `startAttempt` is now `status: "STARTING"` plus
+> `botsUp`/`botCount`. Corrected steps in A8.**
 
 **V2a — 202 and progress.**
 ```bash
@@ -951,6 +999,8 @@ count did **not** jump by the cancelled amount.
 
 ### Phase 4 — block detection and circuit
 
+> **These are Phase 5's steps now (renumbered).** New Phase 4 (registration) steps are in A8.
+
 **V4a — detector present, circuit closed.**
 ```bash
 curl -s http://<bot-1>:8085/actuator/prometheus | grep -E '^gateway_circuit_open\{' 
@@ -983,6 +1033,9 @@ PT15M`; the stub's request log shows **zero** requests for the next 15 minutes e
 
 ### Phase 5 — escalation harness and default flip
 
+> **V5 moves to Phase 3** (it gates the single deployment); **V5b/V5c stay with the default
+> flip, now Phase 6.** See A8.
+
 **V5 — escalation, laptop + stub only, before the deploy.**
 ```bash
 export JAVA_HOME=/Users/gleb/Library/Java/JavaVirtualMachines/openjdk-21.0.2/Contents/Home
@@ -999,3 +1052,614 @@ into `release.md`.
 **V5c — prod.** Same V3a + V4a on `Prod-Bot` inside the ticketed window, then V3b's window
 query over the next scheduled launch (`TIP_PROD_TAIXIU_RAMP` uses 10 × 50-bot windows):
 `max_over_time(gateway_budget_window_requests[24h]) <= 900` per environment.
+
+---
+
+## Amendment — 2026-09-23 (user decisions on Open Items 1-5; Phase 1 shipped)
+
+Phase 1 is on `feature/gateway-request-budget` (`7c7c3b1`..`b741d92`, QA / review / compliance
+all PASS) and is **not deployed** — see A7. The user has answered every open item; two answers
+change the plan's shape rather than a parameter, so they are written here as new ADs rather
+than edited into the originals.
+
+Inputs read for this amendment: `docs/reviews/GATEWAY_REQUEST_BUDGET/compliance.md` (nine
+deviations, all accepted; seven drift notes D1-D7 for later phases), `review.md` (F1-F12),
+`qa.md` (2,196 tests green; gaps G1-G6).
+
+---
+
+### A1 — AD-17a: `BotGroupStatus` gains three appended constants; `startAttempt` is dropped
+
+**Supersedes AD-17.** The user chose the enum over the additive block. The enum is the one
+field a client reads for the whole lifecycle:
+
+```
+REGISTRATION_PENDING → REGISTRATION_FAILED        (Phase 4)
+(null / STOPPED) → STARTING → ACTIVE | DEAD       (Phase 2)
+```
+
+**The constants are appended, never inserted.** `BotSortKey.STATUS`
+(`bot-app/.../sort/BotSortKey.java:29`) sorts on `actualStatus()` as a `Comparable` enum, i.e.
+on `ordinal()`. Appending keeps `ACTIVE(0) < STOPPED(1) < DEAD(2)` and therefore every existing
+sort result byte-identical; inserting would silently reorder the `STATUS` sort for every
+existing group. Final declaration order: `ACTIVE, STOPPED, DEAD, STARTING,
+REGISTRATION_PENDING, REGISTRATION_FAILED`.
+
+**Which field can hold which value — this is the load-bearing half of the decision.**
+
+| Value | `BotGroup.targetStatus` (Mongo) | `BotGroupRuntime.actualStatus` (memory) | DTOs |
+|---|---|---|---|
+| `ACTIVE` / `STOPPED` / `DEAD` | yes (unchanged) | yes (unchanged) | yes |
+| `STARTING` | **never** | **yes** | yes |
+| `REGISTRATION_PENDING` / `REGISTRATION_FAILED` | **never** | **never** | **yes — derived only** |
+
+- **Nothing new is ever persisted into `targetStatus`.** That is a rollback requirement, not
+  tidiness: `targetStatus` is stored as the enum `name()` string with no
+  `MongoCustomConversions` (CLAUDE.md, "The persisted and wire shapes did not change"), so a
+  document holding `STARTING` read back by an **older** jar throws
+  `ConversionFailedException` — and `findByTargetStatus(ACTIVE)` is on the `onStartup` path,
+  so one poisoned document would fail the whole boot query. Rolling back to
+  `vingame-bot:rollback-*` must stay a safe action at all times.
+- **`STARTING` is in-memory only.** `BotGroupRuntime` is constructed `STARTING` (today
+  `ACTIVE`, `BotGroupRuntime.java:164`) and flipped to `ACTIVE` at the end of a successful
+  `startLocked`, next to the existing `group.setTargetStatus(ACTIVE)` (`:623`). A JVM restart
+  loses it, which is correct: an interrupted start is not a state to resume.
+- **The registration values are derived at the DTO boundary** from two new *additive document
+  fields* — `registeredCount` (int) and `registrationState` (**String**: `PENDING`, `FAILED`,
+  or absent = complete/legacy) — plus `registrationError` (String). New fields are invisible
+  to an older jar (Mongo keeps unknown fields; the mapper ignores them), so a rollback with a
+  registration in flight degrades to "the group looks created" rather than to a boot failure.
+  A `String`, not an enum, for the same reason one level down.
+- **On completion, `targetStatus` is left `null`** — byte-for-byte the state a synchronously
+  registered group has had since day one. So the only new values a UI ever sees are the two
+  registration ones, and only while registration is in flight or failed.
+
+**Consumer audit** (every reader of `BotGroupStatus` in `bot-app/src/main`; there are no
+readers in `bot-engine` or `bot-api`):
+
+| Consumer | Effect of the three new constants | Action |
+|---|---|---|
+| `BotGroupBehaviorService.startLocked` reclaim guard `:403-415` | tests `== ACTIVE` ⇒ a `STARTING` runtime would be **torn down and rebuilt** | **must change**: treat `STARTING` like `ACTIVE` (keep, no-op). Unreachable in practice (the per-group lock serialises starts and the attempt registry rejects the second `/start`), which is exactly why it must be written down rather than relied on |
+| `isGroupRunning` `:1608` | `== ACTIVE` ⇒ false while starting | **must change** to `ACTIVE || STARTING` — this is AD-16's mechanism, and `ActivationScheduler:130` and `RecoveryCandidateSelector:82` inherit it for free |
+| `countOpenWsByEnvForActiveRuntimes` `:1915-1919` | skips non-`ACTIVE` ⇒ a starting group with open sockets stops counting as a live sibling | **leave**; costs at most one extra anonymous probe per tick (DEAD_GROUP_AUTO_RECOVERY AD-10) and never a wrong recovery decision |
+| `performPeriodicLogout` `:2425` | gates on `== ACTIVE` | **leave** — the logout scheduler is not started until after the build anyway |
+| `monitorHealth` / `handleBotGroupDeath` / `markAsDead` | DEAD-only logic | no change |
+| `RecoveryEligibility.isCandidate` `:85,94,98` | branches on `ACTIVE` / `STOPPED` / `DEAD` only, with an else-ineligible default | no change — a `STARTING` runtime status is never passed (the selector maps to `DEAD`/`ACTIVE`/`null`), and `isGroupRunning` now covers starting groups |
+| `RecoveryCandidateSelector:79-88` | derives runtime status from `listDeadRuntimeGroupIds` + `isGroupRunning` | no change beyond the `isGroupRunning` widening above |
+| `BotSortKey.STATUS` / `SortComparators.compareNaLast` | ordinal sort | no change **given append-only** — pin it with a test |
+| `findByTargetStatus` (`BotGroupRepository:16`, `BotGroupService:77`) | Mongo query on the persisted field | no change — nothing new is persisted there |
+| `BotGroupDTO.targetStatus` `:142`, `BotGroupStatusDTO` `:23,26`, `BotGroupHealthDTO.status` `:21` | serialise the enum by `name()` | **UI contract change**: three new strings can appear. `BotGroupDTO.targetStatus` can still only carry the original three |
+| Prometheus / Grafana | **no metric label anywhere carries `BotGroupStatus`** — `bots_by_env_status` / `bots_by_game_status` carry `BotStatus` (per-bot) and `groups_dead_by_env` is a count (`InfoGaugeRefresher.java:26-38`) | no change, no alert rule affected |
+| `prometheus/alerts.yml` | mentions DEAD only in prose | no change |
+
+**Where progress goes now that the status carries the state.** `StartAttemptRegistry` (Phase 2)
+survives unchanged as the in-memory owner of `botsUp`/`botsFailed`, the origin and the
+cancellation flag — what is dropped is only the DTO block. `BotGroupStatusDTO` gains four
+nullable, explicitly named fields (no generic `progress`/`progressTotal` pair — the meaning
+must not depend on the status):
+
+- `botCount` (int) — the target, for both progress senses;
+- `botsUp` (Integer) — bots built in the current start; non-null while `actualStatus ==
+  STARTING` and retained until the next start;
+- `registeredCount` (Integer) — accounts created; non-null once async registration has run;
+- `lastError` (String) — the last start or registration failure, whichever is more recent.
+
+`BotGroupHealthDTO` already carries `totalBots`/`connectedBots` and needs only the new `status`
+value plus `registeredCount`. `BotGroupDTO` (`GET /{id}`, `POST /{envId}/filter`) gains
+`registeredCount` so a list view can render "120/500" without a second call.
+
+**Tests:** `BotGroupStatusAppendOnlyTest` (ordinal positions of the original three are 0/1/2,
+the enum has exactly six constants); `BotGroupStatusPersistenceGuardTest` — a source guard in
+the `PerBotInfoLogGuardTest` idiom asserting that no production call site passes `STARTING`,
+`REGISTRATION_PENDING` or `REGISTRATION_FAILED` to `setTargetStatus`; a Mongo round-trip test
+that a group persisted mid-start reads back with `targetStatus` in the original three.
+
+---
+
+### A2 — AD-19a: registration is an asynchronous, resumable job, and the job is the group
+
+**Supersedes AD-19 in full.** The user's shape: the client asks for N bots with settings; the
+server returns an ack carrying the group id, having created nothing but the record; the group
+carries `REGISTRATION_PENDING`; a worker registers steadily; polling returns in-progress with
+count/total. `ASYNC_REGISTRATION` is no longer a separate deferred plan — it is Phase 4 here.
+
+The six inputs already worked out with the user, adopted or rejected with reasons:
+
+1. **The group *is* the job — adopted.** Usernames are `namePrefix + index`
+   (`ApiGatewayClient.registerSingleUser:281`), so the job's identity, its work list and its
+   progress are all already in the group document; `registeredCount` versus `botCount` is the
+   whole state. No job collection, no scheduler table, no id to correlate. **With one
+   constraint made explicit: `registeredCount` is a high-water mark that only means "indices
+   1..k are done" because the worker is serial and in-order** (A2.4). A parallel worker would
+   make the same integer meaningless, which is a second reason the worker stays
+   single-threaded.
+2. **Resumability across a JVM restart via `onStartup` re-enqueue — adopted**, with the
+   registration equivalent of the Phase 2 daisy-chain: an `ApplicationReadyEvent` listener
+   enqueues every group whose `registrationState == PENDING`. Ordering: registration before
+   the start chain, since a pending group cannot start anyway.
+   *Caveat that has to be settled in code:* "a retry of index k is idempotent" is true of
+   **our** state but is an assumption about the **gateway** — re-registering an existing
+   username returns an error envelope, and its exact shape is not documented anywhere we
+   control (the gwms gates are catalogued in `HANDOVER.md`, "Four gates", and three of them
+   are HTTP 200). The worker must therefore treat "account already exists" as
+   **success-equivalent** and needs the real status/code to do it. Open Item 13.
+3. **Pacing from the DEFAULT tier, not a second rate limiter — adopted for `enforce`,
+   with one derived fallback.** A single serial worker at ~100-300 ms per call is
+   ~200-600 requests per 5-minute window *on its own*, i.e. it can breach the cap unaided when
+   the budget is only observing. So: the worker acquires through
+   `execute(DEFAULT, scope, …)` with `bot.gateway.budget.registration.max-wait`, and when
+   `budget.snapshot().mode() != ENFORCE` it additionally sleeps
+   `window / defaultCeiling` (300 s / 500 = **600 ms**) between users. That is not a new knob
+   and not a second limiter — it is the same configured ceiling, applied by the only component
+   that would otherwise be unpaced. The phase order (enforcement lands in Phase 3) means the
+   fallback is a belt, not the mechanism.
+4. **One single-threaded worker, `DeadGroupRecoveryScheduler`'s idiom — adopted.**
+   `RegistrationWorker`: one virtual-thread `ScheduledExecutorService`, one group at a time,
+   in-order indices, per-group isolation in a `try/catch`, MDC set from the group. It is
+   **not** a rate limiter and must not grow one.
+5. **Status rides `GET /{id}` and `/status`; no new status endpoint — adopted** (A1 puts the
+   state in the enum and the counts beside it). **One new *action* endpoint is unavoidable**
+   (A2.6) — that is an action, not a status read.
+6. **Terminal-with-failures needs an explicit retry — adopted.** After
+   `bot.registration.max-attempts-per-user` (default 3) consecutive failures on one index the
+   worker **stops the group** (it does not skip ahead — skipping breaks the high-water-mark
+   invariant), sets `registrationState=FAILED`, writes `registrationError`, and emits one
+   ERROR. Nothing retries it silently. `POST /api/v1/bot-group/{id}/registration/retry` → 200
+   + `BotGroupStatusDTO`, clears `FAILED` back to `PENDING` and re-enqueues from
+   `registeredCount + 1`. **A Cloudflare circuit-open (Phase 5) or a budget timeout is not a
+   failure** — the worker re-queues the group and waits, because those say "not now", not
+   "this account cannot be created".
+7. **`PATCH botCount` upward extends the target — adopted.** `BotGroupService.update` routes
+   through `save` on the existing-group branch, which never registers (`:137-196`), so the
+   extension is explicit: if the merged `botCount > registeredCount`, set
+   `registrationState=PENDING` and enqueue. This is what makes "register additional bots" a
+   product feature instead of a script. **Downward is allowed and never un-registers** —
+   `registeredCount` is a fact about accounts that exist, so it may exceed `botCount`;
+   progress renders as `min(registeredCount, botCount)/botCount`, and a group at
+   `registeredCount >= botCount` is complete. That also gives the operator the clean exit from
+   a half-failed 500-bot group: PATCH `botCount` down to what registered, and start it.
+8. **`existingGroup=true` stays synchronous — adopted.** It makes no upstream call, so there
+   is nothing to pace; it leaves `registrationState` absent and `targetStatus` null, exactly
+   as today.
+
+**The two calls the coordinator left open:**
+
+- **A game-less "account factory" group — recommend a follow-up, not this feature.** The
+  engine is closer than it looks (`validateGameEnvironmentMatch` early-returns on a null
+  `gameId`, `filterSorted` already null-guards it, and `startLocked` already rejects a
+  null `gameId` with a 400 — which is the right behaviour for a group that must never
+  start), but `BotGroupDTO.gameId` is `@NotBlank(groups = OnCreate.class)` (`:44`), so
+  enabling it is a **create-contract change**, and the real use case
+  (`scripts/bulk-create-accounts.py`, the 500 `liengbot*` accounts for another team) also
+  wants credential export, no deposits and no group lifecycle at all. Folding that in would
+  widen this feature past the thing it is for. **Recommendation:** ship Phase 4 for
+  game-bearing groups, and add one assertion that a group whose `gameId` is null would
+  register and simply never start, so the follow-up is a DTO change and nothing else. Needs
+  a user ruling either way (Open Item 14).
+- **`/start` on a group that is still registering → `400`**, via the existing
+  `BadRequestException` arm (no new status code, no new handler), with a message naming the
+  counts and the way out:
+  `Bot group <name> is still registering (120/500 accounts). Wait for REGISTRATION_PENDING to
+  clear, or PATCH botCount down to 120 to start with the accounts that exist.`
+  Same for `REGISTRATION_FAILED`, naming the retry endpoint. The guard sits in `startLocked`
+  beside the two existing `BadRequestException` checks (`:429-443`) so **every** entry point
+  inherits it — `/start`, `/restart`, the startup chain, `startForRecovery`. `ActivationScheduler`
+  needs its own guard as well: it queries `findByActivationMode(SCHEDULED)`, not by status, so
+  a SCHEDULED group created mid-registration would otherwise be handed to `startAsync` every
+  minute and log a 400's worth of noise each time.
+
+---
+
+### A3 — AD-15a: the ack is `200` with a DTO, for `/start`, `/restart` and `POST /`
+
+**Amends AD-15 and AD-19a.** The user's wording for the create ack was "server sends 200 and
+some basic DTO"; that shape applies to the whole lifecycle so a client has one rule. All four
+endpoints return **`200`** with a body:
+
+| Endpoint | Body | Meaning |
+|---|---|---|
+| `POST /api/v1/bot-group/` | `BotGroupDTO` (as today) with `targetStatus` rendered `REGISTRATION_PENDING` and `registeredCount: 0` | the record exists, nothing upstream has been created |
+| `POST /{id}/start`, `/{id}/restart` | `BotGroupStatusDTO` (`actualStatus: "STARTING"`, `botsUp`, `botCount`) | accepted, running on a virtual thread |
+| `POST /{id}/registration/retry` | `BotGroupStatusDTO` | re-enqueued |
+
+Consequence worth naming: **`/start` keeps returning `200`**, so release step **V1b**'s
+`%{http_code}` assertion stays valid and no verification step has to be rewritten for this
+decision. The change a client sees is that `200` now means *accepted*, not *finished* — which
+is the whole point of Phase 2 and must be in the UI note.
+
+---
+
+### A4 — Phase 3 must fix `authenticate`'s rewrap, or AD-9 cannot work at all
+
+Found by the compliance pass (D1) and adopted verbatim. `GatewayBudgetException` is a
+`RuntimeException`, and `ApiGatewayClient.authenticate` has a pre-existing
+`catch (RuntimeException e)` arm **outside** the budget funnel that rewraps everything as
+`UpstreamLoginException` (`ApiGatewayClient.java:150-163`). From the moment Phase 3 starts
+throwing, on the login path only:
+
+- `performReauth` (`Bot.java:782-800`) sees `UpstreamLoginException`, never
+  `GatewayBudgetException`, so **AD-9's "a budget outcome must not mark the bot DEAD" can
+  never fire** — a paced re-auth kills the bot;
+- `classifyCreationFailure` (`:771-806`) takes the `UpstreamLoginException` arm and tags
+  `"auth"`, defeating the `"budget"` arm Phase 1 already shipped for exactly this;
+- `bot_login_total{outcome="failure"}` counts our own throttling as upstream login failures —
+  and that counter is the per-brand regression gate in V4c and the input to
+  `EnvironmentLoginFailing`.
+
+**Required in Phase 3:** a `catch (GatewayBudgetException e) { throw e; }` arm **ahead of** the
+`RuntimeException` arm, and **no `metrics.incLogin(false)`** on that path — a request the JVM
+declined to send is not a failed login. `getBalance` has the milder twin: it rethrows the type
+unwrapped (good) but increments `bot_verify_token_total{outcome="failure"}` on the way past
+(`:517-524`), which would make `EnvironmentAuthDown` fire on our own pacing; same treatment.
+`deposit` catches only `IOException`/`InterruptedException`, so it is already clean.
+
+**Test:** `ApiGatewayClientBudgetPassthroughTest` — for each of the three methods, a budget
+that throws `GatewayBudgetExhaustedException` produces that exact type at the caller and moves
+**no** `bot_login_total` / `bot_verify_token_total` series.
+
+---
+
+### A5 — the five smaller inheritances, folded into Phase 3
+
+1. **Enforcement must reach `run` and `runWsUpgrade`, not only `execute`/`tryExecute`**
+   (compliance D2). Every WS upgrade in the fleet goes through `runWsUpgrade`
+   (`GatewayBudget.java:49`); queueing only inside `execute` would stamp upgrades while never
+   pacing or refusing them, and AD-8's "cancellation must happen before `connect()` is
+   entered" would have no hook at all.
+2. **`count-ws-upgrades=false` currently bypasses the budget entirely, not just the stamp**
+   (D3). Decision, so Dev does not have to guess: when the flag is off, `runWsUpgrade`
+   **still checks cancellation and the circuit, and neither waits on nor consumes the
+   window**. "Not counted by the edge" ⇒ "not paced by us"; it does not imply "un-cancellable"
+   (a stopped group's queued upgrade must still die) or "sent into an open circuit" (the edge
+   is refusing us regardless).
+3. **The probe's over-count consumes real ceiling under enforce** (D4) — accepted at ≈5 stamps
+   per window (≤0.6% of the cap, and only while a DEAD group is a recovery candidate) rather
+   than re-keyed, because a shared `webSocketMiniUrl` genuinely maps to several environments
+   and over-counting is the safe direction. Reviewer **F2** is adopted alongside it: `count`
+   gains a WS-aware twin (`countWsUpgrade(reason)`) that consults the same
+   `count-ws-upgrades` flag, so answering Open Item 1 "no" silences the probe's stamp too and
+   the coupling shrinks to nothing. Phase 5's `count("circuit-probe")` is an HTTP GET and
+   keeps the unconditional form.
+4. **The Phase 6 default flip is a three-file edit** (D5): `application.properties`,
+   `GatewayBudgetConfig`'s `@Value` fallback **and** `GatewayBudgetSettings.defaults()`, or
+   `ApplicationContextLoadsTest.gatewayBudgetIsWiredAndObserveOnly`'s equality assertion fails
+   the build. That is the assertion working; it is written into A6 Phase 6 so the Releaser is
+   not surprised. The same applies to A9's `essential.ceiling=850` escape hatch.
+5. **Two tripwires must be rewritten, not deleted, when enforcement lands** (QA G2, review F4):
+   - `SlidingWindowGatewayBudgetWindowTest.aCancelledScopeIsStillAdmittedInPhaseOne` builds
+     its budget from `defaults()`, i.e. `mode=OBSERVE`, and observe keeps Phase 1 behaviour
+     byte-for-byte — so **it will not fail when Phase 3 lands** and the assertion it exists to
+     force a look at would go unlooked-at. The one that bites is QA's
+     `SlidingWindowGatewayBudgetObserveModeTest.aCancelledScopeIsAdmittedInEitherMode`, which
+     builds in `ENFORCE`; under Phase 3 it must fail twice (unexpected
+     `GatewayRequestCancelledException`, and `windowRequests() == 1` where it must be 0).
+     Phase 3 rewrites both.
+   - `GatewayBudgetRegistryTest.enforceModeWarnsUntilPhaseThree` pins the "enforce is set but
+     NOTHING is being paced" WARN. Left in place after Phase 3 that WARN is a tier-1,
+     Loki-visible, actively false statement about a production instance's posture. Phase 3
+     deletes the WARN and rewrites the test to assert its absence.
+6. Two cheap reviewer findings ride along because the plan's own Implementation Note 2 is
+   otherwise contradicted: **F3** — `count()` increments no `requests_total` series, so the
+   counter and the gauge provably cannot reconcile; add a fifth bounded outcome
+   `outcome="counted"`, pre-registered at zero. **F5** — export
+   `gateway_budget_ceiling{tier}` from `registerMeters` so the Grafana panel plots the
+   *configured* ceilings instead of three literals, drop the dead `"ESSENTIAL ceiling"`
+   field override that matches no target, and express `GatewayBudgetNearCap`'s `800` against
+   the exported hard cap.
+
+---
+
+### A6 — the amended phase list
+
+Phase 1 is shipped. The list below replaces the "Plan" section's phases 2-5.
+
+**Phase 2 — async start/restart, `STARTING`, startup daisy-chain.** As the original Phase 2,
+with three substitutions: `202` → **`200` + DTO** (A3); the `startAttempt` block and
+`StartAttemptDTO` → **`BotGroupStatus.STARTING`** plus `botsUp` / `botCount` /
+`registeredCount` / `lastError` on `BotGroupStatusDTO` (A1); and the A1 consumer-audit edits
+(`startLocked`'s reclaim guard, `isGroupRunning`, `BotGroupRuntime`'s initial status).
+`StartAttemptRegistry` stays. Tests as listed, plus `BotGroupStatusAppendOnlyTest`,
+`BotGroupStatusPersistenceGuardTest` and a round-trip test that a mid-start group's persisted
+`targetStatus` is one of the original three.
+
+**Phase 3 — enforcement behind `mode=enforce`.** The original five items, **plus**: A4's
+`authenticate`/`getBalance` passthrough arms; A5.1 (`run`/`runWsUpgrade` enforcement); A5.2
+(the `count-ws-upgrades=false` semantics); A5.3 (`countWsUpgrade` twin); A5.5 (rewrite both
+tripwires, delete the enforce WARN); A5.6 (`outcome="counted"`, `gateway_budget_ceiling{tier}`,
+the dashboard/alert literals). **The `StubGateway` (AD-22) moves into this phase** — test scope
+only, without the block-mode half — so `GatewayBudgetEscalationIT` can prove the cap here,
+before the single deployment, instead of two phases later.
+
+**Phase 4 — asynchronous registration (new, A2).**
+1. `BotGroup`: `registeredCount` (int), `registrationState` (String), `registrationError`
+   (String); `BotGroupRepository.findByRegistrationState("PENDING")`.
+2. `BotGroupService.save`: the new-group branch **stops calling `registerUsers`**; it validates,
+   persists with `registrationState=PENDING`, `registeredCount=0`, and returns. `skipRegistration`
+   (`existingGroup=true`) persists with no registration state at all. `update` detects an
+   upward `botCount` and re-enqueues (A2.7).
+3. `RegistrationWorker` (`bot-app`, `domain/botgroup/service`): one virtual-thread scheduler,
+   one group and one index at a time, from `registeredCount + 1`; per-index
+   register + display-name through `ApiGatewayClient` at `DEFAULT` with the registration
+   wait override; `registeredCount` persisted after each success; `max-attempts-per-user`
+   then `FAILED` + ERROR; budget timeout / circuit-open re-queues instead of failing; the
+   observe-mode 600 ms fallback (A2.3); `ApplicationReadyEvent` re-enqueue, ahead of the
+   start chain.
+4. `POST /{id}/registration/retry` (the one new endpoint) + `BotGroupController` wiring; the
+   `startLocked` and `ActivationScheduler` guards (A2, "the two calls").
+5. `ApiGatewayClient.registerUsers` is reduced to a single-user call
+   (`registerOne(prefix, password, index)`); the `Semaphore` and the fan-out go with the
+   bulk method, and with them QA's **G1** hang (`registrationParallelism` is `0` outside
+   Spring). `user.registration.parallelism` becomes dead config — remove it and say so in
+   CLAUDE.md.
+6. Metrics: `registration_pending_groups` gauge, `registration_accounts_total{outcome=
+   success|failed|exists}` counter (pre-registered at zero), and one alert —
+   `RegistrationStalled` (`registration_failed_groups > 0`, `for: 15m`, warning,
+   `audience: internal`), because a half-registered group is precisely the thing that gets
+   forgotten. Nothing per account at INFO; one INFO line per group at enqueue and at
+   completion (`group <id> (<name>): registration complete, <n>/<n> accounts`).
+
+*Tests:* resume from `registeredCount` after a simulated restart; an "already exists" envelope
+counts as success and advances the counter; `max-attempts-per-user` then `FAILED` with the
+error persisted; a budget timeout re-queues and does **not** consume an attempt; retry clears
+`FAILED` and resumes from `registeredCount + 1`; `PATCH botCount` up re-enqueues, down never
+un-registers and completes the group; `/start` on a pending or failed group is a 400 naming the
+counts; `ActivationScheduler` skips a registering SCHEDULED group; the worker is serial (two
+groups never interleave); `existingGroup=true` makes no upstream call and leaves no
+registration state.
+
+**Phase 5 — Cloudflare detection, circuit breaker, login in-repo.** Unchanged from the original
+Phase 4, minus the `StubGateway` (now Phase 3) and plus its block-mode half.
+
+**Phase 6 — docs, default flip, prod.** The original Phase 5 minus the escalation IT (now
+Phase 3), plus A5.4's three-file warning, plus the CLAUDE.md sections for async registration
+and the `STARTING` status.
+
+---
+
+### A7 — release gating: one deployment, after Phase 5
+
+The user wants a single deployment covering everything; nothing ships after Phase 2 or after
+Phase 3 alone, and there is **no staging soak between them**.
+
+- **The cut is after Phase 5**, not after Phase 3. Phase 4 is what the user's Open Item 4
+  decision requires — shipping Phases 2-3 alone would deploy a tree in which registration is
+  still synchronous, which is the thing they rejected. Phase 5 rides along because a box
+  running `enforce` without the block detector retries into a Cloudflare block exactly as
+  today.
+- **The branch must be releasable as a whole at that point, and it is**: each phase leaves
+  the tree green and internally consistent (Phase 1 already proved the pattern — observe mode
+  changes nothing, in either mode), and no phase depends on a change deferred to a later one.
+  The one ordering constraint that matters is that **Phase 3 precedes Phase 4**: a serial
+  registration worker in a tree where the budget only observes can breach the cap on its own
+  (A2.3), so the worker must never exist in a tree without enforcement.
+- **Verification runs as one sequence on that single deploy**, in phase order: V0a-V0c, V1a-V1e,
+  V2a-V2f, V3a-V3f, the new V4 block (A8), then V5's block-detection steps. `GatewayBudgetEscalationIT`
+  (V5, renamed **V3g**) runs on the laptop **before** the deploy.
+- **Phase 6 is a second, smaller deployment** by nature — flipping a compiled default is a
+  rebuild — and is the only place a soak is still assumed (≥ 7 days of staging in `enforce`
+  before the default flips, per AD-23).
+- Staging runs `GATEWAY_BUDGET_MODE=enforce` in `secrets.env` from this deployment onward;
+  prod stays `observe` until Phase 6.
+
+---
+
+### A8 — corrected and added verification steps
+
+**V1b** is unchanged and still expects `200` (A3). **V2a-V2f** change only in their assertions:
+
+- **V2a** — `POST /{id}/start` expects **`200`** with a `BotGroupStatusDTO` whose
+  `actualStatus` is `"STARTING"`; the follow-up `GET /{id}/status` shows `botsUp` rising toward
+  `botCount`, then `actualStatus: "ACTIVE"` with `botsUp == botCount`.
+- **V2d** — `/restart` expects `200` and `actualStatus: "STARTING"`.
+- **V2b, V2c, V2e, V2f** unchanged in substance; in V2b both calls expect `200`.
+
+**New — V4 block (async registration).**
+
+**V4a — create returns immediately and creates nothing upstream.**
+```bash
+time curl -s -X POST http://<bot-1>:8085/api/v1/bot-group/ -H 'Content-Type: application/json' \
+  -d '{"name":"budget-reg-test","environmentId":"<ENV>","gameId":"<GAME>","namePrefix":"budregt","password":"a123Aa123","botCount":40,...}'
+```
+Expect: `200` in **under 2 s**, body carries an `id`, `targetStatus: "REGISTRATION_PENDING"`,
+`registeredCount: 0`.
+
+**V4b — progress is visible and monotonic.**
+```bash
+for i in 1 2 3 4 5; do curl -s http://<bot-1>:8085/api/v1/bot-group/<GID>/status \
+  | grep -o '"registeredCount":[0-9]*'; sleep 30; done
+```
+Expect: five non-decreasing values, strictly increasing at least once, ending at `40`; the
+status then reads `targetStatus: null` (registration complete) and `registeredCount: 40`.
+
+**V4c — the worker is paced, not bursty.**
+```bash
+curl -s 'http://<bot-1>:9090/api/v1/query?query=max_over_time(gateway_budget_window_requests{environmentId="<ENV>"}[15m])'
+```
+Expect: `<= 900` throughout, and `<= 500` attributable to `tier="DEFAULT"` in any window
+(`increase(gateway_budget_requests_total{tier="DEFAULT",outcome="admitted"}[5m]) <= 500`).
+
+**V4d — `/start` on a registering group is a clean 400.** Create a 200-bot group and
+immediately `POST /{id}/start`:
+expect `400` with `{"type":"Bad request"}` and a `msg` containing `still registering` and the
+`n/200` counts — **not** a 500, and no bot created.
+
+**V4e — resume across a restart.** During a large registration, `docker compose restart
+bot-manager`; then:
+```bash
+docker logs bot-manager 2>&1 | grep -E "registration: re-enqueued .* pending group"
+curl -s http://<bot-1>:8085/api/v1/bot-group/<GID>/status | grep -o '"registeredCount":[0-9]*'
+```
+Expect: one re-enqueue line naming the group; `registeredCount` resumes from at least its
+pre-restart value and continues to `botCount`; **no username is registered twice** — confirm
+with `increase(registration_accounts_total{outcome="exists"}[1h])` staying at or below the
+number of indices in flight at the restart (0 or 1 for a serial worker).
+
+**V4f — extend by PATCH.** `PATCH /{id}` with `botCount: 45` on a completed group:
+expect `200`, `targetStatus` back to `"REGISTRATION_PENDING"`, and `registeredCount` climbing
+to `45`.
+
+**V4g — failure is terminal and explicit.** (Only if a failure occurs naturally; do not
+manufacture one against a real gateway.) Expect `targetStatus: "REGISTRATION_FAILED"`, a
+non-null `lastError`, one ERROR line, `registration_failed_groups == 1`, and no further
+requests for that group. `POST /{id}/registration/retry` → `200` and the count resumes.
+
+**V3g (was V5)** — `GatewayBudgetEscalationIT`, laptop + stub, run before the deployment.
+Unchanged in substance; it now sits in Phase 3.
+
+**V5b / V5c** stay as written and belong to Phase 6.
+
+---
+
+### A9 — open items: closed, remaining, and what is needed before Dev starts Phase 2
+
+**Closed by this amendment:**
+
+| # | Item | Resolution |
+|---|---|---|
+| 2 | `STARTING` vs additive block | **Enum** (A1). Appended; `actualStatus`-only; nothing new persisted |
+| 3 | `202` vs `200` | **`200` + DTO** on create, start, restart and retry (A3) |
+| 4 | Synchronous registration | **Removed entirely**; async, resumable, group-as-job, Phase 4 (A2) |
+| 5 | `essential.ceiling` | **Stays at the hard cap (900)**, as originally specified. `850` remains the documented one-line escape if PRIORITIZED starvation during a very large start bites — now a three-place edit (A5.4) |
+
+**Provisionally answered:**
+
+| # | Item | State |
+|---|---|---|
+| 1 | Do WS upgrades count? | **`count-ws-upgrades=true` stands** pending SA. The flip is one property thanks to Dev's `runWsUpgrade` seam, and A5.2/A5.3 now define the *other* half of that answer (not paced, still cancellable; the probe's stamp follows the same flag) |
+
+**Still open, unchanged:** 6 (startup chain order), 7 (cooldown length — ask SA whether the
+block has a fixed duration), 8 (prod enable window), 9 (EWMA, deferred), 10 (periodic-logout
+spurious reconnect, `FOLLOWUPS.md` P13), 11 (`bulk-create-accounts.py` shares the IP budget),
+12 (dead-code follow-ups).
+
+**New open items from this amendment:**
+
+- **13 — the "account already exists" envelope.** The worker's resumability depends on
+  treating a re-registration of index `k` as success. The gwms register endpoint's exact
+  `status`/`code` for an existing username is not documented anywhere we control and three of
+  the four gates answer HTTP 200 (`HANDOVER.md`). Dev must capture it from one real
+  registration of an existing staging account before Phase 4's classifier is written, and
+  until then the worker must fail-closed (treat an unrecognised envelope as a failure, which
+  costs an attempt and an operator retry, rather than silently skipping an index).
+- **14 — game-less account-factory groups.** Recommended as a follow-up, not folded in (A2).
+  Needs a ruling.
+- **15 — QA G1's real fix.** `registrationParallelism` is `0` outside Spring, so
+  `Semaphore(0).acquire()` hangs any non-Spring caller. Phase 4 deletes the bulk method and
+  the trap with it; if Phase 4 slipped, this belongs in `FOLLOWUPS.md` as a
+  `Math.max(1, …)` floor.
+- **16 — the RIK hunk riding in this branch** (compliance Provenance, review F6, QA G3):
+  `isDisplayNameTaken` now accepts `EXISTED` and the "already taken" line is demoted to DEBUG
+  — a behaviour change **on every brand**, whose test
+  (`ApiGatewayClientDisplayNameTakenStatusTest`) is untracked and therefore not in the 2,196.
+  Phase 4 touches display-name handling directly, so decide before then: commit the RIK test
+  alongside it, or restore both hunks to the pre-RIK base as `831e311`/`f3ddb28` did for
+  their siblings. Either way it goes in the release notes.
+
+**Needed from the user before Dev starts Phase 2:**
+
+1. **Confirm the persistence split in A1** — `STARTING` never reaches Mongo; registration
+   state is two additive document fields, not a new persisted enum value. This is the one
+   decision that makes a rollback safe, and it is a deliberate narrowing of "use the enum".
+2. **Confirm the completion state**: a fully registered group goes back to `targetStatus:
+   null`, identical to every group created before this feature — so the UI only ever has to
+   learn `STARTING`, `REGISTRATION_PENDING` and `REGISTRATION_FAILED`.
+3. **Confirm the UI can tolerate three new `status` strings and a `200` that now means
+   accepted rather than finished** (A3). The frontend is not in this repo, so this cannot be
+   verified here.
+4. **Rule on Open Item 14** (game-less account-factory groups — recommended as a follow-up).
+5. **Approve the one new endpoint**, `POST /{id}/registration/retry` — the only addition to
+   the REST surface in the whole feature.
+
+---
+
+## Amendment — 2026-09-24 (compliance pass on Phase 2; A10-A13)
+
+Phase 2 is on `feature/gateway-request-budget` (`b2a6799`..`750fc91`). The compliance pass
+accepted the diff; four items below are corrections to **this document**, not to the code —
+three of them are places where the plan asked for something that cannot be done as written, and
+one records who owns a change the plan assigned to Dev. Verified against the branch, not
+inferred.
+
+### A10 — AD-16 is wrong about `restart()`'s internal stop; cancellation is gated on `parkRuntimeless`
+
+AD-16's last sentence — "`restart()`'s internal stop does the same" (cancels the attempt and
+the scope) — **cannot be implemented**. Traced on the branch:
+
+`restartAsync` → `submitLifecycle` → `startAttempts.begin(id, REST)` opens the attempt **before**
+the virtual thread runs → `restart(id)` → `stop(id, false)`. An unconditional
+`cancelStartInFlight` there cancels *the restart's own attempt*, so every one of
+`createBotsInParallel`'s tasks returns `null`, the post-build `isCancelled` check unwinds the
+half-built runtime, and the zero-bot guard then throws. **Every `/restart` would become a
+`/stop` plus a spurious `lastError`.**
+
+It is also unnecessary. `restartAsync`'s `putIfAbsent` refuses a restart while any start is in
+flight, so the internal stop can never be the thing that has to call off *somebody else's*
+start.
+
+**Corrected:** cancellation is gated on `parkRuntimeless` — the flag that already distinguishes
+a **statement of intent** (operator `/stop`, the activation reconciler's STOP, cascade delete
+via `stopAndLogout`) from a **teardown step** (`restart`'s internal stop). That is the same
+discriminator DEAD_GROUP_AUTO_RECOVERY AD-5 introduced for persisting `STOPPED`, and the two
+now agree: a teardown step neither persists `STOPPED` nor cancels a start. Only two call sites
+exist (`stop(id)` → `true`, `restart` → `false`), so the gate is exhaustive.
+
+### A11 — V2b's grep can never match; the group id precedes `start admitted`
+
+V2b says `grep -c "start admitted.*<GID>"` → `1`. AD-18's own line format puts the id **first**,
+and the shipped line is `group <id> (<name>): start admitted — origin <O>, <n> bots`. The
+pattern is therefore unmatchable on any input this feature produces (confirmed against the line
+emitted in the test run). Dev kept AD-18's shape, which is the right call — it is the format the
+rollup, the estimate and Phase 3's declared demand all extend.
+
+**Corrected V2b:** issue `/start` twice within a second; expect both **`200`** (A3), then
+
+```bash
+docker logs bot-manager 2>&1 | grep -c "<GID>.*start admitted"      # → 1
+docker logs bot-manager 2>&1 | grep -c "<GID>.*a start is already in flight"   # → 1
+```
+
+The second line is the positive evidence that the duplicate was refused rather than merely
+absent, and it is what tells a `1` apart from a group that was never started.
+
+### A12 — A1's Mongo round-trip test is replaced by a captor test plus the source guard
+
+A1 asks for "a Mongo round-trip test that a group persisted mid-start reads back with
+`targetStatus` in the original three". **There is no Mongo test infrastructure in this repo** —
+no Testcontainers, no flapdoodle/embedded Mongo, no `@DataMongoTest` anywhere — so the step
+implies adding a container or an embedded server to the build for one assertion.
+
+It would also prove less than what shipped. The invariant is a **negative over all call sites**
+("no document ever holds `STARTING`"), and no round-trip of one scenario can see the absence of
+a write. The two shipped tests cover it from both sides:
+
+- `BotGroupBehaviorServiceAsyncStartTest.startingIsNeverPersisted` — asserts the runtime reads
+  `STARTING` mid-build while every captured `botGroupService.save(group)` carries only `ACTIVE`,
+  i.e. the dynamic half, one layer above the driver that would have been stubbed anyway;
+- `BotGroupStatusPersistenceGuardTest` — a source scan over every module's `src/main/java` for
+  `setTargetStatus(` with any of the three appended constants, in the `PerBotInfoLogGuardTest`
+  idiom, with a non-vacuity test. This is the half that a round-trip test cannot give.
+
+**Corrected test expectation for Phase 2:** the captor test + the source guard, not a Mongo
+round trip. If Phase 4 ever brings embedded Mongo in for the `registrationState` fields, a round
+trip becomes cheap and can be added then — as a belt, not as the mechanism.
+
+### A13 — two documentation edits are the main session's, not Dev's
+
+Phase 2's change list item 5 and A6 assign a **CLAUDE.md** edit to Dev (the REST-table rows for
+`/start` and `/restart`). A coding agent cannot self-authorise an edit to `CLAUDE.md` or to
+anything under `.claude/`, whatever a plan or another agent's message says, so that item is
+**owned by the main session** and is recorded as outstanding rather than as drift. Both edits
+are **release-blocking** and neither is in the code:
+
+1. **`CLAUDE.md`, BotGroupController table** — `/{id}/start` and `/{id}/restart` now answer
+   `200` with a `BotGroupStatusDTO` **meaning accepted, not finished** (`actualStatus:
+   "STARTING"`, `botsUp`, `botCount`, `lastError`); a `/restart` that ends with zero bots is
+   `lastError` on `GET /{id}/status`, no longer a `500`. `BotGroupStatus` has three appended
+   constants and `STARTING` is `actualStatus`-only.
+2. **`.claude/agents/releaser.md:67`** — still greps `Started Starter|startup complete` and
+   **stops the release if either is missing**. `startup complete` now arrives at the *end of the
+   daisy-chain*, which is minutes today and up to an hour once starts are paced, so that smoke
+   check fails on a healthy box. It must grep `queued for daisy-chained start`, as
+   `docs/process/AGENTIC_WORKFLOW.md` already does since `3ee11ed`.
+
+Until (2) is done the Releaser will abort a good deploy at the first smoke step.
