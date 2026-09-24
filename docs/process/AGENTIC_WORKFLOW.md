@@ -104,9 +104,18 @@ ssh Bot-1 '
 ssh Bot-1 'docker ps --filter name=bot-manager --format "{{.Status}}"'
 #   expect: "Up X minutes (healthy)" after the start_period (~60s)
 
-ssh Bot-1 'docker logs --tail 200 <bot-manager-container> 2>&1 | grep -E "Started Starter|startup complete"'
-#   expect: Spring Boot ready line + Bot Manager startup completion line
+ssh Bot-1 'docker logs --tail 200 <bot-manager-container> 2>&1 | grep -E "Started Starter|queued for daisy-chained start"'
+#   expect: Spring Boot ready line + "Bot Manager startup: N bot groups queued for
+#   daisy-chained start", both within ~60 s
 ```
+
+> **Do not grep `startup complete` as the liveness signal** (GATEWAY_REQUEST_BUDGET AD-14).
+> Group starts moved off the startup thread onto a `startup-chain` virtual thread, and once
+> gateway requests are paced a single 3,000-bot group takes 33-50 minutes to come up — so
+> `Bot Manager startup complete. N bot groups running` can be an hour after the app is
+> healthy and reachable. The `queued for daisy-chained start` line is emitted before the
+> first group is touched and is what proves the app came up; `startup complete` is still
+> worth checking later, as the signal that the fleet finished rather than that the app did.
 
 **Plan-driven verification:** then execute every step from the plan's `## Verification` section. Record each step's result in `release.md`.
 
