@@ -27,6 +27,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.model.RecoveryEligibility;
+import com.vingame.bot.domain.botgroup.model.StartOrigin;
 import com.vingame.bot.domain.botgroup.sort.BotGroupSortRow;
 import com.vingame.bot.domain.botgroup.sort.BotGroupSorter;
 import com.vingame.bot.domain.brand.model.BrandCode;
@@ -37,6 +38,8 @@ import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.domain.game.sort.GameSortRow;
 import com.vingame.bot.domain.game.sort.GameSorter;
+import com.vingame.bot.infrastructure.gateway.GatewayBudget;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
@@ -46,11 +49,12 @@ import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.websocketparser.auth.AuthClient;
 import com.vingame.websocketparser.exception.ValidationException;
-import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
@@ -74,6 +78,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 /**
  * Service for managing bot group lifecycle: start, stop, restart, scheduling.
@@ -110,6 +115,13 @@ public class BotGroupBehaviorService {
      * bookkeeping alongside the other per-group aggregators.
      */
     private final ScopedDebugEscalator scopedDebugEscalator;
+
+    /**
+     * Per-environment gateway budgets (GATEWAY_REQUEST_BUDGET AD-1). Read for one purpose here:
+     * {@code stop()} has to call off a cancelled start's queued gateway requests, and the queue
+     * they sit in belongs to the environment's budget.
+     */
+    private final GatewayBudgetRegistry gatewayBudgetRegistry;
 
     /**
      * Max number of bots to create/authenticate simultaneously.
@@ -204,6 +216,14 @@ public class BotGroupBehaviorService {
      */
     private final StartAttemptRegistry startAttempts = new StartAttemptRegistry();
 
+    /**
+     * The daisy-chain thread, kept only so a test can join it (AD-14). Not used for control: the
+     * chain is fire-and-forget by design, and interrupting it would be worse than letting it
+     * finish — {@code VingameWebSocketClient.connect()} swallows interrupts and returns a
+     * half-built client.
+     */
+    private volatile Thread startupChain;
+
     // Per-group lock serializing the reclaim-decision + build in start() and the
     // teardown in stop() (DEAD_GROUP_RESTART AD-5). Makes the
     // containsKey/reclaim/put sequence atomic so a double-click or a
@@ -231,7 +251,8 @@ public class BotGroupBehaviorService {
             BotMetrics botMetrics,
             SessionAggregationService sessionAggregationService,
             GroupLifecycleAggregator groupLifecycleAggregator,
-            ScopedDebugEscalator scopedDebugEscalator
+            ScopedDebugEscalator scopedDebugEscalator,
+            GatewayBudgetRegistry gatewayBudgetRegistry
     ) {
         this.botGroupService = botGroupService;
         this.environmentService = environmentService;
@@ -241,6 +262,7 @@ public class BotGroupBehaviorService {
         this.sessionAggregationService = sessionAggregationService;
         this.groupLifecycleAggregator = groupLifecycleAggregator;
         this.scopedDebugEscalator = scopedDebugEscalator;
+        this.gatewayBudgetRegistry = gatewayBudgetRegistry;
 
         // Use virtual threads for scheduled tasks
         this.scheduler = Executors.newScheduledThreadPool(4, Thread.ofVirtual().factory());
@@ -261,8 +283,24 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Auto-start bot groups on application startup.
-     * Starts all groups where targetStatus == ACTIVE.
+     * Auto-start bot groups once the application is ready, one at a time, off the startup
+     * thread (GATEWAY_REQUEST_BUDGET AD-14 — the CEO's "daisy-chain, never burst", literally).
+     * <p>
+     * <b>Why this is an {@link ApplicationReadyEvent} listener and not a
+     * {@code @PostConstruct}.</b> A {@code @PostConstruct} runs <em>inside</em> context
+     * refresh, before Tomcat binds its port, so every second spent starting groups was a
+     * second in which the app answered nothing and the container healthcheck
+     * ({@code docker-compose.yml}, {@code start_period: 60s}) was failing. That was already
+     * tens of seconds; once a paced start takes 33-50 minutes for a 3,000-bot group it would be
+     * hours of an unreachable, restart-looping container. Now Tomcat, actuator, the schedulers
+     * and the whole REST API are reachable from the first second of a restart whatever the
+     * fleet size, and the chain runs behind them.
+     * <p>
+     * <b>One group at a time, in order.</b> The previous loop was already serial, but each
+     * {@code start(id)} burst N logins + N WebSocket upgrades + N balance reads at the gateway;
+     * the chain keeps the serialisation and Phase 3's budget paces what happens inside it. It
+     * also gives each group a <em>complete</em> start rather than every group a partial one.
+     * Per-group isolation is kept: one group's failure must not abort the chain.
      * <p>
      * Startup ownership (TIMED_ACTIVATION AD-10): groups with
      * {@code activationMode == SCHEDULED} are <b>skipped</b> here — the first
@@ -274,25 +312,43 @@ public class BotGroupBehaviorService {
      * persisted {@code targetStatus}, so they resume correctly with no special
      * casing.
      */
-    @PostConstruct
+    @EventListener(ApplicationReadyEvent.class)
     public void onStartup() {
-        log.info("Bot Manager starting up - checking for bot groups to auto-start");
+        List<BotGroup> queued = new ArrayList<>();
+        for (BotGroup group : botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE)) {
+            if (group.getActivationMode() == ActivationMode.SCHEDULED) {
+                log.info("Skipping auto-start for scheduled bot group {} (ID: {}) — " +
+                        "the activation reconciler owns it", group.getName(), group.getId());
+                continue;
+            }
+            queued.add(group);
+        }
 
-        botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE)
-                .forEach(group -> {
-                    if (group.getActivationMode() == ActivationMode.SCHEDULED) {
-                        log.info("Skipping auto-start for scheduled bot group {} (ID: {}) — " +
-                                "the activation reconciler owns it", group.getName(), group.getId());
-                        return;
-                    }
-                    try {
-                        log.info("Auto-starting bot group: {} (ID: {})", group.getName(), group.getId());
-                        start(group.getId());
-                    } catch (Exception e) {
-                        log.error("Failed to auto-start bot group {} (ID: {}): {}",
-                                group.getName(), group.getId(), e.getMessage(), e);
-                    }
-                });
+        // The line that says the app is up and the fleet is coming. "startup complete" now
+        // arrives when the chain ends, which can be an hour away on a large fleet, so this is
+        // the line a smoke test greps for liveness (plan V0b).
+        log.info("Bot Manager startup: {} bot groups queued for daisy-chained start", queued.size());
+
+        Thread chain = Thread.ofVirtual().name("startup-chain").unstarted(() -> runStartupChain(queued));
+        startupChain = chain;
+        chain.start();
+    }
+
+    /**
+     * The daisy-chain body: start each queued group to completion, in order, isolating
+     * failures. Package-private so {@code StartupChainTest} can drive it without racing a
+     * thread it did not create.
+     */
+    void runStartupChain(List<BotGroup> queued) {
+        for (BotGroup group : queued) {
+            try {
+                log.info("Auto-starting bot group: {} (ID: {})", group.getName(), group.getId());
+                startTracked(group.getId(), StartOrigin.STARTUP);
+            } catch (Exception e) {
+                log.error("Failed to auto-start bot group {} (ID: {}): {}",
+                        group.getName(), group.getId(), e.getMessage(), e);
+            }
+        }
 
         log.info("Bot Manager startup complete. {} bot groups running", runningGroups.size());
     }
@@ -312,12 +368,192 @@ public class BotGroupBehaviorService {
         // concurrent Start blocks here, then observes the fresh ACTIVE runtime
         // and no-ops below. Held across the whole (I/O-bound, internally
         // parallel) build — acceptable for an infrequent admin action.
+        //
+        // GATEWAY_REQUEST_BUDGET: "acceptable for an infrequent admin action" stops being the
+        // whole story once the build is paced and holds this lock for tens of minutes. That is
+        // why stop() cancels a start in flight BEFORE it takes this lock (cancelStartInFlight):
+        // otherwise a /stop would park on it for the entire duration of the start it is trying
+        // to stop.
         ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
         lock.lock();
         try {
             startLocked(id);
         } finally {
             lock.unlock();
+        }
+    }
+
+    /**
+     * Accept a start and run it on a virtual thread (GATEWAY_REQUEST_BUDGET AD-15, ack shape
+     * amended to {@code 200} + DTO by A3).
+     * <p>
+     * <b>What stays synchronous, and why exactly this much.</b> {@code findById} (so an unknown
+     * id is still a {@code 404}) and the two {@link #validateStartable} checks (so a group with
+     * no environment or no game is still a {@code 400}) — the outcomes a client can act on. Then
+     * {@link StartAttemptRegistry#begin}, which is a {@code putIfAbsent}: a second {@code /start}
+     * while one is in flight answers {@code 200} describing the <em>same</em> attempt and never
+     * submits a second task. Everything after that is the build, and the build is what became
+     * too long to hold an HTTP thread for: a 3,000-bot group is 6,000-9,000 paced gateway
+     * requests, i.e. 33-50 minutes at 900 per 5 minutes. That is the Cloudflare rule working,
+     * not a regression, and {@code 200} now means <b>accepted</b>, not finished.
+     * <p>
+     * <b>{@code onFailure}</b> is the rollback the caller can no longer do in a {@code catch},
+     * because the failure happens after the response has been sent. Its one production use is
+     * {@code BotGroupController.runWithManualOverride} restoring a SCHEDULED group's
+     * {@code activationMode} after the flip to {@code MANUAL_ON} (TIMED_ACTIVATION AD-4): the
+     * flip is persisted before the action to close a TOCTOU race with the reconciler, so
+     * something has to undo it when the action fails. It runs on the build thread, exactly once,
+     * and its own failure is logged rather than propagated.
+     *
+     * @return the status to put in the ack — {@code STARTING} when this call opened the attempt,
+     *         otherwise whatever the group is already doing
+     */
+    public BotGroupStatus startAsync(String id, StartOrigin origin, Runnable onFailure) {
+        return submitLifecycle(id, origin, onFailure, "start", this::start);
+    }
+
+    /**
+     * {@link #startAsync} for a restart: same synchronous validation, same single-attempt rule,
+     * and the whole {@code stop} + 2 s pause + {@code start} + zero-bot check sequence runs on
+     * the virtual thread.
+     * <p>
+     * Consequence worth naming: {@code restart()}'s zero-bot {@code IllegalStateException} no
+     * longer reaches HTTP. It is recorded as the attempt's {@code lastError} and surfaced on
+     * {@code GET /{id}/status} instead, because by the time it can be known the response is long
+     * gone. The ERROR log and {@code bot_creation_failures_total} are unchanged.
+     */
+    public BotGroupStatus restartAsync(String id, StartOrigin origin, Runnable onFailure) {
+        return submitLifecycle(id, origin, onFailure, "restart", this::restart);
+    }
+
+    private BotGroupStatus submitLifecycle(String id, StartOrigin origin, Runnable onFailure,
+                                           String action, Consumer<String> lifecycle) {
+        // Synchronous: 404 and the two 400s must not be reported as "accepted".
+        BotGroup group = botGroupService.findById(id);
+        validateStartable(group);
+
+        if (!startAttempts.begin(id, origin)) {
+            log.info("Bot group {} ({}): {} ignored — a start is already in flight ({})",
+                    id, group.getName(), action, startAttempts.describe(id));
+            return getActualStatus(id);
+        }
+
+        String environmentId = group.getEnvironmentId();
+        Thread.ofVirtual().name("group-" + action + "-" + id).start(() -> {
+            BotMdc.setGroupContext(id, environmentId);
+            Throwable failure = null;
+            try {
+                lifecycle.accept(id);
+            } catch (Throwable t) {
+                failure = t;
+                // The only place this failure is now visible: there is no HTTP response left to
+                // carry it and no advice in the call chain. Also retained as the attempt's
+                // lastError for GET /{id}/status.
+                log.error("Asynchronous {} of bot group {} (origin {}) failed: {}",
+                        action, id, origin, t.toString(), t);
+                try {
+                    onFailure.run();
+                } catch (RuntimeException rollbackFailure) {
+                    log.error("Rollback after the failed {} of bot group {} itself failed: {}",
+                            action, id, rollbackFailure.getMessage(), rollbackFailure);
+                }
+            } finally {
+                startAttempts.finish(id, failure);
+                BotMdc.clear();
+            }
+        });
+
+        return BotGroupStatus.STARTING;
+    }
+
+    /**
+     * Run a start synchronously on the caller's thread while still recording it as an attempt
+     * (AD-15, Implementation Note 10) — the startup daisy-chain's entry point.
+     * <p>
+     * The chain is already serial and already off the request path, so there is nothing to gain
+     * by submitting another thread; what it needs from the registry is that {@code /status}
+     * shows a group the chain is currently building, and that a concurrent operator
+     * {@code /start} of the same group becomes a no-op instead of a second build.
+     */
+    private void startTracked(String id, StartOrigin origin) {
+        if (!startAttempts.begin(id, origin)) {
+            log.info("Bot group {}: not starting from {} — a start is already in flight ({})",
+                    id, origin, startAttempts.describe(id));
+            return;
+        }
+        Throwable failure = null;
+        try {
+            start(id);
+        } catch (Throwable t) {
+            failure = t;
+            throw t;
+        } finally {
+            startAttempts.finish(id, failure);
+        }
+    }
+
+    /**
+     * The two rejections that must happen before a start is accepted rather than during it
+     * (AD-15). Called from {@link #submitLifecycle} so {@code POST /start} can still answer
+     * {@code 400}, and from {@link #startLocked} so <b>every</b> entry point — the startup
+     * chain, the activation reconciler, auto-recovery — inherits the same guard rather than
+     * discovering the misconfiguration halfway through a build.
+     * <p>
+     * Phase 4 adds the registration guards here (a group whose accounts are still being created
+     * is a {@code 400}, naming the counts and the way out); they are not expressible until the
+     * {@code registrationState} document field exists.
+     */
+    private static void validateStartable(BotGroup group) {
+        // Verify environment exists
+        if (group.getEnvironmentId() == null) {
+            throw new BadRequestException(
+                    "BotGroup " + group.getName() + " has no environmentId set. " +
+                            "Please assign an environment before starting the bot group."
+            );
+        }
+
+        // Verify game exists
+        if (group.getGameId() == null) {
+            throw new BadRequestException(
+                    "BotGroup " + group.getName() + " has no gameId set. " +
+                            "Please assign a game before starting the bot group."
+            );
+        }
+    }
+
+    /**
+     * Cancel a start in flight for this group, and call off whatever it has queued at its
+     * environment's gateway budget (AD-8/AD-16).
+     * <p>
+     * <b>The order of the three steps in {@code stop()} is the load-bearing part</b>: cancel the
+     * attempt, cancel the budget scope, <em>then</em> take the group lock. Reversed, a
+     * {@code /stop} parks on the lock for the whole paced duration of the start it is trying to
+     * stop — up to 50 minutes on an HTTP thread for a 3,000-bot group. Cancelling first means
+     * the build's remaining bots are skipped, its queued gateway requests fail fast,
+     * {@code startLocked}'s {@code finally} tears the runtime down and releases the lock, and
+     * the stop then proceeds normally.
+     * <p>
+     * Cancellation is a flag and a scope predicate, never a thread interrupt:
+     * {@code CompletableFuture.join()} is uninterruptible and
+     * {@code VingameWebSocketClient.connect()} swallows {@code InterruptedException} and returns
+     * a half-built client, so interrupting a build would not stop it — it would corrupt it.
+     */
+    private void cancelStartInFlight(String id) {
+        if (startAttempts.cancel(id)) {
+            log.info("Bot group {}: stop requested while a start was in flight ({}) — cancelling it",
+                    id, startAttempts.describe(id));
+        }
+        // The budget is per environment and only exists once something has been sent through it;
+        // find() deliberately does not create one, because conjuring a budget (and a fresh set of
+        // gateway_budget_* series) as a side effect of a stop would be a lie about the fleet.
+        BotGroupRuntime runtime = runningGroups.get(id);
+        String environmentId = runtime != null ? runtime.getEnvironmentId() : null;
+        if (environmentId == null) {
+            return;
+        }
+        GatewayBudget budget = gatewayBudgetRegistry.find(environmentId);
+        if (budget != null) {
+            budget.cancelScope(id);
         }
     }
 
@@ -396,7 +632,23 @@ public class BotGroupBehaviorService {
                 return false;
             }
 
-            startLocked(id);
+            // Recovery stays SYNCHRONOUS (AD-15): its tick is designed to block for exactly one
+            // group start (DEAD_GROUP_AUTO_RECOVERY AD-9 — that blocking IS the staggering) and
+            // it charges the outcome to the attempt budget on return. It opens a StartAttempt
+            // purely so the rebuild is visible on /status and so a concurrent operator /start of
+            // the same group is a no-op rather than a second build.
+            boolean tracked = startAttempts.begin(id, StartOrigin.RECOVERY);
+            Throwable failure = null;
+            try {
+                startLocked(id);
+            } catch (Throwable t) {
+                failure = t;
+                throw t;
+            } finally {
+                if (tracked) {
+                    startAttempts.finish(id, failure);
+                }
+            }
 
             BotGroupRuntime rebuilt = runningGroups.get(id);
             return rebuilt != null
@@ -448,22 +700,22 @@ public class BotGroupBehaviorService {
         // critical detail for the auto-start path on application ready,
         // where there is no advice in the call chain.
         Throwable failure = null;
+        // Set by the cancellation check below, so the finally block can report a stop-cancelled
+        // build as the INFO it is rather than as a failed start ERROR.
+        boolean cancelled = false;
         try {
-            // Verify environment exists
-            if (group.getEnvironmentId() == null) {
-                throw new BadRequestException(
-                        "BotGroup " + group.getName() + " has no environmentId set. " +
-                                "Please assign an environment before starting the bot group."
-                );
-            }
+            // The two 400s. Shared with submitLifecycle so REST answers them synchronously while
+            // every other entry point still inherits them (AD-15).
+            validateStartable(group);
 
-            // Verify game exists
-            if (group.getGameId() == null) {
-                throw new BadRequestException(
-                        "BotGroup " + group.getName() + " has no gameId set. " +
-                                "Please assign a game before starting the bot group."
-                );
-            }
+            startAttempts.progress(id, StartAttemptRegistry.Phase.BUILDING);
+            // AD-18: expected durations are correct behaviour, and the operator learns them from
+            // this line. Phase 3 extends it with the declared demand, the live window and the
+            // estimate; this is the shape it extends. One line per group start — tier 1.
+            log.info("group {} ({}): start admitted — origin {}, {} bots",
+                    id, group.getName(),
+                    startAttempts.origin(id).map(Enum::name).orElse("DIRECT"),
+                    group.getBotCount());
 
             // Load environment (throws ResourceNotFoundException if not found)
             Environment environment = environmentService.findById(group.getEnvironmentId());
@@ -570,6 +822,20 @@ public class BotGroupBehaviorService {
 
             // Create bots in parallel with controlled concurrency
             List<Bot> bots = createBotsInParallel(group, environment, game, strategyAssignment);
+
+            // A /stop landed during the build (AD-8/AD-16). Return without persisting anything:
+            // `started` stays false, so the finally block below tears the half-built runtime down
+            // and the stop — which is parked on this group's lock right now — then proceeds and
+            // persists STOPPED. Deliberately not an exception: a cancelled start is an operator
+            // decision that completed, not a failure to report.
+            if (startAttempts.isCancelled(id)) {
+                cancelled = true;
+                log.info("A stop during the start of group {} cancelled the build at {}/{} bots — "
+                                + "unwinding", id, bots.size(), group.getBotCount());
+                return;
+            }
+
+            startAttempts.progress(id, StartAttemptRegistry.Phase.STARTING_BOTS);
 
             // Start all bots
             for (Bot bot : bots) {
@@ -696,12 +962,20 @@ public class BotGroupBehaviorService {
                                 group.getName(), cleanupEx.getMessage(), cleanupEx);
                     }
                 }
-                // Attach the captured failure so operators grepping for
-                // "Failed to start bot group" see the cause inline. Matters
-                // for the auto-start path (PostConstruct) where no advice
-                // logs the exception elsewhere.
-                log.error("Failed to start bot group {}: {}", group.getName(),
-                        failure != null ? failure.toString() : "(unknown)", failure);
+                if (cancelled) {
+                    // Not a failure: the operator asked for this. An ERROR here would page
+                    // someone for a successful /stop, and "Failed to start bot group X:
+                    // (unknown)" is exactly the line nobody can act on.
+                    log.info("Start of bot group {} was cancelled by a stop — runtime torn down",
+                            group.getName());
+                } else {
+                    // Attach the captured failure so operators grepping for
+                    // "Failed to start bot group" see the cause inline. Matters
+                    // for the startup daisy-chain, where no advice logs the
+                    // exception elsewhere.
+                    log.error("Failed to start bot group {}: {}", group.getName(),
+                            failure != null ? failure.toString() : "(unknown)", failure);
+                }
             }
         }
     }
@@ -735,8 +1009,26 @@ public class BotGroupBehaviorService {
             CompletableFuture<Bot> future = CompletableFuture.supplyAsync(() -> {
                 BotMdc.setGroupContext(group.getId(), group.getEnvironmentId(), product);
                 try {
+                    // GATEWAY_REQUEST_BUDGET AD-8: this is how a /stop unwinds a start that is
+                    // still queued. Checked before the semaphore rather than after, so a
+                    // cancelled build does not sit waiting for a permit it will not use; and
+                    // returning null rather than throwing keeps a cancelled bot out of
+                    // bot_creation_failures_total, which counts things that went wrong.
+                    if (startAttempts.isCancelled(group.getId())) {
+                        return null;
+                    }
                     semaphore.acquire();
                     try {
+                        // Re-checked UNDER the permit, and this is the check that actually stops a
+                        // cancelled build. Every one of the N tasks is submitted at once, so all N
+                        // race through the check above within milliseconds and then park on the
+                        // semaphore; for a 3,000-bot group at parallelism 10, 2,990 of them had
+                        // already passed it before any /stop could possibly arrive. Only a task
+                        // that has just taken a permit is about to spend gateway requests, so only
+                        // this check can prevent them.
+                        if (startAttempts.isCancelled(group.getId())) {
+                            return null;
+                        }
                         return createSingleBot(group, environment, game, botIndex, strategyAssignment);
                     } finally {
                         semaphore.release();
@@ -755,6 +1047,7 @@ public class BotGroupBehaviorService {
         // Wait for all bots to be created and collect results
         List<Bot> bots = new ArrayList<>(botCount);
         List<Throwable> errors = new ArrayList<>();
+        int skipped = 0;
 
         // The result-collection loop runs on the caller thread of start(), NOT on
         // the per-bot virtual thread (where MDC was set inside the supplyAsync
@@ -769,7 +1062,15 @@ public class BotGroupBehaviorService {
             for (int i = 0; i < futures.size(); i++) {
                 try {
                     Bot bot = futures.get(i).join();
+                    if (bot == null) {
+                        // Cancelled before it was built (AD-8). Neither up nor failed.
+                        skipped++;
+                        continue;
+                    }
                     bots.add(bot);
+                    // Progress for GET /{id}/status while the group is STARTING. A no-op when
+                    // there is no tracked attempt (a direct start(), a fixture).
+                    startAttempts.botUp(group.getId());
                 } catch (Exception e) {
                     // Unwrap CompletionException → real cause; users care about the
                     // actual auth/validation failure, not the wrapper.
@@ -778,6 +1079,7 @@ public class BotGroupBehaviorService {
                             i + 1, botCount, group.getId(), group.getEnvironmentId(),
                             cause.toString(), cause);
                     botMetrics.incBotCreationFailure(classifyCreationFailure(cause));
+                    startAttempts.botFailed(group.getId());
                     errors.add(e);
                 }
             }
@@ -788,6 +1090,10 @@ public class BotGroupBehaviorService {
         if (!errors.isEmpty()) {
             log.warn("Created {}/{} bots successfully ({} failures) for group {}",
                     bots.size(), botCount, errors.size(), group.getId());
+        }
+        if (skipped > 0) {
+            log.info("Bot group {}: {}/{} bots were not built — the start was cancelled",
+                    group.getId(), skipped, botCount);
         }
 
         return bots;
@@ -1041,6 +1347,22 @@ public class BotGroupBehaviorService {
      *        nothing logged to say so.
      */
     private void stop(String id, boolean parkRuntimeless) {
+        // GATEWAY_REQUEST_BUDGET AD-8/AD-16 — BEFORE the lock, and that order is the whole
+        // point: cancel the attempt, cancel the budget scope, then lock. See
+        // cancelStartInFlight.
+        //
+        // Gated on parkRuntimeless, i.e. only the paths that are a STATEMENT OF INTENT (the
+        // operator /stop, the activation reconciler's STOP decision, a cascade delete) cancel a
+        // start. restart()'s internal stop must NOT: by the time it runs, the restart's own
+        // StartAttempt is already open, so cancelling "the start in flight" would cancel the
+        // restart itself — its start half would unwind immediately and every /restart would
+        // become a /stop. (AD-16's "restart()'s internal stop does the same" is wrong for this
+        // reason; it is also unnecessary, because restartAsync's putIfAbsent means a restart is
+        // never submitted while another start is in flight.)
+        if (parkRuntimeless) {
+            cancelStartInFlight(id);
+        }
+
         // Same per-group lock as start() (AD-5) so an operator Stop cannot race a
         // Start's reclaim. restart() calls stop() then start() sequentially
         // (non-nested), so there is no reentrancy/deadlock concern.
@@ -1091,6 +1413,14 @@ public class BotGroupBehaviorService {
 
             log.info("Bot group {} stopped successfully", id);
         } finally {
+            if (parkRuntimeless) {
+                // AD-17: an attempt's progress and lastError are retained "until the next start
+                // or stop" — this is the stop half, and it is also what keeps the registry's
+                // retained map bounded. Deliberately AFTER the locked teardown: the cancellation
+                // flag a cancelled build polls lives on the attempt, so dropping it any earlier
+                // would let that build carry on creating bots for a group being stopped.
+                startAttempts.clear(id);
+            }
             lock.unlock();
         }
     }
@@ -1159,8 +1489,14 @@ public class BotGroupBehaviorService {
      * so a DB round-trip would be wasted.
      */
     public void stopAndLogout(String id) {
+        // A start in flight has to be called off first: its remaining bots would otherwise be
+        // authenticated against a group document that is about to be deleted. Same
+        // cancel-before-anything-else ordering as stop() (AD-8), for the same reason.
+        cancelStartInFlight(id);
+
         BotGroupRuntime runtime = runningGroups.get(id);
         if (runtime == null) {
+            startAttempts.clear(id);
             log.debug("Bot group {} is not running; nothing to stop/logout before delete", id);
             return;
         }
@@ -1189,6 +1525,8 @@ public class BotGroupBehaviorService {
         groupLifecycleAggregator.evictGroup(id);
         scopedDebugEscalator.evictGroup(id);
         runningGroups.remove(id);
+        // The group is about to cease to exist; nothing should keep reporting its last start.
+        startAttempts.clear(id);
 
         log.info("Bot group {} stopped and logged out (cascade delete)", id);
     }
@@ -1329,7 +1667,11 @@ public class BotGroupBehaviorService {
 
         scheduler.schedule(() -> {
             log.info("Executing scheduled restart for bot group {}", id);
-            restart(id);
+            // Through the async entry (AD-15) so the restart is a tracked attempt like any
+            // other: visible on /status, and a no-op if a start is already in flight instead of
+            // a second build racing it. The scheduler thread is shared by every scheduled
+            // restart in the JVM, so it must not block for a paced start either.
+            restartAsync(id, StartOrigin.SCHEDULED_RESTART, () -> { });
         }, delayMillis, TimeUnit.MILLISECONDS);
 
         // Update entity
@@ -2294,11 +2636,44 @@ public class BotGroupBehaviorService {
      * {@code STOPPED} there would tell an operator their start did nothing.
      */
     public BotGroupStatus getActualStatus(String id) {
+        // An open attempt wins over whatever runtime is there. Normally they agree (a fresh
+        // runtime is STARTING anyway); where they differ is a reclaim — a DEAD runtime being
+        // rebuilt still reads DEAD until startLocked tears it down, and answering DEAD to an
+        // operator whose /start was just accepted is the one answer that is actively misleading.
+        if (startAttempts.isOpen(id)) {
+            return BotGroupStatus.STARTING;
+        }
         return Optional.ofNullable(runningGroups.get(id))
                 .map(BotGroupRuntime::getActualStatus)
-                .orElseGet(() -> startAttempts.isOpen(id)
-                        ? BotGroupStatus.STARTING
-                        : BotGroupStatus.STOPPED);
+                .orElse(BotGroupStatus.STOPPED);
+    }
+
+    /**
+     * Bots built so far by this group's current start, or by the last one that finished;
+     * {@code null} when the group has not been started in this JVM (GATEWAY_REQUEST_BUDGET A1).
+     * Rendered against the group's {@code botCount} as progress while {@code actualStatus} is
+     * {@code STARTING} — which under a paced start is the only way to tell a slow build from a
+     * stuck one.
+     */
+    public Integer getStartBotsUp(String id) {
+        return startAttempts.botsUp(id);
+    }
+
+    /**
+     * The last start or restart failure for this group, or {@code null}. This is where a
+     * {@code /restart}'s zero-bot {@code IllegalStateException} surfaces now that it can no
+     * longer be thrown at an HTTP caller (AD-15).
+     */
+    public String getLastStartError(String id) {
+        return startAttempts.lastError(id);
+    }
+
+    /**
+     * The startup daisy-chain thread (AD-14), for tests that need to wait for it. {@code null}
+     * until {@link #onStartup()} has run.
+     */
+    Thread startupChainThread() {
+        return startupChain;
     }
 
     /**

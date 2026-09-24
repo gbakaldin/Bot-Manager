@@ -21,6 +21,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.sort.BotGroupSortRow;
 import com.vingame.bot.domain.botgroup.sort.BotSortKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
+import com.vingame.bot.domain.botgroup.model.StartOrigin;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
@@ -36,7 +37,9 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
@@ -45,6 +48,7 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -518,20 +522,30 @@ class BotGroupControllerTest {
     class StartTests {
 
         @Test
-        @DisplayName("Should return 200 OK when bot group is started")
-        void shouldReturnOkWhenBotGroupIsStarted() throws Exception {
+        @DisplayName("Accepts the start with 200 + a STARTING DTO, and does not run it inline")
+        void shouldReturnOkWithStartingDto() throws Exception {
             // Arrange — legacy null-mode group: activationMode stays null (AD-4),
             // so the controller must NOT flip the mode after a manual start.
             String groupId = "123";
-            doNothing().when(behaviorService).start(groupId);
             when(service.findById(groupId))
-                    .thenReturn(BotGroup.builder().id(groupId).build());
+                    .thenReturn(BotGroup.builder().id(groupId).name("Group").botCount(50).build());
+            when(behaviorService.startAsync(eq(groupId), eq(StartOrigin.REST), any()))
+                    .thenReturn(BotGroupStatus.STARTING);
+            when(behaviorService.getStartBotsUp(groupId)).thenReturn(3);
 
-            // Act & Assert
+            // Act & Assert — 200 now means ACCEPTED (A3): the build is on a virtual thread and
+            // may legitimately run for tens of minutes, so the body has to say what to poll.
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
-                    .andExpect(status().isOk());
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.groupId").value(groupId))
+                    .andExpect(jsonPath("$.actualStatus").value("STARTING"))
+                    .andExpect(jsonPath("$.botCount").value(50))
+                    .andExpect(jsonPath("$.botsUp").value(3));
 
-            verify(behaviorService).start(groupId);
+            verify(behaviorService).startAsync(eq(groupId), eq(StartOrigin.REST), any());
+            // The synchronous entry point is gone: a blocking start here is what held an HTTP
+            // thread (and, on the startup path, Tomcat itself) for the whole build.
+            verify(behaviorService, never()).start(anyString());
             verify(service, never()).setActivationMode(any(BotGroup.class), any());
         }
 
@@ -542,9 +556,10 @@ class BotGroupControllerTest {
             // mode to MANUAL_ON *before* starting so a reconciler tick racing the
             // action window sees a non-SCHEDULED mode and cannot stop it.
             String groupId = "123";
-            doNothing().when(behaviorService).start(groupId);
             when(service.findById(groupId)).thenReturn(
                     BotGroup.builder().id(groupId).activationMode(ActivationMode.SCHEDULED).build());
+            when(behaviorService.startAsync(eq(groupId), eq(StartOrigin.REST), any()))
+                    .thenReturn(BotGroupStatus.STARTING);
 
             // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
@@ -554,79 +569,101 @@ class BotGroupControllerTest {
             InOrder inOrder = inOrder(service, behaviorService);
             inOrder.verify(service).setActivationMode(
                     argThat((BotGroup g) -> groupId.equals(g.getId())), eq(ActivationMode.MANUAL_ON));
-            inOrder.verify(behaviorService).start(groupId);
+            inOrder.verify(behaviorService).startAsync(eq(groupId), eq(StartOrigin.REST), any());
         }
 
         @Test
-        @DisplayName("A failing start rolls back the mode flip, leaving activationMode unchanged (AD-4)")
-        void failingStartRollsBackMode() throws Exception {
-            // Arrange — scheduled-capable group whose start fails: the MANUAL_ON
-            // flip must be reverted to the prior SCHEDULED mode so a failed action
-            // leaves no spurious mode change.
+        @DisplayName("The mode rollback is handed to the async start, and running it restores SCHEDULED")
+        void asyncFailureRollsBackModeThroughTheCallback() throws Exception {
+            // The controller's catch cannot see a failure that happens minutes after the
+            // response (AD-15 / Implementation Note 8), so the rollback travels into startAsync
+            // as a Runnable. Here we capture it and run it, which is what the build thread does
+            // on failure.
             String groupId = "123";
             when(service.findById(groupId)).thenReturn(
                     BotGroup.builder().id(groupId).activationMode(ActivationMode.SCHEDULED).build());
-            doThrow(new RuntimeException("Start failed")).when(behaviorService).start(groupId);
+            ArgumentCaptor<Runnable> onFailure = ArgumentCaptor.forClass(Runnable.class);
+            when(behaviorService.startAsync(eq(groupId), eq(StartOrigin.REST), onFailure.capture()))
+                    .thenReturn(BotGroupStatus.STARTING);
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
+                    .andExpect(status().isOk());
+
+            verify(service).setActivationMode(any(BotGroup.class), eq(ActivationMode.MANUAL_ON));
+            assertThat(onFailure.getValue()).as("a rollback must be handed to the build").isNotNull();
+
+            onFailure.getValue().run();
+
+            verify(service).setActivationMode(any(BotGroup.class), eq(ActivationMode.SCHEDULED));
+        }
+
+        @Test
+        @DisplayName("A failure in the synchronous half still rolls the flip back and still answers 500")
+        void synchronousFailureRollsBackMode() throws Exception {
+            // Only the accept is synchronous now, but it can still throw (a Mongo read, the two
+            // 400s), and in that case no build was submitted — so the catch, not the callback, is
+            // what has to undo the flip.
+            String groupId = "123";
+            when(service.findById(groupId)).thenReturn(
+                    BotGroup.builder().id(groupId).activationMode(ActivationMode.SCHEDULED).build());
+            doThrow(new RuntimeException("Start failed"))
+                    .when(behaviorService).startAsync(eq(groupId), eq(StartOrigin.REST), any());
 
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
                     .andExpect(status().isInternalServerError());
 
-            // Flip to MANUAL_ON, then restore SCHEDULED on failure, in that order.
             InOrder inOrder = inOrder(service, behaviorService);
             inOrder.verify(service).setActivationMode(any(BotGroup.class), eq(ActivationMode.MANUAL_ON));
-            inOrder.verify(behaviorService).start(groupId);
+            inOrder.verify(behaviorService).startAsync(eq(groupId), eq(StartOrigin.REST), any());
             inOrder.verify(service).setActivationMode(any(BotGroup.class), eq(ActivationMode.SCHEDULED));
         }
 
         @Test
-        @DisplayName("Should return 400 Bad Request when start throws IllegalArgumentException")
-        void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
-            // Arrange — legacy null-mode group: no flip, action runs and throws.
+        @DisplayName("404 for an unknown id stays synchronous")
+        void unknownIdIsStillSynchronous() throws Exception {
             String groupId = "999";
-            when(service.findById(groupId)).thenReturn(BotGroup.builder().id(groupId).build());
-            doThrow(new IllegalArgumentException("Not found")).when(behaviorService).start(groupId);
+            when(service.findById(groupId)).thenThrow(new ResourceNotFoundException("BotGroup " + groupId + " not found"));
 
-            // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
-                    .andExpect(status().isBadRequest());
+                    .andExpect(status().isNotFound());
+
+            verify(behaviorService, never()).startAsync(anyString(), any(), any());
+        }
+
+        @Test
+        @DisplayName("400 from the accept's validation stays synchronous (no environment / no game)")
+        void validationBadRequestIsStillSynchronous() throws Exception {
+            // The two checks startLocked does first are hoisted into the accept precisely so a
+            // misconfigured group is a 400 and not a 200 followed by a silent failure.
+            String groupId = "123";
+            when(service.findById(groupId)).thenReturn(BotGroup.builder().id(groupId).build());
+            doThrow(new BadRequestException("BotGroup Group has no gameId set."))
+                    .when(behaviorService).startAsync(eq(groupId), eq(StartOrigin.REST), any());
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.type").value("Bad request"))
+                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString("gameId")));
 
             verify(service, never()).setActivationMode(any(BotGroup.class), any());
         }
 
         @Test
-        @DisplayName("Should return 500 Internal Server Error with sanitised body when start fails")
-        void shouldReturnInternalServerErrorWhenStartFails() throws Exception {
-            // The 500 fallback in RestExceptionHandler intentionally does not
-            // echo e.getMessage() to the client — raw exception messages can
-            // carry Mongo hostnames, Spring wiring failures, JDK HttpClient
-            // infra details. The full exception is logged server-side.
+        @DisplayName("A second start while one is in flight is still a 200 describing the same attempt")
+        void secondStartIsAcceptedAndDescribesTheSameAttempt() throws Exception {
             String groupId = "123";
-            when(service.findById(groupId)).thenReturn(BotGroup.builder().id(groupId).build());
-            doThrow(new RuntimeException("Start failed")).when(behaviorService).start(groupId);
+            when(service.findById(groupId))
+                    .thenReturn(BotGroup.builder().id(groupId).name("Group").botCount(50).build());
+            // startAsync's putIfAbsent lost the race, so it reports the status of the attempt
+            // that is already running rather than submitting a second build.
+            when(behaviorService.startAsync(eq(groupId), eq(StartOrigin.REST), any()))
+                    .thenReturn(BotGroupStatus.STARTING);
+            when(behaviorService.getStartBotsUp(groupId)).thenReturn(12);
 
             mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
-                    .andExpect(status().isInternalServerError())
-                    .andExpect(jsonPath("$.type").value("Internal error"))
-                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
-                            "Internal server error")))
-                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
-                            org.hamcrest.Matchers.containsString("Start failed"))));
-        }
-
-        @Test
-        @DisplayName("Should return 502 Bad Gateway when start surfaces UpstreamLoginException")
-        void shouldReturnBadGatewayWhenUpstreamLogin() throws Exception {
-            String groupId = "123";
-            when(service.findById(groupId)).thenReturn(BotGroup.builder().id(groupId).build());
-            doThrow(new UpstreamLoginException(
-                    "Login failed for user 'authtest1': No data in response"))
-                    .when(behaviorService).start(groupId);
-
-            mockMvc.perform(post("/api/v1/bot-group/{id}/start", groupId))
-                    .andExpect(status().isBadGateway())
-                    .andExpect(jsonPath("$.type").value("Game server error"))
-                    .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString(
-                            "Login failed for user 'authtest1'")));
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.actualStatus").value("STARTING"))
+                    .andExpect(jsonPath("$.botsUp").value(12));
         }
     }
 
@@ -715,27 +752,56 @@ class BotGroupControllerTest {
     class RestartTests {
 
         @Test
-        @DisplayName("Should return 200 OK when bot group is restarted")
-        void shouldReturnOkWhenBotGroupIsRestarted() throws Exception {
-            // Arrange
+        @DisplayName("Accepts the restart with 200 + a STARTING DTO, carrying the last start error")
+        void shouldReturnOkWithStartingDto() throws Exception {
             String groupId = "123";
-            doNothing().when(behaviorService).restart(groupId);
+            when(service.findById(groupId))
+                    .thenReturn(BotGroup.builder().id(groupId).name("Group").botCount(20).build());
+            when(behaviorService.restartAsync(eq(groupId), eq(StartOrigin.REST), any()))
+                    .thenReturn(BotGroupStatus.STARTING);
+            // A previous restart that produced zero bots used to be a 500; it is now readable
+            // here, because the exception happens long after the response (AD-15).
+            when(behaviorService.getLastStartError(groupId))
+                    .thenReturn("java.lang.IllegalStateException: Restart of group 123 produced 0/20 bots");
 
-            // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/restart", groupId))
-                    .andExpect(status().isOk());
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.actualStatus").value("STARTING"))
+                    .andExpect(jsonPath("$.botCount").value(20))
+                    .andExpect(jsonPath("$.lastError").value(
+                            org.hamcrest.Matchers.containsString("produced 0/20 bots")));
+
+            verify(behaviorService).restartAsync(eq(groupId), eq(StartOrigin.REST), any());
+            verify(behaviorService, never()).restart(anyString());
         }
 
         @Test
-        @DisplayName("Should return 400 Bad Request when restart throws IllegalArgumentException")
-        void shouldReturnBadRequestWhenIllegalArgument() throws Exception {
-            // Arrange
-            String groupId = "999";
-            doThrow(new IllegalArgumentException("Not found")).when(behaviorService).restart(groupId);
+        @DisplayName("A restart never parks a SCHEDULED group as MANUAL_ON")
+        void restartDoesNotFlipActivationMode() throws Exception {
+            String groupId = "123";
+            when(service.findById(groupId)).thenReturn(
+                    BotGroup.builder().id(groupId).activationMode(ActivationMode.SCHEDULED).build());
+            when(behaviorService.restartAsync(eq(groupId), eq(StartOrigin.REST), any()))
+                    .thenReturn(BotGroupStatus.STARTING);
 
-            // Act & Assert
             mockMvc.perform(post("/api/v1/bot-group/{id}/restart", groupId))
-                    .andExpect(status().isBadRequest());
+                    .andExpect(status().isOk());
+
+            // Unchanged from the synchronous version: a restart is not a statement about whether
+            // the group should be running (TIMED_ACTIVATION AD-4).
+            verify(service, never()).setActivationMode(any(BotGroup.class), any());
+        }
+
+        @Test
+        @DisplayName("404 for an unknown id stays synchronous")
+        void unknownIdIsStillSynchronous() throws Exception {
+            String groupId = "999";
+            when(service.findById(groupId)).thenThrow(new ResourceNotFoundException("BotGroup " + groupId + " not found"));
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/restart", groupId))
+                    .andExpect(status().isNotFound());
+
+            verify(behaviorService, never()).restartAsync(anyString(), any(), any());
         }
     }
 

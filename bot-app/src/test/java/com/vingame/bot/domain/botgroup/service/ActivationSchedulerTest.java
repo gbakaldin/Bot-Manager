@@ -4,6 +4,7 @@ import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.ActivationWindow;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.StartOrigin;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -17,7 +18,9 @@ import java.time.ZonedDateTime;
 import java.util.List;
 import java.util.Set;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -85,7 +88,7 @@ class ActivationSchedulerTest {
     }
 
     @Test
-    @DisplayName("open window + not running → START (calls behaviorService.start)")
+    @DisplayName("open window + not running → START (accepts an async start, never blocks the tick)")
     void openNotRunningStarts() {
         BotGroup g = scheduledGroup("g1", openNowWindow(), BotGroupStatus.STOPPED);
         when(repository.findByActivationMode(ActivationMode.SCHEDULED)).thenReturn(List.of(g));
@@ -94,7 +97,10 @@ class ActivationSchedulerTest {
 
         scheduler().reconcileAll();
 
-        verify(behaviorService).start("g1");
+        // startAsync, not start (GATEWAY_REQUEST_BUDGET AD-15): one reconciler thread serves
+        // every scheduled group, so a paced start must not be run on it.
+        verify(behaviorService).startAsync(eq("g1"), eq(StartOrigin.SCHEDULE), any());
+        verify(behaviorService, never()).start(anyString());
         verify(behaviorService, never()).stop(anyString());
     }
 
@@ -109,6 +115,7 @@ class ActivationSchedulerTest {
         scheduler().reconcileAll();
 
         verify(behaviorService).stop("g1");
+        verify(behaviorService, never()).startAsync(anyString(), any(), any());
         verify(behaviorService, never()).start(anyString());
     }
 
@@ -122,6 +129,7 @@ class ActivationSchedulerTest {
 
         scheduler().reconcileAll();
 
+        verify(behaviorService, never()).startAsync(anyString(), any(), any());
         verify(behaviorService, never()).start(anyString());
         verify(behaviorService, never()).stop(anyString());
     }
@@ -137,6 +145,7 @@ class ActivationSchedulerTest {
 
         scheduler().reconcileAll();
 
+        verify(behaviorService, never()).startAsync(anyString(), any(), any());
         verify(behaviorService, never()).start(anyString());
         verify(behaviorService, never()).stop(anyString());
     }
@@ -152,6 +161,7 @@ class ActivationSchedulerTest {
 
         scheduler().reconcileAll();
 
+        verify(behaviorService, never()).startAsync(anyString(), any(), any());
         verify(behaviorService, never()).start(anyString());
         verify(behaviorService, never()).stop(anyString());
     }
@@ -171,7 +181,7 @@ class ActivationSchedulerTest {
 
         scheduler().reconcileAll();
 
-        verify(behaviorService).start("good");
+        verify(behaviorService).startAsync(eq("good"), eq(StartOrigin.SCHEDULE), any());
     }
 
     @Test
@@ -181,6 +191,7 @@ class ActivationSchedulerTest {
 
         scheduler().reconcileAll();
 
+        verify(behaviorService, never()).startAsync(anyString(), any(), any());
         verify(behaviorService, never()).start(anyString());
         verify(behaviorService, never()).stop(anyString());
     }

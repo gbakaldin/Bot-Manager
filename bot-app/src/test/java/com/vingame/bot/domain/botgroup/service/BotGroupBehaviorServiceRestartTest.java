@@ -101,6 +101,9 @@ class BotGroupBehaviorServiceRestartTest {
     @Mock
     private ScopedDebugEscalator scopedDebugEscalator;
 
+    @Mock
+    private com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry gatewayBudgetRegistry;
+
     @InjectMocks
     private BotGroupBehaviorService service;
 
@@ -443,7 +446,8 @@ class BotGroupBehaviorServiceRestartTest {
 
         BotGroupBehaviorService realMetricsService = new BotGroupBehaviorService(
                 botGroupService, environmentService, gameService, botFactory, realMetrics,
-                sessionAggregationService, groupLifecycleAggregator, scopedDebugEscalator);
+                sessionAggregationService, groupLifecycleAggregator, scopedDebugEscalator,
+                gatewayBudgetRegistry);
         ReflectionTestUtils.setField(realMetricsService, "deadBotGroupThreshold", 0.80);
         ReflectionTestUtils.setField(realMetricsService, "botCreationParallelism", 10);
         ReflectionTestUtils.setField(realMetricsService, "watchdogTimeoutSeconds", 180L);
@@ -643,7 +647,8 @@ class BotGroupBehaviorServiceRestartTest {
 
         BotGroupBehaviorService svc = new BotGroupBehaviorService(
                 botGroupService, environmentService, gameService, botFactory, realMetrics,
-                sessionAggregationService, groupLifecycleAggregator, scopedDebugEscalator);
+                sessionAggregationService, groupLifecycleAggregator, scopedDebugEscalator,
+                gatewayBudgetRegistry);
         ReflectionTestUtils.setField(svc, "deadBotGroupThreshold", 0.80);
         ReflectionTestUtils.setField(svc, "botCreationParallelism", 10);
         ReflectionTestUtils.setField(svc, "watchdogTimeoutSeconds", 180L);

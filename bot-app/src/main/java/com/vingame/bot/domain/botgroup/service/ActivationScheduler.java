@@ -6,6 +6,7 @@ import com.vingame.bot.domain.botgroup.model.ActivationEvaluator;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.StartOrigin;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -138,7 +139,17 @@ public class ActivationScheduler {
         switch (decision) {
             case START -> {
                 log.info("Activation reconcile: group {} window open → START", id);
-                behaviorService.start(id);
+                // Asynchronous (GATEWAY_REQUEST_BUDGET AD-15): this is ONE reconciler thread for
+                // every scheduled group in the JVM, and a paced start can take tens of minutes.
+                // Calling start(id) here would delay every other group's window transition by
+                // that much — an 18:00 group could open at 18:40 because a 17:00 group was still
+                // building.
+                //
+                // A second tick one minute later does not start it again: isGroupRunning() now
+                // reports a start in flight as running (AD-16), so ActivationEvaluator resolves
+                // NONE while the build is going, and startAsync's putIfAbsent is the backstop if
+                // it ever did not.
+                behaviorService.startAsync(id, StartOrigin.SCHEDULE, () -> { });
             }
             case STOP -> {
                 log.info("Activation reconcile: group {} window closed → STOP", id);

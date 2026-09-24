@@ -94,6 +94,9 @@ class BotGroupBehaviorServiceTest {
     @Mock
     private ScopedDebugEscalator scopedDebugEscalator;
 
+    @Mock
+    private com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry gatewayBudgetRegistry;
+
     @Captor
     private ArgumentCaptor<BotGroup> botGroupCaptor;
 
@@ -202,6 +205,7 @@ class BotGroupBehaviorServiceTest {
                     .thenReturn(List.of(scheduled));
 
             service.onStartup();
+            joinStartupChain();
 
             // start() resolves the group via findById first; a skipped group is
             // never started, so findById is never called for it.
@@ -226,8 +230,26 @@ class BotGroupBehaviorServiceTest {
             when(botGroupService.findById("legacy-1")).thenReturn(legacy);
 
             service.onStartup();
+            joinStartupChain();
 
             verify(botGroupService).findById("legacy-1");
+        }
+
+        /**
+         * onStartup() now only queues: the starts run on the "startup-chain" virtual thread
+         * (GATEWAY_REQUEST_BUDGET AD-14), so an assertion made immediately after it would race
+         * the chain rather than observe it.
+         */
+        private void joinStartupChain() {
+            Thread chain = service.startupChainThread();
+            assertThat(chain).as("onStartup must have submitted the daisy-chain").isNotNull();
+            try {
+                chain.join(java.time.Duration.ofSeconds(10));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("interrupted while waiting for the startup chain", e);
+            }
+            assertThat(chain.isAlive()).as("startup chain did not finish").isFalse();
         }
     }
 

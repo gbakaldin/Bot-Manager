@@ -10,6 +10,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.StartOrigin;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import com.vingame.bot.domain.botgroup.sort.BotSortKey;
@@ -30,6 +31,7 @@ import org.springframework.validation.annotation.Validated;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.Function;
 
 /**
  * Exception handling is delegated to
@@ -141,14 +143,24 @@ public class BotGroupController {
 
 
     @PostMapping("/{id}/start")
-    @Operation(summary = "Start bot group", description = "Starts the bot group with the given ID")
-    public ResponseEntity<Void> start(@PathVariable String id) {
-        runWithManualOverride(id, ActivationMode.MANUAL_ON, () -> behaviorService.start(id));
-        return ResponseEntity.ok().build();
+    @Operation(summary = "Start bot group",
+            description = "Accepts a start for the bot group and returns its status immediately. "
+                    + "200 means ACCEPTED, not finished: the build runs on a virtual thread and a "
+                    + "large group legitimately takes tens of minutes once its gateway requests "
+                    + "are paced. Poll GET /{id}/status — actualStatus is STARTING with botsUp "
+                    + "climbing toward botCount, then ACTIVE. A second start while one is in "
+                    + "flight is accepted and describes the same attempt; it never starts a "
+                    + "second build. 404 for an unknown id and 400 for a group with no "
+                    + "environment or no game are still answered synchronously.")
+    public ResponseEntity<BotGroupStatusDTO> start(@PathVariable String id) {
+        return ResponseEntity.ok(runWithManualOverrideAsync(id, ActivationMode.MANUAL_ON,
+                onFailure -> behaviorService.startAsync(id, StartOrigin.REST, onFailure)));
     }
 
     @PostMapping("/{id}/stop")
-    @Operation(summary = "Stop bot group", description = "Stops the bot group with the given ID")
+    @Operation(summary = "Stop bot group", description = "Stops the bot group with the given ID. "
+            + "Synchronous, and it wins over a start in flight: the start is cancelled before the "
+            + "stop takes the group lock, so a stop never waits out the start it is stopping.")
     public ResponseEntity<Void> stop(@PathVariable String id) {
         runWithManualOverride(id, ActivationMode.MANUAL_OFF, () -> behaviorService.stop(id));
         return ResponseEntity.ok().build();
@@ -194,11 +206,56 @@ public class BotGroupController {
         }
     }
 
+    /**
+     * {@link #runWithManualOverride} for an action that only <em>accepts</em> work
+     * (GATEWAY_REQUEST_BUDGET AD-15). The rollback has to be handed to the action instead of
+     * living in a {@code catch}, because the failure it undoes happens on a virtual thread long
+     * after this method has returned — for a paced 3,000-bot start, up to fifty minutes after.
+     * <p>
+     * Both halves are wired and they cannot both fire: the synchronous {@code catch} covers the
+     * validation the accept does on this thread (404, the two 400s), and the {@code onFailure}
+     * runnable covers the build. If the synchronous half throws, no task was ever submitted.
+     */
+    private BotGroupStatusDTO runWithManualOverrideAsync(
+            String id, ActivationMode manualMode, Function<Runnable, BotGroupStatus> action) {
+        BotGroup group = service.findById(id);
+        if (group.getActivationMode() == null) {
+            // Legacy, non-timed group — no mode flip, nothing to roll back.
+            return statusDTO(group, action.apply(() -> { }));
+        }
+        ActivationMode priorMode = group.getActivationMode();
+        service.setActivationMode(group, manualMode);
+        try {
+            return statusDTO(group, action.apply(() -> restoreMode(id, priorMode)));
+        } catch (RuntimeException e) {
+            // The accept itself failed, so no build was submitted and no async rollback will run.
+            service.setActivationMode(group, priorMode);
+            throw e;
+        }
+    }
+
+    /**
+     * Undo a manual-override flip from the build thread. Re-reads the group rather than reusing
+     * the instance the request thread loaded: minutes have passed, and writing a stale document
+     * back would silently revert whatever else changed in between.
+     */
+    private void restoreMode(String id, ActivationMode priorMode) {
+        service.setActivationMode(service.findById(id), priorMode);
+    }
+
     @PostMapping("/{id}/restart")
-    @Operation(summary = "Restart bot group", description = "Restarts the bot group with the given ID")
-    public ResponseEntity<Void> restart(@PathVariable String id) {
-        behaviorService.restart(id);
-        return ResponseEntity.ok().build();
+    @Operation(summary = "Restart bot group",
+            description = "Accepts a restart and returns the group's status immediately; same "
+                    + "200-means-accepted contract as /start. The stop, the pause and the rebuild "
+                    + "all run on a virtual thread, so a restart that ends with zero bots is "
+                    + "reported as lastError on GET /{id}/status rather than as a 500.")
+    public ResponseEntity<BotGroupStatusDTO> restart(@PathVariable String id) {
+        // No manual-override flip: a restart is not a statement about whether the group should be
+        // running, so it must not park a SCHEDULED group as MANUAL_ON (TIMED_ACTIVATION AD-4).
+        // Unchanged from the synchronous version.
+        BotGroup group = service.findById(id);
+        BotGroupStatus accepted = behaviorService.restartAsync(id, StartOrigin.REST, () -> { });
+        return ResponseEntity.ok(statusDTO(group, accepted));
     }
 
     @PostMapping("/{id}/schedule-restart")
@@ -225,18 +282,30 @@ public class BotGroupController {
             description = "Returns both target status (from database) and actual runtime status")
     public ResponseEntity<BotGroupStatusDTO> getStatus(@PathVariable String id) {
         BotGroup group = service.findById(id);
-        BotGroupStatus actualStatus = behaviorService.getActualStatus(id);
-        BotGroupPlayingStatus playingStatus = behaviorService.getPlayingStatus(id);
+        return ResponseEntity.ok(statusDTO(group, behaviorService.getActualStatus(id)));
+    }
 
-        BotGroupStatusDTO statusDTO = BotGroupStatusDTO.builder()
+    /**
+     * The one place a {@link BotGroupStatusDTO} is assembled, so the ack returned by
+     * {@code /start} and {@code /restart} and the body of {@code /status} cannot drift
+     * (GATEWAY_REQUEST_BUDGET A1).
+     * <p>
+     * {@code actualStatus} is passed in rather than read here: the start path has just been told
+     * {@code STARTING} by the service and re-reading it would open a window in which the ack says
+     * something else.
+     */
+    private BotGroupStatusDTO statusDTO(BotGroup group, BotGroupStatus actualStatus) {
+        return BotGroupStatusDTO.builder()
                 .groupId(group.getId())
                 .groupName(group.getName())
                 .targetStatus(group.getTargetStatus())
                 .actualStatus(actualStatus)
-                .playingStatus(playingStatus)
+                .playingStatus(behaviorService.getPlayingStatus(group.getId()))
+                .botCount(group.getBotCount())
+                .botsUp(behaviorService.getStartBotsUp(group.getId()))
+                // registeredCount stays null until asynchronous registration lands (Phase 4).
+                .lastError(behaviorService.getLastStartError(group.getId()))
                 .build();
-
-        return ResponseEntity.ok(statusDTO);
     }
 
 
