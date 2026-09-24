@@ -904,6 +904,35 @@ class BotGroupControllerTest {
                     .andExpect(jsonPath("$.actualStatus").value("STOPPED"))
                     .andExpect(jsonPath("$.playingStatus").doesNotExist());
         }
+
+        /**
+         * The shape of the three nullable progress fields for a group that has not been started
+         * in this JVM (GATEWAY_REQUEST_BUDGET A1). All three are absent rather than {@code 0}:
+         * "no progress to report" and "zero bots came up" are different answers, and
+         * {@code registeredCount} is reserved for asynchronous registration (Phase 4) — a client
+         * that starts reading it now must not be handed a zero that looks like a fact.
+         * {@code botCount} is the one that is always present, because it is the denominator for
+         * both senses.
+         */
+        @Test
+        @DisplayName("botsUp / registeredCount / lastError are absent, not zero, for a never-started group")
+        void progressFieldsAreAbsentUntilThereIsProgress() throws Exception {
+            String groupId = "123";
+            when(service.findById(groupId)).thenReturn(BotGroup.builder()
+                    .id(groupId).name("Fresh Group").botCount(40).build());
+            when(behaviorService.getActualStatus(groupId)).thenReturn(BotGroupStatus.STOPPED);
+            when(behaviorService.getStartBotsUp(groupId)).thenReturn(null);
+            when(behaviorService.getLastStartError(groupId)).thenReturn(null);
+
+            mockMvc.perform(get("/api/v1/bot-group/{id}/status", groupId))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.botCount").value(40))
+                    .andExpect(jsonPath("$.botsUp").doesNotExist())
+                    .andExpect(jsonPath("$.lastError").doesNotExist())
+                    // Phase 4 populates this from an additive document field; until then it must
+                    // stay null so the response shape does not change again when it lands.
+                    .andExpect(jsonPath("$.registeredCount").doesNotExist());
+        }
     }
 
     @Nested
