@@ -212,14 +212,23 @@ class BotGroupStartCancellationRaceTest {
         service.startAsync("g-1", StartOrigin.REST, () -> { });
         assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
 
-        // BotGroupService.delete calls this before deleting the document.
-        service.stopAndLogout("g-1");
+        // BotGroupService.delete calls this before deleting the document — on its own thread here
+        // because, since R6, stopAndLogout takes the per-group lock like every other lifecycle
+        // path (without it, a DELETE tore the runtime down underneath a live build: the build's
+        // finally then saw a null runtime, never called stopAllBots, and leaked every bot that had
+        // authenticated after the remove). So the teardown parks behind this build, exactly as
+        // /stop does, and the cancel — which happens BEFORE the lock, and is the thing under test
+        // — is observable while it parks.
+        Thread deleter = new Thread(() -> service.stopAndLogout("g-1"), "test-deleter");
+        deleter.start();
 
-        assertThat(startAttempts().isCancelled("g-1"))
-                .as("a start whose group is about to cease to exist must stay cancelled")
-                .isTrue();
+        awaitTrue("the delete cancelled the start before taking the group lock",
+                () -> startAttempts().isCancelled("g-1"));
 
         release.countDown();
+        deleter.join(TimeUnit.SECONDS.toMillis(20));
+        assertThat(deleter.isAlive()).as("the delete completed rather than waiting out the start")
+                .isFalse();
         awaitNoStartInFlight();
 
         verify(botFactory, never()).createBot(anyString(), any(BotConfiguration.class));

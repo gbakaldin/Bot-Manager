@@ -5,6 +5,7 @@ import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.service.BotFactory;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.StartOrigin;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.game.model.Game;
@@ -44,9 +45,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -122,6 +125,117 @@ class BotGroupBehaviorServiceRestartTest {
         try {
             service.shutdown();
         } catch (Exception ignored) {
+        }
+    }
+
+    @Test
+    @DisplayName("startForRecovery refuses to build while another start is in flight (R7)")
+    void startForRecovery_respectsAnAttemptAlreadyInFlight() {
+        BotGroup group = BotGroup.builder()
+                .id("g-1").name("Group").environmentId("env-1").gameId("game-1")
+                .botCount(3).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.DEAD).build();
+        when(botGroupService.findById("g-1")).thenReturn(group);
+
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 3, "env-1");
+        dead.markAsDead();
+        runningGroups(service).put("g-1", dead);
+
+        // Someone else's start is open — an operator /restart of the same DEAD group, which is
+        // exactly what the exhaustion ERROR tells them to do.
+        startAttempts(service).begin("g-1", StartOrigin.REST);
+
+        try {
+            boolean up = service.startForRecovery("g-1");
+
+            assertThat(up)
+                    .as("recovery has nothing to do while someone else is starting the group")
+                    .isFalse();
+            // The registry is keyed on group id, not on attempt identity, so a build here would
+            // have credited its botUp/botFailed counts to the foreign attempt while recovery's
+            // own failure went unrecorded.
+            verify(botFactory, never()).createBot(anyString(), any(BotConfiguration.class));
+            verify(botGroupService, never()).save(any(BotGroup.class));
+            assertThat(runningGroups(service).get("g-1")).isSameAs(dead);
+        } finally {
+            startAttempts(service).finish("g-1", null);
+            dead.getExecutor().shutdownNow();
+            runningGroups(service).remove("g-1");
+        }
+    }
+
+    @Test
+    @DisplayName("stopAndLogout takes the group lock, so a DELETE cannot interleave with a build (R6)")
+    void stopAndLogout_takesTheGroupLock() throws Exception {
+        // The defect this pins is not observable from stopAndLogout's own result: it is that a
+        // teardown running CONCURRENTLY with a build made the build's finally see a null runtime
+        // (so stopAllBots never ran and every bot authenticated after the remove leaked its
+        // client, scheduler and threads for the life of the JVM), and that a build winning the
+        // race to its ACTIVE persist re-inserted the document deleteById had just removed. What
+        // makes both impossible is taking the lock, so that is what is asserted.
+        ReentrantLock lock = new ReentrantLock();
+        groupLocks(service).put("g-1", lock);
+        BotGroupRuntime runtime = new BotGroupRuntime("g-1", 1, "env-1");
+        runtime.setActualStatus(BotGroupStatus.ACTIVE);
+        runningGroups(service).put("g-1", runtime);
+
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(() -> {
+            lock.lock();
+            try {
+                locked.countDown();
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } finally {
+                lock.unlock();
+            }
+        }, "test-lock-holder");
+        holder.start();
+        assertThat(locked.await(10, TimeUnit.SECONDS)).isTrue();
+
+        CountDownLatch done = new CountDownLatch(1);
+        Thread deleter = new Thread(() -> {
+            service.stopAndLogout("g-1");
+            done.countDown();
+        }, "test-deleter");
+        deleter.start();
+
+        try {
+            assertThat(done.await(300, TimeUnit.MILLISECONDS))
+                    .as("stopAndLogout must wait for the build that holds this group's lock; "
+                            + "without the lock it tears the runtime down underneath it")
+                    .isFalse();
+        } finally {
+            release.countDown();
+            holder.join(TimeUnit.SECONDS.toMillis(10));
+        }
+
+        assertThat(done.await(10, TimeUnit.SECONDS))
+                .as("and it proceeds as soon as the lock is free")
+                .isTrue();
+        assertThat(runningGroups(service)).doesNotContainKey("g-1");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, ReentrantLock> groupLocks(BotGroupBehaviorService svc) {
+        try {
+            Field f = BotGroupBehaviorService.class.getDeclaredField("groupLocks");
+            f.setAccessible(true);
+            return (Map<String, ReentrantLock>) f.get(svc);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    private static StartAttemptRegistry startAttempts(BotGroupBehaviorService svc) {
+        try {
+            Field f = BotGroupBehaviorService.class.getDeclaredField("startAttempts");
+            f.setAccessible(true);
+            return (StartAttemptRegistry) f.get(svc);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
         }
     }
 

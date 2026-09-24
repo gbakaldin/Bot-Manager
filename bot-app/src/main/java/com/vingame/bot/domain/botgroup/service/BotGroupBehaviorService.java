@@ -531,6 +531,23 @@ public class BotGroupBehaviorService {
         }
 
         String environmentId = group.getEnvironmentId();
+        try {
+            submit(id, action, origin, environmentId, onFailure, lifecycle);
+        } catch (Throwable t) {
+            // R11: everything between begin() and the thread actually running is outside the
+            // build's own finally. A thread-creation failure (or an OOM) under exactly the load
+            // this feature exists for would otherwise leave the attempt open forever — and an
+            // attempt that never closes reports the group STARTING for the life of the JVM,
+            // refuses every later /start and /restart, and hides it from both reconcilers.
+            startAttempts.finish(id, t);
+            throw t;
+        }
+
+        return BotGroupStatus.STARTING;
+    }
+
+    private void submit(String id, String action, StartOrigin origin, String environmentId,
+                        Runnable onFailure, Consumer<String> lifecycle) {
         Thread.ofVirtual().name("group-" + action + "-" + id).start(() -> {
             BotMdc.setGroupContext(id, environmentId);
             Throwable failure = null;
@@ -554,8 +571,6 @@ public class BotGroupBehaviorService {
                 BotMdc.clear();
             }
         });
-
-        return BotGroupStatus.STARTING;
     }
 
     /**
@@ -729,7 +744,18 @@ public class BotGroupBehaviorService {
             // it charges the outcome to the attempt budget on return. It opens a StartAttempt
             // purely so the rebuild is visible on /status and so a concurrent operator /start of
             // the same group is a no-op rather than a second build.
-            boolean tracked = startAttempts.begin(id, StartOrigin.RECOVERY);
+            if (!startAttempts.begin(id, StartOrigin.RECOVERY)) {
+                // R7: the one path where putIfAbsent's answer used to be ignored. Building anyway
+                // is not merely untidy — the registry is keyed on GROUP ID, not on attempt
+                // identity, so this build's botUp/botFailed counts would be attributed to the
+                // foreign attempt while recovery's own failure was recorded nowhere. Treated like
+                // every other entry point: someone else is already starting this group, so
+                // recovery has nothing to do. Reported as "not running", which is what the
+                // reconciler's false means everywhere else too.
+                log.info("Bot group {} already has a start in flight ({}) — recovery is not "
+                        + "starting it", id, startAttempts.describe(id));
+                return false;
+            }
             Throwable failure = null;
             try {
                 startLocked(id);
@@ -737,9 +763,7 @@ public class BotGroupBehaviorService {
                 failure = t;
                 throw t;
             } finally {
-                if (tracked) {
-                    startAttempts.finish(id, failure);
-                }
+                startAttempts.finish(id, failure);
             }
 
             BotGroupRuntime rebuilt = runningGroups.get(id);
@@ -1599,6 +1623,34 @@ public class BotGroupBehaviorService {
         // cancel-before-anything-else ordering as stop() (AD-8), for the same reason.
         cancelStartInFlight(id);
 
+        // ...and then the same per-group lock every other lifecycle path takes (R6). This was the
+        // one entry point without it, which was survivable while a start lasted ~50 s and is not
+        // now that it lasts as long as a paced build. Two things happened if a DELETE's teardown
+        // interleaved with a build that had passed the cancellation checkpoint:
+        //
+        //  1. this method's runningGroups.remove(id) made the build's own finally see null, so
+        //     stopAllBots was never called and every bot that finished authenticating after the
+        //     remove (up to bot.creation.parallelism of them) kept its WebSocket client, its
+        //     scheduler and its threads for the life of the JVM, invisible to every accounting
+        //     path — the shape of the 2026-06-30 thread-exhaustion outage;
+        //  2. if the build instead won the race to its ACTIVE persist, save() RE-INSERTED the
+        //     document deleteById had just removed (Spring Data save is an upsert by _id), so the
+        //     operator's delete silently did not stick.
+        //
+        // Taking the lock serialises both away: the build finishes, releases, and this teardown
+        // then runs against a settled runtime — after which BotGroupService.delete removes a
+        // document nothing will write again. No reentrancy concern: the only caller is
+        // BotGroupService.delete, which holds no lock, and restart's stop→start are non-nested.
+        ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            stopAndLogoutLocked(id);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void stopAndLogoutLocked(String id) {
         BotGroupRuntime runtime = runningGroups.get(id);
         if (runtime == null) {
             startAttempts.clearRetained(id);
