@@ -224,6 +224,14 @@ public class BotGroupBehaviorService {
      */
     private volatile Thread startupChain;
 
+    /**
+     * Set by {@link #shutdown()} so the daisy-chain can stop cooperatively (R4). A flag and not
+     * an interrupt, for the same reason cancellation is: {@code connect()} swallows
+     * {@code InterruptedException} and returns a half-built client, so interrupting a build
+     * corrupts it instead of ending it.
+     */
+    private volatile boolean shuttingDown;
+
     // Per-group lock serializing the reclaim-decision + build in start() and the
     // teardown in stop() (DEAD_GROUP_RESTART AD-5). Makes the
     // containsKey/reclaim/put sequence atomic so a double-click or a
@@ -278,6 +286,9 @@ public class BotGroupBehaviorService {
     @PreDestroy
     public void shutdown() {
         log.info("Shutting down BotGroupBehaviorService executors...");
+        // Signalled BEFORE the executors are torn down (R4), so the daisy-chain sees a shutdown
+        // rather than a fleet of RejectedExecutionExceptions it would report as N group failures.
+        shuttingDown = true;
         scheduler.shutdownNow();
         botCreationExecutor.shutdownNow();
     }
@@ -315,13 +326,28 @@ public class BotGroupBehaviorService {
     @EventListener(ApplicationReadyEvent.class)
     public void onStartup() {
         List<BotGroup> queued = new ArrayList<>();
-        for (BotGroup group : botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE)) {
-            if (group.getActivationMode() == ActivationMode.SCHEDULED) {
-                log.info("Skipping auto-start for scheduled bot group {} (ID: {}) — " +
-                        "the activation reconciler owns it", group.getName(), group.getId());
-                continue;
+        try {
+            for (BotGroup group : botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE)) {
+                if (group.getActivationMode() == ActivationMode.SCHEDULED) {
+                    log.info("Skipping auto-start for scheduled bot group {} (ID: {}) — " +
+                            "the activation reconciler owns it", group.getName(), group.getId());
+                    continue;
+                }
+                queued.add(group);
             }
-            queued.add(group);
+        } catch (RuntimeException e) {
+            // Deliberate, and worth one log line: an exception out of an ApplicationReadyEvent
+            // listener makes Spring Boot close the context and exit — AFTER "Started Starter",
+            // after Tomcat bound its port and after /actuator/health first answered UP. The net
+            // outcome is the same as the old @PostConstruct (the app dies), but the shape reads as
+            // a crash rather than a boot failure, so without this line an operator sees a
+            // healthy-then-gone container and a stack trace Spring writes on the way out. It is
+            // rethrown rather than swallowed on purpose: swallowing would leave a fleet that is
+            // never started, with nothing to retry it — a container that exits gets restarted by
+            // the compose restart policy and tries again once Mongo is back.
+            log.error("Bot Manager startup: could not read the bot groups to auto-start — the "
+                    + "context will now close: {}", e.toString(), e);
+            throw e;
         }
 
         // The line that says the app is up and the fleet is coming. "startup complete" now
@@ -338,19 +364,85 @@ public class BotGroupBehaviorService {
      * The daisy-chain body: start each queued group to completion, in order, isolating
      * failures. Package-private so {@code StartupChainTest} can drive it without racing a
      * thread it did not create.
+     * <p>
+     * Two things it does that a pre-Phase-2 loop did not have to (R4, R5), both because the chain
+     * now runs for minutes-to-hours <em>behind a live REST API</em> instead of inside context
+     * refresh:
+     * <ul>
+     *   <li><b>it stops when the context is closing.</b> {@code shutdown()} calls
+     *       {@code botCreationExecutor.shutdownNow()}, so every remaining group's build would
+     *       throw {@code RejectedExecutionException} and be logged as a <em>group failure</em> —
+     *       N page-worthy ERRORs with stack traces per restart on a fleet of a few hundred
+     *       groups. A restart is not a group failure. The flag is cooperative, not an interrupt:
+     *       {@code VingameWebSocketClient.connect()} swallows {@code InterruptedException} and
+     *       returns a half-built client, so interrupting the chain would corrupt a build rather
+     *       than end it;</li>
+     *   <li><b>it re-reads each group before starting it.</b> The queue is a snapshot taken
+     *       before the first group was touched, and an operator can now {@code /stop} a group
+     *       that is still sitting in it. {@code startLocked} re-reads the document for its
+     *       configuration but never re-asserts intent, and then persists
+     *       {@code targetStatus=ACTIVE} — so the write that got silently overwritten was
+     *       {@code STOPPED}, which is DEAD_GROUP_AUTO_RECOVERY AD-5's <em>only</em> opt-out.
+     *       Same "re-read and re-assert eligibility" discipline {@code startForRecovery} already
+     *       applies to the identical race, and one extra {@code findById} is nothing next to the
+     *       thousands of gateway requests a start is about to spend.</li>
+     * </ul>
      */
     void runStartupChain(List<BotGroup> queued) {
-        for (BotGroup group : queued) {
+        int started = 0;
+        for (int i = 0; i < queued.size(); i++) {
+            BotGroup group = queued.get(i);
+            if (shuttingDown) {
+                log.info("Bot Manager shutting down — abandoning the daisy-chain with {} of {} "
+                                + "bot groups not started", queued.size() - i, queued.size());
+                return;
+            }
             try {
+                if (!stillWantsToStart(group)) {
+                    continue;
+                }
                 log.info("Auto-starting bot group: {} (ID: {})", group.getName(), group.getId());
                 startTracked(group.getId(), StartOrigin.STARTUP);
-            } catch (Exception e) {
+                started++;
+            } catch (Throwable t) {
+                // Throwable, not Exception (R4): an Error from one group used to abandon the whole
+                // remaining fleet with nothing in console.log at all — the default handler writes
+                // to stderr, which since LOG_VOLUME_TIERING Phase 4 reaches neither track and
+                // therefore neither Loki nor Grafana. Under the old @PostConstruct the same Error
+                // failed the boot loudly; here it would have been silent.
                 log.error("Failed to auto-start bot group {} (ID: {}): {}",
-                        group.getName(), group.getId(), e.getMessage(), e);
+                        group.getName(), group.getId(), t.toString(), t);
             }
         }
 
-        log.info("Bot Manager startup complete. {} bot groups running", runningGroups.size());
+        log.info("Bot Manager startup complete. {} bot groups running ({} started by this chain)",
+                runningGroups.size(), started);
+    }
+
+    /**
+     * Whether a group the chain queued still wants to be started, re-read from Mongo (R5).
+     * <p>
+     * Only intent is re-asserted, and only the two statements that can have changed since the
+     * snapshot: an operator {@code /stop} (or the activation reconciler's STOP) writes
+     * {@code targetStatus=STOPPED}, and a PATCH can move a group onto the activation schedule,
+     * whose reconciler then owns it. A group deleted meanwhile throws
+     * {@code ResourceNotFoundException} out of {@code findById}, which the caller logs — the
+     * document is gone, so there is nothing to skip politely.
+     */
+    private boolean stillWantsToStart(BotGroup queued) {
+        BotGroup current = botGroupService.findById(queued.getId());
+        if (current.getTargetStatus() != BotGroupStatus.ACTIVE) {
+            log.info("Skipping auto-start for bot group {} (ID: {}) — its targetStatus is now {}, "
+                            + "so someone changed their mind while the chain was running",
+                    current.getName(), current.getId(), current.getTargetStatus());
+            return false;
+        }
+        if (current.getActivationMode() == ActivationMode.SCHEDULED) {
+            log.info("Skipping auto-start for bot group {} (ID: {}) — it joined the activation "
+                    + "schedule while the chain was running", current.getName(), current.getId());
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -1699,11 +1791,20 @@ public class BotGroupBehaviorService {
 
         scheduler.schedule(() -> {
             log.info("Executing scheduled restart for bot group {}", id);
-            // Through the async entry (AD-15) so the restart is a tracked attempt like any
-            // other: visible on /status, and a no-op if a start is already in flight instead of
-            // a second build racing it. The scheduler thread is shared by every scheduled
-            // restart in the JVM, so it must not block for a paced start either.
-            restartAsync(id, StartOrigin.SCHEDULED_RESTART, () -> { });
+            try {
+                // Through the async entry (AD-15) so the restart is a tracked attempt like any
+                // other: visible on /status, and a no-op if a start is already in flight instead
+                // of a second build racing it. The scheduler thread is shared by every scheduled
+                // restart in the JVM, so it must not block for a paced start either.
+                restartAsync(id, StartOrigin.SCHEDULED_RESTART, () -> { });
+            } catch (Throwable t) {
+                // R12: restartAsync validates SYNCHRONOUSLY, on this thread. A group deleted or
+                // de-configured between booking and firing therefore throws here, into a
+                // one-shot ScheduledFuture nobody ever calls get() on — where the exception is
+                // discarded with no log at all and the booked restart simply never happens.
+                log.error("Scheduled restart of bot group {} could not be accepted: {}",
+                        id, t.toString(), t);
+            }
         }, delayMillis, TimeUnit.MILLISECONDS);
 
         // Update entity
@@ -1724,7 +1825,13 @@ public class BotGroupBehaviorService {
             return BotGroupHealthDTO.builder()
                     .groupId(id)
                     .groupName(group.getName())
-                    .status(BotGroupStatus.STOPPED)
+                    // getActualStatus, not a hard-coded STOPPED (R3). There is now a window with
+                    // an accepted start and no runtime yet, and it is minutes wide under pacing:
+                    // answering STOPPED there told an operator their start did nothing, while
+                    // /status and the environment list view said STARTING for the same group at
+                    // the same instant. This endpoint is the public-facing UI health feature, so
+                    // it is the worst of the three places to disagree.
+                    .status(getActualStatus(id))
                     .totalBots(0)
                     .connectedBots(0)
                     .disconnectedBots(0)

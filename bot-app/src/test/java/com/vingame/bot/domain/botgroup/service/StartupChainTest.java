@@ -46,10 +46,12 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -164,10 +166,98 @@ class StartupChainTest {
                         + "every group getting a partial one")
                 .isEqualTo(1);
 
+        // Each group is now read twice — once by the chain's eligibility re-read (R5) and once by
+        // startLocked — so this asserts the ORDER of the reads rather than their count.
         var order = inOrder(botGroupService);
-        order.verify(botGroupService).findById("g1");
-        order.verify(botGroupService).findById("g2");
-        order.verify(botGroupService).findById("g3");
+        order.verify(botGroupService, atLeastOnce()).findById("g1");
+        order.verify(botGroupService, atLeastOnce()).findById("g2");
+        order.verify(botGroupService, atLeastOnce()).findById("g3");
+    }
+
+    @Test
+    @DisplayName("a group stopped while the chain was still running is not started (R5)")
+    void aGroupStoppedDuringTheChainIsSkipped() {
+        BotGroup first = group("g1");
+        BotGroup second = group("g2");
+        when(botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE))
+                .thenReturn(List.of(first, second));
+        when(botGroupService.findById("g1")).thenReturn(first);
+        // The operator's /stop lands while the chain is building g1: by the time the chain reaches
+        // g2 the document says STOPPED. Pre-Phase-2 this was unreachable — the loop ran before
+        // Tomcat bound its port — and the write that used to be lost is the ONLY opt-out
+        // DEAD_GROUP_AUTO_RECOVERY has.
+        when(botGroupService.findById("g2")).thenReturn(BotGroup.builder()
+                .id("g2").name("Group g2").environmentId("env-1").gameId("game-1")
+                .botCount(2).namePrefix("botg2").password("pass")
+                .targetStatus(BotGroupStatus.STOPPED)
+                .build());
+        when(environmentService.findById("env-1")).thenReturn(environment());
+        when(gameService.findById("game-1")).thenReturn(game());
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> stubBot("bot" + System.nanoTime()));
+
+        service.onStartup();
+        joinChain();
+
+        assertThat(service.isGroupRunning("g1")).isTrue();
+        assertThat(service.isGroupRunning("g2"))
+                .as("the chain must not overwrite an operator's STOPPED with ACTIVE")
+                .isFalse();
+        // And nothing was built for it: the skip happens before the start, not inside it.
+        verify(botFactory, times(2)).createBot(anyString(), any(BotConfiguration.class));
+    }
+
+    @Test
+    @DisplayName("a group moved onto the activation schedule mid-chain is left to the reconciler")
+    void aGroupScheduledDuringTheChainIsSkipped() {
+        BotGroup queued = group("g1");
+        when(botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE)).thenReturn(List.of(queued));
+        when(botGroupService.findById("g1")).thenReturn(BotGroup.builder()
+                .id("g1").name("Group g1").environmentId("env-1").gameId("game-1")
+                .botCount(2).namePrefix("botg1").password("pass")
+                .targetStatus(BotGroupStatus.ACTIVE)
+                .activationMode(ActivationMode.SCHEDULED)
+                .build());
+
+        service.onStartup();
+        joinChain();
+
+        assertThat(service.isGroupRunning("g1")).isFalse();
+        verify(botFactory, never()).createBot(anyString(), any(BotConfiguration.class));
+    }
+
+    @Test
+    @DisplayName("a shutdown abandons the chain with one line, not one group failure per group")
+    void aShutdownAbandonsTheChainQuietly() {
+        BotGroup first = group("g1");
+        BotGroup second = group("g2");
+        BotGroup third = group("g3");
+        when(botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE))
+                .thenReturn(List.of(first, second, third));
+        when(botGroupService.findById("g1")).thenReturn(first);
+        when(environmentService.findById("env-1")).thenReturn(environment());
+        when(gameService.findById("game-1")).thenReturn(game());
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> {
+                    // A restart lands while the first group is building.
+                    service.shutdown();
+                    return stubBot("bot" + System.nanoTime());
+                });
+
+        List<String> info = captureBehaviorServiceLogs(() -> {
+            service.onStartup();
+            joinChain();
+        });
+
+        // Without the cooperative flag, botCreationExecutor.shutdownNow() turns every remaining
+        // group into a RejectedExecutionException reported as a GROUP FAILURE: N page-worthy
+        // ERRORs with stack traces per restart, on a fleet of a few hundred groups. A restart is
+        // not a group failure.
+        assertThat(indexOfLineContaining(info, "abandoning the daisy-chain with 2 of 3"))
+                .as("one line, naming what was abandoned")
+                .isNotNegative();
+        verify(botGroupService, never()).findById("g2");
+        verify(botGroupService, never()).findById("g3");
     }
 
     @Test
@@ -177,7 +267,9 @@ class StartupChainTest {
         // No gameId: startLocked's validation rejects it with a BadRequestException.
         BotGroup bad = BotGroup.builder()
                 .id("bad").name("Bad").environmentId("env-1")
-                .botCount(1).namePrefix("bot").password("pass").build();
+                .botCount(1).namePrefix("bot").password("pass")
+                .targetStatus(BotGroupStatus.ACTIVE)
+                .build();
         BotGroup good2 = group("g3");
         when(botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE))
                 .thenReturn(List.of(good1, bad, good2));

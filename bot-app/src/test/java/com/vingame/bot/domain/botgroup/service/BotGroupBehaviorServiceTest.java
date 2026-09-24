@@ -232,7 +232,9 @@ class BotGroupBehaviorServiceTest {
             service.onStartup();
             joinStartupChain();
 
-            verify(botGroupService).findById("legacy-1");
+            // At least once: the chain re-reads the group to re-assert intent before starting it
+            // (GATEWAY_REQUEST_BUDGET R5), and startLocked reads it again for its configuration.
+            verify(botGroupService, org.mockito.Mockito.atLeastOnce()).findById("legacy-1");
         }
 
         /**
