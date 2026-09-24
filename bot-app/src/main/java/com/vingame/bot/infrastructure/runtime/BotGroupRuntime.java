@@ -79,7 +79,12 @@ public class BotGroupRuntime {
     // it on the admin/caller thread (the DEAD-reclaim discriminator) without sharing
     // a lock with the monitor — so a stale ACTIVE read would silently no-op Start on
     // a DEAD group, resurfacing the very bug the reclaim path fixes.
-    private volatile BotGroupStatus actualStatus;  // ACTIVE, STOPPED, DEAD
+    // GATEWAY_REQUEST_BUDGET A1: a runtime is born STARTING and flipped to ACTIVE once its
+    // bots are up, so "the build is still running" is a state an operator can read instead of
+    // a group that claims ACTIVE with zero bots for the 33-50 minutes a paced 3,000-bot start
+    // legitimately takes. STARTING is in-memory only and is never persisted into
+    // BotGroup.targetStatus.
+    private volatile BotGroupStatus actualStatus;  // STARTING, ACTIVE, STOPPED, DEAD
     private BotGroupPlayingStatus playingStatus;   // PLAYING, IDLE, PENDING
 
     // Runtime metadata
@@ -161,7 +166,14 @@ public class BotGroupRuntime {
         this.botInstances = new CopyOnWriteArrayList<>();
         this.botFutures = new CopyOnWriteArrayList<>();
         this.executor = createExecutor(groupId);
-        this.actualStatus = BotGroupStatus.ACTIVE;
+        // STARTING, not ACTIVE (GATEWAY_REQUEST_BUDGET A1). The runtime is inserted into
+        // runningGroups before a single bot exists, so ACTIVE here was a claim the group could
+        // not honour for the whole duration of the build — minutes today, tens of minutes under
+        // a paced start. BotGroupBehaviorService.startLocked flips it to ACTIVE the moment the
+        // bots are up, and the zero-bot path marks it DEAD instead; either way nothing observes
+        // STARTING after the build. isGroupRunning treats STARTING as running, so no reconciler
+        // sees a gap.
+        this.actualStatus = BotGroupStatus.STARTING;
         this.playingStatus = BotGroupPlayingStatus.IDLE;
         this.startedAt = Instant.now();
         this.consecutiveFailures = 0;

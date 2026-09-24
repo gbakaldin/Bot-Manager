@@ -53,11 +53,14 @@ class BotGroupRuntimeTest {
     class ConstructorTests {
 
         @Test
-        @DisplayName("Should initialize with ACTIVE status, IDLE playing status, zero failures")
+        @DisplayName("Should initialize with STARTING status, IDLE playing status, zero failures")
         void shouldInitializeFreshState() {
             BotGroupRuntime runtime = new BotGroupRuntime("group-1", 5, "env-1");
 
-            assertThat(runtime.getActualStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+            // STARTING, not ACTIVE (GATEWAY_REQUEST_BUDGET A1). The runtime exists before a
+            // single bot does, so ACTIVE was a claim it could not honour for the whole build.
+            // BotGroupBehaviorService.startLocked flips it to ACTIVE once the bots are up.
+            assertThat(runtime.getActualStatus()).isEqualTo(BotGroupStatus.STARTING);
             assertThat(runtime.getPlayingStatus()).isEqualTo(BotGroupPlayingStatus.IDLE);
             assertThat(runtime.getConsecutiveFailures()).isEqualTo(0);
             assertThat(runtime.getBotInstances()).isEmpty();

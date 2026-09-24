@@ -193,6 +193,17 @@ public class BotGroupBehaviorService {
     // Runtime state map: groupId -> BotGroupRuntime
     private final ConcurrentHashMap<String, BotGroupRuntime> runningGroups = new ConcurrentHashMap<>();
 
+    /**
+     * Starts in flight (GATEWAY_REQUEST_BUDGET Phase 2). Owned here rather than injected:
+     * it has no dependencies, nothing outside this service reads it directly, and keeping it
+     * off the constructor keeps every {@code @InjectMocks} fixture of this class non-null —
+     * which is why none of its call sites need a null guard.
+     * <p>
+     * It covers the window {@link #runningGroups} cannot: between "the start was accepted" and
+     * "a runtime exists", the group is only visible here.
+     */
+    private final StartAttemptRegistry startAttempts = new StartAttemptRegistry();
+
     // Per-group lock serializing the reclaim-decision + build in start() and the
     // teardown in stop() (DEAD_GROUP_RESTART AD-5). Makes the
     // containsKey/reclaim/put sequence atomic so a double-click or a
@@ -407,8 +418,16 @@ public class BotGroupBehaviorService {
         // register, no deposit, no DB-group recreation). See DEAD_GROUP_RESTART.
         BotGroupRuntime existing = runningGroups.get(id);
         if (existing != null) {
-            if (existing.getActualStatus() == BotGroupStatus.ACTIVE) {
-                log.warn("Bot group {} is already running", id);
+            // GATEWAY_REQUEST_BUDGET A1: STARTING counts as ACTIVE here. A runtime is born
+            // STARTING, so testing ACTIVE alone would make this guard tear down and rebuild a
+            // group whose build is in flight — the opposite of what the guard is for, and under
+            // a paced start it would abandon up to 50 minutes of admitted gateway requests.
+            // Unreachable in practice (the per-group lock serialises starts and the attempt
+            // registry refuses a second /start), which is exactly why it is written down rather
+            // than relied upon.
+            if (existing.getActualStatus() == BotGroupStatus.ACTIVE
+                    || existing.getActualStatus() == BotGroupStatus.STARTING) {
+                log.warn("Bot group {} is already running (status {})", id, existing.getActualStatus());
                 return;
             }
             // Lingering non-viable (DEAD) runtime. Reclaim: full teardown credits
@@ -617,6 +636,12 @@ public class BotGroupBehaviorService {
                 started = true;
                 return;
             }
+
+            // The build is done and the bots are up: the runtime stops being STARTING and
+            // becomes ACTIVE (GATEWAY_REQUEST_BUDGET A1). Before the schedulers, deliberately —
+            // performPeriodicLogout and the health monitor both gate on ACTIVE, so flipping
+            // after them would leave a window in which the first tick skipped itself.
+            runtime.setActualStatus(BotGroupStatus.ACTIVE);
 
             // Start health monitoring
             startHealthMonitoring(runtime);
@@ -1620,11 +1645,30 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Check if a bot group is currently running (has an active runtime).
+     * Check if a bot group is currently running — which, since the start became
+     * asynchronous, includes <b>a start that is still in flight</b>
+     * (GATEWAY_REQUEST_BUDGET AD-16).
+     * <p>
+     * Both widenings matter and they cover different windows:
+     * <ul>
+     *   <li>{@code STARTING} runtime — the build has begun. Without this,
+     *       {@code ActivationScheduler} would decide START again on its next tick and
+     *       {@code RecoveryCandidateSelector} could pick a group an operator is already
+     *       restarting.</li>
+     *   <li>an open start attempt with <em>no</em> runtime yet — the task has been submitted
+     *       but has not reached {@code startLocked}. Short today, but it is the window a
+     *       one-minute reconciler tick lands in most often, and the plan's whole point is that
+     *       the gap before a runtime exists can be long.</li>
+     * </ul>
+     * A {@code DEAD} or {@code STOPPED} runtime is still not running, unchanged.
      */
     public boolean isGroupRunning(String groupId) {
         BotGroupRuntime runtime = runningGroups.get(groupId);
-        return runtime != null && runtime.getActualStatus() == BotGroupStatus.ACTIVE;
+        if (runtime != null) {
+            return runtime.getActualStatus() == BotGroupStatus.ACTIVE
+                    || runtime.getActualStatus() == BotGroupStatus.STARTING;
+        }
+        return startAttempts.isOpen(groupId);
     }
 
     // ---- Aggregate accessors for observability gauges (used by ObservabilityConfig) ----
@@ -2242,12 +2286,19 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Get actual runtime status (ACTIVE, STOPPED, DEAD)
+     * Get actual runtime status (STARTING, ACTIVE, STOPPED, DEAD).
+     * <p>
+     * A group with no runtime but an open start attempt reads {@code STARTING}
+     * (GATEWAY_REQUEST_BUDGET A1): {@code POST /start} answers with this value the moment it
+     * accepts the work, before the build thread has created the runtime, and answering
+     * {@code STOPPED} there would tell an operator their start did nothing.
      */
     public BotGroupStatus getActualStatus(String id) {
         return Optional.ofNullable(runningGroups.get(id))
                 .map(BotGroupRuntime::getActualStatus)
-                .orElse(BotGroupStatus.STOPPED);
+                .orElseGet(() -> startAttempts.isOpen(id)
+                        ? BotGroupStatus.STARTING
+                        : BotGroupStatus.STOPPED);
     }
 
     /**

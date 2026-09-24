@@ -465,6 +465,9 @@ class BotGroupBehaviorServiceTest {
 
             BotGroupRuntime runtime = new BotGroupRuntime("g-1", 5, "env-1");
             runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+            // A fresh runtime is STARTING (GATEWAY_REQUEST_BUDGET A1); this fixture is a group
+            // whose build has finished, which is the state startLocked's flip leaves behind.
+            runtime.setActualStatus(BotGroupStatus.ACTIVE);
             try {
                 // 2 connected (one CONNECTION_AUTHENTICATED + one STARTED), 1 reconnecting,
                 // 1 dead, 1 disconnected
@@ -805,6 +808,9 @@ class BotGroupBehaviorServiceTest {
             BotGroupRuntime runtime = new BotGroupRuntime("g-1", 0, "env-1");
             try {
                 runtime.setPlayingStatus(BotGroupPlayingStatus.PLAYING);
+                // A fresh runtime is STARTING (A1); this fixture stands in for a group whose
+                // build has finished, which is what startLocked's flip produces.
+                runtime.setActualStatus(BotGroupStatus.ACTIVE);
                 runningGroups().put("g-1", runtime);
 
                 assertThat(service.getActualStatus("g-1")).isEqualTo(BotGroupStatus.ACTIVE);
