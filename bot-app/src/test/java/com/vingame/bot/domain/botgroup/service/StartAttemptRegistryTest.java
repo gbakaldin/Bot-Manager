@@ -208,21 +208,36 @@ class StartAttemptRegistryTest {
     }
 
     @Nested
-    @DisplayName("clear")
-    class Clear {
+    @DisplayName("clearRetained")
+    class ClearRetained {
 
         @Test
-        @DisplayName("forgets the open attempt and the retained one (the stop/delete path)")
-        void clearForgetsEverything() {
+        @DisplayName("forgets the retained record (the stop/delete path)")
+        void forgetsTheRetainedRecord() {
             registry.begin("g1", StartOrigin.REST);
             registry.botUp("g1");
             registry.finish("g1", new IllegalStateException("boom"));
 
-            registry.clear("g1");
+            registry.clearRetained("g1");
 
             assertThat(registry.isOpen("g1")).isFalse();
             assertThat(registry.botsUp("g1")).isNull();
             assertThat(registry.lastError("g1")).isNull();
+        }
+
+        @Test
+        @DisplayName("never drops an attempt that is still open — that would uncancel its build")
+        void leavesAnOpenAttemptAlone() {
+            registry.begin("g1", StartOrigin.REST);
+            registry.cancel("g1");
+
+            registry.clearRetained("g1");
+
+            assertThat(registry.isOpen("g1")).isTrue();
+            assertThat(registry.isCancelled("g1"))
+                    .as("a /stop landing before the build took the group lock would otherwise "
+                            + "persist STOPPED and then watch the build bring the group up")
+                    .isTrue();
         }
     }
 

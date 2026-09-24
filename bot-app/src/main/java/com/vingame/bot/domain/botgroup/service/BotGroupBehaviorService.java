@@ -1423,10 +1423,10 @@ public class BotGroupBehaviorService {
             if (parkRuntimeless) {
                 // AD-17: an attempt's progress and lastError are retained "until the next start
                 // or stop" — this is the stop half, and it is also what keeps the registry's
-                // retained map bounded. Deliberately AFTER the locked teardown: the cancellation
-                // flag a cancelled build polls lives on the attempt, so dropping it any earlier
-                // would let that build carry on creating bots for a group being stopped.
-                startAttempts.clear(id);
+                // retained map bounded. It drops only the RETAINED record: an attempt that is
+                // still unwinding keeps its cancellation flag, or the build would uncancel itself
+                // (see StartAttemptRegistry.clearRetained).
+                startAttempts.clearRetained(id);
             }
             lock.unlock();
         }
@@ -1503,7 +1503,7 @@ public class BotGroupBehaviorService {
 
         BotGroupRuntime runtime = runningGroups.get(id);
         if (runtime == null) {
-            startAttempts.clear(id);
+            startAttempts.clearRetained(id);
             log.debug("Bot group {} is not running; nothing to stop/logout before delete", id);
             return;
         }
@@ -1533,7 +1533,7 @@ public class BotGroupBehaviorService {
         scopedDebugEscalator.evictGroup(id);
         runningGroups.remove(id);
         // The group is about to cease to exist; nothing should keep reporting its last start.
-        startAttempts.clear(id);
+        startAttempts.clearRetained(id);
 
         log.info("Bot group {} stopped and logged out (cascade delete)", id);
     }

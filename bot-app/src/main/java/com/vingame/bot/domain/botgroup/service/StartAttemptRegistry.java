@@ -58,7 +58,7 @@ public class StartAttemptRegistry {
     /**
      * The most recent finished attempt per group, retained so {@code /status} can still
      * answer "how many came up" and "why did it fail" after the build ended. Cleared by
-     * {@link #clear(String)} on stop/delete, replaced by the next {@link #begin}, so the map
+     * {@link #clearRetained(String)} on stop/delete, replaced by the next {@link #begin}, so the map
      * is bounded by the number of groups started since boot and never grows per attempt.
      */
     private final Map<String, StartAttempt> last = new ConcurrentHashMap<>();
@@ -153,12 +153,19 @@ public class StartAttemptRegistry {
     }
 
     /**
-     * Forget everything about this group's starts — the stop/delete path. {@code lastError}
-     * is retained "until the next start or stop" (AD-17), and this is the stop half; it also
-     * keeps {@link #last} bounded.
+     * Forget the retained record of this group's last start — the stop/delete path.
+     * {@code lastError} and the progress counts are retained "until the next start or stop"
+     * (AD-17), and this is the stop half; it also keeps {@link #last} bounded.
+     * <p>
+     * <b>An attempt that is still OPEN is deliberately left alone</b>, and that is not tidiness.
+     * The cancellation flag a cancelled build polls lives on the open attempt, so removing it
+     * would <em>uncancel</em> the build: a {@code /stop} that lands in the window between
+     * "accepted" and "the build took the group lock" would cancel the attempt, find no runtime to
+     * tear down, persist {@code STOPPED}, drop the attempt — and the build would then wake up,
+     * see no cancellation, and bring the group up anyway. The build's own {@code finally} is what
+     * closes an open attempt, always.
      */
-    public void clear(String botGroupId) {
-        open.remove(botGroupId);
+    public void clearRetained(String botGroupId) {
         last.remove(botGroupId);
     }
 
