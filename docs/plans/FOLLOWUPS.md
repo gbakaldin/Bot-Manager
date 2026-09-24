@@ -275,6 +275,53 @@ shipped instead is an honest `OUTCOME_SUCCESS` javadoc, an honest `startForRecov
   on the DTO removes the class.
 - **Surfaced by:** review round 4, third `[smell]`. Deferred with P11.
 
+### P13 — a build that never returns parks its group for the life of the JVM
+
+- **File:** `bot-app/src/main/java/com/vingame/bot/domain/botgroup/service/StartAttemptRegistry.java`
+  (`cancel` deliberately leaves the attempt open; `finish` is the only closer; no TTL),
+  reached from every start path in `BotGroupBehaviorService`.
+- **What:** if a build thread never returns — a `createSingleBot` parked on a socket with no
+  timeout, a `semaphore.acquire()` that never gets a permit, or (from Phase 3) an `ESSENTIAL`
+  budget waiter whose max-wait is *by design* unbounded — the attempt stays open forever.
+  `/status` then reads `STARTING` indefinitely, `isGroupRunning` reports the group running so
+  `ActivationScheduler` resolves `NONE` and `RecoveryCandidateSelector` never selects it, and
+  `begin`'s `putIfAbsent` refuses every later `/start` and `/restart`. The group becomes a silent
+  black hole, where the pre-Phase-2 shape at least left an operator looking at a hung HTTP
+  request.
+- **Impact:** no data loss and no wrong money; a group that will not come up and cannot be
+  retried without a JVM restart. Diagnosable today, which is why this is a follow-up and not a
+  fix: a second `/start` answers `200` and logs
+  `a start is already in flight (origin REST, phase BUILDING, 12 up / 0 failed, elapsed 3600s)`,
+  so the age is already in front of whoever tries.
+- **Why not fixed now:** the obvious fix is wrong. A TTL that *drops* a stuck attempt re-opens
+  the race `750fc91` closed (dropping an open attempt uncancels its build, so a `/stop` that
+  already answered `200` can be followed by the group coming up). A real fix has to either
+  supersede the attempt *and* prove the old build can no longer act — which needs a generation
+  number on the cancellation predicate, not a timer — or make the build itself bounded, which is
+  Phase 3's territory since the unbounded wait it would bound is Phase 3's design.
+- **Surfaced by:** GATEWAY_REQUEST_BUDGET Phase 2 review, R9. **Phase 3 should re-read this
+  before giving `ESSENTIAL` an unbounded max-wait**, because that is the one production input
+  that turns "conceivable" into "expected".
+
+### P14 — an unclean shutdown leaves the daisy-chain's already-authenticated bots connected
+
+- **File:** `bot-app/src/main/java/com/vingame/bot/domain/botgroup/service/BotGroupBehaviorService.java`
+  (`shutdown()` / `runStartupChain`).
+- **What:** `shutdown()` now signals the chain cooperatively, so a restart mid-chain abandons the
+  queue with one INFO line instead of N ERRORs (fixed). What it still does not do is *drain*: the
+  group that was mid-build when the signal arrived keeps whatever bots it had already
+  authenticated, and they are never logged out — the chain's virtual thread simply dies with the
+  JVM.
+- **Impact:** bounded and self-healing. The sockets drop when the process exits and the server
+  prunes them; the cost is one round of "ghost" players on the game server for the length of a
+  restart, plus the accounts staying authenticated upstream until their tokens age out.
+- **Action:** if it ever matters, join the chain briefly in `@PreDestroy` (bounded, e.g. 10 s)
+  and tear down the in-flight group's runtime, or park the whole thing behind the same drain
+  mechanism `PLUGIN_HOT_RELOAD` will need for a no-restart deploy — that plan wants "the app
+  never restarts, no group ever stopped by a deploy", which subsumes this.
+- **Surfaced by:** GATEWAY_REQUEST_BUDGET Phase 2 QA, Q4 (the ERROR-storm half of that finding
+  is fixed; this is the residue).
+
 ## Test-quality follow-ups
 
 ### T1 — `BotGroupRuntime.stopAllBots` not covered

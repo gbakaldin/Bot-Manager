@@ -72,7 +72,7 @@ public class StartAttemptRegistry {
      *         flight and the caller must <b>not</b> submit a second one.
      */
     public boolean begin(String botGroupId, StartOrigin origin) {
-        StartAttempt attempt = new StartAttempt(botGroupId, origin);
+        StartAttempt attempt = new StartAttempt(origin);
         boolean opened = open.putIfAbsent(botGroupId, attempt) == null;
         if (opened) {
             // A new start supersedes whatever the previous one reported: "botsUp = 12,
@@ -182,7 +182,6 @@ public class StartAttemptRegistry {
         if (attempt == null) {
             return;
         }
-        attempt.finishedAt = Instant.now();
         if (error != null && attempt.error == null) {
             attempt.error = truncate(ClientSafeMessage.of(error));
         }
@@ -276,63 +275,27 @@ public class StartAttemptRegistry {
     }
 
     /**
-     * One start of one group. Mutable and thread-confined only in the sense that every
-     * mutable field is atomic or volatile: the counters are incremented from the per-bot
-     * creation tasks, {@code phase} is written by the build thread, {@code cancelled} by
-     * whoever calls {@code /stop}, and {@code /status} reads all of them from the HTTP
-     * thread.
+     * One start of one group. Mutable, and every mutable field is atomic or volatile: the
+     * counters are incremented from the per-bot creation tasks, {@code phase} is written by the
+     * build thread, {@code cancelled} by whoever calls {@code /stop}, and {@code /status} reads
+     * all of them from the HTTP thread.
+     * <p>
+     * Private, with no accessors (R13). Everything outside this class reads an attempt through
+     * the registry's own group-keyed methods, so a public accessor surface here was the beginning
+     * of an API nobody had asked for — and {@code finishedAt} was written and never read at all.
      */
-    public static final class StartAttempt {
+    private static final class StartAttempt {
 
-        private final String botGroupId;
         private final StartOrigin origin;
         private final Instant startedAt = Instant.now();
         private final AtomicInteger botsUp = new AtomicInteger();
         private final AtomicInteger botsFailed = new AtomicInteger();
         private volatile Phase phase = Phase.PENDING;
         private volatile boolean cancelled;
-        private volatile Instant finishedAt;
         private volatile String error;
 
-        private StartAttempt(String botGroupId, StartOrigin origin) {
-            this.botGroupId = botGroupId;
+        private StartAttempt(StartOrigin origin) {
             this.origin = origin;
-        }
-
-        public String botGroupId() {
-            return botGroupId;
-        }
-
-        public StartOrigin origin() {
-            return origin;
-        }
-
-        public Instant startedAt() {
-            return startedAt;
-        }
-
-        public Phase phase() {
-            return phase;
-        }
-
-        public int botsUp() {
-            return botsUp.get();
-        }
-
-        public int botsFailed() {
-            return botsFailed.get();
-        }
-
-        public boolean isCancelled() {
-            return cancelled;
-        }
-
-        public Instant finishedAt() {
-            return finishedAt;
-        }
-
-        public String error() {
-            return error;
         }
     }
 }
