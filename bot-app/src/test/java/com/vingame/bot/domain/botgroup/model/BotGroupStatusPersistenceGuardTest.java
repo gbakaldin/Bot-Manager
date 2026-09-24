@@ -1,7 +1,11 @@
 package com.vingame.bot.domain.botgroup.model;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
+import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mapstruct.factory.Mappers;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -15,24 +19,44 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The three constants appended to {@link BotGroupStatus} must never reach Mongo
- * (GATEWAY_REQUEST_BUDGET A1), enforced against the source in the
- * {@code PerBotInfoLogGuardTest} / {@code GatewayCallSiteGuardTest} idiom.
+ * (GATEWAY_REQUEST_BUDGET A1), enforced from <b>both</b> sides: a source scan for literal
+ * writes, in the {@code PerBotInfoLogGuardTest} / {@code GatewayCallSiteGuardTest} idiom, and a
+ * value-level check that the DTO boundary cannot carry such a value at all.
  * <p>
- * <b>Why a source scan, and why it is worth one.</b> {@code targetStatus} is persisted as the
- * enum's {@code name()} string with no {@code MongoCustomConversions}. A document holding
- * {@code "STARTING"} is unreadable by any jar built before this feature — the mapper throws
- * {@code ConversionFailedException} — and {@code findByTargetStatus(ACTIVE)} is on the
- * application-ready boot path, so a single such document does not degrade one group, it fails
- * the whole startup query and takes the fleet down. That makes a rollback to
- * {@code vingame-bot:rollback-*} unsafe, which is the one thing this guard exists to keep
- * true. No dynamic test can see the absence of such a write; a {@code setTargetStatus} call
- * added in a year's time with the "obvious" argument would simply work, until the day someone
- * rolls back.
+ * <b>What actually goes wrong, stated correctly.</b> {@code targetStatus} is persisted as the
+ * enum's {@code name()} string with no {@code MongoCustomConversions}, so a document holding
+ * {@code "STARTING"} is unreadable by any jar built before this feature: Spring Data's
+ * {@code MappingMongoConverter} lets {@link Enum#valueOf}'s
+ * {@link IllegalArgumentException} ("No enum constant …") out of
+ * {@code getPotentiallyConvertedSimpleRead} — measured in
+ * {@code BotGroupStatusRollbackSafetyTest}, and <b>not</b> the
+ * {@code ConversionFailedException} that A1 and this class used to name.
  * <p>
- * <b>What it cannot prove.</b> {@code setTargetStatus} is also called with variables (the
- * restart path restores a status it read from Mongo, so its value can only be one of the
- * original three). The scan therefore pins the literal form, which is every production call
- * site today, and a reviewer has to keep the variable ones honest.
+ * <b>Which reads break, also stated correctly.</b> Not the boot query:
+ * {@code findByTargetStatus(ACTIVE)} filters server-side on the string {@code "ACTIVE"}, so a
+ * poisoned document is never returned and never converted. What breaks is every read that
+ * <em>does</em> convert the group — {@code GET /{id}} and, worse,
+ * {@code POST /{envId}/filter}, the UI's list view for a whole environment, where one poisoned
+ * group 500s the list for every healthy group beside it. And on the <em>current</em> jar the
+ * same document silently leaves {@code findByTargetStatus(ACTIVE)} and
+ * {@code RecoveryEligibility}'s {@code ACTIVE}/{@code STOPPED}/{@code DEAD} branches, so the
+ * group never auto-starts and never auto-recovers again: unmanaged, with nothing logged. Either
+ * way a rollback to {@code vingame-bot:rollback-*} stops being a safe action, which is the one
+ * thing this guard exists to keep true.
+ * <p>
+ * <b>Why a source scan at all.</b> No dynamic test can see the absence of a write; a
+ * {@code setTargetStatus} call added in a year's time with the "obvious" argument would simply
+ * work, until the day someone rolls back.
+ * <p>
+ * <b>Why the source scan is not enough on its own, and what closes the gap.</b> The hole QA
+ * found was reachable through two shapes a scan structurally cannot judge: a Lombok
+ * <em>builder</em> call ({@code .targetStatus(dto.getTargetStatus())} in {@code toEntity}) and a
+ * setter taking a <em>variable</em> ({@code setTargetStatus(Optional.ofNullable(...).orElse(...))}
+ * in {@code updateEntityFromDTO}) — where the variable was whatever a client had sent. So this
+ * class also asserts, by value, that {@link BotGroupMapper} copies {@code targetStatus} in
+ * neither write direction, for <b>every</b> constant rather than for today's three. That
+ * formulation survives the next appended constant without an edit, which the enumerate-the-bad-
+ * values formulation does not.
  */
 @DisplayName("BotGroupStatus: the appended constants are never persisted")
 class BotGroupStatusPersistenceGuardTest {
@@ -65,10 +89,11 @@ class BotGroupStatusPersistenceGuardTest {
 
         assertThat(offenders)
                 .as("BotGroupStatus.%s must never be written to BotGroup.targetStatus: an older "
-                                + "jar cannot deserialise it, and findByTargetStatus(ACTIVE) is on "
-                                + "the boot path, so one such document fails the whole startup "
-                                + "query. STARTING belongs to the runtime; the registration "
-                                + "states are derived at the DTO boundary.",
+                                + "jar cannot deserialise it (IllegalArgumentException out of "
+                                + "Enum.valueOf), which 500s GET /{id} and the whole env list "
+                                + "view and makes a rollback unsafe. STARTING belongs to the "
+                                + "runtime; the registration states are derived at the DTO "
+                                + "boundary.",
                         NOT_PERSISTABLE)
                 .isEmpty();
     }
@@ -84,6 +109,61 @@ class BotGroupStatusPersistenceGuardTest {
         assertThat(sites)
                 .as("if this drops to zero the guard above is passing on an empty scan")
                 .isGreaterThan(3);
+    }
+
+    @Test
+    @DisplayName("the mapper copies targetStatus in neither write direction — builder or setter")
+    void theMapperNeverCarriesTargetStatus() {
+        BotGroupMapper mapper = Mappers.getMapper(BotGroupMapper.class);
+
+        for (BotGroupStatus status : BotGroupStatus.values()) {
+            // POST / — the create path, through the Lombok builder. A scan cannot see this at
+            // all: it is not a setTargetStatus( call.
+            BotGroupDTO created = new BotGroupDTO();
+            created.setName("n");
+            created.setTargetStatus(status);
+
+            assertThat(mapper.toEntity(created).getTargetStatus())
+                    .as("POST /api/v1/bot-group/ must not carry %s into the entity", status)
+                    .isNull();
+
+            // PATCH /{id} — the merge path, through a setter whose argument is a variable. A
+            // scan can see the call but not the value, and the value is whatever a client sent.
+            BotGroup existing = BotGroup.builder().id("g-1").name("n")
+                    .targetStatus(BotGroupStatus.ACTIVE).build();
+            BotGroupDTO patch = new BotGroupDTO();
+            patch.setTargetStatus(status);
+            mapper.updateEntityFromDTO(patch, existing);
+
+            assertThat(existing.getTargetStatus())
+                    .as("PATCH /api/v1/bot-group/{id} must not carry %s into the entity", status)
+                    .isEqualTo(BotGroupStatus.ACTIVE);
+        }
+    }
+
+    @Test
+    @DisplayName("the DTO field is READ_ONLY, so Jackson never populates it from a request body")
+    void theDtoFieldIsReadOnlyInbound() throws Exception {
+        // Belt to the mapper's braces, and the half that also covers any future in-process
+        // mapper. Asserted through a real ObjectMapper rather than by reading the annotation,
+        // because the annotation is only worth what Jackson does with it.
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        BotGroupDTO read = objectMapper.readValue(
+                "{\"name\":\"n\",\"targetStatus\":\"STARTING\"}", BotGroupDTO.class);
+
+        assertThat(read.getTargetStatus())
+                .as("a request body must not be able to set targetStatus at all; lifecycle is "
+                        + "what POST /{id}/start and /stop are for")
+                .isNull();
+        assertThat(read.getName()).as("the rest of the body still binds").isEqualTo("n");
+
+        // Still rendered outbound — A3 has POST / answer with targetStatus, and Phase 4 renders
+        // REGISTRATION_PENDING there. READ_ONLY is what makes that safe for a read-modify-write
+        // client: the value comes back, is handed back, and is ignored.
+        BotGroupDTO rendered = new BotGroupDTO();
+        rendered.setTargetStatus(BotGroupStatus.STARTING);
+        assertThat(objectMapper.writeValueAsString(rendered)).contains("\"targetStatus\":\"STARTING\"");
     }
 
     private static Path repoRoot() {

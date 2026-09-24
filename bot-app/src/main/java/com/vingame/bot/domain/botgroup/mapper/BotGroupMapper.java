@@ -89,7 +89,12 @@ public interface BotGroupMapper {
                 .autoDepositEnabled(Optional.ofNullable(dto.getAutoDepositEnabled()).orElse(false))
                 .strategyMix(dto.getStrategyMix())
                 .slotStrategyId(dto.getSlotStrategyId())
-                .targetStatus(dto.getTargetStatus())
+                // targetStatus is deliberately NOT mapped from the DTO (GATEWAY_REQUEST_BUDGET
+                // R1/Q1). It is system-managed: the lifecycle endpoints write it, and three of
+                // the six BotGroupStatus constants cannot be read back by a pre-feature jar, so a
+                // client-supplied value is how a rollback stops being safe. @JsonProperty(
+                // READ_ONLY) already stops it arriving over HTTP; this stops an in-process caller
+                // (a script, a future controller, a test fixture) getting there another way.
                 .scheduledRestartTime(dto.getScheduledRestartTime())
                 .lastStartedAt(dto.getLastStartedAt())
                 .lastStoppedAt(dto.getLastStoppedAt())
@@ -178,8 +183,14 @@ public interface BotGroupMapper {
         // Mid-flight changes do NOT re-assign already-running bots, mirroring
         // strategyMix.
         entity.setSlotStrategyId(Optional.ofNullable(dto.getSlotStrategyId()).orElse(entity.getSlotStrategyId()));
-        entity.setTargetStatus(Optional.ofNullable(dto.getTargetStatus()).orElse(entity.getTargetStatus()));
         entity.setScheduledRestartTime(Optional.ofNullable(dto.getScheduledRestartTime()).orElse(entity.getScheduledRestartTime()));
-        // Note: lastStartedAt, lastStoppedAt, lastFailureReason are system-managed, not updated via DTO
+        // Note: targetStatus, lastStartedAt, lastStoppedAt and lastFailureReason are
+        // system-managed, not updated via DTO.
+        //
+        // targetStatus joined that list in GATEWAY_REQUEST_BUDGET Phase 2 and is the one whose
+        // absence has teeth: PATCH {"targetStatus":"STARTING"} used to be a 200 that persisted a
+        // constant no pre-feature jar can deserialise, which is exactly what A1's
+        // in-memory-only rule exists to prevent. Do not reinstate it — a client that needs to
+        // change a group's lifecycle calls /start or /stop.
     }
 }

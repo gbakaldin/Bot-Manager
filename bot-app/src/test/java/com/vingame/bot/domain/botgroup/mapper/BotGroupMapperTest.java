@@ -182,7 +182,13 @@ class BotGroupMapperTest {
                     .build());
             assertThat(entity.isChatEnabled()).isTrue();
             assertThat(entity.isAutoDepositEnabled()).isTrue();
-            assertThat(entity.getTargetStatus()).isEqualTo(BotGroupStatus.STOPPED);
+            assertThat(entity.getTargetStatus())
+                    .as("targetStatus is system-managed and NOT mapped from the DTO "
+                            + "(GATEWAY_REQUEST_BUDGET R1/Q1): three of BotGroupStatus' six "
+                            + "constants cannot be read back by a pre-feature jar, so a "
+                            + "client-supplied value is how a rollback stops being safe. "
+                            + "Lifecycle is what /start and /stop are for.")
+                    .isNull();
             assertThat(entity.getScheduledRestartTime()).isEqualTo(now.plusDays(1));
             assertThat(entity.getLastStartedAt()).isEqualTo(now.minusHours(2));
             assertThat(entity.getLastStoppedAt()).isEqualTo(now.minusHours(1));

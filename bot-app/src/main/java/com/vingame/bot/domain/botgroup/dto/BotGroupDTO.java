@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.botgroup.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
@@ -138,7 +139,29 @@ public class BotGroupDTO {
      */
     private String slotStrategyId;
 
-    // Lifecycle management
+    /**
+     * The persisted lifecycle state — <b>rendered, never accepted</b>
+     * (GATEWAY_REQUEST_BUDGET R1/Q1).
+     * <p>
+     * {@code READ_ONLY} is load-bearing rather than tidy. Until this feature the enum's whole
+     * alphabet was {@code ACTIVE}/{@code STOPPED}/{@code DEAD}, so a client writing this field
+     * was at worst a data-consistency annoyance and Jackson rejected everything else with a 400.
+     * Three appended constants changed that: {@code STARTING},
+     * {@code REGISTRATION_PENDING} and {@code REGISTRATION_FAILED} cannot be read back by any
+     * jar built before them — {@code Enum.valueOf} throws while mapping the document — so one
+     * {@code PATCH {"targetStatus":"STARTING"}} was enough to put a value in Mongo that makes a
+     * rollback to {@code vingame-bot:rollback-*} unsafe, and to drop the group out of
+     * {@code findByTargetStatus(ACTIVE)} and out of auto-recovery on the current jar too.
+     * <p>
+     * Lifecycle is what {@code POST /{id}/start} and {@code /stop} are for. Ignoring the field
+     * inbound (rather than rejecting it with a 400) is the deliberate choice: {@code POST /}
+     * renders {@code REGISTRATION_PENDING} from Phase 4 on, so a read-modify-write client hands
+     * the value straight back, and a validator would then answer 400 to every PATCH such a
+     * client makes — the same trap CLAUDE.md records for the strategy-key validation. The mapper
+     * does not copy it in either write direction either, so no in-process caller can slip past
+     * Jackson; {@code BotGroupStatusPersistenceGuardTest} pins both halves.
+     */
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
     private BotGroupStatus targetStatus;
 
     // Scheduled operations

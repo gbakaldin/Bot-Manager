@@ -14,10 +14,26 @@ package com.vingame.bot.domain.botgroup.model;
  * <b>Which field may hold which value</b> — this is the load-bearing half of A1, and it is
  * a rollback requirement rather than tidiness. {@code targetStatus} is persisted as the
  * enum {@code name()} string with no {@code MongoCustomConversions}, so a document holding
- * a constant an <em>older</em> jar does not know throws {@code ConversionFailedException} —
- * and {@code findByTargetStatus(ACTIVE)} is on the boot path, so one poisoned document
- * would fail the whole startup query. Rolling back to {@code vingame-bot:rollback-*} must
- * stay a safe action at all times.
+ * a constant an <em>older</em> jar does not know is unreadable: Spring Data's
+ * {@code MappingMongoConverter} lets {@link Enum#valueOf}'s {@link IllegalArgumentException}
+ * ("No enum constant …") out of {@code getPotentiallyConvertedSimpleRead}. Measured by
+ * {@code BotGroupStatusRollbackSafetyTest} — earlier versions of this javadoc, and A1 itself,
+ * named {@code ConversionFailedException}, which is not what happens.
+ * <p>
+ * <b>What that costs, precisely.</b> Not the boot query:
+ * {@code findByTargetStatus(ACTIVE)} filters server-side on the string {@code "ACTIVE"}, so a
+ * poisoned document is never returned and never converted. The damage is on every read that
+ * <em>does</em> convert the group — {@code GET /{id}} and especially
+ * {@code POST /{envId}/filter}, the UI's list view for a whole environment, where one poisoned
+ * group 500s the list for every healthy group beside it — and, on the <em>current</em> jar,
+ * the group silently drops out of {@code findByTargetStatus(ACTIVE)} and out of
+ * {@code RecoveryEligibility}'s branches, so it never auto-starts and never auto-recovers
+ * again. Rolling back to {@code vingame-bot:rollback-*} must stay a safe action at all times.
+ * <p>
+ * The perimeter is two things, both pinned by {@code BotGroupStatusPersistenceGuardTest}:
+ * {@code BotGroupDTO.targetStatus} is {@code @JsonProperty(access = READ_ONLY)} so a request
+ * body cannot carry one of these values, and {@code BotGroupMapper} copies the field in
+ * neither write direction so an in-process caller cannot either.
  *
  * <table border="1">
  *   <caption>Field eligibility</caption>
