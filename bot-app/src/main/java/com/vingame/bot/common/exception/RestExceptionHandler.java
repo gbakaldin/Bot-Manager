@@ -66,7 +66,13 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
      * cluster topology, Spring bean wiring failures, or JDK {@code HttpClient}
      * hostnames.
      */
-    private static final String INTERNAL_ERROR_MSG = "Internal server error — see server logs";
+    /**
+     * Sanitised body text for anything whose real message may not reach a client. Now held by
+     * {@link ClientSafeMessage}, which is the same policy applied to the one place an error can
+     * reach a client without being an HTTP status: {@code BotGroupStatusDTO.lastError} on an
+     * asynchronous start (GATEWAY_REQUEST_BUDGET R2). One string, one rule.
+     */
+    private static final String INTERNAL_ERROR_MSG = ClientSafeMessage.INTERNAL_ERROR;
 
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<Void> handleNotFound(ResourceNotFoundException e, HttpServletRequest request) {

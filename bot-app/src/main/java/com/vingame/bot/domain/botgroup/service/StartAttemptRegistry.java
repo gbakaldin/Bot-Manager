@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.service;
 
+import com.vingame.bot.common.exception.ClientSafeMessage;
 import com.vingame.bot.domain.botgroup.model.StartOrigin;
 import lombok.extern.slf4j.Slf4j;
 
@@ -138,9 +139,43 @@ public class StartAttemptRegistry {
     }
 
     /**
-     * Close the attempt, retaining its counts and — when {@code error} is non-null — its
-     * message for {@code /status}. Must be called from a {@code finally}: an attempt left
-     * open reports the group as permanently {@code STARTING} and blocks every later start.
+     * Record an operator-facing reason on the open attempt, for a failure the build <em>handles</em>
+     * rather than throws (GATEWAY_REQUEST_BUDGET R10).
+     * <p>
+     * The zero-bot start path is the case that needs it: it persists {@code targetStatus=DEAD} and
+     * a perfectly good {@code lastFailureReason}, then returns <b>normally</b>, so {@link #finish}
+     * sees no throwable and {@code /status} would answer {@code DEAD, botsUp: 0, lastError: null}
+     * — the canonical start failure, unreported by the field documented to report it.
+     * <p>
+     * {@code message} must be self-authored and operator-safe; it is published verbatim. A
+     * recorded message wins over whatever {@link #finish} would derive from a throwable, which is
+     * also how the restart's zero-bot {@code IllegalStateException} keeps its own wording while
+     * the type stays sanitised. Last writer wins between two recorded messages: a {@code /restart}
+     * whose rebuild came up empty records the zero-bot reason inside {@code startLocked} and then
+     * the restart's own, and the restart's is the one an operator asked about.
+     */
+    public void recordFailure(String botGroupId, String message) {
+        StartAttempt attempt = open.get(botGroupId);
+        if (attempt != null && message != null) {
+            attempt.error = truncate(message);
+        }
+    }
+
+    /**
+     * Close the attempt, retaining its counts and its failure reason for {@code /status}. Must be
+     * called from a {@code finally}: an attempt left open reports the group as permanently
+     * {@code STARTING} and blocks every later start.
+     * <p>
+     * <b>The retained message is classified, never a raw {@code toString()}</b>
+     * (GATEWAY_REQUEST_BUDGET R2). {@code lastError} is read by {@code GET /{id}/status} and by
+     * both acks — an unauthenticated surface — and the build is the most exception-rich path in
+     * the application, so the same rule {@code RestExceptionHandler} applies to response bodies
+     * applies here: our own exception types say what they mean, everything else is reported by
+     * class name with the detail left in the server log, where the ERROR line already carries the
+     * full stack trace. See {@link com.vingame.bot.common.exception.ClientSafeMessage}.
+     * <p>
+     * A reason already set by {@link #recordFailure} is kept: it is more specific than anything
+     * derivable from the throwable.
      */
     public void finish(String botGroupId, Throwable error) {
         StartAttempt attempt = open.remove(botGroupId);
@@ -148,7 +183,9 @@ public class StartAttemptRegistry {
             return;
         }
         attempt.finishedAt = Instant.now();
-        attempt.error = error == null ? null : truncate(error.toString());
+        if (error != null && attempt.error == null) {
+            attempt.error = truncate(ClientSafeMessage.of(error));
+        }
         last.put(botGroupId, attempt);
     }
 

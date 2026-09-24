@@ -49,8 +49,9 @@ class StartAttemptRegistryTest {
         void beginSupersedesTheRetainedAttempt() {
             registry.begin("g1", StartOrigin.REST);
             registry.botUp("g1");
+            registry.recordFailure("g1", "Started 0/50 bots — all bot creations failed");
             registry.finish("g1", new IllegalStateException("boom"));
-            assertThat(registry.lastError("g1")).contains("boom");
+            assertThat(registry.lastError("g1")).contains("Started 0/50 bots");
 
             registry.begin("g1", StartOrigin.REST);
 
@@ -112,15 +113,47 @@ class StartAttemptRegistryTest {
     class Finish {
 
         @Test
-        @DisplayName("retains the counts and the error for /status")
+        @DisplayName("retains the counts, and a recorded reason wins over the throwable")
         void retainsLastError() {
             registry.begin("g1", StartOrigin.REST);
             registry.botUp("g1");
+            registry.recordFailure("g1", "Restart of group g1 produced 0/50 bots");
+            // The throwable carrying the same fact is an IllegalStateException, which
+            // ClientSafeMessage sanitises by type — this is how the one message lastError
+            // genuinely needs to carry survives that (R2).
             registry.finish("g1", new IllegalStateException("Restart of group g1 produced 0/50 bots"));
 
             assertThat(registry.isOpen("g1")).isFalse();
             assertThat(registry.botsUp("g1")).isEqualTo(1);
-            assertThat(registry.lastError("g1")).contains("produced 0/50 bots");
+            assertThat(registry.lastError("g1")).isEqualTo("Restart of group g1 produced 0/50 bots");
+        }
+
+        @Test
+        @DisplayName("a foreign throwable is reported by class name, never by its own words (R2)")
+        void aForeignThrowableIsSanitised() {
+            registry.begin("g1", StartOrigin.REST);
+
+            registry.finish("g1", new IllegalStateException(
+                    "Timed out after 30000 ms while waiting to connect to mongo-7.internal:27017"));
+
+            // lastError reaches GET /{id}/status and both acks, on an API with no authentication
+            // in front of it. This is verbatim the class of string RestExceptionHandler refuses
+            // to echo, and the start path is the most exception-rich path in the app.
+            assertThat(registry.lastError("g1"))
+                    .doesNotContain("mongo-7.internal")
+                    .doesNotContain("Timed out")
+                    .isEqualTo("Internal server error — see server logs (IllegalStateException)");
+        }
+
+        @Test
+        @DisplayName("our own exception types keep their words")
+        void ourOwnExceptionsAreVerbatim() {
+            registry.begin("g1", StartOrigin.REST);
+
+            registry.finish("g1", new com.vingame.bot.common.exception.BadRequestException(
+                    "BotGroup Group has no gameId set."));
+
+            assertThat(registry.lastError("g1")).isEqualTo("BotGroup Group has no gameId set.");
         }
 
         @Test
@@ -138,7 +171,19 @@ class StartAttemptRegistryTest {
         @DisplayName("truncates a pathological message rather than putting it all on the wire")
         void truncatesLongErrors() {
             registry.begin("g1", StartOrigin.REST);
-            registry.finish("g1", new IllegalStateException("x".repeat(5_000)));
+            // A type whose message IS forwarded, or the sanitiser would be doing the work and
+            // this would pass while proving nothing.
+            registry.finish("g1", new com.vingame.bot.common.exception.BadRequestException("x".repeat(5_000)));
+
+            assertThat(registry.lastError("g1")).hasSizeLessThan(600);
+        }
+
+        @Test
+        @DisplayName("a recorded reason is truncated too")
+        void truncatesRecordedReasons() {
+            registry.begin("g1", StartOrigin.REST);
+            registry.recordFailure("g1", "y".repeat(5_000));
+            registry.finish("g1", null);
 
             assertThat(registry.lastError("g1")).hasSizeLessThan(600);
         }
@@ -147,6 +192,14 @@ class StartAttemptRegistryTest {
         @DisplayName("is a no-op with nothing open")
         void noOpWhenNothingOpen() {
             registry.finish("g1", new IllegalStateException("boom"));
+
+            assertThat(registry.lastError("g1")).isNull();
+        }
+
+        @Test
+        @DisplayName("recordFailure is a no-op with nothing open, so no call site needs a guard")
+        void recordFailureIsANoOpWhenNothingOpen() {
+            registry.recordFailure("g1", "Started 0/3 bots — all bot creations failed");
 
             assertThat(registry.lastError("g1")).isNull();
         }

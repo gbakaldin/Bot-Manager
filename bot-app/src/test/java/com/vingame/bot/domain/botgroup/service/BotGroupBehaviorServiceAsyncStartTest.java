@@ -3,6 +3,7 @@ package com.vingame.bot.domain.botgroup.service;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.service.BotFactory;
+import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
 import com.vingame.bot.domain.botgroup.model.StartOrigin;
@@ -252,15 +253,62 @@ class BotGroupBehaviorServiceAsyncStartTest {
         BotGroup group = group(2);
         when(botGroupService.findById("g-1")).thenReturn(group);
         when(environmentService.findById("env-1"))
-                .thenThrow(new IllegalStateException("environment exploded"));
+                .thenThrow(new IllegalStateException("environment exploded at mongo-7.internal:27017"));
 
         BotGroupStatus accepted = service.startAsync("g-1", StartOrigin.REST, () -> { });
 
         assertThat(accepted).isEqualTo(BotGroupStatus.STARTING);
         awaitNoStartInFlight();
-        assertThat(service.getLastStartError("g-1")).contains("environment exploded");
+
+        // R2: lastError is on GET /{id}/status and both acks, and the API has no auth in front of
+        // it yet. A foreign exception's own words never reach it — the message above is exactly
+        // the shape RestExceptionHandler refuses to echo (a hostname and a port). The class name
+        // is kept because the holder of a lastError has no request URI to correlate a log with.
+        assertThat(service.getLastStartError("g-1"))
+                .doesNotContain("mongo-7.internal")
+                .doesNotContain("environment exploded")
+                .contains("Internal server error")
+                .contains("IllegalStateException");
         assertThat(service.getActualStatus("g-1")).isEqualTo(BotGroupStatus.STOPPED);
         assertThat(service.isGroupRunning("g-1")).isFalse();
+    }
+
+    @Test
+    @DisplayName("a failure this codebase authored keeps its own words — that is the point of the split")
+    void ourOwnExceptionsAreForwardedVerbatim() {
+        BotGroup group = group(2);
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenThrow(
+                new ResourceNotFoundException("Environment env-1 not found"));
+
+        service.startAsync("g-1", StartOrigin.REST, () -> { });
+        awaitNoStartInFlight();
+
+        // BotManagerException subclasses carry messages we wrote, and RestExceptionHandler
+        // already forwards them verbatim at 400/404/502 — sanitising them here would have made
+        // the field useless for the failures it exists to explain.
+        assertThat(service.getLastStartError("g-1")).isEqualTo("Environment env-1 not found");
+    }
+
+    @Test
+    @DisplayName("a zero-bot start reports why, instead of DEAD with a null lastError")
+    void zeroBotStartRecordsItsReason() {
+        BotGroup group = group(3);
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(environment());
+        when(gameService.findById("game-1")).thenReturn(game());
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new IllegalStateException("auth refused"));
+
+        service.startAsync("g-1", StartOrigin.REST, () -> { });
+        awaitNoStartInFlight();
+
+        // R10: this branch returns normally, so nothing is thrown for finish() to classify. The
+        // group is DEAD with a persisted lastFailureReason, and /status has to say the same thing.
+        assertThat(service.getActualStatus("g-1")).isEqualTo(BotGroupStatus.DEAD);
+        assertThat(service.getStartBotsUp("g-1")).isZero();
+        assertThat(service.getLastStartError("g-1")).isEqualTo(
+                "Started 0/3 bots — all bot creations failed");
     }
 
     @Test

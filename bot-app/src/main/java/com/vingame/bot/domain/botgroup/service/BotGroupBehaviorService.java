@@ -893,7 +893,13 @@ public class BotGroupBehaviorService {
                     BotMdc.clear();
                 }
                 group.setTargetStatus(BotGroupStatus.DEAD);
-                group.setLastFailureReason("Started 0/" + group.getBotCount() + " bots — all bot creations failed");
+                String zeroBotReason = "Started 0/" + group.getBotCount() + " bots — all bot creations failed";
+                group.setLastFailureReason(zeroBotReason);
+                // R10: this branch returns NORMALLY, so submitLifecycle's finally calls
+                // finish(id, null) and /status would answer "DEAD, botsUp: 0, lastError: null" —
+                // the canonical start failure, missing from the field documented to carry it.
+                // Self-authored and operator-safe, so it is published verbatim.
+                startAttempts.recordFailure(id, zeroBotReason);
                 group.setLastStartedAt(LocalDateTime.now());
                 group.setLastStoppedAt(null);
                 botGroupService.save(group);
@@ -1601,13 +1607,32 @@ public class BotGroupBehaviorService {
         // despite a non-zero botCount, surface that as an exception. The controller
         // already returns 500 on Exception; this turns silent failure into an
         // entry the operator can grep for and metrics they can alert on.
+        // A /stop landed during the rebuild and won (AD-8/AD-16). Zero bots is then the
+        // operator's decision having completed, not a failure: startLocked logs the equivalent
+        // /start case as INFO precisely because "an ERROR here would page someone for a
+        // successful /stop", and without this arm the restart path reported the same outcome as
+        // an ERROR *and* wrote "produced 0/N bots; check ... bot_creation_failures_total" into
+        // lastError, pointing the operator at a metric that had not moved.
+        if (startAttempts.isCancelled(id)) {
+            log.info("Restart of bot group {} was cancelled by a stop — not treating 0 bots as a "
+                    + "failure", id);
+            return;
+        }
+
         BotGroup group = botGroupService.findById(id);
         BotGroupRuntime runtime = runningGroups.get(id);
         int alive = runtime != null ? runtime.getBotInstances().size() : 0;
         if (group.getBotCount() > 0 && alive == 0) {
-            throw new IllegalStateException(String.format(
+            String reason = String.format(
                     "Restart of group %s produced %d/%d bots; check logs and %s metric for cause",
-                    id, alive, group.getBotCount(), BotMetrics.BOT_CREATION_FAILURES_TOTAL));
+                    id, alive, group.getBotCount(), BotMetrics.BOT_CREATION_FAILURES_TOTAL);
+            // Recorded as well as thrown: the throwable is an IllegalStateException, which
+            // ClientSafeMessage sanitises by type (RestExceptionHandler does the same, because
+            // that type's call sites in this codebase carry internal class names). This message
+            // is ours and is the one thing lastError genuinely needs to say, so it is recorded
+            // explicitly rather than smuggled out through an exception message.
+            startAttempts.recordFailure(id, reason);
+            throw new IllegalStateException(reason);
         }
     }
 
