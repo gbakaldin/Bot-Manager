@@ -186,54 +186,64 @@ class SlidingWindowGatewayBudgetAdmissionTest {
     @Test
     @DisplayName("FIFO within a tier: the freed slot goes to the waiter that arrived first")
     void fifoWithinATier() throws Exception {
-        fill(RequestTier.DEFAULT, 500);
+        // Room is freed ONE slot at a time, and the test waits for each admitted waiter to run
+        // before freeing the next. That is what makes this deterministic: the budget admits in
+        // deque order under its lock, but each admitted waiter's continuation then runs on its own
+        // virtual thread, so recording the order from inside the calls would be recording the
+        // order the SCHEDULER happened to resume them in — which is how the first version of this
+        // test produced ["first", "third", "second"] roughly one run in twenty.
+        //
+        // Three stamps one second apart, then the rest of the ceiling, so exactly one stamp
+        // expires per clock step.
+        budget.execute(RequestTier.DEFAULT, scope("group-1"), () -> "ok");
+        clock.addAndGet(Duration.ofSeconds(1).toNanos());
+        budget.execute(RequestTier.DEFAULT, scope("group-1"), () -> "ok");
+        clock.addAndGet(Duration.ofSeconds(1).toNanos());
+        budget.execute(RequestTier.DEFAULT, scope("group-1"), () -> "ok");
+        clock.addAndGet(Duration.ofSeconds(1).toNanos());
+        fill(RequestTier.DEFAULT, 497);
+        assertThat(budget.windowRequests()).isEqualTo(500);
 
         List<String> admittedOrder = new CopyOnWriteArrayList<>();
+        List<String> arrivalOrder = List.of("first", "second", "third");
         CountDownLatch done = new CountDownLatch(3);
-        for (String name : List.of("first", "second", "third")) {
-            CountDownLatch entered = new CountDownLatch(1);
+        for (String name : arrivalOrder) {
+            int expectedDepth = arrivalOrder.indexOf(name) + 1;
             Thread.ofVirtual().name("waiter-" + name).start(() -> {
-                entered.countDown();
                 try {
-                    budget.execute(RequestTier.DEFAULT, scope("group-1"), () -> {
-                        admittedOrder.add(name);
-                        return name;
-                    }, Duration.ofSeconds(20));
+                    budget.execute(RequestTier.DEFAULT, scope("group-1"), () -> admittedOrder.add(name),
+                            Duration.ofSeconds(20));
                 } catch (Exception e) {
-                    // ignored: the tail of the queue is cancelled at the end of the test
+                    // any failure shows up as a missing entry in admittedOrder
                 } finally {
                     done.countDown();
                 }
             });
-            assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
             // Serialise enqueueing so "arrival order" is a fact of the test, not a race.
-            int expected = admittedOrder.size() + queueDepthOf(name);
-            for (int i = 0; i < 200 && budget.snapshot().queuedDefault() < expected; i++) {
-                Thread.sleep(10);
+            for (int i = 0; i < 400 && budget.snapshot().queuedDefault() < expectedDepth; i++) {
+                Thread.sleep(5);
             }
+            assertThat(budget.snapshot().queuedDefault()).isEqualTo(expectedDepth);
         }
-        assertThat(budget.snapshot().queuedDefault()).isEqualTo(3);
 
-        // Expire exactly one stamp: one slot, and it must go to "first".
-        clock.set(WINDOW.toNanos() + 1);
-        // Every stamp was taken at t=0 on a frozen clock, so moving past the window expires all
-        // 500 at once. Drive the pass and all three are admitted, in arrival order.
-        budget.admitWaiters();
+        // One slot at a time, with a barrier after each.
+        for (int step = 0; step < 3; step++) {
+            clock.set(WINDOW.toNanos() + Duration.ofSeconds(step).toNanos() + 1);
+            budget.admitWaiters();
+            int expected = step + 1;
+            for (int i = 0; i < 400 && admittedOrder.size() < expected; i++) {
+                Thread.sleep(5);
+            }
+            assertThat(admittedOrder)
+                    .as("exactly one waiter per freed slot, at step %d", step)
+                    .hasSize(expected);
+        }
         assertThat(done.await(10, TimeUnit.SECONDS)).isTrue();
 
         assertThat(admittedOrder)
                 .as("FIFO within a tier is what stops the head of a busy queue starving behind "
                         + "later arrivals — under pacing the head is the oldest bot of a start")
                 .containsExactly("first", "second", "third");
-    }
-
-    /** How many waiters are expected to be queued once the {@code name}th thread has enqueued. */
-    private static int queueDepthOf(String name) {
-        return switch (name) {
-            case "first" -> 1;
-            case "second" -> 2;
-            default -> 3;
-        };
     }
 
     @Test
