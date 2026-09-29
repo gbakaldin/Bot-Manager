@@ -293,3 +293,197 @@ The seams are real. Each was checked against the shipped code, not the javadoc.
    today and harmless; A1 only requires health to carry the new *value*, which it does via
    `runtime.getActualStatus()`. Worth closing when `registeredCount` is added to
    `BotGroupHealthDTO` in Phase 4, since that is the next edit to the same method.
+
+---
+
+## Re-check — 2026-09-29 (fix round, and A1's own factual errors)
+
+Diff re-reviewed: `git diff 0558a51..HEAD` — **7** commits, `7e118bf`..`72bbb24`, 20 files,
++1,520 / −144 (excluding `review-phase2.md`). Six are Dev's fix round
+(`7e118bf`..`d9be331`); the seventh, `72bbb24`, is the **main session's** and is treated as
+out-of-scope-but-recorded below.
+Plan re-read: `docs/plans/GATEWAY_REQUEST_BUDGET.md`, now **committed** (`8e4a1bc`), including
+A1-A13 and the new `## Amendment — 2026-09-29 (A14-A20)`.
+Inputs: `qa-phase2.md` (FAIL on Q1; Q2-Q6), `review-phase2.md` (CHANGES_REQUESTED; R1-R13).
+Build at `72bbb24`, in a **detached worktree** rather than the working tree (which carries ~58
+dirty RIK/Aviator entries): **2,276 tests, 0 failures, 0 errors, 0 skipped** — bot-api 148,
+bot-messages 167, bot-strategies 126, bot-engine 494, bot-app 1,341. QA's deliberately-red
+`BotGroupStatusRollbackSafetyTest$WritePaths` is green, unchanged by Dev.
+
+### Verdict
+
+**PLAN_AMENDED** — the diff is accepted; the plan was wrong and is corrected.
+
+The plan error this time is **mine**: A1 (written in the 2026-09-23 amendment and relied on ever
+since) asserts three things about how this codebase behaves that are false, and QA and the
+reviewer each falsified part of it. A1 is now the text a future reader trusts, so it is corrected
+in `A14` rather than left to a review file. Nothing goes back to Dev: the fix round closes QA's
+blocker and twelve of the reviewer's thirteen findings, and the thirteenth is deferred with a
+reason that survives checking.
+
+**Each corrected claim was verified here independently, not accepted on report** — the first is a
+claim about Spring Data query translation, so it was measured rather than reasoned about:
+
+| A1 said | Actually | How it was established |
+|---|---|---|
+| a poisoned document "would fail the whole startup query" | **it does not** — `findByTargetStatus(ACTIVE)` resolves to `ExecutableFind.as(BotGroup).matching(…).all()` and `QueryMapper` renders the criterion as the BSON filter `{"targetStatus": "ACTIVE"}`, a `String`, so the match is server-side and a non-matching document is never read | issued the derived method against a recording `MongoOperations` proxy with a real `MappingMongoConverter`; no server, no mocking of the query path |
+| `ConversionFailedException` | `IllegalArgumentException: No enum constant …` from `Enum.valueOf` via `MappingMongoConverter.getPotentiallyConvertedSimpleRead:1420` | read a document holding an undeclared constant name through a real converter |
+| (implicitly) the damage is at boot | **`GET /{id}` and `POST /{envId}/filter`** — the latter is `mongoTemplate.find(query, BotGroup.class)` over the whole environment (`BotGroupService:96-105`), so one bad document breaks the **list view for every group beside it**; plus, on the current jar, the group leaves both `findByTargetStatus(ACTIVE)` and `RecoveryEligibility` and is never started or recovered again | read the two call paths |
+| `BotGroupDTO.targetStatus` "can still only carry the original three" | true of what it **renders**, false of what it **accepted** — the builder path in `toEntity:92` and the variable path in `updateEntityFromDTO:181` both wrote it, and the source guard could see neither | QA's Q1 / review's R1; re-read both mapper paths |
+
+**And one correction to the correction, which is new here.** Dev, the reviewer and the task
+description all describe the rollback symptom as a **500**. It is a **400**:
+`IllegalArgumentException` reaching a controller is answered by
+`RestExceptionHandler.handleIllegalArgument` (`:94-100`) as `{"type":"Bad request","msg":"No enum
+constant …"}`, that arm has existed since `92469f5`, and Spring Data does not wrap the exception
+on the way up. The invariant's severity is unchanged; the symptom is *more* misleading than
+advertised, because a 400 on the environment list view reads as "the UI sent something wrong" and
+points the investigation away from "a document written by a newer jar is unreadable". Three
+javadoc strings still say "500s the list" and no code does; folded into Phase 3's doc pass rather
+than spending a commit, with A14 as the authority.
+
+### Phase-by-phase
+
+#### Phase 2 — async start/restart, `STARTING`, startup daisy-chain
+Status: **implemented**
+
+Every A6 Phase 2 change-list item and every test-list item verified in the first pass still
+holds; the fix round changed *how* three of them behave, in the direction the plan asked for.
+
+| Finding | Commit | Verified state |
+|---|---|---|
+| **R1 / Q1** (blocking) — `targetStatus` client-writable | `7e118bf` | Closed at the boundary: `@JsonProperty(access = READ_ONLY)` + removed from **both** mapper write directions. The guard test gains a **value-level** assertion over `BotGroupStatus.values()` in both directions (survives the next appended constant) and a real-`ObjectMapper` inbound/outbound pair. Chose the boundary over a validator for a reason I agree with and have folded into A14: A3 renders `REGISTRATION_PENDING` from Phase 4 on, so a validator would 400 every PATCH from a read-modify-write client — CLAUDE.md's strategy-key trap, one field over |
+| **R2** (security) — raw `Throwable.toString()` on an unauthenticated endpoint | `bebad84` | `ClientSafeMessage` extracts the policy `RestExceptionHandler` already had, and the handler's `INTERNAL_ERROR_MSG` now *comes from it* — one string, one rule, which is materially better than the "classify in two places" the finding asked for. Our own `BotManagerException` hierarchy (+ `IllegalArgumentException`) verbatim, everything else `Internal server error — see server logs (<ClassName>)`. The class name is a deliberate addition over the handler, with the reason stated (a `lastError` holder has no request URI to correlate a log against). `IllegalStateException` is correctly **not** on the safe list, which is why the one message the field genuinely needs is recorded explicitly instead |
+| **R10** — zero-bot `/start` left `lastError` null | `bebad84` | `recordFailure(id, …)` on the branch that returns normally; `/status` now answers `DEAD, botsUp: 0, lastError: "Started 0/N bots …"` |
+| **Q2** — a successful `/stop` during `/restart` logged an ERROR and poisoned `lastError` | `bebad84` | `restart`'s zero-bot check now returns early when the attempt was cancelled, mirroring `startLocked`'s INFO. The symmetry the finding asked for |
+| **R3** — `/health` said `STOPPED` while `/status` said `STARTING` | `9ef553a` | `getActualStatus(id)`, so all three surfaces (`/status`, `/health`, `filterSorted`) agree. **This closes inheritance #5 from the first pass** |
+| **R4** — chain logged N ERRORs per restart | `9ef553a` | Cooperative `volatile shuttingDown`, set **before** the executors are torn down, checked at the top of the loop, one INFO naming what was abandoned. Per-group `catch` widened to `Throwable` with the stderr/Loki reason. Not an interrupt, for the documented `connect()`-swallows-interrupts reason |
+| **R5** — chain overwrote an operator `/stop` | `9ef553a` | `stillWantsToStart` re-reads each group and skips unless still `ACTIVE` and still not `SCHEDULED`. Same discipline `startForRecovery` applies to the identical race, and the lost write was `STOPPED`, DEAD_GROUP_AUTO_RECOVERY's only opt-out |
+| **R12** — scheduled restart swallowed its new synchronous rejection | `9ef553a` | try/catch + ERROR on the scheduler thread |
+| reviewer's open question on `onStartup` | `9ef553a` | Settled **deliberately**, which is what the reviewer asked for: log ERROR and **rethrow**, so the container exits and the restart policy retries once Mongo is back, rather than leaving a fleet nothing will ever start. The ERROR is what stops it reading as healthy-then-gone |
+| **R6** — DELETE mid-build leaked bots / resurrected the document | `766f245` | `stopAndLogout` now takes the per-group lock (cancel still happens **before** it, so a delete does not wait out the start it is cancelling). QA's `deleteMidStartCancelsTheBuild` correctly moved onto its own thread — with the lock, calling it on the thread that still owes the build its latch is a deadlock; the property under test (cancel lands before the lock) is unchanged and is now asserted *while* the teardown parks |
+| **R7** — `startForRecovery` ignored `begin()` | `766f245` | Returns `false` like every other caller, with the group-keyed-registry reason in the comment. Dev's AD-16 argument ("`putIfAbsent` means a restart is never submitted during a start") is now true of *every* path |
+| **R11** — attempt leaked between `begin()` and the thread starting | `766f245` | `submit(...)` extracted and wrapped in `catch (Throwable) { finish(id, t); throw t; }` |
+| **R8** — `botsUp` counted in the index-ordered join loop | `95d551e` | Moved into the per-bot task, where AD-17 put it, with `botFailed` alongside (including the interrupted path). The join loop keeps the logging and the metric, where deterministic order is wanted. **This makes V2a's "rising toward `botCount`" honest**, which it was not |
+| **Q3** — `BotMdc.clear()` in a nested `finally` dropped the caller's scope | `95d551e` | `BotMdc.snapshot()`/`restore()` added and used at **four** nested scopes, not one — the two `startLocked` blocks matter as much as the collection loop, since the zero-bot ERROR and the failed-start ERROR are emitted after them. Leaving the context set was correctly rejected (the chain and the recovery tick run several groups on one thread) |
+| **Q6** — `STARTING` silently changed recovery's live-sibling short-circuit | `95d551e` | Decided and documented on `countOpenWsByEnvForActiveRuntimes` itself, including the reverse hazard (a reclaim rebuild of the group being recovered passes through `STARTING`) and the operator-facing consequence (`outcome="live_sibling"` disappears during a large start). A1's audit said "leave", and leaving it *with the reason written down* is the right reading |
+| **Q5** — wrong exception type in the docs | `7e118bf` | Corrected in `BotGroupStatus` and the guard test; corrected in the plan here (A14) |
+| **R13** — unused surface on `StartAttempt` | `d9be331` | Class is `private`, all accessors and the write-only `finishedAt` gone |
+| **R9** → **P13**, **Q4**'s residue → **P14** | `d9be331` | Deferred with reasons — judged below |
+
+**Two reviewer *notes* remain unaddressed, correctly.** `parkRuntimeless` still carries two
+meanings (persist `STOPPED`; cancel a start in flight) with no rename — they coincide for all
+three of today's callers, the gate is exhaustive, and A10 documents the discriminator, so a rename
+is cosmetic churn in a 2,700-line file. And `/start` still reads the group two or three times per
+accept; the reviewer labelled it harmless and it is.
+
+### Drift
+
+None new. The fix round introduces no deviation from A6 Phase 2, A1 or A3, and the three
+substitutions it makes were all named as required by a finding.
+
+#### Are the two deferrals legitimately out of phase scope?
+
+**P13 (a wedged build parks its group for the JVM's life) — yes, and the entry is right about
+why.** A6 Phase 2 asks for `begin`/`progress`/`cancel`/`finish`/`lastError` and AD-17 for
+"retained until the next start"; nothing in the plan asks for attempt liveness. More important,
+the obvious fix is *wrong*: a TTL that drops a stuck attempt re-opens the race `750fc91`
+closed, because dropping an open attempt uncancels its build — so a `/stop` that already answered
+`200` could be followed by the group coming up. A real fix needs a generation number on the
+cancellation predicate or a bounded build, and the unbounded wait that makes this expected rather
+than conceivable is Phase 3's own `essential.max-wait=0`. The entry says all of that and tells
+Phase 3 to re-read it. Diagnosable today (a second `/start` prints the attempt's age — confirmed
+in the test log: `elapsed 3600s` shape).
+
+**One correction to P13, which I found while checking it and which the plan now carries (A19):**
+it is described as though a build that never returns needed an exotic cause. It does not. The four
+in-repo gateway calls carry `.timeout(Duration.ofSeconds(10))`; the **login does not go through
+them** — it goes through the library's `AuthClient`, which builds its request with no timeout on
+an `HttpClient.newHttpClient()` with no connect timeout (`websocket-parser-core-3.0.5` sources,
+`AuthClient.java:25,127-137`). A stalled TCP connection on a login parks a build thread
+indefinitely **today**. That does not make it Phase 2's to fix — but it does make AD-12's
+in-repo login (Phase 5) obliged to set a timeout, and since A7 ships Phases 2-5 as one
+deployment, forgetting it ships the exposure. Recorded as A19.
+
+**P14 (an unclean shutdown leaves an in-flight group's bots connected) — yes.** The half that
+was a *regression of this phase* (N ERRORs per restart) is fixed; what remains is bounded,
+self-healing (the sockets drop when the process exits) and pre-existing in kind. The entry names
+the two real options and points at the drain `PLUGIN_HOT_RELOAD` needs anyway. Nothing in A6
+Phase 2 asks for a drain.
+
+### Phase boundary
+
+**Still clean.** Grepped the whole fix-round diff for
+`registrationState`/`registerUsers`/`registeredCount`/`circuit`/`waiter`/`ceiling`/`tryExecute`/
+`reserve(`/`Retry-After`/`ENFORCE`/`cancelScope`/`runWsUpgrade`/`Cloudflare`/`countWsUpgrade`:
+**every hit is javadoc, a FOLLOWUPS entry or `review-phase2.md`.** `SlidingWindowGatewayBudget`,
+`GatewayBudget`, `ApiGatewayClient`, `application.properties`, `prometheus/`, `docker-compose.yml`
+and `logging/` are untouched by `0558a51..HEAD`.
+
+**`STARTING` is still `actualStatus`-only** — and the perimeter is stronger than it was:
+`grep setTargetStatus( | grep -E "STARTING|REGISTRATION"` over all five modules' `src/main` is
+empty, the mapper carries the field in neither direction (asserted by value, for every constant),
+Jackson refuses it inbound (asserted through a real `ObjectMapper`), and
+`startingIsNeverPersisted`'s captor still shows only `ACTIVE`.
+**The enum is still append-only** — `BotGroupStatusAppendOnlyTest` (3 tests) green, ordinals
+0/1/2 pinned through the real `BotSortKey.STATUS` extractor, exactly six constants.
+
+### Out-of-scope changes
+
+- **`72bbb24` is the main session's, not Dev's**, and sits inside the reviewed range: the
+  releaser smoke-test fix (A13.2, user-approved, keyed on chain completion) and
+  `docs/reviews/GATEWAY_REQUEST_BUDGET/gwms-register-envelope.md`, a live capture of the gwms
+  `EXISTED` envelope. Both are legitimate and both **close open items** rather than adding scope —
+  A13.2 and Open Item 13. The envelope capture carries one fact A2 did not anticipate (a
+  re-register returns **no tokens**, so a resumed index costs three DEFAULT requests and
+  `registeredCount` alone cannot express "registered but not named"); it amends A6 Phase 4 items 1
+  and 3, recorded as A17.
+- Nothing else. Provenance re-checked: the ~58 dirty working-tree entries (`Aviator.js`, the RIK
+  dispatch tests, `deploy.sh`, …) are untouched by `0558a51..HEAD` and were not staged, stashed or
+  reverted. Only `docs/plans/GATEWAY_REQUEST_BUDGET.md` and this file are staged by this pass.
+
+### Amendments to the plan
+
+Appended as `## Amendment — 2026-09-29 (A14-A20)`; nothing above A14 was rewritten.
+
+- **A14 — A1's three factual errors**, each with the probe that falsified it, plus the 400-not-500
+  correction, plus how the write hole was closed and why a validator would have broken A3. Carries
+  one new constraint into Phase 4: `registeredCount` must be render-only for the same reason, or
+  A2.1's high-water-mark invariant is client-writable.
+- **A15 — Open Item 1 closed** (WS hosts share the Cloudflare rule). Includes the two things the
+  answer changes that were not in the plan: reconnects are cap consumption at ~180 per 5-minute
+  window in the observed staging hot loop, and the recovery probe reads a Cloudflare block page as
+  *healthy*, which makes AD-13's circuit gate on recovery load-bearing rather than an optimisation.
+- **A16 — Open Item 7 closed**: no tolerable cooldown. Renames `block-cooldown` →
+  `block-probe-interval` (60m), makes an open circuit **refuse every tier instead of parking
+  ESSENTIAL** (with the rule behind it: an unbounded wait is only admissible where progress is
+  guaranteed), restates `Retry-After`'s meaning, fixes the alerting and its annotation, rules out
+  a manual-close endpoint, and records the two prevention gaps (per-environment keying vs a
+  per-IP×zone rule; `bulk-create-accounts.py` as a rule not a caveat).
+- **A17 — A13.1, A13.2 and Open Item 13 closed**, with the three things the envelope capture
+  obliges Phase 4 to change.
+- **A18 — Phase 2 verification**: V2a/V2b/V2c/V2f stand; four steps added (V2g `/health` agrees,
+  V2h the chain honours a `/stop`, V2i one INFO not N ERRORs, V2j `lastError` is sanitised, V2k
+  one curl for the Phase-2 blocker).
+- **A19 — `FOLLOWUPS.md` P13/P14 are taken**, Open Item 10's reference to "P13" is stale (it is
+  P15), and P13's reachability is corrected with the `AuthClient` timeout finding and the
+  obligation it places on AD-12.
+- **A20 — what Phase 3 absorbs, ordered** (twelve items), superseding the first pass's inheritance
+  list.
+
+### Release concerns for the Releaser (updated)
+
+1. ~~The plan is uncommitted~~ — **closed**: `8e4a1bc`. The branch a Releaser checks out now
+   carries the plan it implements. Note the pre-A8 `202` / `startAttempt` text still stands in the
+   original `## Verification` section; **A8 and A18 are the authoritative Phase 2 steps.**
+2. ~~`.claude/agents/releaser.md:67` will abort the deploy~~ — **closed**: `72bbb24`.
+3. ~~CLAUDE.md's REST table is stale~~ — **closed**: `8e4a1bc`.
+4. **Two externally visible behaviour changes to release-note**, both improvements:
+   `/restart` of a group with no `gameId` is now a 400 that leaves the group running (was
+   stop-then-500); and `PATCH`/`POST` bodies no longer accept `targetStatus` at all — it is
+   rendered and ignored. Any client that was setting a group's lifecycle through PATCH (nothing
+   in this repo does) must use `/start` and `/stop`.
+5. `lastError` on `GET /{id}/status` is now sanitised; a failure that used to appear as a raw
+   `Throwable.toString()` appears as `Internal server error — see server logs (<ClassName>)`, with
+   the detail in `console.log`'s ERROR line.
+6. Nothing deploys after Phase 2 alone — A7's single cut is after Phase 5.

@@ -417,3 +417,499 @@ by a teardown of that group, so no live bot ever observes a cancellation it shou
 name suggests a narrower guarantee than the predicate gives. A `/start` on an already-ACTIVE
 group opens (and quickly closes) an attempt whose cancellation would briefly apply to the whole
 live fleet of that group; harmless because the only canceller is a stop.
+
+---
+
+# Re-review — GATEWAY_REQUEST_BUDGET Phase 2 fix round
+
+Branch: `feature/gateway-request-budget`
+Reviewed diff: `git diff 0558a51..HEAD` — the fix round is `7e118bf`..`d9be331` (6 commits);
+`72bbb24` sits on top of it and is unrelated (see Notes).
+Read first: `CLAUDE.md`, `docs/plans/GATEWAY_REQUEST_BUDGET.md` Amendments A1-A13,
+`docs/plans/FOLLOWUPS.md` P13/P14.
+
+Housekeeping, acknowledged: the original `review-phase2.md` above was left staged and rode into
+`7e118bf` unedited. Nothing in it was altered by Dev; this section is the only addition, and it
+is the only thing I have staged.
+
+Build check: `mvn -o -DskipTests compile` clean; full reactor `mvn -o test` **BUILD SUCCESS**
+(bot-app 1,350 tests, 0 failures). `BotGroupStatusRollbackSafetyTest.requestBodiesCannotPoisonTargetStatus`
+— the test that carried QA's FAIL — now passes.
+
+## Verdict
+
+**PASS**
+
+Both blockers are closed, and closed in the right places. R1 is fixed at the boundary rather
+than in a validator, and I verified the perimeter is complete rather than merely plausible. R2
+extracts a real shared policy and does not change one byte of what any existing HTTP path
+exposes. R3-R8 and R10-R13 are each fixed as claimed, R6's new lock introduces no deadlock, and
+nothing in the round reaches outside Phase 2 or weakens a Phase 1 guarantee.
+
+No `bug` and no `security` finding. Eleven advisory items follow — **two of them (RR1, RR2) are
+residual holes in the R5 and R3 fixes** and are the only ones I would ask to see before Phase 3
+starts; RR3 is a note that belongs in P13; the rest is documentation drift and hygiene, and
+RR6/RR7 matter only because they are stale claims a future reader will reason from.
+
+## Findings
+
+### [smell] RR1 — R5's re-read is on the wrong side of the lock, unlike the precedent it cites
+
+`BotGroupBehaviorService.java:401` (the call), `:432-446` (`stillWantsToStart`), against
+`:723-740` (`startForRecovery`).
+
+The fix is right in substance and the window is now tiny, but it is not the discipline its own
+javadoc claims:
+
+> Same "re-read and re-assert eligibility" discipline `startForRecovery` already applies to the
+> identical race
+
+`startForRecovery` takes the lock **first** and re-reads **inside** it (`:724` then `:727`).
+`stillWantsToStart` re-reads **before** `startTracked` → `start` → `lock.lock()`, and
+`startLocked` re-reads the document only for its configuration. So the sequence
+
+1. chain: `stillWantsToStart(g)` → `ACTIVE`, proceed
+2. operator `/stop`: nothing open to cancel, lock free, runtime null → persists `STOPPED`
+3. chain: `begin`, lock, build, `setTargetStatus(ACTIVE)` at `:1045`
+
+still loses the `STOPPED` write — which is DEAD_GROUP_AUTO_RECOVERY AD-5's only opt-out, i.e.
+the exact write R5 was about. The window shrinks from "the whole chain, up to an hour" to "one
+`findById` plus one log line plus `begin`", which is why this is a smell and not a re-raise: the
+same width exists for any `/start` racing any `/stop` and always has.
+
+Fix shape: assert intent where the lock already is — a `startLocked` precondition, or an
+`expectTargetStatus` argument threaded through `startTracked`, so the assertion and the ACTIVE
+persist are under one lock acquisition. Failing that, drop the `startForRecovery` comparison from
+the javadoc, because it is the sentence that will stop the next reader from looking.
+
+### [smell] RR2 — R3 fixed only `getHealth`'s runtime-**less** branch; the reclaim window still answers `DEAD`
+
+`BotGroupBehaviorService.java:1948` (`status(runtime.getActualStatus())`), against `:1916`
+(`status(getActualStatus(id))`) and `:2872-2882` (`getActualStatus`).
+
+`getActualStatus`'s javadoc names the case this leaves open, in so many words:
+
+> where they differ is a reclaim — a DEAD runtime being rebuilt still reads DEAD until
+> `startLocked` tears it down, and answering DEAD to an operator whose `/start` was just
+> accepted is the one answer that is actively misleading
+
+A `/start` on a DEAD group opens the attempt in `submitLifecycle` (`:530`), and the DEAD runtime
+stays in `runningGroups` until `teardownRuntimeMemory` at `:806` — which is behind
+`lock.lock()`. For the whole of that window `/status` says `STARTING` (correct) and `/health` —
+the public-facing UI feature — takes the runtime branch and says **`DEAD`**. Under pacing the
+lock can be held by another operation for minutes. There is a milder inverse too: a redundant
+`/start` on a live group makes `/status` say `STARTING` while `/health` says `ACTIVE`.
+
+R3's point was that the two endpoints must not disagree about the same group at the same
+instant, and they still can — now in the direction the javadoc singles out as the worst one.
+Fix: `status(getActualStatus(id))` in **both** branches; the runtime's own status is still the
+right source for `playingStatus`, `startedAt` and the per-bot block.
+
+(The second half of R3 — carrying `botsUp` on the health DTO — was not done. That needs a new
+`BotGroupHealthDTO` field and A1 only promises `registeredCount` there, so skipping it is fine;
+`totalBots: 0` on a group that is `STARTING` is honest, if terse.)
+
+### [smell] RR3 — R6's lock gives a wedged build a second blast radius, and P13 does not record it
+
+`BotGroupBehaviorService.java:1675` (`stopAndLogout`'s `lock.lock()`), `docs/plans/FOLLOWUPS.md`
+P13, against the precedent at `:3008-3018` (`handleBotGroupDeath`).
+
+Taking the lock is the right fix and I verified it is deadlock-free (below). The cost is that
+`DELETE /{id}` now parks **uninterruptibly** on a lock a build holds. Normally that is bounded:
+`cancelStartInFlight` runs first, the build polls the flag under its semaphore permit and
+unwinds. But P13 is precisely the case where the build *never polls* — parked in
+`semaphore.acquire()`, or on a socket read with no timeout, or (Phase 3) on an `ESSENTIAL`
+waiter with an unbounded max-wait. Then the lock is never released and every DELETE, like every
+`/stop`, permanently consumes a Tomcat worker. An operator who retries a few times spends a few
+more. Before this round a DELETE at least returned.
+
+This does not change my agreement with deferring R9, but P13 currently says the impact is "a
+group that will not come up and cannot be retried" — it is now also "and every attempt to stop
+or delete it costs a request thread for the life of the JVM". Two cheap mitigations, either of
+which would close it independently of P13: `tryLock` with a timeout and a `409`/`503` (the
+health monitor already does exactly this at `:3008`, with the reasoning written out), or bound
+the acquire in `createBotsInParallel`.
+
+### [smell] RR4 — `ClientSafeMessage`'s stated rule does not match the handler for two `BotManagerException` subtrees
+
+`ClientSafeMessage.java:21-25` and `:69-70` (the claims), `:78-80` (the predicate), against
+`RestExceptionHandler.java:77-84` and the absent 429/503 arms.
+
+The extraction is the right shape and the forwarded set is the one I asked for. But the class
+whose whole purpose is to be the single true statement of the policy states it wrongly in two
+places, and `BotManagerException` is wider than the handler's typed arms:
+
+- **`ResourceNotFoundException extends BotManagerException`**, and its handler arm returns a
+  **bodyless 404** (`:77-84`) — the message is logged at INFO and never reaches a client. So
+  `ClientSafeMessage` forwards verbatim a message the HTTP layer has never exposed. It is
+  reachable on this path: a group deleted mid-build makes `startLocked`'s `findById` throw it,
+  and `lastError` will then read `Bot group not found with id: …`. That is a *better* answer
+  than `Internal server error (ResourceNotFoundException)`, so the behaviour is fine — the
+  claim "every subclass of it is already message-forwarded by `RestExceptionHandler`'s typed
+  arms" is not.
+- **`GatewayBudgetException extends BotManagerException`** (plus `…Exhausted`, `…CircuitOpen`,
+  `…RequestCancelled`) has **no arm in `RestExceptionHandler` at all** in Phase 2 — it falls
+  through to `handleAny` and is sanitised into a 500. So "the handler already forwards all of
+  them verbatim at 400/502/429/503" describes a Phase 3 state as present tense. The messages
+  are self-authored (`GatewayBudgetExhaustedException: … (tier ESSENTIAL); retry in 12s`
+  appears in the test log), so forwarding them is right — but it is a decision this class is
+  making ahead of the handler, not a policy it is inheriting.
+
+Fix shape: state the rule as "our own hierarchy, whose messages we wrote" and drop the appeal to
+which arm forwards what, or enumerate the two exceptions to it. Both messages being safe is why
+this is a smell; a policy class that misdescribes the policy is how the next widening gets
+justified by a sentence that was never true.
+
+### [smell] RR5 — the delete/resurrect race is narrowed, not closed: `deleteById` runs after the lock is released
+
+`BotGroupService.java:334-337`, against `BotGroupBehaviorService.java:1675-1681`.
+
+```java
+public void delete(String id) {
+    behaviorService.stopAndLogout(id);   // takes and releases the group lock
+    repository.deleteById(id);           // outside it
+}
+```
+
+A `/start` that acquires the lock in the gap between those two statements reads the document
+successfully (it still exists), builds for minutes, and then `save()` **re-inserts** it — Spring
+Data `save` is an upsert by `_id` — leaving a live runtime for a group the operator deleted. The
+window has gone from "the whole build" to "between two adjacent statements", so the fix is a
+real fix; but the clean shape is one lock acquisition covering both the teardown and the delete
+(a behaviour-service method that ends in the repository call, or the lock hoisted into
+`BotGroupService.delete`). The `stopAndLogout` comment currently asserts the stronger property
+it does not quite have: "after which `BotGroupService.delete` removes a document nothing will
+write again".
+
+### [style] RR6 — `BotGroupStatusRollbackSafetyTest` was not brought along with R1, and now reads as a defect report for a defect that is fixed
+
+`bot-app/src/test/java/com/vingame/bot/domain/botgroup/model/BotGroupStatusRollbackSafetyTest.java:29`,
+`:78`, `:125`, `:150`.
+
+Dev corrected the `ConversionFailedException` / boot-query model in `BotGroupStatus`,
+`BotGroupStatusPersistenceGuardTest` and `BotGroupDTO` — and left the sibling file that
+*measures* the mechanism carrying the old one:
+
+- `:29` — "`findByTargetStatus(ACTIVE)` is on the application-ready boot path — one poisoned
+  document does not degrade one group, it fails the whole boot query";
+- `:78` — "which on the `findByTargetStatus(ACTIVE)` boot path means the whole query — and
+  therefore the whole startup — fails";
+- `:125` — "**This is a defect report, not a specification.** … The assertions below are the
+  invariant A1 states; they fail today, and the fix belongs in production code";
+- `:150` — `@DisplayName("neither create nor patch may persist an appended constant (currently
+  they do)")`, on a test that now passes.
+
+The same file already corrects the *exception type* at `:82-83`, so it is internally
+inconsistent as well as stale. This is the last place in the tree still teaching the wrong
+model, and it is the place a reader goes for the measured answer. (A1 itself still carries it
+too — that is Architect-2's reconciliation and is correctly out of Dev's hands.)
+
+### [style] RR7 — the Q3 MDC change invalidated a javadoc in `DeadGroupRecoveryScheduler` that the diff did not touch
+
+`DeadGroupRecoveryScheduler.java:372-386` (the claim), `:419-422` (the now-redundant re-assert).
+
+> **The MDC has to be re-asserted after `startForRecovery` returns**, and that is not defensive
+> tidying. Every path through `startLocked` calls `BotMdc.clear()` on *this* thread before
+> returning — the reclaim path's `teardownRuntimeMemory`, the normal build path's
+> `createBotsInParallel` result loop, and the failure path's outer `finally`
+
+All three named sites were converted to `snapshot`/`restore` in `95d551e` (`:1600/:1607`,
+`:1206/:1236`, `:1064/:1086`). The re-assert at `:421` is now a harmless no-op, but a paragraph
+that opens with "that is not defensive tidying" and names three specific sites as the reason is
+exactly what someone will delete or rely on. Either drop the re-assert and the paragraph, or
+restate it as belt-and-braces.
+
+### [style] RR8 — two consecutive javadoc blocks on `INTERNAL_ERROR_MSG`, the first now orphaned and wrong
+
+`RestExceptionHandler.java:62-75`.
+
+The new block was added without removing the old one. Java attaches only the last, so the first
+becomes a dangling comment that still describes the string as being defined here ("Fixed,
+operator-safe message used in the 500 fallback"). Compiles, and it is the kind of thing that
+makes the next reader think there are two constants.
+
+### [style] RR9 — R11 is half-fixed: the MDC call is still outside the lambda's `try`
+
+`BotGroupBehaviorService.java:551-553`.
+
+```java
+Thread.ofVirtual().name("group-" + action + "-" + id).start(() -> {
+    BotMdc.setGroupContext(id, environmentId);   // outside the try
+    Throwable failure = null;
+    try { … } finally { startAttempts.finish(id, failure); … }
+});
+```
+
+Wrapping `submit()` closes the thread-creation half, which was the larger one. A throw from
+`setGroupContext` still leaves the attempt open forever — R9/P13's black hole from a
+one-line-movable cause. Move it inside the `try`.
+
+### [style] RR10 — R8's relocation split `botsFailed` from `bot_creation_failures_total` for non-`Exception` throwables
+
+`BotGroupBehaviorService.java:1174` (`catch (RuntimeException e)`) against `:1225`
+(`incBotCreationFailure` in the join loop's `catch (Exception e)`).
+
+Moving the increments into the task is right and fixes the index-order lie. One invariant was
+lost in the move: while both lived in the join loop they could not disagree. Now an `Error` from
+`createSingleBot` — `NoClassDefFoundError` is not hypothetical in a tree heading for child
+classloaders, and `OutOfMemoryError` is the load this feature exists for — skips
+`catch (RuntimeException)`, so `botsFailed` misses it while the join loop's `catch (Exception)`
+still catches the wrapping `CompletionException` and moves the metric. `catch (Throwable)` at
+`:1174` restores it. Low stakes (`botsFailed` reaches nothing but `describe()`'s log line, per
+A1), which is why this is style.
+
+### [style] RR11 — `stopAndLogoutLocked` is the one teardown left on `clear()` rather than `snapshot`/`restore`
+
+`BotGroupBehaviorService.java:1707`.
+
+Four sibling teardown/aggregation blocks were converted in `95d551e`; this one was not. Correct
+today — its only caller is `BotGroupService.delete` on a Tomcat thread with no outer scope — but
+it is now the odd one out, and the `BotMdc.clear()` javadoc added in this very round tells the
+reader to prefer `snapshot`/`restore` "when the scope you are leaving is nested inside another
+one". Either convert it or say why it is exempt.
+
+## Notes
+
+### Item 1 — R1's perimeter, checked rather than assumed
+
+`targetStatus` is `@JsonProperty(access = READ_ONLY)` on `BotGroupDTO:164` and gone from both
+mapper write paths. I looked for a third way in and did not find one:
+
+- **Other mappers:** `BotGroupMapper` is the only production construction path — one
+  `BotGroup.builder()` call in the whole tree (`BotGroupMapper.java:66`), and exactly two
+  persist sites, both in `BotGroupService` (`:207`, `:311`).
+- **MapStruct-generated code:** every method on the interface is `default`, so the generated
+  `BotGroupMapperImpl` is an empty `@Component` — verified in
+  `bot-app/target/generated-sources/annotations/…/BotGroupMapperImpl.java`. There is no
+  generated write path.
+- **Direct `@RequestBody` onto the entity:** the botgroup controller binds `BotGroupDTO`,
+  `BotGroupFilter` and `LocalDateTime` only. No endpoint anywhere accepts a `BotGroup`.
+- **Mongo `update`:** `BotGroupService`'s `MongoTemplate` is used for `find` only (`:105`);
+  `BotGroupRepository` declares four derived finders and no `@Query` update. Nothing partial
+  writes this field.
+- **Filter/sort surface:** `BotGroupFilter` carries `name`/`gameId`/`sortBy`/`sortDir` — no
+  status criterion, so `READ_ONLY` cannot have broken filtering *by* status, because there was
+  none. `BotSortKey.STATUS` sorts on `actualStatus()`, in memory.
+- **Outbound rendering still works** on all three surfaces: `BotGroupMapper.toDTO:49` →
+  `BotGroupDTO` (GET `/{id}`, `POST /{envId}/filter`, and the `POST /` and `PATCH` responses),
+  `BotGroupController.statusDTO:301` → `BotGroupStatusDTO` (unannotated, untouched), and
+  `BotGroupHealthDTO.status`. `READ_ONLY` is serialise-yes / deserialise-no, and the DTO
+  deserialises through `@NoArgsConstructor` + setters with no `@JsonCreator`, so there is no
+  creator-binding path around the annotation. The guard test asserts both directions through a
+  real `ObjectMapper`, which is the right way to assert it.
+- **The by-value assertion does survive an appended constant**:
+  `theMapperNeverCarriesTargetStatus` loops `BotGroupStatus.values()` for both directions. Worth
+  knowing that the *other* half does not — `NOT_PERSISTABLE` in
+  `BotGroupStatusPersistenceGuardTest:69-70` is still a hand-written list of today's three, so a
+  fourth appended constant is guarded by the mapper test and by nothing in the source scan. That
+  is the right split (the scan exists for `setTargetStatus` literals, and the six real call
+  sites are all internal), but it is a split, not a general guarantee.
+- **Out of the perimeter by construction:** `seed.js` writes `botGroups` documents straight into
+  Mongo, `targetStatus` included. Nothing can or should stop that; it is worth one sentence
+  somewhere that the invariant is an *API* invariant, so that a future seed or a `mongosh`
+  one-liner with `"STARTING"` is understood to be poisoning the collection deliberately.
+
+**Rejecting the validator arm is the right call, and the argument is stronger than Dev states.**
+The javadoc grounds it in Phase 4 rendering `REGISTRATION_PENDING`. It already bites *today*:
+`toDTO` renders `ACTIVE`/`STOPPED`/`DEAD`, so any read-modify-write client already hands a
+non-null `targetStatus` back on every PATCH. A validator restricted to the three appended
+constants would be fine today and would start 400-ing legitimate PATCHes the day Phase 4 ships —
+which is CLAUDE.md's recorded strategy-key trap exactly. Silent-ignore is also what the class
+already does for `lastStartedAt` / `lastStoppedAt` / `lastFailureReason`, so `READ_ONLY` makes
+the field consistent with its three neighbours instead of inventing a fourth behaviour. Agreed,
+with the one consequence worth stating in a release note: a client that *intends* to change
+lifecycle by PATCH now gets a `200` and no change.
+
+### Item 2 — R2's refactor changes nothing the HTTP layer exposes
+
+`INTERNAL_ERROR` is byte-identical to the old `INTERNAL_ERROR_MSG`
+(`"Internal server error — see server logs"`), and `RestExceptionHandler` now reads the constant
+from `ClientSafeMessage` without touching a single arm. Every existing path — the bodyless 404,
+the two verbatim 400s, the synthesised type-mismatch 400, the 502, the sanitised
+`IllegalStateException` 500, `handleAny`, `msgForStatus`'s 4xx-forwards-5xx-sanitises split —
+is unchanged. Confirmed by reading all 297 lines, not just the diff.
+
+**The one deliberate widening (the simple class name in `lastError`) is justified.** A
+`lastError` holder has no request URI and no timestamp to correlate a server log against, which
+is the thing the handler's policy leans on, and a bare `getSimpleName()` carries none of the
+three leaks the policy names — no hostname, no bean-wiring detail, no `HttpClient` internals.
+`Internal server error — see server logs (MongoSocketOpenException)` is materially more useful
+than the bare string and materially less than `toString()`. Accepted. Two cosmetic notes:
+`getSimpleName()` is `""` for an anonymous class, so the message can render as
+`… server logs ()`; and `IllegalArgumentException` being in the safe set means a *library-*
+authored IAE is forwarded verbatim — including, pleasingly,
+`No enum constant com.vingame.bot.domain.botgroup.model.BotGroupStatus.STARTING` if a document
+is ever poisoned by the one route R1 cannot close. That is the handler's existing 400 policy
+applied consistently, and it is the set I asked for, so it is not a finding — just the one
+FQCN-shaped hole in an otherwise clean rule.
+
+### Item 3 — the rest of R3-R8, R10-R13
+
+- **R4** fixed, and the mechanism is right. `shuttingDown` is `volatile`, set at `:291`
+  **before** either `shutdownNow()`, and checked at the top of every iteration (`:395`) with one
+  INFO line naming the abandoned count. `botCreationExecutor` is
+  `Executors.newThreadPerTaskExecutor`, so there is no queue to reject from — the flag is what
+  turns N rejections into zero, and the group that was mid-build still costs one ERROR, not N.
+  `catch (Throwable t)` at `:404` closes the `Error`-swallowed-by-stderr half, and the log line
+  now uses `t.toString()` so the type survives (the old `e.getMessage()` was `null` for plenty
+  of the types this catches). P14 honestly records the drain residue.
+- **R5** fixed in substance — see RR1 for the residual. `MANUAL_OFF` is not checked explicitly
+  and does not need to be: `POST /{id}/stop` goes through `runWithManualOverride` *and*
+  `stop(id, true)`, which persists `STOPPED` for a runtime-less group (`:1541-1553`), so the
+  `targetStatus != ACTIVE` test covers it. The `SCHEDULED` arm is the right second test — a PATCH
+  can move a queued group onto the schedule. A deleted group throwing out of `findById` into the
+  chain's own catch is the right call, not a defect.
+- **R6** fixed, and I could not construct a deadlock. All five `groupLocks` acquisitions
+  (`:470`, `:724`, `:1526`, `:1675`, `:3008`) take exactly one per-group lock and never nest, so
+  there is no ordering to get wrong; `handleBotGroupDeath` — the only other thread that contends
+  for it on a schedule — uses `tryLock` with a timeout and gives up with a WARN, so the health
+  monitor cannot park behind a DELETE. `stopAllBots` waits on the *runtime's* executor, which no
+  lock-holder is ever inside, and the bot threads never touch `groupLocks`. The daisy-chain and
+  `startForRecovery` are serial, one group at a time. The two hazards R6 named are genuinely
+  serialised away: the ACTIVE-persist-then-delete order now completes before the teardown, and
+  the `remove` → `null` → no-`stopAllBots` leak cannot happen because the build's `finally` and
+  this teardown can no longer interleave. See RR3 for the cost and RR5 for what is left.
+- **R7** fixed: `begin`'s `false` now returns `false` from `startForRecovery` (`:748-758`), and
+  the check is inside the lock, next to the eligibility re-assert. One consequence to be aware
+  of rather than to fix: `DeadGroupRecoveryScheduler:444-449` treats `false` as
+  `OUTCOME_FAILED` and charges the attempt budget, so a foreign start that is open-but-not-yet-
+  locked converts into a charged failed attempt. It is very narrow (`RecoveryCandidateSelector`
+  screens on `isGroupRunning`, which is now attempt-aware, and the foreign start is about to
+  persist `ACTIVE` and take the group out of the candidate set), and the pre-existing
+  no-longer-eligible branch three frames up has had the same property all along — the `@return`
+  javadoc even says so. Building anyway was worse. Accepted.
+- **R8** fixed as AD-17 asked: `botUp` at `:1176` inside the task, immediately after
+  `createSingleBot` returns and while the permit is still held; `botFailed` at `:1183` and
+  `:1189`; both gone from the join loop, so there is no double count. The cancelled-and-returns-
+  null path is still neither up nor failed, and `skipped` still accounts for it. See RR10 for
+  the one invariant the move cost.
+- **R10** fixed, and fixed in the better of the two ways I offered: `recordFailure` publishes
+  the self-authored reason rather than the DTO falling back to `lastFailureReason`. I checked the
+  ordering hazard it could have introduced — `recordFailure(zeroBotReason)` sits *after* the
+  cancellation checkpoint at `:948`, so a `/stop` that cancels a build to zero bots returns at
+  `:952` and never records a failure. A cancelled stop is still reported as the INFO it is. The
+  `finish` precedence (`error != null && attempt.error == null`) and `recordFailure`'s
+  last-writer-wins are both documented and both correct for the restart case.
+- **R11** fixed for the thread-creation half; see RR9 for the other line.
+- **R12** fixed. `catch (Throwable t)` around `restartAsync` in the scheduler lambda, one ERROR
+  with the SLF4J `{}` form and the throwable attached. Swallowing is right here — a one-shot
+  `ScheduledFuture` nobody calls `get()` on has nowhere else to put it.
+- **R13** fixed: `StartAttempt` is `private`, `finishedAt` is gone, and the eight accessors with
+  it. `Phase` stays public because it is a parameter of `progress`. Compiles clean, so nothing
+  outside was reading them.
+
+### Item 4 — the R9 / Q4 deferral
+
+**Accepted, and the reasoning is correct where it matters most.** I verified the specific claim
+that the obvious fix is wrong: the cancellation flag lives on the *open* attempt, and
+`isCancelled` returns `false` when nothing is open (`StartAttemptRegistry:131-134`), so a TTL
+that removes an open attempt makes the build's next poll read "not cancelled" and bring the
+group up after a `/stop` already answered `200` — which is exactly the `750fc91` race, from the
+other end. That is the same mechanism `clearRetained`'s javadoc spells out for the stop path,
+and it applies unchanged to a timer. The named alternatives are the right two: a generation
+token on the cancellation predicate (so a superseded build can be told "you are not the current
+attempt" without the flag being reachable through a group-keyed lookup), or a bounded build —
+and the observation that Phase 3's `essential.max-wait=0` is the input that turns this from
+conceivable to expected is the useful half of P13. Flagging it as a Phase 3 pre-read is the
+right disposition.
+
+Two things to add to P13 rather than to the code:
+
+1. **Discovery depends on a human trying a second `/start`.** P13 calls the condition
+   "diagnosable today" on the strength of `describe()`'s `elapsed 3600s`, but that line is only
+   emitted by a second start attempt. Nothing periodic reports it, no metric was added this
+   phase, and `FleetRollupLogger` keys off running environments — so a fleet parked in
+   `STARTING` is invisible in Grafana. The cheapest thing that would change that is one gauge
+   (`start_attempt_age_seconds`, pre-registered at zero per CLAUDE.md), and it is a Phase 3
+   line item, not a Phase 2 one.
+2. **RR3** — the lock now makes the wedge cost request threads too.
+
+**Q4's ERROR-storm half is genuinely fixed and the residue in P14 is honestly scoped.** "The
+sockets drop when the process exits and the server prunes them" is right, and the pointer at
+`PLUGIN_HOT_RELOAD`'s drain requirement is the correct home — a bounded `@PreDestroy` join is
+the sort of thing that is cheap to write and expensive to get wrong against a `connect()` that
+swallows interrupts.
+
+### Item 5 — the `findByTargetStatus` mechanism, confirmed independently
+
+Dev's adjudication is right and I re-derived it without reference to my earlier note:
+
+- `BotGroupRepository.findByTargetStatus(BotGroupStatus)` is a Spring Data derived query. The
+  enum parameter is converted to its `name()` string (the same conversion that writes the field,
+  and there are no `MongoCustomConversions` anywhere in the app) and issued as
+  `{"targetStatus": "ACTIVE"}`. **MongoDB does the filtering.** A document holding `"STARTING"`
+  does not match, is never returned, and is therefore never handed to the converter. The boot
+  query does not fail.
+- What *does* convert the group is every read that returns it: `findById` → `GET /{id}`, and
+  `BotGroupService:105`'s `mongoTemplate.find(query, BotGroup.class)` → `POST /{envId}/filter`,
+  where the query is scoped by `environmentId` and one poisoned document therefore 500s the list
+  for every healthy group beside it. That is the blast radius.
+- On the current jar the same document silently leaves `findByTargetStatus(ACTIVE)` (no
+  auto-start), `findByTargetStatus(DEAD)` in `RecoveryCandidateSelector:62` (no auto-recovery),
+  and `RecoveryEligibility`'s `ACTIVE`/`STOPPED`/`DEAD` branches. Unmanaged, with nothing logged
+  — which was the sharper half of R1 all along.
+- The exception type correction is also right, and is now measured rather than asserted:
+  `MappingMongoConverter.getPotentiallyConvertedSimpleRead` lets `Enum.valueOf`'s
+  `IllegalArgumentException` out, which `BotGroupStatusRollbackSafetyTest:89-98` pins by message.
+
+A1 still carries the wrong claim, correctly left to compliance. RR6 is the copy of it that Dev
+*could* have fixed and did not.
+
+### Item 6 — phase boundary and Phase 1 guarantees
+
+**Clean.** The production diff is: `BotMdc` (two additive methods), `ClientSafeMessage` (new),
+`RestExceptionHandler` (one constant), `BotGroupDTO` (annotation + javadoc), `BotGroupMapper`
+(two removals + comments), `BotGroupStatus` (javadoc), `BotGroupBehaviorService` (the ten fixes
+above), `StartAttemptRegistry` (`recordFailure`, the classified `finish`, the privatisation). No
+queue, waiter, ceiling, reservation, tier decision, `registrationState` field, registration
+machinery or Cloudflare detection appears anywhere. The only budget surface touched is Phase 1's
+existing `find`/`cancelScope` in `cancelStartInFlight`, unchanged. `GatewayBudgetException` shows
+up only as a javadoc reference in `ClientSafeMessage` and as a test fixture — see RR4, which is
+a documentation issue, not machinery.
+
+**No Phase 1 guarantee weakened.** `BotMdc.clear()` removes exactly the same nine keys it did
+before (`ALL_KEYS` is the same list, and it is the complete set of the class's nine constants),
+`snapshot`/`restore` are additive, and the full reactor — including
+`GatewayCallSiteGuardTest`, `Log4j2TwinConfigTest`, `PerBotInfoLogGuardTest` and the rest of the
+build-time guards — is green. One structural note for later: nothing pins `ALL_KEYS` against the
+declared constants, so a tenth MDC key would be silently missed by `clear()`, `snapshot()` and
+`restore()` alike. `clear()` had the same exposure before, so this is not a regression, but the
+surface it affects has tripled.
+
+**Logging** stays compliant. Every new INFO is once per JVM (the abandoned-chain line, the
+`started by this chain` count), once per group start (the two skip lines, the recovery
+already-in-flight line) or once per operator action. No new per-bot, per-round or per-message
+line, no token material, `{}` form throughout, and every one carries the group MDC — which is
+what `95d551e` was for.
+
+### Behaviour and contract changes worth a release note
+
+1. **`POST /api/v1/bot-group/` no longer honours `targetStatus` in the body.** A new group is
+   created with `targetStatus = null`, which A1 says is the intended state ("byte-for-byte the
+   state a synchronously registered group has had since day one"), so this is a correction. But
+   a script that created groups pre-set to `ACTIVE` in order to have them auto-start on the next
+   boot will silently stop doing that. Nothing in `seed.js` or the UI does, as far as I can see.
+2. **`PATCH /{id}` with `targetStatus` is now a silent no-op**, not a 400 — deliberate, see
+   item 1.
+3. **OpenAPI/Swagger now marks `BotGroupDTO.targetStatus` `readOnly: true`**, so any client
+   generated from `/v3/api-docs` will drop it from its create/update models. Correct, and
+   visible.
+4. **`lastError` text changed for every failure that is not a `BotManagerException` or an
+   `IllegalArgumentException`** — previously the raw `toString()`, now
+   `Internal server error — see server logs (ClassName)`. Anyone who was reading that field with
+   a script is reading something different now.
+
+### Smaller things, for the author, not findings
+
+- `cancelStartInFlight:649-652` calls `describe(id)` *after* `cancel(id)` has already flipped the
+  flag, so the operator-facing line always ends `", cancelled"` — visible in the test output as
+  `elapsed 0s, cancelled) — cancelling it`. It is impossible to tell from that line whether an
+  earlier `/stop` had already cancelled the build. Pre-existing from the previous round;
+  capturing the description before the cancel would fix it.
+- `BotMdc.snapshot()` / `restore()` are new public API on a class with its own dedicated
+  `BotMdcTest`, and I do not see them exercised there. That is QA's call, not a finding here —
+  flagging it only because they are the mechanism the whole Q3 fix rests on.
+- `72bbb24`, the branch tip, is not part of the fix round and is not Phase 2: it touches
+  `.claude/agents/releaser.md` and adds `docs/findings/gwms-register-envelope.md`. I left it
+  alone, as instructed; noting it so the compliance and release passes are not surprised by a
+  commit after `d9be331`.

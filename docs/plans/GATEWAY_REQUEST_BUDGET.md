@@ -1663,3 +1663,399 @@ are **release-blocking** and neither is in the code:
    `docs/process/AGENTIC_WORKFLOW.md` already does since `3ee11ed`.
 
 Until (2) is done the Releaser will abort a good deploy at the first smoke step.
+
+---
+
+## Amendment — 2026-09-29 (Phase 2 re-check; A1's factual errors reconciled; Open Items 1, 7 and 13 closed; A14-A20)
+
+Phase 2's fix round is `7e118bf`..`d9be331` (six commits answering QA's Q1-Q6 and review's
+R1-R13), plus the main session's `72bbb24`. Re-check verdict **PLAN_AMENDED / diff accepted** —
+`docs/reviews/GATEWAY_REQUEST_BUDGET/compliance-phase2.md`, `## Re-check`. Build at `72bbb24` in
+a detached worktree: **2,276 tests, 0 failures, 0 errors, 0 skipped** (bot-api 148,
+bot-messages 167, bot-strategies 126, bot-engine 494, bot-app 1,341), including QA's previously
+red `BotGroupStatusRollbackSafetyTest$WritePaths`.
+
+Three of the items below correct claims **this document was asserting confidently and wrongly**;
+two close open items the user has now answered; one orders what Phase 3 absorbs. Everything was
+verified against the code or against the running library — where a claim is a claim about a
+framework, the probe that established it is named, so the next reader can re-run it rather than
+trust it.
+
+---
+
+### A14 — A1 is wrong in three places: the boot query, the exception type, and what the DTO accepted
+
+A1 is now the text a future reader will trust, and it contains three falsehoods. Each was
+checked independently for this amendment, not taken on Dev's or the reviewer's report.
+
+**1. `findByTargetStatus(ACTIVE)` does not fail on a poisoned document.** A1 says "one poisoned
+document would fail the whole boot query". It does not. Verified by issuing the repository method
+against a recording `MongoOperations` (a `java.lang.reflect.Proxy` over the interface, a real
+`MappingMongoConverter` over a real `MongoMappingContext`, no server): the derived method
+resolves to
+
+```
+ExecutableFind.as(BotGroup) → FindWithQuery.matching(Query{targetStatus=ACTIVE}) → TerminatingFind.all()
+```
+
+and `QueryMapper.getMappedObject` renders the criterion as the BSON filter
+`{"targetStatus": "ACTIVE"}` — a **`java.lang.String`**, not the enum. The match is therefore
+server-side, a document holding `"STARTING"` is never returned, and `MappingMongoConverter.read`
+never sees it. `onStartup` is not the blast radius, and no amount of poisoning stops the app
+booting.
+
+**What the blast radius actually is**, in two halves:
+
+- **Older jar (the rollback case): every read that *does* convert the group.** `GET /{id}`
+  (`findById`) and — far worse — `POST /{envId}/filter`, which is
+  `mongoTemplate.find(query, BotGroup.class)` over the whole environment
+  (`BotGroupService.java:96-105`). One poisoned document takes **the entire environment's list
+  view** with it, not one row. That is the UI's primary screen.
+- **Current jar: the group goes silently unmanaged.** It leaves `findByTargetStatus(ACTIVE)`, so
+  `onStartup` never queues it; and it leaves `RecoveryEligibility`'s `ACTIVE`/`STOPPED`/`DEAD`
+  branches, which default to ineligible, so auto-recovery never touches it either. Nothing is
+  logged. That is precisely the failure shape DEAD_GROUP_AUTO_RECOVERY exists to remove, restored
+  by one PATCH.
+
+**2. The exception is `IllegalArgumentException`, not `ConversionFailedException`.** Measured:
+reading a document whose `targetStatus` holds a name the enum does not declare throws
+
+```
+java.lang.IllegalArgumentException: No enum constant com.vingame.bot.domain.botgroup.model.BotGroupStatus.<name>
+  at java.base/java.lang.Enum.valueOf(Enum.java:293)
+  at org.springframework.data.mongodb.core.convert.MappingMongoConverter.getPotentiallyConvertedSimpleRead(...:1420)
+```
+
+QA measured the same thing through `BotGroupStatusRollbackSafetyTest`; this amendment reproduced
+it independently. `BotGroupStatus`' javadoc and the guard test's javadoc were corrected by
+`7e118bf`; A1's text is corrected here.
+
+**3. And it is not a 500 — correcting the correction.** Both Dev and the reviewer describe the
+consequence as "one poisoned group 500s the whole environment's list view". It does not.
+`IllegalArgumentException` reaching a controller is caught by
+`RestExceptionHandler.handleIllegalArgument` (`:94-100`) and answered as **HTTP 400
+`{"type":"Bad request","msg":"No enum constant …"}`**. Spring Data does not wrap it
+(`MongoExceptionTranslator` translates driver exceptions, not ours), and that handler arm has
+existed since the module split (`92469f5`), so any plausible `vingame-bot:rollback-*` has it.
+
+The list view therefore fails with a **client-error status that blames the caller** and leaks the
+enum name — which is worse for diagnosis than a 500, because a 400 reads as "the UI sent
+something wrong" and sends the investigation in the opposite direction from the truth ("a
+document written by a newer jar is unreadable"). The severity of the invariant is unchanged; only
+the symptom an operator will actually see is different, and it is more misleading than advertised.
+The "500s the list" wording survives in three javadoc strings
+(`BotGroupStatus`, `BotGroupStatusPersistenceGuardTest`, `BotGroupStatusRollbackSafetyTest`) and
+in no code; fold the correction into Phase 3's documentation pass rather than spending a commit
+on it. **This amendment is the authority.**
+
+**4. A1's consumer audit claims a property that was false.** The row for
+`BotGroupDTO.targetStatus` says it "can still only carry the original three". That was true of
+what the API **renders** and false of what it **accepted** — `BotGroupMapper.toEntity` copied the
+field through the Lombok builder (`:92`, not a `setTargetStatus(` call at all, so the source guard
+could not see it) and `updateEntityFromDTO` copied it from a variable whose value was whatever a
+client sent (`:181`, a call the guard *can* see and a value it cannot judge). `PATCH
+{"targetStatus":"STARTING"}` was a `200` that persisted the one value A1 spends a page forbidding.
+Found by QA (Q1) and the reviewer (R1) independently; the guard test was green throughout, which
+is worse than no guard, because the guard is what the next reader trusts.
+
+**How it was closed (`7e118bf`), and why this shape and not a validator.**
+
+- `@JsonProperty(access = READ_ONLY)` on `BotGroupDTO.targetStatus` — rendered outbound, ignored
+  inbound, asserted through a real `ObjectMapper` rather than by reading the annotation.
+- Removed from **both** mapper write paths, so an in-process caller (a script, a future
+  controller, a test fixture) cannot reach it either.
+- `BotGroupStatusPersistenceGuardTest` gains a **value-level** assertion over
+  `BotGroupStatus.values()` — every constant, in both mapper directions — which survives the next
+  appended constant without an edit. The source scan stays for the "no new literal write
+  anywhere" half, which no dynamic test can give.
+
+**A validator would have been wrong, and this is the part that matters for A3 and Phase 4.** Dev's
+argument is correct and is adopted: A3 has `POST /` render `targetStatus: "REGISTRATION_PENDING"`
+from Phase 4 on, so a read-modify-write client hands that value straight back on its next PATCH. A
+validator rejecting the appended constants would then answer **400 to every PATCH such a client
+makes** — the identical trap CLAUDE.md already records for the strategy-key validation ("a group
+holding an unregistered key fails *any* PATCH until its mix is replaced"). Ignoring the field
+inbound is what makes A3 safe; rejecting it would have made A3 a bug.
+
+So **A3 is unchanged and needs no amendment** — and it is now safe in a way it was not when it was
+written. **Phase 4 inherits one hard constraint from this:** `registeredCount`,
+`registrationState` and `registrationError` are additive *document* fields whose values are
+system-managed exactly as `targetStatus` now is. `registeredCount` is a high-water mark that A2.1's
+resumability depends on (`indices 1..k are done`); if it is writable from a request body, a client
+can make the worker skip or re-register a block of accounts. Render it, never accept it — the same
+`READ_ONLY` + no-mapper-write pair, pinned by the same value-level test.
+
+---
+
+### A15 — Open Item 1 CLOSED: the WS hosts are behind the same Cloudflare rule as the API hosts
+
+User-confirmed. `count-ws-upgrades=true` is **fact**, not the conservative guess A9 left it as.
+Five consequences, the third of which is the largest thing this answer changes:
+
+1. **Declared demand is `botCount × 3`, unconditionally** (login + upgrade + first balance read).
+   A6 Phase 3's `BotGroupBehaviorServiceReservationTest` keeps its `× 2` case as a *hypothetical*
+   covering the kill switch; the flag survives as a kill switch, not as an open question.
+2. **The recovery probe's stamp (A5.3) is on for good.** `countWsUpgrade(reason)` still consults
+   the flag, so the coupling A5.3 removed stays removed, but the answer is now "counted".
+3. **Bot reconnects are cap consumption, and they are the largest un-budgeted source we know
+   of.** `Bot.tryReconnectWs` → `connectUnderBudget(PRIORITIZED, …)` → `runWsUpgrade`
+   (`Bot.java:913,951`), so every watchdog reconnect is now known to be a request the Cloudflare
+   rule counts. MEMORY's staging hot loop is **156k watchdog reconnects in 3 days from two
+   groups** ≈ 52k/day ≈ **~180 per 5-minute window** — ~18% of the entire 1,000-request rule,
+   spent by two sick groups that were never receiving a game message. That makes a reconnect
+   storm a plausible **cause** of an edge block, not only a symptom of a sick fleet. Two things
+   follow: A5.1's "enforcement must reach `run` and `runWsUpgrade`" is the load-bearing half of
+   the feature rather than a completeness item, and enforcement is what converts a reconnect
+   storm from a block risk into a paced queue — an argument for Phase 3 the plan does not make
+   anywhere.
+4. **The anonymous recovery probe reads a Cloudflare block page as *healthy*.** `EnvironmentWsProbe`
+   classifies any completed response with `status < 500` as healthy (AD-2, `:229`), and a
+   Cloudflare 403 block page is a completed, well-formed 403. So during a block the probe reports
+   the environment as serving. AD-13's "`DeadGroupRecoveryScheduler.evaluateCandidate` skips a
+   group whose environment's circuit is open" is therefore **not an optimisation — it is the only
+   thing that stops auto-recovery from starting groups into a blocked edge for as long as the
+   block lasts**, which A16 now says may be a day. Phase 5 must keep it, must not make it
+   conditional on `bot.recovery.enabled`, and should suppress the probe scheduler itself while the
+   circuit is open (its stamps buy no information, and it is now counted).
+5. Open Item 10's periodic-logout spurious reconnect stops being purely a BOT_LIVENESS matter: one
+   extra WS upgrade per group per hour is now a counted gateway request (see A19 for its number).
+
+---
+
+### A16 — Open Item 7 CLOSED, in the worst way: there is no tolerable block cooldown
+
+User's answer: **possibly ~24 hours, possibly until someone clears it manually.** AD-13's
+15-minute cooldown is therefore wrong **in kind, not in degree** — the circuit breaker cannot be
+built on the premise that a block ages out, and a clearance probe cannot be the recovery
+mechanism. What survives, what changes, and what an operator is owed:
+
+1. **The structure survives; the vocabulary and the cadence do not.** AD-13 already never resumes
+   traffic on a timer — `OPEN → HALF_OPEN` only issues **one probe**, and only a non-block
+   response closes the circuit. That is the right shape for an indefinite block. But the property
+   is named `bot.gateway.budget.block-cooldown` and the AD reasons about "the cooldown ends",
+   which is the assumption itself written into the code. **Rename it
+   `bot.gateway.budget.block-probe-interval`, default `60m`** (from 15m): with a ~24 h floor,
+   15-minute probes buy nothing but 96 requests/day thrown at a wall that may well count them,
+   while 60 minutes costs 24/day and detects a human-cleared block within an hour. Constant, not
+   exponential, as before.
+2. **While the circuit is OPEN, no tier parks.** This amends AD-13's "ESSENTIAL waiters park
+   (their wait is unbounded and cancellable)". The rule the plan should have stated, and which
+   `essential.max-wait=0` silently assumes, is: **an unbounded wait is admissible only where
+   progress is guaranteed.** The sliding window guarantees it — stamps expire, so a 3,000-bot
+   start is ~10 windows of monotonic progress. A block guarantees nothing; parking on it is
+   parking a bot thread for up to a day. So an open circuit **refuses every tier** with
+   `GatewayCircuitOpenException` (AD-11's 503 shape) rather than queueing any of them.
+   Consequences, all of them wanted: a group start during a block ends `0/N` with a `lastError`
+   that names the edge block instead of hanging; `classifyCreationFailure` tags it `"budget"`
+   (AD-9, non-terminal); and **FOLLOWUPS P13's black hole is avoided** — a start that parks
+   forever inside the budget is exactly how an attempt stays open for the life of the JVM.
+   `GatewayCircuitBreakerTest`'s "ESSENTIAL parks" assertion becomes "ESSENTIAL is refused".
+3. **`Retry-After` on the circuit's 503 means "when we will next *ask*", not "when it will
+   work".** Keep the header (an HTTP client needs a number) set to the probe interval, and put the
+   truth in the body `msg`: the block may require operator action and may outlive a day. A
+   `Retry-After` that promises 15 minutes for a 24-hour outage is a lie the UI will repeat.
+4. **Alerting must say the brand is down until a human acts.** `GatewayEdgeBlocked`
+   (`gateway_circuit_open == 1`, `for: 1m`, critical, `audience: product`) stays as specified and
+   still needs no Alertmanager route. Two additions: (a) its annotation must carry the
+   operator-facing consequence and the action — *bots on this brand cannot log in, re-auth,
+   deposit or reconnect; there is no automatic recovery inside ~24 h; raise an SA/back-office
+   ticket quoting the `cf-ray`* — and (b) the root `repeat_interval: 4h`
+   (`alertmanager/alertmanager.yml:46`) already re-notifies ~6 times across a 24 h block, which is
+   the right cadence for something a human must clear, so **do not** add a shorter repeat. A
+   second rule `GatewayEdgeBlockUncleared` (same expression, `for: 2h`, critical) is worth adding
+   to separate "blocked" from "blocked and not going away"; it is the only signal that
+   distinguishes a rate-limit blip from a rule change that needs escalating.
+5. **No manual-close endpoint, deliberately.** With no timer to wait out, "SA says it is cleared"
+   wants to be actionable immediately — but the circuit is in-memory, so `docker compose restart
+   bot-manager` closes it now, and the probe closes it within `block-probe-interval` anyway. A
+   `POST /…/circuit/{envId}/close` would be a second lifecycle surface for one rare event; A2 was
+   right to hold the feature to one new endpoint. Written down here so nobody builds it.
+6. **Prevention is the only defence — which is the user's own reason for prioritising this
+   feature, and it changes two things the plan treats as minor.**
+   - **(a) The budget is keyed per environment; the rule is counted per (egress IP × Cloudflare
+     zone).** AD-1 rejected a global budget because "two environments on different hosts must not
+     throttle each other", which is right and does not extend to two environments on the **same**
+     host: two `Environment` documents pointing at the same `apiGateway` each get their own 900,
+     i.e. 1,800 against a 1,000 cap, with neither budget able to see it. **Phase 3 pre-flight:**
+     either key the budget by gateway host, or assert host uniqueness across `Environment`
+     documents at startup and log one WARN naming the duplicates. Cheap; now worth a day of a
+     brand's uptime.
+   - **(b) Open Item 11 stops being a caveat.** `scripts/bulk-create-accounts.py` run from a host
+     that also runs bot-manager against the same brand shares the 1,000 invisibly. One careless
+     run can now cost that brand a day. It goes in CLAUDE.md as a rule, not a note (Phase 6).
+   - The `essential.ceiling = hard-cap = 900` decision (Open Item 5) is **unchanged**, and its
+     reason is stronger: the 100-request gap below 1,000 is the only margin for traffic the JVM
+     cannot see, and it is the margin a day-long block is measured against. **Do not raise
+     `hard-cap`.**
+
+---
+
+### A17 — A13's two documentation items and Open Item 13 are closed, outside Dev's diff
+
+- **A13.1 done** (`8e4a1bc`). CLAUDE.md's BotGroupController table now says `/start` and
+  `/restart` answer `200 + BotGroupStatusDTO` meaning *accepted*, names `STARTING` as
+  `actualStatus`-only and never persisted, and points the caller at `GET /{id}/status`. Verified
+  in the file, not in the commit message.
+- **A13.2 done** (`72bbb24`, the main session, user-approved). `.claude/agents/releaser.md`'s
+  universal smoke now greps `Started Starter|queued for daisy-chained start` and demotes
+  `startup complete` to a later, **non-blocking chain-completion** check. The release-blocker A13
+  flagged — the Releaser aborting a healthy deploy at its first smoke step — is gone.
+- **Open Item 13 CLOSED** by `docs/reviews/GATEWAY_REQUEST_BUDGET/gwms-register-envelope.md`
+  (captured live on 097/BOM staging, 2026-09-29). The existing-username envelope is
+  `{"status":"EXISTED","code":409,…}` at **HTTP 200**. Three things Phase 4 must take from it, one
+  of which A2 did not anticipate:
+  1. classify on `status == "EXISTED"` (the body, never the HTTP status — both answers are 200);
+  2. `EXISTED` is **endpoint-scoped**: from `update-fullname.aspx` it means "display name taken",
+     which is what `isDisplayNameTaken` already accepts. The worker must interpret it against the
+     endpoint it called;
+  3. **a re-register returns no tokens** — no `session_id`, no `token`, no `token2`. So an index
+     that registered but whose display name never landed cannot be finished from the re-register:
+     the worker has to **log in** first, costing `register + login + update-fullname` = **3
+     DEFAULT requests** on that index. A2.1's single `registeredCount` high-water mark cannot
+     express "registered but not named", so **A6 Phase 4 items 1 and 3 are amended**: persist
+     the two as distinct progress (`registeredCount` and `namedCount`, same monotonic
+     in-order rule) so the common case does not pay for the resume case, and budget the resume
+     path at 3 rather than 2.
+
+---
+
+### A18 — Phase 2 verification: what the fix round changed, and four steps to add
+
+**V2a / V2d** are unchanged from A8, with one improvement worth knowing: `botsUp` is now
+incremented **in the per-bot task** rather than in the index-ordered join loop (R8), so "rising
+toward `botCount`" is honest when one bot is slow. Before the fix, one slow bot at index 5 pinned
+the count at 4 however many later bots were up — i.e. the field lied in the *stuck* direction, on
+the one path where 33-50 minutes is normal. **V2b** stays as corrected in A11 (the refusal line
+is `Bot group <id> (<name>): start ignored — a start is already in flight (origin …, elapsed …)`,
+so `grep -c "<GID>.*a start is already in flight"` matches). **V2c** and **V2f** stand.
+
+Four steps to add, all cheap and all covering behaviour that only exists after this fix round:
+
+**V2g — `/health` agrees with `/status` in the accepted-but-not-built window.** Immediately after
+`POST /{GID}/start` on a ≥ 100-bot group, in one shell:
+```bash
+curl -s .../bot-group/<GID>/health | grep -o '"status":"[A-Z_]*"'
+curl -s .../bot-group/<GID>/status | grep -o '"actualStatus":"[A-Z_]*"'
+```
+Expect both `STARTING`. Before R3's fix `/health` hard-coded `STOPPED` here, on the endpoint
+MEMORY records as *the* public-facing UI health feature.
+
+**V2h — an operator `/stop` during the daisy-chain is honoured.** With ≥ 2 ACTIVE groups,
+`docker compose restart bot-manager`; while the chain is on the first group, `/stop` the second:
+```bash
+docker logs bot-manager 2>&1 | grep -c "its targetStatus is now STOPPED"   # → 1
+```
+and that group must never start. `STOPPED` is DEAD_GROUP_AUTO_RECOVERY's only opt-out, and before
+R5's fix the chain overwrote it minutes later.
+
+**V2i — a shutdown mid-chain is one INFO line, not N ERRORs.** `docker compose restart
+bot-manager` while a chain is running, then on the *previous* container's logs:
+```bash
+docker logs bot-manager 2>&1 | grep -c "abandoning the daisy-chain"        # → 0 or 1
+docker logs bot-manager 2>&1 | grep -c "Failed to auto-start bot group"    # → 0
+```
+
+**V2j — `lastError` is sanitised.** Point a throwaway `Environment` at `http://127.0.0.1:1`
+(no traffic leaves the box), create a 2-bot group on it, `/start`, then read
+`GET /{id}/status`. Expect `lastError` to be either the self-authored `Started 0/2 bots — all
+bot creations failed` or `Internal server error — see server logs (<ClassName>)`, and to contain
+**no** `com.`-prefixed package name, no hostname and no port. This is R2's security finding, on
+an unauthenticated endpoint.
+
+**V2k — a request body cannot set `targetStatus`.** The one-curl reproduction of the Phase-2
+blocker, and it belongs in the release sequence:
+```bash
+curl -s -X PATCH .../bot-group/<GID> -H 'Content-Type: application/json' \
+  -d '{"targetStatus":"STARTING"}' -o /dev/null -w '%{http_code}\n'   # → 200
+curl -s .../bot-group/<GID> | grep -o '"targetStatus":[^,]*'          # → unchanged
+```
+
+---
+
+### A19 — `FOLLOWUPS.md` P13 is taken; Open Item 10's reference is stale
+
+Open Item 10 and A9 both tell the reader to file the periodic-logout spurious reconnect as
+**P13**. `d9be331` used **P13** (a wedged build parks its group for the life of the JVM) and
+**P14** (an unclean shutdown leaves an in-flight group's bots connected) for this phase's two
+deferrals, and the periodic-logout item was never filed. It becomes **P15** when it is.
+
+Both of this phase's deferrals are legitimately out of Phase 2's scope — neither a TTL on a start
+attempt nor a shutdown drain appears anywhere in A6 Phase 2, and P13's obvious fix (a TTL that
+drops a stuck attempt) re-opens the race `750fc91` closed, because dropping an open attempt
+uncancels its build. **But P13's entry understates its reachability, and Phase 3 and Phase 5 both
+need the correction:** it is described as what happens if a build "never returns", as though that
+needed an exotic cause. The bot login does not go through our own `HttpClient` — it goes through
+the library's `AuthClient`, which builds its request with **no `.timeout(...)`** on an
+`HttpClient.newHttpClient()` with no connect timeout (`websocket-parser-core-3.0.5` sources,
+`AuthClient.java:25,127-137`), while the four in-repo gateway calls all carry
+`.timeout(Duration.ofSeconds(10))`. A stalled TCP connection on a login therefore parks a build
+thread indefinitely **today**. So:
+
+- **AD-12 (Phase 5, login moves in-repo) must give the login request the same 10 s timeout the
+  other four calls have.** AD-12 does not currently mention a timeout, and since A7 ships Phases
+  2-5 as one deployment, forgetting it means P13 stays reachable in the shipped artifact.
+- Phase 3 must re-read P13 before giving `ESSENTIAL` an unbounded max-wait, as its own entry says
+  — and A16.2 removes the other unbounded wait (an open circuit).
+
+---
+
+### A20 — what Phase 3 absorbs, ordered
+
+This supersedes and orders the "What Phase 3 and Phase 4 inherit" list at the end of
+`compliance-phase2.md` (the fifth item there — `/health` disagreeing with `/status` — is **closed**
+by R3's fix and drops off). Items 1-4 are prerequisites for enforcement being *correct*; 5-8 are
+correctness in the large; 9-12 must not be left behind.
+
+1. **Bound every wait whose subject cannot make progress** (A16.2). An open circuit refuses all
+   tiers; only the sliding window may be waited on unboundedly, because only it drains by
+   construction. This is the difference between a paced fleet and FOLLOWUPS P13 becoming routine.
+2. **A4's `authenticate` / `getBalance` rewrap.** Unchanged, and the stakes are higher than A4
+   states: `/start` no longer has an HTTP response, so a budget outcome during a build is visible
+   *only* through `classifyCreationFailure`'s tag, `bot_creation_failures_total` and the attempt's
+   `lastError`. Leave the rewrap in place and a paced start is indistinguishable from a brand-wide
+   auth outage. Cancelled bots return `null` and are counted `skipped`, deliberately outside both
+   — A4 is about *paced* requests only.
+3. **`cancelScope` must wake waiters, not merely mark them**, matched on
+   `GatewayRequestScope.botGroupId` — the key `Bot.scope()` already supplies and
+   `cancelStartInFlight` already passes. Today a cancelled build returns within one in-flight HTTP
+   call per permit, so V2c's "stop 200 within 5 s" is comfortable; with waiter queues, a bot parked
+   *inside* the budget cannot return until `cancelScope` wakes it, so V2c becomes a direct test of
+   `cancelScope` and A5.1 becomes a **stop-latency** requirement, not only a pacing one.
+4. **Resolve the environment for a cancel without a runtime, or place `reserve` after the runtime
+   is published.** Unchanged by the fix round: `cancelStartInFlight` still reads the environment
+   from `runningGroups`, which is published at `startLocked` before `createBotsInParallel`, so the
+   lookup cannot miss *today*. AD-7's declared-demand reservation breaks that if it is taken at the
+   top of `startLocked`: a `/stop` in that window leaves a reservation shrinking the lower ceilings
+   with nothing to release it.
+5. **A5.1, A5.2 and A5.3**, with `count-ws-upgrades=true` now fact (A15) and reconnects understood
+   as cap consumption.
+6. **The per-gateway-host keying pre-flight** (A16.6a) — one startup assertion or a key change.
+7. **A5.5's two tripwire rewrites, plus the group-level cancellation half.** Both named tests are
+   untouched by Phase 2 and still assert Phase 1 semantics, so A5.5 holds verbatim. What changed is
+   the *population*: before Phase 2 the only cancelled scope in the fleet came from
+   `Bot.isStopped()`; now every bot of a cancelled group start has one. The rewrite must assert a
+   cancelled scope whose **bot is healthy**, or it pins only the case that was already true.
+   `BotGatewayTierTest.theScopeCarriesBothHalvesOfCancellation` is the fixture to lift from.
+8. **Budget outcomes already reach `lastError` correctly — keep them safe.**
+   `GatewayBudgetException extends BotManagerException`
+   (`bot-api/.../GatewayBudgetException.java:25`) and `ClientSafeMessage` forwards our own
+   hierarchy verbatim, so a paced or refused start reports its tier and retry-after on
+   `GET /{id}/status` with no extra work. Verified. That makes those messages **client-visible on
+   an unauthenticated endpoint**: they may name a tier, a duration and an environment id, and must
+   never name a host, a port or an upstream body.
+9. **The MDC idiom.** AD-20's throttle WARN/INFO and the budget scheduler's lines run on threads
+   that already carry a group scope. Use `BotMdc.snapshot()` / `restore()` inside any nested scope,
+   never `clear()` (Q3) — a bare `clear()` in a nested `finally` is what untagged the only report
+   an asynchronous failure makes.
+10. **Alerting for enforce mode.** In `enforce`, `GatewayBudgetNearCap` (> 800) changes meaning
+    from "about to be blocked" to "saturating our own cap", which is **normal** during a large
+    start; nothing alerts on the shape that actually hurts, which is sustained queueing (a group
+    that cannot finish starting). Add one rule on queue depth or wait p95, or accept that V3 is
+    read by hand and say so.
+11. **`StubGateway` (AD-22) lands here**, test scope, without the block-mode half, so
+    `GatewayBudgetEscalationIT` (V3g) proves the cap on the laptop before the single deployment.
+12. **A5.4's three-file flip warning** applies to A9's `essential.ceiling=850` escape hatch as
+    much as to the Phase 6 mode flip.
+
+And what Phase 3 must **not** absorb: registration machinery (Phase 4), Cloudflare detection and
+the circuit (Phase 5) — A16 amends their *design*, not their phase.
