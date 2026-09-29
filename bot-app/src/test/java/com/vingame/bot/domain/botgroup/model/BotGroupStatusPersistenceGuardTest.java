@@ -13,6 +13,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -109,6 +111,112 @@ class BotGroupStatusPersistenceGuardTest {
         assertThat(sites)
                 .as("if this drops to zero the guard above is passing on an empty scan")
                 .isGreaterThan(3);
+    }
+
+    /**
+     * The builder form of the same guard, which is the shape that let R1/Q1 through in the first
+     * place.
+     * <p>
+     * {@code noAppendedConstantIsEverPersisted} scans for {@code setTargetStatus(} only, and
+     * {@code theMapperNeverCarriesTargetStatus} pins the two mapper paths <em>by value</em> — so
+     * between them, the one thing still invisible is a <b>new</b> production site that writes the
+     * field through {@code BotGroup.builder()}. That is exactly how {@code toEntity} wrote it: not
+     * a {@code setTargetStatus(} call at all, and therefore not something a reviewer following
+     * the scan's own instruction ("keep the variable ones honest") would ever have looked at.
+     * <p>
+     * <b>It has to distinguish the entity builder from a DTO builder</b>, which is why this walks
+     * back to the nearest {@code X.builder()} instead of matching {@code .targetStatus(} alone.
+     * A DTO carrying one of these constants is not a defect, it is the <em>design</em>: A3 has
+     * {@code POST /} render {@code REGISTRATION_PENDING} from Phase 4, so a guard that flagged
+     * {@code BotGroupDTO.builder().targetStatus(REGISTRATION_PENDING)} would fail the build on a
+     * correct line and get itself deleted. Only {@code BotGroup} — the persisted document — is
+     * out of bounds.
+     */
+    @Test
+    @DisplayName("no production call site builds a BotGroup with an appended constant")
+    void noAppendedConstantReachesTheEntityThroughABuilder() {
+        List<String> offenders = new ArrayList<>();
+        long entityBuilderSites = 0;
+        for (Path file : productionSources()) {
+            List<String> code = stripCommentsAndLiterals(readLines(file));
+            for (int i = 0; i < code.size(); i++) {
+                String line = code.get(i);
+                if (!line.contains(".targetStatus(")) {
+                    continue;
+                }
+                if (!"BotGroup".equals(enclosingBuilderType(code, i))) {
+                    continue;
+                }
+                entityBuilderSites++;
+                String argument = line.substring(line.indexOf(".targetStatus(") + ".targetStatus(".length());
+                for (String forbidden : NOT_PERSISTABLE) {
+                    if (argument.contains(forbidden)) {
+                        offenders.add(file + ":" + (i + 1) + " → " + line.trim());
+                    }
+                }
+            }
+        }
+
+        assertThat(offenders)
+                .as("a Lombok builder reaches BotGroup.targetStatus just as a setter does, and "
+                        + "this is the form the request-body hole used: BotGroupMapper.toEntity's "
+                        + ".targetStatus(dto.getTargetStatus()). %s may not be written that way "
+                        + "either.", NOT_PERSISTABLE)
+                .isEmpty();
+        // No assertion on entityBuilderSites: the fix for R1/Q1 removed the only one there was,
+        // and the right number is zero. Vacuity is covered from the other side by
+        // theBuilderScanRecognisesAnEntityBuilder, which feeds it the removed line.
+        assertThat(entityBuilderSites)
+                .as("production builds no BotGroup with an explicit targetStatus today; if this "
+                        + "grows, the offenders assertion above is what keeps it honest")
+                .isZero();
+    }
+
+    @Test
+    @DisplayName("the builder scan tells a BotGroup builder apart from a DTO builder")
+    void theBuilderScanRecognisesAnEntityBuilder() {
+        // The line the R1/Q1 fix deleted from BotGroupMapper.toEntity, and its DTO twin from
+        // BotGroupMapper.toDTO. Without this the guard above could pass by recognising nothing.
+        List<String> entityChain = List.of(
+                "return BotGroup.builder()",
+                "        .name(dto.getName())",
+                "        .targetStatus(BotGroupStatus.STARTING)",
+                "        .build();");
+        List<String> dtoChain = List.of(
+                "return BotGroupDTO.builder()",
+                "        .name(entity.getName())",
+                "        .targetStatus(BotGroupStatus.REGISTRATION_PENDING)",
+                "        .build();");
+
+        assertThat(enclosingBuilderType(entityChain, 2)).isEqualTo("BotGroup");
+        assertThat(enclosingBuilderType(dtoChain, 2))
+                .as("a DTO rendering REGISTRATION_PENDING is A3's design, not a defect")
+                .isEqualTo("BotGroupDTO");
+    }
+
+    /**
+     * The type whose {@code builder()} opened the chain {@code code.get(index)} belongs to, or
+     * {@code null} when no {@code X.builder()} precedes it within a plausible distance. Textual
+     * and deliberately shallow — it exists to keep one guard from firing on the wrong builder,
+     * not to parse Java.
+     */
+    private static String enclosingBuilderType(List<String> code, int index) {
+        Pattern builder = Pattern.compile("(\\w+)\\s*\\.builder\\(\\)");
+        for (int i = index; i >= 0 && i > index - 60; i--) {
+            Matcher matcher = builder.matcher(code.get(i));
+            String type = null;
+            while (matcher.find()) {
+                type = matcher.group(1);
+            }
+            if (type != null) {
+                return type;
+            }
+            // A statement terminator between here and the builder means we left the chain.
+            if (i < index && code.get(i).trim().endsWith(";")) {
+                return null;
+            }
+        }
+        return null;
     }
 
     @Test

@@ -11,7 +11,10 @@ import org.mapstruct.factory.Mappers;
 import org.springframework.data.mongodb.core.convert.MappingMongoConverter;
 import org.springframework.data.mongodb.core.convert.MongoCustomConversions;
 import org.springframework.data.mongodb.core.convert.NoOpDbRefResolver;
+import org.springframework.data.mongodb.core.convert.QueryMapper;
 import org.springframework.data.mongodb.core.mapping.MongoMappingContext;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -40,6 +43,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class BotGroupStatusRollbackSafetyTest {
 
     private static MappingMongoConverter converter;
+    private static MongoMappingContext context;
+    private static QueryMapper queryMapper;
     private static BotGroupMapper mapper;
 
     @BeforeAll
@@ -47,12 +52,13 @@ class BotGroupStatusRollbackSafetyTest {
         // The application registers no MongoCustomConversions anywhere, so building from an
         // empty list is the honest reproduction of its wiring.
         MongoCustomConversions conversions = new MongoCustomConversions(List.of());
-        MongoMappingContext context = new MongoMappingContext();
+        context = new MongoMappingContext();
         context.setSimpleTypeHolder(conversions.getSimpleTypeHolder());
         context.afterPropertiesSet();
         converter = new MappingMongoConverter(NoOpDbRefResolver.INSTANCE, context);
         converter.setCustomConversions(conversions);
         converter.afterPropertiesSet();
+        queryMapper = new QueryMapper(converter);
         mapper = Mappers.getMapper(BotGroupMapper.class);
     }
 
@@ -178,11 +184,13 @@ class BotGroupStatusRollbackSafetyTest {
 
             assertThat(reachable)
                     .as("A1: nothing new is ever persisted into targetStatus, because an older "
-                            + "jar throws ConversionFailedException on it and "
-                            + "findByTargetStatus(ACTIVE) is on the boot path. These request-body "
-                            + "paths reach Mongo with no guard in between, and the source guard "
-                            + "cannot see either of them (one is a builder, one passes a "
-                            + "variable).")
+                            + "jar cannot deserialise it (IllegalArgumentException out of "
+                            + "Enum.valueOf — see Mechanism, and see BlastRadius for which reads "
+                            + "that actually breaks). Closed at the boundary: the DTO field is "
+                            + "READ_ONLY and the mapper copies it in neither write direction. "
+                            + "Reinstating either is how a request body poisons a document again, "
+                            + "and the source guard cannot see either shape (one is a builder, "
+                            + "one passes a variable).")
                     .isEmpty();
         }
 
@@ -197,6 +205,112 @@ class BotGroupStatusRollbackSafetyTest {
             mapper.updateEntityFromDTO(patch, existing);
 
             assertThat(existing.getTargetStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+        }
+    }
+
+
+    /**
+     * <b>What a poisoned document actually costs — QA's original verdict got this wrong.</b>
+     * <p>
+     * Phase 2's QA repeated A1's claim that one poisoned document "fails the whole
+     * {@code findByTargetStatus(ACTIVE)} boot query". Dev's fix round contradicted it, and Dev is
+     * right. The two tests below are the measurement that settles it, so the next reader weighs
+     * the hazard against the real model rather than re-deriving it from the plan's prose:
+     * <ul>
+     *   <li>the boot query's criterion is rendered into BSON as the plain string
+     *       {@code {"targetStatus": "ACTIVE"}}, so the <em>server</em> does the matching and a
+     *       document holding {@code "STARTING"} is never returned and therefore never
+     *       converted. It does not fail; the group silently drops out of it — and out of
+     *       {@code RecoveryEligibility} — so it is never auto-started and never auto-recovered
+     *       again, with nothing logged;</li>
+     *   <li>the reads that <em>do</em> convert the group are the ones that break —
+     *       {@code GET /{id}} and {@code POST /{envId}/filter}, where the failure is a 500 for a
+     *       whole environment's list view rather than for one group.</li>
+     * </ul>
+     * A third consequence falls out of the same mechanism and is <em>wider</em> than either
+     * account: a query that filters on some <em>other</em> field still converts every document it
+     * returns, so a poisoned group that is also {@code activationMode == SCHEDULED} is handed to
+     * {@code ActivationScheduler}'s {@code findByActivationMode(SCHEDULED)} and fails that tick
+     * — every minute, for every scheduled group in the fleet, not just the poisoned one.
+     * <p>
+     * All of this is reachable only by writing such a document, which is what the
+     * {@code READ_ONLY} DTO field and the mapper's two omissions now prevent. These tests exist
+     * so the severity argument stays honest, not because the path is open.
+     */
+    @Nested
+    @DisplayName("the blast radius of a poisoned document")
+    class BlastRadius {
+
+        @Test
+        @DisplayName("findByTargetStatus filters server-side on the string, so it never converts a poisoned group")
+        void theBootQueryFiltersOnTheStringAndNeverConvertsAPoisonedGroup() {
+            Document criteria = queryMapper.getMappedObject(
+                    Query.query(Criteria.where("targetStatus").is(BotGroupStatus.ACTIVE))
+                            .getQueryObject(),
+                    context.getRequiredPersistentEntity(BotGroup.class));
+
+            assertThat(criteria)
+                    .as("the derived query findByTargetStatus(ACTIVE) goes to the server as a "
+                            + "string equality on targetStatus. Mongo returns only matching "
+                            + "documents, and conversion happens on what is returned — so a "
+                            + "document holding STARTING is never read back by this query and "
+                            + "cannot make it throw. A1 and QA's Phase 2 verdict both said it "
+                            + "would; they were wrong, and the real cost is the group leaving "
+                            + "the query silently.")
+                    .isEqualTo(new Document("targetStatus", "ACTIVE"));
+        }
+
+        @Test
+        @DisplayName("a query on another field still converts what it returns — the activation tick's exposure")
+        void aQueryOnAnotherFieldStillConvertsThePoisonedGroup() {
+            Document criteria = queryMapper.getMappedObject(
+                    Query.query(Criteria.where("activationMode").is(ActivationMode.SCHEDULED))
+                            .getQueryObject(),
+                    context.getRequiredPersistentEntity(BotGroup.class));
+
+            assertThat(criteria)
+                    .as("ActivationScheduler's findByActivationMode(SCHEDULED) constrains "
+                            + "activationMode and nothing else, so a poisoned group that is also "
+                            + "SCHEDULED IS returned — and then converted")
+                    .isEqualTo(new Document("activationMode", "SCHEDULED"));
+
+            Document poisonedAndScheduled = Document.parse("{\"_id\": \"g-1\", \"name\": \"n\", "
+                    + "\"activationMode\": \"SCHEDULED\", "
+                    + "\"targetStatus\": \"A_STATUS_THIS_JAR_DOES_NOT_HAVE\"}");
+
+            assertThatThrownBy(() -> converter.read(BotGroup.class, poisonedAndScheduled))
+                    .as("which fails the reconciler's whole tick, every minute, for every "
+                            + "scheduled group in the fleet — wider than either the plan's or "
+                            + "the fix round's account of the blast radius")
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+
+        /**
+         * Models the list view rather than proving it: the repository converts document by
+         * document and the loop here is that iteration. What it pins is the part that matters —
+         * the converter has no per-document tolerance, so a healthy group <em>after</em> the
+         * poisoned one is never produced, which is why {@code POST /{envId}/filter} answers 500
+         * for the whole environment instead of omitting one row.
+         */
+        @Test
+        @DisplayName("one poisoned document takes the healthy groups beside it")
+        void onePoisonedDocumentTakesThePageWithIt() {
+            List<Document> page = List.of(
+                    Document.parse("{\"_id\": \"g-1\", \"name\": \"a\", \"targetStatus\": \"ACTIVE\"}"),
+                    Document.parse("{\"_id\": \"g-2\", \"name\": \"b\", "
+                            + "\"targetStatus\": \"A_STATUS_THIS_JAR_DOES_NOT_HAVE\"}"),
+                    Document.parse("{\"_id\": \"g-3\", \"name\": \"c\", \"targetStatus\": \"STOPPED\"}"));
+            List<BotGroup> read = new ArrayList<>();
+
+            assertThatThrownBy(() -> {
+                for (Document doc : page) {
+                    read.add(converter.read(BotGroup.class, doc));
+                }
+            }).isInstanceOf(IllegalArgumentException.class);
+
+            assertThat(read)
+                    .as("g-3 is healthy and is never produced: the page is lost, not filtered")
+                    .hasSize(1);
         }
     }
 

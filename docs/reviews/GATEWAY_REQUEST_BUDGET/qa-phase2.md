@@ -366,3 +366,311 @@ Expecting empty but was: ["POST /api/v1/bot-group/ → BotGroupMapper.toEntity �
 
 Intentional, reproducible in both runs, and the only failure in the suite. It goes green when
 Q1 is fixed in production code.
+
+---
+
+# Re-check — fix round `7e118bf`..`d9be331`
+
+**Verdict:** PASS
+**Build:** `mvn test` → **2,282 tests, 0 failures, 0 errors** (five runs at the final state, identical every time)
+**Branch tip:** `d9be331`, verified in a detached `git worktree`, never in the working tree (58 dirty unrelated RIK/Aviator entries)
+
+| Run | Tree | tests | failures | errors |
+|---|---|---|---|---|
+| 1 | `d9be331` exactly as committed | **2,276** | 0 | 0 |
+| 2, 3 | + QA's 4 new blast-radius / delete-window tests | 2,280 | 0 | 0 |
+| 4, 5 | + QA's 2 builder-guard tests | 2,282 | 0 | 0 |
+| 6, 7 | + QA's Q2 pin (assertion only) | 2,282 | 0 | 0 |
+
+Dev's 2,276 reproduces exactly. **The blocker is closed and every non-blocking finding was either
+fixed or deferred with a reason I agree with.** One of Dev's adjudications against me is correct
+and I concede it below; three things I would still change are recorded as non-blocking, and two of
+them I closed myself with tests.
+
+---
+
+## Q1 — closed, at the boundary, and closed on **both** paths
+
+Verified line by line at the tip:
+
+- **`BotGroupMapper:92`, the Lombok builder** — `.targetStatus(dto.getTargetStatus())` is gone from
+  `toEntity`, replaced by a comment naming R1/Q1. The type is no longer referenced by the mapper at
+  all: an attempt to reinstate the line by hand does not even compile until you re-import
+  `BotGroupStatus`, which is a small extra tripwire and not one anybody designed.
+- **`BotGroupMapper:181`, the variable argument** —
+  `setTargetStatus(Optional.ofNullable(dto.getTargetStatus()).orElse(existing))` is gone from
+  `updateEntityFromDTO`. Note the removal is *strictly* safe for PATCH semantics: the old
+  expression already fell back to the entity's own value, so a body that omitted the field was
+  inert before and is inert now.
+- **`@JsonProperty(access = READ_ONLY)` on `BotGroupDTO.targetStatus`**, asserted through a real
+  `ObjectMapper` rather than by reading the annotation (`theDtoFieldIsReadOnlyInbound`), including
+  that the field is **still rendered outbound** — which is what A3 needs.
+- **Every remaining writer of the field is lifecycle code with a self-authored constant**: six
+  `setTargetStatus(` sites in `BotGroupBehaviorService` (`DEAD`×2, `ACTIVE`, `STOPPED`×2, and
+  `statusBeforeRestart` read back from Mongo). No other production code reaches it.
+
+`BotGroupStatusRollbackSafetyTest.WritePaths.requestBodiesCannotPoisonTargetStatus` is **green by
+the production fix, and the file is untouched** — `git log cade5c9..d9be331 --` on that path is
+empty. I corrected one thing in it myself: its `as(...)` description still named
+`ConversionFailedException` and the boot-query claim, both of which are wrong (below), and a
+never-rendered message is exactly where a wrong model survives.
+
+**On rejecting the validator arm: Dev is right, and for a stronger reason than the commit gives.**
+The commit argues from the read-modify-write client. Two things make that decisive rather than
+merely likely:
+
+1. Under A3, `POST /` **renders** `REGISTRATION_PENDING` from Phase 4 on. So the client that hands
+   the value back is not a careless client, it is the *normal* one — the trap CLAUDE.md records for
+   strategy-key validation, but with the bad value supplied by our own response body.
+2. A validator in `BotGroupConfigValidationService` runs **post-merge over the whole entity** on
+   PATCH (Amendment A5 says so explicitly, and CLAUDE.md records the consequence for strategy
+   keys). So the 400 would not be scoped to the offending field — a group that had once been
+   poisoned would fail *every* PATCH until someone could change a field they are no longer allowed
+   to send. The validator arm cannot even be used to clean up after itself.
+
+Ignoring inbound also keeps the contract in A3 intact, which a 400 would not: `targetStatus` has to
+keep round-tripping through a UI that never intends to write it.
+
+**One residual, which I closed rather than reported.** The source guard still scans for
+`setTargetStatus(` only, so a *new* production site writing the field through
+`BotGroup.builder()` — the exact shape that let Q1 through — would still be invisible to it. My
+Q1 write-up asked for that extension and the fix round did not land it; the new value-level mapper
+test pins the two known mapper paths but not a third site somewhere else. Added:
+
+- `noAppendedConstantReachesTheEntityThroughABuilder` — the builder form of the same scan, scoped
+  to the **entity** builder by walking back to the nearest `X.builder()`. That scoping is
+  load-bearing: `BotGroupDTO.builder().targetStatus(REGISTRATION_PENDING)` is Phase 4's *design*
+  (A3), so an unscoped scan would fail the build on a correct line and get itself deleted.
+- `theBuilderScanRecognisesAnEntityBuilder` — feeds the walker the deleted `toEntity` chain and its
+  DTO twin, so the guard above cannot pass by recognising nothing.
+
+Non-vacuity demonstrated: reinstating `.targetStatus(BotGroupStatus.STARTING)` in `toEntity` fails
+both the new builder guard (naming `BotGroupMapper.java:92`) and Dev's mapper value test.
+
+---
+
+## 1. The blast radius — **Dev is right and my original verdict was wrong**
+
+Stated plainly: **`findByTargetStatus(ACTIVE)` does not fail on a poisoned document.** I repeated
+A1's claim without measuring it, and the reviewer (R1, sub-point 1) and Dev both corrected it. I
+have now measured the mechanism rather than asserting it, in a new `BlastRadius` nested class:
+
+- `theBootQueryFiltersOnTheStringAndNeverConvertsAPoisonedGroup` — maps
+  `Criteria.where("targetStatus").is(ACTIVE)` through a **real `QueryMapper`** over the real
+  `MongoMappingContext` and asserts the rendered BSON is exactly `{"targetStatus": "ACTIVE"}`. The
+  server does the matching, conversion happens only on what comes back, so a document holding
+  `"STARTING"` is never converted by that query and cannot make it throw.
+- `onePoisonedDocumentTakesThePageWithIt` — the `POST /{envId}/filter` shape: the converter has no
+  per-document tolerance, so a healthy group *after* the poisoned one is never produced. The page
+  is lost, not filtered.
+
+**And the reach is wider than either account.** A query that filters on some *other* field still
+converts every document it returns, so a poisoned group that is also
+`activationMode == SCHEDULED` is returned by `ActivationScheduler`'s
+`findByActivationMode(SCHEDULED)` and fails that tick — **every minute, for every scheduled group
+in the fleet**, not just the poisoned one. `findAll()` and `findByGameId` have the same shape.
+Pinned by `aQueryOnAnotherFieldStillConvertsThePoisonedGroup`.
+
+Two corrections that make the severity honest in the other direction:
+
+- **No poisoned document can exist today.** The three constants are new on this branch and the
+  branch has never been deployed (A7 gates the release to after Phase 5), so there is no cleanup
+  question — only a "must stay closed" question.
+- **The reviewer's sub-point 2 is now safe by construction.**
+  `BotGroupBehaviorService:1854`'s `setTargetStatus(statusBeforeRestart)` launders whatever got
+  in; with the boundary closed, the only values the document can hold are the original three or
+  null, so the site no longer depends on luck.
+
+Also confirmed: with `persistedTarget == STARTING` and no runtime, `RecoveryEligibility` condition
+(2) returns false, so the group is silently unmanaged by *both* reconcilers — Dev's description of
+the current-jar cost is accurate.
+
+---
+
+## 2. `lastError` sanitisation — holds, with one thing to carry into Phase 4
+
+Traced end to end rather than read:
+
+- **One assembly point.** `BotGroupController.statusDTO` builds the body for `/status` **and** both
+  acks, and its only exception-derived field is `lastError` ←
+  `behaviorService.getLastStartError(id)` ← `startAttempts.lastError(id)`. Nothing else on
+  `BotGroupStatusDTO` can carry a throwable's words.
+- **Two writers of `attempt.error`, both accounted for.** `recordFailure` has exactly two
+  production call sites and both pass a **self-authored** sentence (`startLocked`'s zero-bot reason,
+  `checkRestartProducedBots`' reason). `finish` is the only other writer and routes through
+  `ClientSafeMessage.of`.
+- **The policy is what it says it is.** `BotManagerException` and `IllegalArgumentException`
+  verbatim; everything else `INTERNAL_ERROR + " (" + getSimpleName() + ")"`. Pinned by
+  `aForeignThrowableIsSanitised` / `ourOwnExceptionsAreVerbatim` / `ourOwnExceptionsAreForwardedVerbatim`,
+  and the async-path test uses a deliberately hostile message
+  (`"environment exploded at mongo-7.internal:27017"`) and asserts the hostname does **not** appear.
+- **The widening is bounded.** A bare `getSimpleName()` carries none of the three things the
+  handler's policy names (no hostname, no wiring detail, no infra internals), and the rationale —
+  the holder of a `lastError` has no request URI or timestamp to correlate a log against — is
+  correct and is a real operational difference from an HTTP response.
+- **The restart's zero-bot message arrives intact.** `recordFailure` sets it on the still-open
+  attempt *before* the throw, and `finish` keeps a recorded reason (`attempt.error == null` guard)
+  rather than deriving `"Internal server error (IllegalStateException)"` from the throwable. Pinned
+  by `restartZeroBotFailureLandsInLastError`, which would go red if either half were removed.
+- **No second leak path.** `setLastFailureReason` — the *persisted* twin, which **is** rendered on
+  `GET /{id}` — has only two production call sites and both pass self-authored strings.
+- `RestExceptionHandler.INTERNAL_ERROR_MSG` is byte-identical to the string it moved to, so no
+  response body changed.
+
+**Q7 (non-blocking, for Phase 4).** The policy forwards *any* `BotManagerException` verbatim, and
+`UpstreamGatewayException`'s message is built as `"Login failed for user 'X': " + e.getMessage()`
+where the tail is the ws-parser / upstream text — **the very material the fix's own commit message
+cites as the reason for the split** ("ws-parser text that embeds a fragment of the upstream
+response body — on a library separately known to log agency-token material"). It is not reachable
+in `lastError` today: per-bot authentication failures are caught inside `createBotsInParallel`'s
+per-bot task and converted into the self-authored zero-bot reason, so they never reach
+`finish(id, error)`. Phase 4 changes that by design — `RegistrationWorker`'s failures are
+`UpstreamRegistrationException` built from an upstream envelope, on a path whose whole purpose is
+to land in `registrationError` / `lastError` on an unauthenticated endpoint. The right time to
+decide whether `UpstreamGatewayException` is "operator-safe by construction" is before that lands,
+not after.
+
+---
+
+## 3. My four non-blocking findings
+
+| | Status | Judgement |
+|---|---|---|
+| **Q2** — `/restart` zero-bot ERROR + poisoned `lastError` | Fixed (`isCancelled` arm + `recordFailure`) | Correct, and I added the missing pin |
+| **Q3** — async MDC scope dropped mid-build | Fixed (`BotMdc.snapshot()`/`restore(Map)`) | Correct and complete |
+| **Q4** — daisy-chain not drained at `@PreDestroy` | ERROR-storm half fixed; residue deferred as P14 | Right split |
+| **Q6** — `STARTING` leaves the live-sibling short-circuit | Accepted as deliberate, reasoned in the javadoc | Agree — it is the *only* safe answer |
+
+- **Q2.** The fix is right (skip the zero-bot check when the attempt was cancelled, mirroring
+  `startLocked`'s INFO), but **nothing pinned it**: `stopDuringARestartWins` never asserted
+  `lastError`, so deleting the arm again would have been silent. I added one assertion to that test
+  — `getLastStartError("g-1")` is `null` after a `/stop` wins the race — and demonstrated
+  non-vacuity by deleting the arm: the test fails with
+  `but was: "Restart of group g-1 produced 0/3 bots; check logs and bot_creation_failures_total…"`,
+  which is the exact string the finding was about. That run also re-confirms Q3 from the side: the
+  ERROR line now carries `[g-1//]`.
+- **Q3.** `clear()` is now `ALL_KEYS.forEach(MDC::remove)` with a javadoc pointing at
+  `snapshot()`/`restore()`, and the four nested scopes use save/restore. I enumerated the five
+  `BotMdc.clear()` calls that remain in `BotGroupBehaviorService` and every one is the **outermost**
+  scope on a thread that owns its whole MDC (the async lifecycle thread, the per-bot task on the
+  virtual-thread-per-task creation executor, `stopAndLogoutLocked` on an HTTP thread, and the two
+  scheduler tasks). Nothing nested clears any more.
+- **Q6.** The javadoc's decisive argument is the one I had not made: widening the filter to include
+  `STARTING` would let the **group being recovered** satisfy its own gate, because a reclaim
+  rebuild of that group passes through `STARTING` and `RecoveryEligibility` only vetoes on
+  `ACTIVE`. That reopens from the other end precisely the self-attestation hazard the same javadoc
+  explains two paragraphs earlier. Accepting the behaviour change and writing down "expect
+  `outcome="live_sibling"` to vanish during a large fleet start" is the correct call, and the
+  javadoc is the right place for it.
+
+---
+
+## 4. `deleteMidStartCancelsTheBuild` — the reshaping is correct, and it lost one property
+
+**Every assertion I wrote is unchanged**: `createBot` never called, no runtime left behind, nothing
+persisted. The cancel check moved from a direct assert to `awaitTrue` — same property, polled
+because it now happens on another thread — and one assertion was **added** (the deleter completes
+rather than waiting out the start). `awaitTrue` is bounded at 20 s and throws `AssertionError`, so
+there is no hang. The reshaping is necessary and right: with R6's lock, calling `stopAndLogout` on
+the thread that still owes the build its latch is a genuine deadlock.
+
+**But the reshaped test no longer exercises what the original one did.** With the lock, the delete
+parks until the build releases it, so the build's own `finally` has already closed the attempt by
+the time `clearRetained` runs — the reshaped test can never see `clearRetained` against an **open**
+attempt, which is the hazard its own javadoc says it exists for ("its own `clearRetained` call and
+therefore its own copy of the hazard"). Demonstrated, not inferred: mutating `clearRetained` to
+also `open.remove(botGroupId)` leaves `deleteMidStartCancelsTheBuild` **green**.
+
+The window is still reachable in production — a DELETE that lands after `/start` was accepted but
+before its build takes the lock finds no runtime, runs `clearRetained` on an open attempt, and
+returns. So I restored the coverage with a new test rather than by reverting the reshape:
+
+- `deleteBeforeTheBuildTakesTheLockIsNotUndone` — the delete twin of
+  `stopBeforeTheBuildTakesTheLockIsNotUndone`, same pre-seeded-lock idiom, and it goes **red** under
+  the same mutation that leaves the reshaped test green.
+
+---
+
+## 5. The two deferrals — correctly deferred, one line missing from P13
+
+**P13 (R9) — correctly deferred, and the reasoning is the important part.** "A TTL that drops a
+stuck attempt re-opens the race `750fc91` closed" is exactly right, and it is the same invariant
+`stopBeforeTheBuildTakesTheLockIsNotUndone` and my new delete twin pin: dropping an open attempt
+*uncancels* its build. Naming a generation number on the cancellation predicate (or a bounded
+build) as the shape of a real fix is correct, and so is the hook — I verified
+`bot.gateway.budget.tier.essential.max-wait=0` and that `GatewayBudgetSettings` permits zero for
+`ESSENTIAL` **only**, i.e. `0` really is "unbounded, cancellable". Phase 3 giving `ESSENTIAL` that
+wait is what turns P13 from conceivable into expected, and the entry says so.
+
+**One line P13 is missing.** Since R6, a wedged build parks more than `/status`: `/stop` has always
+blocked on the group lock, and **`DELETE` now does too**, each holding a servlet thread for the
+life of the JVM. That is a consistent extension of an existing property rather than a new defect —
+and it is also the *point* of R6 — but P13's "Impact" says only "cannot be retried without a JVM
+restart", which understates it: repeated operator attempts to stop or delete a wedged group
+accumulate parked request threads.
+
+**P14 — correctly deferred.** The split is honest (the ERROR-storm half is what mattered and is
+fixed), the residue really is bounded and self-healing, and folding it into the drain
+`PLUGIN_HOT_RELOAD` needs is better than bolting a 10 s join onto `@PreDestroy` now.
+
+---
+
+## Tests added / updated in this re-check
+
+- `bot-app/src/test/java/com/vingame/bot/domain/botgroup/model/BotGroupStatusRollbackSafetyTest.java`
+  — new nested `BlastRadius` (3 tests): the boot query's criteria rendered through a real
+  `QueryMapper`; a query on another field still converting a poisoned group (the activation-tick
+  exposure); one poisoned document losing the healthy groups beside it. Plus the stale
+  `ConversionFailedException` / boot-query wording corrected in
+  `requestBodiesCannotPoisonTargetStatus`' description.
+- `bot-app/src/test/java/com/vingame/bot/domain/botgroup/model/BotGroupStatusPersistenceGuardTest.java`
+  — `noAppendedConstantReachesTheEntityThroughABuilder` + `theBuilderScanRecognisesAnEntityBuilder`
+  (2 tests): the builder form of the source guard, scoped to the entity builder so Phase 4's DTO
+  rendering is not a false positive.
+- `bot-app/src/test/java/com/vingame/bot/domain/botgroup/service/BotGroupStartCancellationRaceTest.java`
+  — `deleteBeforeTheBuildTakesTheLockIsNotUndone` (1 test) restoring the `clearRetained`-on-an-open-
+  attempt coverage the reshaping lost, and one assertion added to `stopDuringARestartWins` pinning
+  Q2's fix.
+
+All six new tests are unit tests over mocked collaborators. **No test in this diff, in the fix
+round, or in my additions opens a socket or makes a gateway request** — verified by grepping every
+changed test for `HttpClient`, `Socket`, `MongoClients`, `http://`, `wss://` and for any hostname:
+nothing. The blast-radius tests use a real `MappingMongoConverter` / `QueryMapper`, which are pure
+document and criteria mapping with no driver and no server.
+
+## Gaps (unchanged from the original verdict unless noted)
+
+- **G1 — a real Mongo round trip.** Still absent, still unavailable, and A12 explicitly replaces it
+  with the captor test plus the source guard. What I added closes more of it: the criteria rendering
+  is now measured, so the only unproven layer is the driver/server, which does not participate in
+  enum conversion.
+- **New — the server-side filtering claim is Mongo's behaviour, not ours.** I measured that we send
+  `{"targetStatus": "ACTIVE"}`; that the server then returns only matching documents is Mongo's
+  contract, not something a test in this repo can assert. The list-view test likewise *models* the
+  repository's document-by-document conversion rather than proving it.
+- **New — P13 and P14 are not covered by tests, deliberately.** A test for P13 would have to wedge
+  a build for the life of the JVM; P14's residue is observable only across a real process exit.
+- G2-G7 unchanged: the `STARTING` reclaim guard is still read-only coverage, `cancelScope` in the
+  pre-runtime window is still inert until Phase 3, the `"budget"` classification arm is still
+  Phase 3's, pacing is still Phase 3's to demonstrate, and the UI contract for "200 means accepted"
+  still needs the user, not a test.
+
+## Documentation drift noticed while re-checking (not blocking, not Dev's to fix alone)
+
+- **A1 still carries both wrong claims** (`ConversionFailedException`, and the boot query failing).
+  Dev corrected `BotGroupStatus`' javadoc and the guard test's and flagged the plan as
+  Architect-2's; that is the right division, and the plan edit is still outstanding.
+- **`RecoveryEligibility`'s javadoc now cites a route that no longer exists.** It justifies the
+  explicit `STOPPED` veto partly with "two known routes produce the pair: a
+  `PATCH {"targetStatus":"STOPPED"}`, and a lost Mongo write". The R1/Q1 fix **removed** the PATCH
+  route. The veto is still correct and the second route still stands, so this is stale evidence
+  rather than a wrong conclusion — but one clause of it is now unreachable.
+- **`BotGroupMapper.toEntity` still copies `lastFailureReason`, `lastStartedAt` and `lastStoppedAt`
+  from the DTO on create**, immediately beside the line the fix removed, while the method's own
+  trailing comment calls all three "system-managed". No rollback hazard (a `String` and two dates
+  are readable by any jar), so this is cosmetic — but a reader who sees `targetStatus` closed may
+  reasonably assume the whole set is, and it is not. Only `targetStatus` is.
+
+## Failures
+
+None. Seven full-suite runs, no failures, no errors, no flakes.

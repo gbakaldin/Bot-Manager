@@ -190,6 +190,65 @@ class BotGroupStartCancellationRaceTest {
     }
 
     /**
+     * The cascade-delete path in the <b>accepted-but-not-yet-locked</b> window, which is the only
+     * ordering in which a DELETE still runs {@code clearRetained} against an <em>open</em>
+     * attempt.
+     * <p>
+     * {@code deleteMidStartCancelsTheBuild} below used to cover this by accident. Since R6 gave
+     * {@code stopAndLogout} the per-group lock it cannot: a delete that lands mid-build now parks
+     * until the build releases the lock, by which time the build's own {@code finally} has closed
+     * the attempt, so {@code clearRetained} only ever sees a closed one there. Here the build is
+     * still parked on the lock, so the delete reaches {@code clearRetained} while the attempt is
+     * open — and if that dropped the open attempt it would remove the very flag the parked build
+     * polls, and the group would come up under a document that is about to be deleted. That is
+     * the {@code 750fc91} hazard on the delete path, and this is its regression test.
+     * <p>
+     * Same pre-seeded-lock idiom as {@code stopBeforeTheBuildTakesTheLockIsNotUndone}: the test
+     * thread holds the lock, so the build parks on it and {@code stopAndLogout} — re-entrant on
+     * this thread — runs to completion without waiting for anything.
+     */
+    @Test
+    @DisplayName("a delete in the accepted-but-not-yet-locked window is not undone by the build")
+    void deleteBeforeTheBuildTakesTheLockIsNotUndone() throws Exception {
+        BotGroup group = group(2);
+        stubLifecycleLookups(group);
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenAnswer(inv -> stubBot("bot" + System.nanoTime()));
+
+        ReentrantLock lock = new ReentrantLock();
+        groupLocks().put("g-1", lock);
+        lock.lock();
+        try {
+            assertThat(service.startAsync("g-1", StartOrigin.REST, () -> { }))
+                    .isEqualTo(BotGroupStatus.STARTING);
+            awaitTrue("the build parked on the group lock", () -> lock.getQueueLength() >= 1);
+            assertThat(runningGroups()).doesNotContainKey("g-1");
+
+            // BotGroupService.delete's teardown. Re-entrant here, so its clearRetained runs while
+            // the build is still parked and its attempt is still open.
+            service.stopAndLogout("g-1");
+
+            assertThat(startAttempts().isCancelled("g-1"))
+                    .as("the attempt must still be open AND cancelled after the delete — "
+                            + "clearRetained must not drop an open attempt, or the build wakes up "
+                            + "uncancelled and authenticates bots into a deleted group")
+                    .isTrue();
+        } finally {
+            lock.unlock();
+        }
+
+        awaitNoStartInFlight();
+
+        verify(botFactory, never()).createBot(anyString(), any(BotConfiguration.class));
+        assertThat(runningGroups()).as("the build must not leave a runtime behind")
+                .doesNotContainKey("g-1");
+        assertThat(persistedStatuses())
+                .as("a delete persists nothing, and the build must not re-insert the document "
+                        + "Spring Data's upsert-by-_id would happily recreate")
+                .isEmpty();
+    }
+
+    /**
      * The same window reached through the cascade-delete path, which has its own
      * {@code clearRetained} call and therefore its own copy of the hazard.
      */
@@ -317,6 +376,17 @@ class BotGroupStartCancellationRaceTest {
                 .as("the last word is the operator's stop, never an ACTIVE from the rebuild")
                 .doesNotContain(BotGroupStatus.ACTIVE)
                 .endsWith(BotGroupStatus.STOPPED);
+        // Q2, and the pin the fix for it did not bring with it. A /stop that wins this race is an
+        // operator decision that COMPLETED: zero bots is the intended outcome, not a failure.
+        // Before the fix, restart()'s zero-bot check had no cancellation arm, so the same outcome
+        // was logged as an ERROR and wrote "produced 0/3 bots; check ...
+        // bot_creation_failures_total" into lastError — pointing an operator at a metric that had
+        // not moved, on a path where startLocked deliberately logs INFO for exactly this reason.
+        // One assertion covers the whole arm: without it, checkRestartProducedBots records that
+        // sentence and throws.
+        assertThat(service.getLastStartError("g-1"))
+                .as("a successful stop must not leave a failure behind on GET /{id}/status")
+                .isNull();
     }
 
     // ------------------------------------------------------------------ two starts racing
