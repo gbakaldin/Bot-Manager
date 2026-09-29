@@ -2,6 +2,7 @@ package com.vingame.bot.infrastructure.client;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vingame.bot.common.exception.GatewayBudgetException;
 import com.vingame.bot.common.exception.UpstreamLoginException;
 import com.vingame.bot.common.gateway.GatewayRequestScope;
 import com.vingame.bot.common.gateway.RequestTier;
@@ -70,6 +71,17 @@ public class ApiGatewayClient {
     private static final String BOT_DEPOSIT_ENDPOINT = "/gwms/v1/bot/deposit.aspx";
     private static final String USER_AGENT = "PostmanRuntime/7.15.2";
     private static final String SESSION_TOKEN_HEADER = "X-TOKEN";
+
+    /**
+     * The house bound on one gateway round trip, on every request this class makes.
+     * <p>
+     * It used to be four copies of {@code Duration.ofSeconds(10)} and one request with no
+     * timeout at all — the login, which goes through the library (GATEWAY_REQUEST_BUDGET A19).
+     * {@link BoundedLogin} now applies the same number to that one too, so "every gateway call
+     * is bounded at ten seconds" is a property of this class rather than of four of its five
+     * call sites.
+     */
+    static final Duration GATEWAY_REQUEST_TIMEOUT = Duration.ofSeconds(10);
 
     private final DisplayNameService displayNameService;
     private final BotMetrics metrics;
@@ -241,22 +253,40 @@ public class ApiGatewayClient {
 
         try {
             TokensProvider tokens = underBudget(tier, scope,
-                    () -> new AuthClient(ctx, loginRequestFactory).authenticate());
+                    () -> BoundedLogin.login(ctx, loginRequestFactory, credentials.getUsername()));
             log.debug("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
                     tokens.getAgencyToken(), tokens.getAuthToken(), tokens.getJwtToken());
             metrics.incLogin(true);
             return tokens;
         } catch (IOException | InterruptedException e) {
-            // Unreachable today: the library's authenticate() throws only unchecked, and the
-            // funnel rethrows the caller's checked exceptions unwrapped. Declared so that
-            // Phase 4's in-repo login (which does own the HTTP call, and does throw these)
-            // lands without changing this method's contract.
+            // Reachable since GATEWAY_REQUEST_BUDGET A19: BoundedLogin throws
+            // HttpTimeoutException (an IOException) when the gateway does not answer within
+            // ten seconds, which the library could not do — it has no request timeout and no
+            // connect timeout, so this arm used to be dead and the wait used to be infinite.
+            // A timeout IS a login failure: the request left the JVM and the gateway did not
+            // answer, so incLogin(false) is correct here and is exactly what must NOT happen
+            // on the budget arm below.
             metrics.incLogin(false);
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             throw new UpstreamLoginException(
                     "Login failed for user '" + credentials.getUsername() + "': " + e.getMessage(), e);
+        } catch (GatewayBudgetException e) {
+            // A4 — AHEAD of the RuntimeException arm, and the whole of AD-9 depends on it.
+            // GatewayBudgetException is a RuntimeException, so without this arm a paced or
+            // refused login is rewrapped as UpstreamLoginException and three things break at
+            // once: Bot.performReauth marks the bot DEAD for a request the JVM chose not to
+            // send (AD-9's one rule), classifyCreationFailure takes the "auth" arm instead of
+            // the "budget" arm Phase 1 shipped for exactly this, and
+            // bot_login_total{outcome="failure"} — the per-brand regression gate and the input
+            // to EnvironmentLoginFailing — counts our own throttling as upstream login
+            // failures. Since /start no longer has an HTTP response, that tag is one of only
+            // three places a budget outcome during a build is visible at all.
+            //
+            // And deliberately NO metrics.incLogin(false): nothing was sent, so there was no
+            // login to fail. The budget's own gateway_budget_requests_total{outcome} carries it.
+            throw e;
         } catch (RuntimeException e) {
             // Counter increment must not change error semantics — BotFactory relies on
             // the exception propagating up so the bot creation pipeline records the failure.
@@ -414,7 +444,7 @@ public class ApiGatewayClient {
 
         HttpRequest httpRequest = requestBuilder
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                .timeout(Duration.ofSeconds(10))
+                .timeout(GATEWAY_REQUEST_TIMEOUT)
                 .build();
 
         // DEFAULT tier (AD-3): registration is the work whose deferral costs nothing that is
@@ -464,7 +494,7 @@ public class ApiGatewayClient {
                     .header("Content-Type", "application/json")
                     .header(SESSION_TOKEN_HEADER, xToken)
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(GATEWAY_REQUEST_TIMEOUT)
                     .build();
 
             // DEFAULT tier, registration scope (AD-3). The identity available here is the
@@ -577,7 +607,7 @@ public class ApiGatewayClient {
                     .header("User-Agent", USER_AGENT)
                     .header(SESSION_TOKEN_HEADER, xToken)
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(GATEWAY_REQUEST_TIMEOUT)
                     .build();
 
             HttpResponse<String> response = send(tier, scope, httpRequest);
@@ -624,7 +654,7 @@ public class ApiGatewayClient {
                     .header("Content-Type", "application/json")
                     .header("User-Agent", USER_AGENT)
                     .GET()
-                    .timeout(Duration.ofSeconds(10))
+                    .timeout(GATEWAY_REQUEST_TIMEOUT)
                     .build();
 
             HttpResponse<String> response = send(tier, scope, httpRequest);
@@ -644,6 +674,14 @@ public class ApiGatewayClient {
         } catch (IOException | InterruptedException e) {
             metrics.incVerifyToken(false);
             throw new RuntimeException("Failed to fetch balance for user: " + username, e);
+        } catch (GatewayBudgetException e) {
+            // A4's milder twin, and it has to be AHEAD of the RuntimeException arm below.
+            // This method already rethrows the type unwrapped (good — AD-9's non-terminal
+            // handling in Bot can see it), but the arm below would increment
+            // bot_verify_token_total{outcome="failure"} on the way past, which is what
+            // EnvironmentAuthDown fires on. A window we paced ourselves is not an auth
+            // outage, and an alert that says it is would send an operator to the gateway.
+            throw e;
         } catch (RuntimeException e) {
             // Catch the RuntimeException we threw above so it's not double-incremented,
             // but anything else (e.g. JSON parse failures, NPE on missing fields) is

@@ -43,6 +43,8 @@ class GatewayCallSiteGuardTest {
             "bot-engine/src/main/java/com/vingame/bot/domain/bot/core/Bot.java";
     private static final String ENVIRONMENT_CLIENT_REGISTRY =
             "bot-app/src/main/java/com/vingame/bot/config/client/EnvironmentClientRegistry.java";
+    private static final String BOUNDED_LOGIN =
+            "bot-engine/src/main/java/com/vingame/bot/infrastructure/client/BoundedLogin.java";
 
     private static Path repoRoot() {
         Path root = ROOT_CANDIDATES.stream()
@@ -134,18 +136,35 @@ class GatewayCallSiteGuardTest {
     }
 
     @Test
-    @DisplayName("ApiGatewayClient constructs exactly one AuthClient — until Phase 4 removes it")
-    void oneAuthClientConstruction() {
-        List<String> code = codeLines(repoRoot().resolve(API_GATEWAY_CLIENT));
+    @DisplayName("the library login is entered from exactly one place, and that place bounds it")
+    void oneLibraryLoginEntryPoint() {
+        List<String> client = codeLines(repoRoot().resolve(API_GATEWAY_CLIENT));
+        List<String> bounded = codeLines(repoRoot().resolve(BOUNDED_LOGIN));
 
-        // AD-12: the login still goes through the library, whose AuthClient parses the body as
-        // JSON before anything else — so a Cloudflare HTML block page becomes a JsonParseException
-        // and neither the status code nor the cf-ray survives. Phase 4 moves the login in-repo and
-        // this expectation becomes 0 (AuthClient surviving only for generateFingerprint, which is
-        // a static call and does not match this needle).
-        assertThat(occurrences(code, "new AuthClient("))
-                .as("one login construction site today; Phase 4 makes this 0")
+        // AD-12: the login still goes through the library until Phase 5 moves it in-repo,
+        // because AuthClient parses the body as JSON before anything else — so a Cloudflare
+        // block page becomes a JsonParseException and neither the status code nor the cf-ray
+        // survives. What changed in Phase 3 (A19/A20.1) is that it is no longer entered
+        // directly: AuthClient builds its request with no timeout on an HttpClient with no
+        // connect timeout, so a stalled TCP connection parked a bot-creation thread — and with
+        // it a semaphore permit and the group lock — for the life of the JVM. That is
+        // FOLLOWUPS P13, and it is the wait that had to be bounded BEFORE an ESSENTIAL tier
+        // whose max-wait is 0 by design was layered on top of it.
+        assertThat(occurrences(client, "new AuthClient("))
+                .as("ApiGatewayClient must not construct the library client directly — an "
+                        + "unbounded login is what A20.1 exists to remove")
+                .isZero();
+        assertThat(occurrences(client, "BoundedLogin.login("))
+                .as("exactly one login entry point; Phase 5 replaces its body, not its arity")
                 .isEqualTo(1);
+
+        // And the one place that does construct it must be the one that can give up. The
+        // subclass exists solely to reach AuthClient's protected HttpClient getter so the
+        // exchange can be shut down when the wait expires; without the abort the bound would
+        // only move the leak from the caller to a thread nobody can see.
+        assertThat(bounded).anyMatch(line -> line.contains("extends AuthClient"));
+        assertThat(bounded).anyMatch(line -> line.contains("LOGIN_TIMEOUT"));
+        assertThat(bounded).anyMatch(line -> line.contains("shutdownNow()"));
     }
 
     @Test
