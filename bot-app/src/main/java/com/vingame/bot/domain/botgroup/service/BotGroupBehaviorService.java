@@ -379,15 +379,18 @@ public class BotGroupBehaviorService {
      *       {@code VingameWebSocketClient.connect()} swallows {@code InterruptedException} and
      *       returns a half-built client, so interrupting the chain would corrupt a build rather
      *       than end it;</li>
-     *   <li><b>it re-reads each group before starting it.</b> The queue is a snapshot taken
-     *       before the first group was touched, and an operator can now {@code /stop} a group
-     *       that is still sitting in it. {@code startLocked} re-reads the document for its
-     *       configuration but never re-asserts intent, and then persists
+     *   <li><b>it re-reads each group before starting it, under the group's own lock.</b> The
+     *       queue is a snapshot taken before the first group was touched, and an operator can now
+     *       {@code /stop} a group that is still sitting in it. {@code startLocked} re-reads the
+     *       document for its configuration but did not re-assert intent, and then persists
      *       {@code targetStatus=ACTIVE} — so the write that got silently overwritten was
      *       {@code STOPPED}, which is DEAD_GROUP_AUTO_RECOVERY AD-5's <em>only</em> opt-out.
-     *       Same "re-read and re-assert eligibility" discipline {@code startForRecovery} already
-     *       applies to the identical race, and one extra {@code findById} is nothing next to the
-     *       thousands of gateway requests a start is about to spend.</li>
+     *       The re-read is passed down as {@code reassertStartupIntent} rather than done here
+     *       (RR1): {@code startForRecovery} takes the lock <em>first</em> and re-reads inside it,
+     *       and a check made before {@code startTracked} leaves a window — small, but the same
+     *       window — in which a {@code /stop} lands between the decision and the lock. One extra
+     *       {@code findById} is nothing next to the thousands of gateway requests a start is
+     *       about to spend.</li>
      * </ul>
      */
     void runStartupChain(List<BotGroup> queued) {
@@ -400,12 +403,12 @@ public class BotGroupBehaviorService {
                 return;
             }
             try {
-                if (!stillWantsToStart(group)) {
-                    continue;
-                }
                 log.info("Auto-starting bot group: {} (ID: {})", group.getName(), group.getId());
-                startTracked(group.getId(), StartOrigin.STARTUP);
-                started++;
+                // The intent re-read happens INSIDE the group lock (RR1), not here. See
+                // startLocked's `reassertStartupIntent` parameter for why the difference matters.
+                if (startTracked(group.getId(), StartOrigin.STARTUP, true)) {
+                    started++;
+                }
             } catch (Throwable t) {
                 // Throwable, not Exception (R4): an Error from one group used to abandon the whole
                 // remaining fleet with nothing in console.log at all — the default handler writes
@@ -422,17 +425,23 @@ public class BotGroupBehaviorService {
     }
 
     /**
-     * Whether a group the chain queued still wants to be started, re-read from Mongo (R5).
+     * Whether a group the chain queued still wants to be started (R5, RR1).
+     * <p>
+     * Takes the document the caller <b>already read inside the group lock</b> rather than
+     * reading its own: that is the whole of RR1. A check made before the lock is acquired can be
+     * followed by a {@code /stop} that finds no runtime, persists {@code STOPPED} and returns —
+     * and then this start persists {@code ACTIVE} over it, losing the only opt-out
+     * DEAD_GROUP_AUTO_RECOVERY AD-5 has. Asserting intent on the locked read closes it, which is
+     * the discipline {@code startForRecovery} has always applied to the identical race.
      * <p>
      * Only intent is re-asserted, and only the two statements that can have changed since the
      * snapshot: an operator {@code /stop} (or the activation reconciler's STOP) writes
      * {@code targetStatus=STOPPED}, and a PATCH can move a group onto the activation schedule,
      * whose reconciler then owns it. A group deleted meanwhile throws
-     * {@code ResourceNotFoundException} out of {@code findById}, which the caller logs — the
-     * document is gone, so there is nothing to skip politely.
+     * {@code ResourceNotFoundException} out of {@code startLocked}'s own {@code findById}, which
+     * the caller logs — the document is gone, so there is nothing to skip politely.
      */
-    private boolean stillWantsToStart(BotGroup queued) {
-        BotGroup current = botGroupService.findById(queued.getId());
+    private boolean stillWantsToStart(BotGroup current) {
         if (current.getTargetStatus() != BotGroupStatus.ACTIVE) {
             log.info("Skipping auto-start for bot group {} (ID: {}) — its targetStatus is now {}, "
                             + "so someone changed their mind while the chain was running",
@@ -468,10 +477,21 @@ public class BotGroupBehaviorService {
         // why stop() cancels a start in flight BEFORE it takes this lock (cancelStartInFlight):
         // otherwise a /stop would park on it for the entire duration of the start it is trying
         // to stop.
+        start(id, false);
+    }
+
+    /**
+     * {@link #start(String)} with the option to re-assert startup intent on the locked re-read
+     * (RR1).
+     *
+     * @return whether the build was attempted, i.e. false when the locked re-read showed that
+     *         someone changed their mind while the caller was queueing for the lock
+     */
+    private boolean start(String id, boolean reassertStartupIntent) {
         ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
         lock.lock();
         try {
-            startLocked(id);
+            return startLocked(id, reassertStartupIntent);
         } finally {
             lock.unlock();
         }
@@ -585,14 +605,29 @@ public class BotGroupBehaviorService {
      * {@code /start} of the same group becomes a no-op instead of a second build.
      */
     private void startTracked(String id, StartOrigin origin) {
+        startTracked(id, origin, false);
+    }
+
+    /**
+     * {@link #startTracked(String, StartOrigin)} with the option to re-assert startup intent
+     * under the group lock (RR1).
+     *
+     * @param reassertStartupIntent when true, the locked re-read must still say
+     *                              {@code targetStatus=ACTIVE} and not {@code SCHEDULED}, or the
+     *                              start is abandoned. Only the daisy-chain passes true: its
+     *                              queue is a snapshot that can be minutes or an hour old.
+     * @return whether a build was actually attempted — false for a refused single-flight or an
+     *         intent that changed, so the chain's "started by this chain" count stays honest.
+     */
+    private boolean startTracked(String id, StartOrigin origin, boolean reassertStartupIntent) {
         if (!startAttempts.begin(id, origin)) {
             log.info("Bot group {}: not starting from {} — a start is already in flight ({})",
                     id, origin, startAttempts.describe(id));
-            return;
+            return false;
         }
         Throwable failure = null;
         try {
-            start(id);
+            return start(id, reassertStartupIntent);
         } catch (Throwable t) {
             failure = t;
             throw t;
@@ -806,6 +841,19 @@ public class BotGroupBehaviorService {
     }
 
     private void startLocked(String id) {
+        startLocked(id, false);
+    }
+
+    /**
+     * @param reassertStartupIntent see {@link #startTracked(String, StartOrigin, boolean)}. The
+     *                              check lives here, and not at the caller, because here is the
+     *                              only place the document is read with the group lock already
+     *                              held — which is what makes the assertion and the
+     *                              {@code targetStatus=ACTIVE} persist that follows it one
+     *                              atomic decision (RR1).
+     * @return whether the build was attempted
+     */
+    private boolean startLocked(String id, boolean reassertStartupIntent) {
         // Reclaim guard (AD-1, AD-2). A genuinely running group has
         // actualStatus=ACTIVE (set in the BotGroupRuntime constructor); the only
         // non-ACTIVE state a runtime can hold while still in runningGroups is
@@ -826,7 +874,7 @@ public class BotGroupBehaviorService {
             if (existing.getActualStatus() == BotGroupStatus.ACTIVE
                     || existing.getActualStatus() == BotGroupStatus.STARTING) {
                 log.warn("Bot group {} is already running (status {})", id, existing.getActualStatus());
-                return;
+                return false;
             }
             // Lingering non-viable (DEAD) runtime. Reclaim: full teardown credits
             // the open dead-window exactly once, shuts monitor + logout scheduler
@@ -838,6 +886,14 @@ public class BotGroupBehaviorService {
         }
 
         BotGroup group = botGroupService.findById(id);
+
+        if (reassertStartupIntent && !stillWantsToStart(group)) {
+            // Nothing has been built and no runtime exists, so there is nothing to tear down and
+            // nothing to report as a failure. Returning before the try block keeps it out of the
+            // finally's failed-start ERROR, which would otherwise page someone about an operator
+            // decision that was honoured.
+            return false;
+        }
 
         boolean started = false;
         // Capture the in-flight failure so the cleanup log in the finally
@@ -1005,7 +1061,7 @@ public class BotGroupBehaviorService {
                 cancelled = true;
                 log.info("A stop during the start of group {} cancelled the build at {}/{} bots — "
                                 + "unwinding", id, bots.size(), group.getBotCount());
-                return;
+                return false;
             }
 
             startAttempts.progress(id, StartAttemptRegistry.Phase.STARTING_BOTS);
@@ -1083,7 +1139,7 @@ public class BotGroupBehaviorService {
 
                 log.error("Group {} started 0/{} bots — marking DEAD", group.getName(), group.getBotCount());
                 started = true;
-                return;
+                return true;
             }
 
             // The build is done and the bots are up: the runtime stops being STARTING and
@@ -1106,6 +1162,7 @@ public class BotGroupBehaviorService {
 
             log.info("Bot group {} started successfully with {} bots", group.getName(), bots.size());
             started = true;
+            return true;
 
         } catch (Throwable t) {
             // Capture for the finally-block log and rethrow unchanged — the
@@ -2009,7 +2066,20 @@ public class BotGroupBehaviorService {
         return BotGroupHealthDTO.builder()
                 .groupId(id)
                 .groupName(group.getName())
-                .status(runtime.getActualStatus())
+                // getActualStatus(id), not runtime.getActualStatus() (RR2). R3 fixed only the
+                // runtime-LESS branch above, which left the worse half open: in the reclaim
+                // window — a /start on a DEAD group, whose DEAD runtime stays in runningGroups
+                // until startLocked's teardown, which is behind the group lock and can therefore
+                // be minutes under pacing — /status answered STARTING and THIS endpoint answered
+                // DEAD for the same group at the same instant. getActualStatus' own javadoc calls
+                // that "the one answer that is actively misleading", and this is the public-facing
+                // UI health feature. Same for the milder inverse: a redundant /start on a live
+                // group made /status say STARTING while this said ACTIVE.
+                //
+                // The runtime stays the right source for everything BELOW this line —
+                // playingStatus, startedAt, the failure count and the per-bot block are
+                // properties of the runtime that exists, not of the group's lifecycle intent.
+                .status(getActualStatus(id))
                 .playingStatus(runtime.getPlayingStatus())
                 .startedAt(runtime.getStartedAt())
                 .consecutiveFailures(runtime.getConsecutiveFailures())
@@ -2932,6 +3002,11 @@ public class BotGroupBehaviorService {
      * (GATEWAY_REQUEST_BUDGET A1): {@code POST /start} answers with this value the moment it
      * accepts the work, before the build thread has created the runtime, and answering
      * {@code STOPPED} there would tell an operator their start did nothing.
+     * <p>
+     * <b>Every status-bearing endpoint goes through this method</b> — {@code /status},
+     * {@code /health} and the environment list view (RR2). They used to differ: {@code /health}
+     * read the runtime directly, so in the reclaim window it answered {@code DEAD} while
+     * {@code /status} answered {@code STARTING} for the same group at the same instant.
      */
     public BotGroupStatus getActualStatus(String id) {
         // An open attempt wins over whatever runtime is there. Normally they agree (a fresh

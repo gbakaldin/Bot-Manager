@@ -161,6 +161,63 @@ class BotGroupBehaviorServiceAsyncStartTest {
     }
 
     @Test
+    @DisplayName("/health and /status agree in the reclaim window, where the answer used to be DEAD (RR2)")
+    void healthAgreesWithStatusInTheReclaimWindow() throws Exception {
+        // RR2. R3 fixed only getHealth's runtime-LESS branch; this is the half it left, and
+        // getActualStatus' own javadoc calls it "the one answer that is actively misleading".
+        //
+        // A /start on a DEAD group opens the attempt immediately, and the DEAD runtime stays in
+        // runningGroups until startLocked's teardown — which is behind the group lock and can be
+        // MINUTES under pacing. For that whole window /status said STARTING (correct) and
+        // /health — the public-facing UI health feature — read the runtime directly and said DEAD.
+        BotGroup group = group(2);
+        when(botGroupService.findById("g-1")).thenReturn(group);
+
+        BotGroupRuntime dead = new BotGroupRuntime("g-1", 2, "env-1", "env", "Group", null);
+        dead.markAsDead();
+        runningGroups().put("g-1", dead);
+        assertThat(dead.getActualStatus()).isEqualTo(BotGroupStatus.DEAD);
+
+        // The attempt an accepted /start opens, without running a build: what is under test is
+        // what the two endpoints answer while a DEAD runtime and an open attempt coexist.
+        assertThat(startAttempts().begin("g-1", StartOrigin.REST)).isTrue();
+        try {
+            assertThat(service.getActualStatus("g-1")).isEqualTo(BotGroupStatus.STARTING);
+            assertThat(service.getHealth("g-1").getStatus())
+                    .as("the public-facing UI health endpoint must not tell an operator their "
+                            + "/start did nothing while /status says it was accepted")
+                    .isEqualTo(BotGroupStatus.STARTING);
+        } finally {
+            startAttempts().finish("g-1", null);
+        }
+
+        // And with no attempt open it goes back to reporting the runtime, which is the truth then.
+        assertThat(service.getHealth("g-1").getStatus()).isEqualTo(BotGroupStatus.DEAD);
+        assertThat(service.getActualStatus("g-1")).isEqualTo(BotGroupStatus.DEAD);
+    }
+
+    @Test
+    @DisplayName("a redundant /start on a live group does not make the two endpoints disagree either")
+    void healthAgreesWithStatusOnARedundantStart() {
+        // The milder inverse RR2 also names: /status said STARTING while /health said ACTIVE.
+        BotGroup group = group(2);
+        when(botGroupService.findById("g-1")).thenReturn(group);
+
+        BotGroupRuntime live = new BotGroupRuntime("g-1", 2, "env-1", "env", "Group", null);
+        live.setActualStatus(BotGroupStatus.ACTIVE);
+        runningGroups().put("g-1", live);
+
+        assertThat(startAttempts().begin("g-1", StartOrigin.REST)).isTrue();
+        try {
+            assertThat(service.getHealth("g-1").getStatus())
+                    .isEqualTo(service.getActualStatus("g-1"))
+                    .isEqualTo(BotGroupStatus.STARTING);
+        } finally {
+            startAttempts().finish("g-1", null);
+        }
+    }
+
+    @Test
     @DisplayName("the runtime is STARTING while building and only ACTIVE is ever persisted")
     void startingIsNeverPersisted() throws Exception {
         BotGroup group = group(2);

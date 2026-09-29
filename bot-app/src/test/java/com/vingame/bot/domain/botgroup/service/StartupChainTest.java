@@ -40,6 +40,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -354,7 +355,75 @@ class StartupChainTest {
         assertThat(service.isGroupRunning("sched")).isFalse();
     }
 
+    @Test
+    @DisplayName("a /stop that lands while the chain waits for the group lock is still honoured (RR1)")
+    void aStopInsideTheLockWindowIsHonoured() throws Exception {
+        // RR1. The intent re-read used to happen BEFORE startTracked -> start -> lock.lock(), so
+        // the sequence below lost the STOPPED write: the chain read ACTIVE, queued for the lock,
+        // and by the time it got in it persisted ACTIVE over an operator's opt-out. The window was
+        // one findById plus a log line — tiny, and the same width as any /start racing any /stop —
+        // but STOPPED is DEAD_GROUP_AUTO_RECOVERY AD-5's ONLY opt-out, so losing it means a group
+        // an operator deliberately parked starts spending money again on the next restart.
+        //
+        // The lock is held from here, which is exactly the window: the chain cannot proceed, and
+        // the document changes underneath it.
+        BotGroup queued = group("g1");
+        when(botGroupService.findByTargetStatus(BotGroupStatus.ACTIVE)).thenReturn(List.of(queued));
+        // No environment/game stubs: the skip happens before startLocked reads either of them,
+        // which is itself part of the assertion — a start that got as far as loading the
+        // environment would have got as far as persisting ACTIVE.
+
+        java.util.concurrent.atomic.AtomicReference<BotGroup> document =
+                new java.util.concurrent.atomic.AtomicReference<>(queued);
+        when(botGroupService.findById("g1")).thenAnswer(inv -> document.get());
+
+        ReentrantLock lock = groupLock("g1");
+        lock.lock();
+        try {
+            service.onStartup();
+            // Wait until the chain is actually blocked on the lock rather than sleeping for a
+            // guess: queueLength > 0 is the only honest signal that it got that far.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+            while (!lock.hasQueuedThreads() && System.nanoTime() < deadline) {
+                Thread.sleep(5);
+            }
+            assertThat(lock.hasQueuedThreads())
+                    .as("the chain must be waiting for the group lock — if it is not, this test is "
+                            + "not exercising the window it exists for")
+                    .isTrue();
+
+            // The operator's /stop persists STOPPED while the chain is parked.
+            document.set(BotGroup.builder()
+                    .id("g1").name("Group g1").environmentId("env-1").gameId("game-1")
+                    .botCount(2).namePrefix("botg1").password("pass")
+                    .targetStatus(BotGroupStatus.STOPPED)
+                    .build());
+        } finally {
+            lock.unlock();
+        }
+        joinChain();
+
+        assertThat(service.isGroupRunning("g1"))
+                .as("the re-read now happens with the lock held, so the STOPPED it finds is the "
+                        + "STOPPED the operator wrote")
+                .isFalse();
+        verify(botFactory, never()).createBot(anyString(), any(BotConfiguration.class));
+    }
+
     // ------------------------------------------------------------------ helpers
+
+    @SuppressWarnings("unchecked")
+    private ReentrantLock groupLock(String id) {
+        try {
+            java.lang.reflect.Field f =
+                    BotGroupBehaviorService.class.getDeclaredField("groupLocks");
+            f.setAccessible(true);
+            return ((java.util.Map<String, ReentrantLock>) f.get(service))
+                    .computeIfAbsent(id, k -> new ReentrantLock());
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException(e);
+        }
+    }
 
     private void joinChain() {
         Thread chain = service.startupChainThread();
