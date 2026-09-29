@@ -2059,3 +2059,373 @@ correctness in the large; 9-12 must not be left behind.
 
 And what Phase 3 must **not** absorb: registration machinery (Phase 4), Cloudflare detection and
 the circuit (Phase 5) — A16 amends their *design*, not their phase.
+
+---
+
+## Amendment — 2026-09-29 (Phase 3 compliance; A21-A29)
+
+Phase 3 is `6a8d69e`..`4bad37a` (twelve commits) on `feature/gateway-request-budget`. Verdict
+**PLAN_AMENDED / diff accepted** — `docs/reviews/GATEWAY_REQUEST_BUDGET/compliance-phase3.md`.
+All twelve of A20's items are implemented; nothing goes back to Dev.
+
+Verified in a **clean detached worktree at the branch tip** (the check `08c52a3` exists because
+of): `mvn -o -DskipTests test-compile` over all five modules — **SUCCESS**, so the tip no longer
+depends on anyone's uncommitted work. `GatewayBudgetEscalationIT` (V3g) — **4 tests, 0 failures,
+37 s**, against its own loopback stub.
+
+Five of the items below correct **this document**: three places where the plan asked for
+something that cannot be done as written, one verification step that is now obsolete, and one
+cost estimate that is understated. Three more record claims in shipped code and config that are
+now stale. A28/A29 are the ordered inheritance lists for the two phases that follow, in the same
+role A20 played for this one.
+
+---
+
+### A21 — AD-9's `performReauth` could not stay a boolean
+
+**AD-9 says a `GatewayBudgetException` in `performReauth` must "count as a failed attempt and
+continue the existing backoff loop". That is not expressible in the method's Phase-2 signature**,
+and the plan did not notice: `performReauth` returned `boolean`, and at **both** call sites
+`false` already meant *"the bot has been marked DEAD — stop the loop"*
+(`runWsReconnectLoop`'s `if (!performReauth()) return;`, `runAuthThenWsLoop`'s ditto). A budget
+refusal returning `false` would therefore have ended the reconnect loop on a bot that was never
+marked DEAD, leaving it parked `RECONNECTING` with **no loop running and nothing to restart it** —
+strictly worse than the DEAD the AD was written to prevent, because DEAD is at least a state
+auto-recovery and the health monitor can see.
+
+**Corrected:** the method returns `ReauthOutcome { SUCCESS, RETRYABLE, TERMINAL }`. Verified at
+both call sites independently, because collapsing RETRYABLE into either neighbour is the bug:
+
+- `runWsReconnectLoop` — `cycle++` and the `MAX_RECONNECT_CYCLES` check happen **before**
+  `performReauth()`, so RETRYABLE has already been charged a cycle and the absolute cap cannot be
+  bypassed. It then resets `attempt = 0` exactly as SUCCESS does, i.e. the bot gets a fresh
+  7-step backoff sequence and retries the WS upgrade on its existing tokens — which is the
+  pre-existing shape of the first seven attempts of every cycle and is correct.
+- `runAuthThenWsLoop` — RETRYABLE **skips the immediate WS upgrade** and enters
+  `runWsReconnectLoop(1)`. Upgrading on tokens we did not refresh is not the same thing as
+  succeeding, and entering at `cycle=1` is what the SUCCESS path does two frames later, so the
+  cap is not bypassable through this branch either.
+
+The arm only works because `ApiGatewayClient.authenticate` rethrows `GatewayBudgetException`
+ahead of its `RuntimeException` arm (A4). The two changes are one change.
+
+---
+
+### A22 — AD-10's drift read needed a new method, not a tier switch
+
+**AD-10 describes `checkBalance` "with `lastFetchedBalance >= 0`" using
+`tryExecute(DEFAULT, scope, …, Duration.ZERO)` and returning the local estimate on `empty()`.**
+The plan wrote that as though the tier were the only difference. It is not: `ApiGatewayClient`
+owns the call, `getBalance` returns a primitive `long`, and **there is no `long` that can mean
+"not sent"** — `-1` is a legal balance and `0` is the common one on a fresh account.
+
+**Corrected:** `ApiGatewayClient` grows `getBalanceIfAdmitted(...) → OptionalLong`, the
+`tryExecute(DEFAULT, …, ZERO)` twin of `getBalance`. Both delegate to one private
+`readBalance(..., boolean deferrable)`, and all three funnel entry points (`send`, the
+wait-override `send`, `sendIfAdmitted`) share one `httpCall(request)` factory — so
+`GatewayCallSiteGuardTest`'s `httpClient.send( == 1` rule still holds against three admission
+semantics, which is the property that keeps an uncounted escape from the budget unbuildable.
+
+Two consequences worth naming, both in the diff and neither in the plan:
+
+- **`depositIsWarranted(localBalance)` subsumes the `balance < getMinBalance()` test** at both
+  `onNewSession` sites rather than sitting beside it, so the condition is not evaluated twice and
+  there is exactly one place the money decision is made.
+- The per-bot deposit DEBUG line and `GroupLifecycleAggregator.recordAutoDeposit` now read
+  `expectedCurrentBalance` rather than the stale `balance` local, because a pre-deposit refresh
+  may have replaced the estimate between the two. Without that the group-level aggregate would
+  report the figure the decision was **not** made on.
+
+---
+
+### A23 — A16.1's rename is in Phase 3, ahead of the detector it belongs to
+
+`block-cooldown` → **`bot.gateway.budget.block-probe-interval`, 15m → 60m**, landed here rather
+than in Phase 5. That is correct and the plan should say why: **A16.2's refusal path needs a
+number for `Retry-After` now.** An open circuit refuses every tier from this phase, and
+`GatewayCircuitOpenException(environmentId, cfRay, retryAfter)` has to carry something; carrying
+a value read from a property named `block-cooldown` would have written the falsified assumption
+into the one field an HTTP client obeys. `GatewayBudgetSettings` also now **rejects zero** for it
+(probing continuously into an edge that is refusing us is the behaviour that kept the observed
+block alive), which the AD did not specify.
+
+**No detector, no trigger, and that is the phase boundary holding.** `circuitOpen` is an
+`AtomicBoolean` with **no setter anywhere in the tree** — production or test. So the three
+refusal branches (`admit`, `refuseIfCircuitOpen`, `admitWaitersLocked`'s `break`) are correct,
+reviewed, and **unreachable and untested in the shipped artifact**. That is the intended
+trade — "the refusal path is here so the two are not designed apart" — but it must not be
+mistaken for tested behaviour. **Phase 5 owes the first test of code Phase 3 wrote**; see A29.1.
+
+---
+
+### A24 — V3g is not literally achievable as written, in three ways
+
+**1. The headline assertion.** V5/V3g asks the IT to assert "on the **stub's own** sliding count
+(never above 900 at any instant)". **That is not true and cannot be made true**, and the reason
+is a property of the design rather than a defect: **we stamp at admission, the edge counts at
+arrival.** When the window rolls and a fresh burst is admitted, the tail of the previous burst
+may still be arriving, so an *observer's* window can hold up to `cap + (requests in flight at the
+roll)`. The budget's **own** window is strictly within the cap — that invariant is exact — and
+the IT asserts both numbers separately so a disagreement is attributable:
+
+```
+budgetMax   <= HARD_CAP                 (exact; a failure here is an arithmetic defect)
+observedMax <= HARD_CAP + threads       (the in-flight allowance, stated not fudged)
+```
+
+In production the in-flight count is bounded by `bot.creation.parallelism` and
+`user.registration.parallelism` (10 each) against the 100-request gap between `hard-cap=900` and
+Cloudflare's 1,000 — i.e. an order of magnitude inside AD-5's "only margin for traffic the JVM
+cannot see". **It is one more reason not to raise `hard-cap`**, and it is now in
+`SlidingWindowGatewayBudget`'s class javadoc as well as the test. Dev documented and asserted it
+rather than choosing a fudge factor that hid it, which is the right call.
+
+**Corrected V3g wording:** *asserts that the budget's own window never exceeds `hard-cap`, and
+that the receiver's own sliding count never exceeds `hard-cap` + the concurrency of the run.*
+
+**2. The command fails.** The step as written is
+
+```bash
+mvn -pl bot-engine -am test -Dgroups=stub-gateway -Dtest=GatewayBudgetEscalationIT
+```
+
+Measured at the branch tip: **`BUILD FAILURE` at `bot-api`** — `No tests matching pattern
+"GatewayBudgetEscalationIT" were executed!`, because `-Dtest` applies to every module `-am`
+pulls in. **Corrected command:**
+
+```bash
+export JAVA_HOME=/Users/gleb/Library/Java/JavaVirtualMachines/openjdk-21.0.2/Contents/Home
+cd /Users/gleb/IdeaProjects/Bot && mvn -pl bot-engine -am test \
+  -Dtest=GatewayBudgetEscalationIT -Dsurefire.failIfNoSpecifiedTests=false
+```
+
+Expect `BUILD SUCCESS`, `Tests run: 4`, ~40 s. Related: **Implementation Note 18's
+`excludedGroups=stub-gateway` was not added and is not needed** — there is no surefire
+configuration in any pom, so the `*IT` suffix already falls outside surefire's default includes
+(`Test*`, `*Test`, `*Tests`, `*TestCase`). The `@Tag("stub-gateway")` survives as the selector.
+The note should say "excluded by its name" rather than "excluded by `excludedGroups`".
+
+**3. There are no six lines to paste.** V3g says the run prints a summary for each of 910 / 930 /
+950 / 970 / 990 / 1,010 submitted, to be pasted into `release.md`. The shipped IT is **four
+tests**: one 910-attempt, 24-thread, mixed-tier run with a continuous sampler on the receiver's
+side, plus `defaultStopsAtItsCeilingAndEssentialDoesNot`, `theOverflowWaitsForExpiry` and
+`aLoginIsCountedAndParsed`. The escalation ladder was a proxy for "far past the cap on several
+tiers"; one concurrent run past the cap with a sampler covers it better than six sequential ones,
+and the window is injected (5 s) so it takes 40 s rather than the ~7 minutes budgeted. It prints
+nothing on success. **Corrected:** the Releaser pastes the surefire result line
+(`Tests run: 4, Failures: 0, Errors: 0`) and the two measured maxima into `release.md`; if the
+numbers are wanted, they are in the assertion descriptions on failure only.
+
+---
+
+### A25 — V3d is obsolete, and AD-19's 429 stopgap is deliberately not built
+
+**Phase 3's change list item 4 asks for `BotGroupService.save` to throw
+`GatewayBudgetExhaustedException` (429) when every user fails on the budget. Dev did not build
+it, and that is right**: A2/AD-19a **supersede AD-19 in full** and delete the stopgap, and A6
+Phase 4 deletes `registerUsers`' fan-out altogether. Building a 429 arm into
+`BotGroupService.save`'s synchronous-registration branch would add a path the very next phase
+removes, on the branch that ships them together (A7).
+
+**What did land is the half that is not thrown away**: register and update-fullname run at
+DEFAULT with the `registration.max-wait` (15 m) override, so an admitted registration **finishes
+rather than half-finishes** when a group start floods the window. That is the requirement worth
+keeping — a half-registered group is the state nobody comes back to — and Phase 4's
+`RegistrationWorker` uses the same override.
+
+**What is left unprotected in the meantime, stated precisely.** Inside the branch, between this
+phase and Phase 4, synchronous registration under `enforce` has two defects:
+
+1. **A complete budget failure is a `502`, not a 429.** `registerUsers` catches `Exception`
+   per user into `failureCount`/`errors`, so a `GatewayBudgetExhaustedException` becomes a
+   per-user failure string; `BotGroupService.save` then throws `UpstreamRegistrationException`
+   → **502 "Game server error"** about a gateway that is working perfectly. This is precisely
+   what AD-11 and A20.8 forbid.
+2. **The HTTP thread can park for hours.** Ten concurrent registrations each waiting up to 15
+   minutes, `allOf(...).join()`, `ceil(N/10)` batches — a 200-bot create is a worst case of
+   ~5 hours on one Tomcat worker.
+
+**Neither is reachable in any deployed artifact, because A7's single cut is after Phase 5** and
+Phase 4 removes the code that contains them. The exposure is therefore *ordering*, and A7's one
+ordering constraint already covers it in the other direction ("Phase 3 precedes Phase 4"). It is
+recorded here so that **if Phase 4 ever slips or is descoped, this becomes a release blocker
+rather than a surprise**, and so the correct minimal fix is on record: one
+`catch (GatewayBudgetException)` arm in `registerUsers`' per-user lambda that does not
+`failureCount.incrementAndGet()`, plus the 429 in `save`. QA's G1 / Open Item 15
+(`Semaphore(registrationParallelism)` with `registrationParallelism == 0` outside Spring) is
+still live in the same method for the same reason, and the IT sets the field by reflection.
+
+**Corrected V3d.** On the single deployment (after Phase 5) registration is asynchronous, so the
+step's premise no longer exists. Replace it with: *create a 5-bot group while V3b is running and
+DEFAULT is starved; expect `200` in under 2 s with `targetStatus: "REGISTRATION_PENDING"`
+(V4a), and `registeredCount` climbing thereafter — never a `502`, and never a request that
+blocks for minutes.*
+
+---
+
+### A26 — the per-gateway-host seam is real, but "one line" understates it
+
+A16.6a's pre-flight is satisfied and the keying decision is honoured: **the budget is keyed per
+`Environment` and nothing else** (`budgetKey(environmentId, apiGatewayUrl)` accepts the URL and
+returns the id), plus one WARN per gateway host per JVM naming every colliding environment and
+the cap each of them thinks it owns, fired from `EnvironmentClientRegistry.createClients` — the
+only place in the app that knows an environment's gateway URL when its budget is created. Host
+only, lower-cased, unparseable URL skips the check rather than failing startup. Two tests pin
+both the collision and the three non-collisions.
+
+**The cost estimate in `forEnvironment`'s javadoc is understated, though**, and a future reader
+would plan against it. It says switching to a host key is "`budgetKey`'s body plus giving `find`
+and `snapshotOrEmpty` the same host — and those two are read-only consumers with one caller
+each". `snapshotOrEmpty`'s caller (`FleetRollupLogger`) could be given a host. **`find`'s caller
+cannot**: `cancelStartInFlight` resolves the environment id from `BotGroupRuntime`, which carries
+`environmentId` and `environmentName` and **no gateway URL**. A host key therefore additionally
+requires either carrying the URL onto `BotGroupRuntime` or an extra `Environment` read **on the
+`/stop` path**, which is the one path A20.3 just made a stop-latency requirement.
+
+**Corrected:** the seam is one method plus two read-only consumers, **one of which needs a value
+its caller does not currently hold.** Still small; not one line. If the day comes, prefer
+threading `apiGatewayUrl` onto the runtime at `startLocked` (where the `Environment` is already
+loaded) over a Mongo read inside a stop.
+
+---
+
+### A27 — three claims in shipped code and config that are now stale or overstated
+
+Small, and each is a sentence the next reader would otherwise trust. None is a defect in
+behaviour; all three should be corrected in Phase 5's pass.
+
+1. **`SlidingWindowGatewayBudget.recordAdmitted`'s javadoc** says its DEBUG line "runs on a
+   thread whose MDC the bot already populated ... which is what makes a per-request line
+   admissible at all". True on the arrival path; **false on the waiter path.** An admitted
+   waiter's `recordAdmitted` runs inside `runAfterUnlock`, i.e. on **whichever thread ran the
+   admission pass** — the budget's own `gateway-budget-<env>` scheduler thread (no MDC at all),
+   the probe scheduler's, or another group's start thread inside `reserve`/`release`. So on a
+   paced fleet the line is either untagged or **tagged with a different group's MDC**. Impact is
+   confined to track 2 DEBUG and the identity is in the message text (`scope.describe()`), so
+   nothing operator-facing is wrong — but the claim is, and the fix is cheap and known:
+   `Waiter` captures `MDC.getCopyOfContextMap()` at enqueue and `recordAdmitted` runs under it
+   via `BotMdc.snapshot()`/`restore()` (never `clear()`, A20.9). Recommended for Phase 5, not
+   required by any AD.
+2. **`GatewayBudgetSustainedQueue` fires on the largest documented *normal* case.**
+   `min_over_time(...[15m]) > 0` with `for: 15m` is ~30 minutes of continuously non-empty
+   ESSENTIAL queue; AD-18 puts a 3,000-bot group at ~50 minutes of exactly that. The rule's own
+   description says "this is not a large start passing through — it is a start that cannot
+   finish", and for a 3,000-bot start that sentence is false. The rule is `warning` /
+   `audience: internal` and falls through to `viptalk`, so the cost is one spurious warning per
+   very large start; A20.10 explicitly allowed "or accept that V3 is read by hand", so the rule
+   is a bonus rather than a requirement. **Decide at Phase 6 with V3b's real numbers in hand**:
+   either widen to `for: 45m`, or keep 15m and rewrite the annotation to say "expected during a
+   start of more than ~1,800 bots; correlate with the group's `start admitted … estimated <m>
+   min` line". Do not leave the annotation as it stands.
+3. **`classifyCreationFailure`'s `"budget"` arm still says "Inert until Phase 3 — nothing throws
+   a `GatewayBudgetException` while the facade is in observe mode".** It is live now, and it is
+   one of only three places a budget outcome during a build is visible at all (A20.2). One-line
+   comment fix.
+
+---
+
+### A28 — what Phase 4 (asynchronous registration) inherits, ordered
+
+Phase 4 starts next. A6 Phase 4 and A17 stand; these are the things the plan does not yet say,
+in the order they will be met.
+
+1. **`registrationMaxWait()` on the interface is necessary but *not sufficient* for
+   `RegistrationWorker`.** It is wired and correct (`ApiGatewayClient` reads it for both
+   registration calls). What A2.3's observe-mode fallback also needs is **the window and the
+   DEFAULT ceiling** — `window / defaultCeiling` = 600 ms — and neither is reachable through
+   `GatewayBudget`: `snapshot()` carries `mode`, `windowRequests`, `hardCap`, the three queue
+   depths and `circuitOpen`, and `settings()` exists only on the concrete
+   `SlidingWindowGatewayBudget`. **Do not read `settings()` by downcast** (fixtures use
+   `GatewayBudget.UNLIMITED`); add the two values to `Snapshot` or add one
+   `Duration observeModePacing()` to the interface, defaulting to zero on `UNLIMITED`.
+   Related trap: **`UnlimitedGatewayBudget.registrationMaxWait()` returns `Duration.ZERO`**,
+   which is harmless there (nothing waits) but is `tryExecute`'s "now or never" on a real budget.
+   `GatewayBudgetSettings` validates `registration.max-wait` as non-negative only, so
+   `bot.gateway.budget.registration.max-wait=0` would silently turn registration into
+   fail-fast. Either reject zero there as `block-probe-interval` now does, or have the worker
+   floor it.
+2. **`registeredCount` and `namedCount` are render-only, by the same mechanism `targetStatus`
+   now uses** (A14's hard constraint, and A17.3 makes it two fields rather than one):
+   `@JsonProperty(access = READ_ONLY)` on the DTO **and** absent from *both* `BotGroupMapper`
+   write paths, pinned by the value-level assertion in `BotGroupStatusPersistenceGuardTest`'s
+   idiom. A client-writable high-water mark lets a request body make the worker skip or
+   re-register a block of accounts. Note the mapper's other three system-managed fields
+   (`lastStartedAt`, `lastStoppedAt`, `lastFailureReason`) were closed on `toEntity` in this
+   phase (`36aec4e`), so the "system-managed set" is now actually closed and the new fields join
+   a consistent rule rather than a half-applied one.
+3. **The resume path costs three DEFAULT requests, not two** (A17.3): a re-register returns no
+   `session_id`, so an index that registered but was never named needs `register + login +
+   update-fullname`. Classify on the **body** (`status == "EXISTED"` at HTTP **200**), scoped to
+   the endpoint called — from `update-fullname.aspx` the same `status` means "display name
+   taken". The live capture, including the fixture account `envprobe0929a` on 097 staging, is
+   `docs/reviews/GATEWAY_REQUEST_BUDGET/gwms-register-envelope.md`. Fail closed on any other
+   `status`.
+4. **QA's G1 / Open Item 15 disappears with the bulk method, and only with it.**
+   `Semaphore(registrationParallelism)` with `registrationParallelism == 0` outside Spring hangs
+   any non-Spring caller; `GatewayBudgetEscalationIT` already has to set the field by reflection
+   to use `ApiGatewayClient` at all. A6 Phase 4 item 5 reduces `registerUsers` to
+   `registerOne(prefix, password, index)` — **do that rather than adding a `Math.max(1, …)`
+   floor**, and delete `user.registration.parallelism`. A25's two synchronous-registration
+   defects (a budget failure surfacing as a 502, and an HTTP thread parked for hours) go with the
+   same method; until then they are the branch's one enforce-mode exposure.
+5. **`/start` on a registering group must be refused where the lock is, not before it.** A2's
+   guard belongs in `startLocked` beside the two existing `BadRequestException` checks — and
+   note that `startLocked` now also carries `reassertStartupIntent` (RR1) for the same reason:
+   the locked re-read is the only place a decision and the `targetStatus=ACTIVE` persist that
+   follows it are one atomic step. `ActivationScheduler` still needs its own guard (it queries
+   by activation mode, not by status).
+6. **The worker's requests must be cancellable and must not be charged for what the budget
+   refuses.** `GatewayRequestScope.registration(prefix)` carries no `botGroupId`, so
+   `cancelScope(groupId)` cannot reach a registration waiter and a reservation cannot be
+   consumed by one. For a group-as-job worker that is now wrong in both directions: use a scope
+   carrying the group id so a `DELETE` during registration can call it off. And per A2.6, a
+   budget timeout or an open circuit **re-queues the group without consuming an attempt** —
+   distinct from a gateway refusal, which does.
+7. **A20.10's alerting question repeats for registration.** `RegistrationStalled`
+   (`registration_failed_groups > 0`, `for: 15m`) needs its counters **pre-registered at zero**
+   for the reason CLAUDE.md spells out for `group_recovery_*`, and
+   `registration_accounts_total{outcome=success|failed|exists}` needs `exists` from day one or
+   V4e's "no username registered twice" check has nothing to read.
+
+---
+
+### A29 — what Phase 5 (Cloudflare detection, circuit, in-repo login) inherits
+
+1. **Phase 5 writes the first test of code Phase 3 shipped.** The refusal half of the circuit
+   exists and is unreachable: `circuitOpen` has no setter. `GatewayCircuitBreakerTest` must
+   therefore cover the three branches already written here — `admit` (throws
+   `GatewayCircuitOpenException` for **every** tier, ESSENTIAL included, per A16.2, and returns
+   `false` for a soft caller), `refuseIfCircuitOpen` (the `count-ws-upgrades=false` path, A5.2),
+   and `admitWaitersLocked`'s `break` (an open circuit admits no queued waiter) — plus
+   `outcome="circuit_open"` on the counter. A16.2 already replaces the AD's "ESSENTIAL parks"
+   assertion with "ESSENTIAL is refused".
+2. **`EnvironmentWsProbe` still reads a Cloudflare block page as *healthy*** (A15.4, unchanged
+   by this phase): any completed response with `status < 500` is healthy by AD-2, and a block
+   page is a well-formed 403. So during a block the probe reports the environment as serving, and
+   `DeadGroupRecoveryScheduler.evaluateCandidate`'s circuit skip is **the only thing** stopping
+   auto-recovery from starting groups into a blocked edge for up to a day. Keep it, do not make
+   it conditional on `bot.recovery.enabled`, and suppress the probe scheduler itself while the
+   circuit is open — its stamps buy no information and, since A15, they are counted
+   (`countWsUpgrade("ws-probe")` is already wired).
+3. **AD-12's in-repo login is what lets `BoundedLogin` delete itself.** `BoundedLogin` is a
+   deliberate stopgap: a virtual thread per login, a 10 s wait, and `HttpClient.shutdownNow()`
+   on expiry reached through a subclass, because `AuthClient.authenticate()` builds its request
+   internally and exposes `httpClient` only through a `protected` getter. When the login moves
+   in-repo it becomes `.timeout(GATEWAY_REQUEST_TIMEOUT)` on the request and the class goes away
+   — **and `GATEWAY_REQUEST_TIMEOUT` is already the shared constant** (`ApiGatewayClient`, all
+   five calls), so A19's obligation "give the login request the same 10 s timeout the other four
+   have" is discharged by using it. Two things must move together with it:
+   `GatewayCallSiteGuardTest.oneLibraryLoginEntryPoint` (which now asserts `new AuthClient(` is
+   **zero** in `ApiGatewayClient`, `BoundedLogin.login(` is exactly one, and `BoundedLogin`
+   contains `extends AuthClient` / `LOGIN_TIMEOUT` / `shutdownNow()`), and the
+   `IOException` arm's comment in `authenticate`, which currently explains itself in terms of
+   `BoundedLogin`. The `RuntimeException`-shaped failure contract must not change: the library
+   throws only unchecked, and `rethrowUnchecked` exists so a brand's login failure does not
+   become an `IllegalStateException` in one release.
+4. **The `httpCall(request)` factory is the classifier's insertion point.** Implementation Note
+   11 ("classifier before parser, on every funnel response") now has exactly one place to go, and
+   the guard test will fail the build if a second one appears.
+5. **Phase 5 owns A27's three corrections** (the `recordAdmitted` MDC claim, the
+   `GatewayBudgetSustainedQueue` annotation, `classifyCreationFailure`'s "inert" comment) and
+   AD-13's `count("circuit-probe")` keeps the unconditional form — it is an HTTP GET, not an
+   upgrade (A5.3).
