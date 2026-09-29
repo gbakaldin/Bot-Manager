@@ -135,10 +135,17 @@ public class EnvironmentClientRegistry {
         // the same per-environment window. forEnvironment is a computeIfAbsent and is never
         // evicted, so rebuilding an environment's clients (a restart, a recovery) keeps the
         // window it was already counting rather than resetting it to zero.
+        //
+        // The gateway URL is passed so the registry can WARN when two environments resolve to
+        // the same gateway HOST (A16.6a): Cloudflare counts per (source IP x gateway host), so
+        // two such environments would run two 900-request windows against one 1,000-request
+        // limit and neither would be able to see the other. This is the only place in the app
+        // that knows an environment's gateway URL at the moment its budget is created.
         GatewayBudget gatewayBudget = gatewayBudgetRegistry.forEnvironment(
                 environmentId,
                 env.getName(),
-                env.getProductCode() != null ? env.getProductCode().getCode() : null);
+                env.getProductCode() != null ? env.getProductCode().getCode() : null,
+                env.getApiGatewayUrl());
 
         ApiGatewayClient apiGatewayClient = apiGatewayClientProvider.getObject();
         apiGatewayClient.init(env.getApiGatewayUrl(), appId,

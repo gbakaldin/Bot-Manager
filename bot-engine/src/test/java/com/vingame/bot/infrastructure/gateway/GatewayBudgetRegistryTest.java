@@ -291,6 +291,67 @@ class GatewayBudgetRegistryTest {
     }
 
     @Test
+    @DisplayName("two environments on one gateway host produce one WARN naming both")
+    void sharedGatewayHostWarnsOnce() {
+        // A16.6a. The budget is keyed per ENVIRONMENT (the user's decision) but Cloudflare counts
+        // per (source IP x gateway host). Two Environment documents pointing at the same
+        // apiGateway therefore each get their own 900 against ONE 1,000-request limit, and
+        // neither budget can see the other — the exact shape that costs a brand a day of uptime,
+        // and the one the data model does nothing to prevent. One WARN naming the duplicates turns
+        // it from a day of misdiagnosis into a grep.
+        registry.forEnvironment("env-a", "Staging A", "116", "https://gw.example.test/");
+        registry.forEnvironment("env-b", "Staging B", "097", "https://gw.example.test:8443/x");
+
+        assertThat(linesAt(Level.WARN)).singleElement().asString()
+                .contains("gw.example.test")
+                .contains("env-a, env-b")
+                .as("host only — the Cloudflare zone follows the hostname, not the scheme, the "
+                        + "port or the path, so these two really are one limit")
+                .doesNotContain("8443");
+
+        // Once per host per JVM: this is reached from getClients, i.e. from every bot-creation
+        // thread of every group start, and a per-call WARN would be a bot-count-scaled INFO class
+        // wearing a WARN badge.
+        registry.forEnvironment("env-a", "Staging A", "116", "https://gw.example.test/");
+        registry.forEnvironment("env-b", "Staging B", "097", "https://gw.example.test/");
+        assertThat(linesAt(Level.WARN)).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("distinct hosts, a repeated environment and an unparseable URL are all silent")
+    void noWarnWithoutAnActualCollision() {
+        registry.forEnvironment("env-a", "Staging A", "116", "https://gw-a.example.test/");
+        registry.forEnvironment("env-b", "Staging B", "097", "https://gw-b.example.test/");
+        // The same environment twice is not a collision — forEnvironment is called once per
+        // client rebuild, which happens on every restart and every recovery.
+        registry.forEnvironment("env-a", "Staging A", "116", "https://gw-a.example.test/");
+        // A URL we cannot parse is not worth a WARN and definitely not worth a startup failure:
+        // the budget still works, only the collision check is skipped.
+        registry.forEnvironment("env-c", "Staging C", "119", "not a url at all");
+        registry.forEnvironment("env-d", "Staging D", "114", null);
+
+        assertThat(linesAt(Level.WARN)).isEmpty();
+        assertThat(registry.size())
+                .as("and the key is still the environment id, so all five calls resolved four "
+                        + "distinct budgets — keying by host is a one-line change, not this")
+                .isEqualTo(4);
+    }
+
+    @Test
+    @DisplayName("the gateway host is the hostname, lower-cased, and nothing else")
+    void gatewayHostIsJustTheHostname() {
+        assertThat(GatewayBudgetRegistry.gatewayHost("https://GW.Example.Test:443/gwms/v1/"))
+                .isEqualTo("gw.example.test");
+        assertThat(GatewayBudgetRegistry.gatewayHost("http://gw.example.test"))
+                .isEqualTo("gw.example.test");
+        assertThat(GatewayBudgetRegistry.gatewayHost("  https://gw.example.test/ "))
+                .isEqualTo("gw.example.test");
+        assertThat(GatewayBudgetRegistry.gatewayHost("")).isNull();
+        assertThat(GatewayBudgetRegistry.gatewayHost(null)).isNull();
+        assertThat(GatewayBudgetRegistry.gatewayHost("nonsense with spaces")).isNull();
+    }
+
+    @Test
     @DisplayName("the injected clock reaches the budgets it creates")
     void theClockIsHandedToEveryBudget() throws Exception {
         // Without this seam every window test would have to sleep for five minutes, and the

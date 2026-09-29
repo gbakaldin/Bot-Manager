@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongSupplier;
 
@@ -37,6 +38,10 @@ import java.util.function.LongSupplier;
 public class GatewayBudgetRegistry {
 
     private final ConcurrentHashMap<String, SlidingWindowGatewayBudget> budgets = new ConcurrentHashMap<>();
+    /** Gateway host -> the environment ids that send to it. See {@code recordGatewayHost}. */
+    private final ConcurrentHashMap<String, Set<String>> environmentsByGatewayHost = new ConcurrentHashMap<>();
+    /** Hosts already warned about, so the WARN is once per host per JVM and not once per call. */
+    private final Set<String> warnedGatewayHosts = ConcurrentHashMap.newKeySet();
     private final GatewayBudgetSettings settings;
     private final MeterRegistry meterRegistry;
     private final LongSupplier nanos;
@@ -100,12 +105,109 @@ public class GatewayBudgetRegistry {
      *                        else that labels with it
      */
     public GatewayBudget forEnvironment(String environmentId, String environmentName, String productCode) {
-        return budgets.computeIfAbsent(environmentId, id -> {
+        return forEnvironment(environmentId, environmentName, productCode, null);
+    }
+
+    /**
+     * Get or create the budget for an environment, declaring the gateway base URL it will send
+     * to.
+     * <p>
+     * <b>The key is still the environment id</b> — {@link #budgetKey} — and that is the user's
+     * decision, not an oversight. What the URL buys is the <em>detection</em> of the one case
+     * where per-environment keying and the real rule disagree (A16.6a): Cloudflare counts per
+     * (egress IP × gateway host), so two {@code Environment} documents pointing at the same
+     * {@code apiGateway} each get their own 900 — 1,800 against a 1,000 cap, with neither budget
+     * able to see the other. One WARN naming the duplicates is what makes that a five-minute
+     * diagnosis instead of a day of a brand's uptime.
+     * <p>
+     * <b>Switching to a host key is a small change on purpose.</b> It is {@link #budgetKey}'s
+     * body plus giving {@link #find} and {@link #snapshotOrEmpty} the same host — and those two
+     * are read-only consumers with one caller each. The seam exists because the *rule* is
+     * per-host, so the day someone stands up two environments on one gateway deliberately, the
+     * answer is a key change rather than a rework.
+     *
+     * @param apiGatewayUrl the environment's {@code apiGateway} base URL, or {@code null} from
+     *                      callers that do not have it (the WS probe scheduler resolves
+     *                      environments by socket URL, not by gateway host)
+     */
+    public GatewayBudget forEnvironment(String environmentId, String environmentName,
+                                        String productCode, String apiGatewayUrl) {
+        recordGatewayHost(environmentId, apiGatewayUrl);
+        return budgets.computeIfAbsent(budgetKey(environmentId, apiGatewayUrl), key -> {
             log.debug("Creating gateway request budget for environment {} ({}, product {})",
-                    id, environmentName, productCode);
+                    environmentId, environmentName, productCode);
             return new SlidingWindowGatewayBudget(
-                    id, environmentName, productCode, settings, meterRegistry, nanos);
+                    environmentId, environmentName, productCode, settings, meterRegistry, nanos);
         });
+    }
+
+    /**
+     * The budget key: <b>the environment id, and nothing else</b> (AD-1, user-confirmed).
+     * <p>
+     * {@code apiGatewayUrl} is accepted and ignored so that the one line which would have to
+     * change to key by host is this one. See {@link #forEnvironment(String, String, String, String)}
+     * for why it is not keyed by host today and what else would have to move with it.
+     */
+    private static String budgetKey(String environmentId, String apiGatewayUrl) {
+        return environmentId;
+    }
+
+    /**
+     * Remember which environments send to which gateway host, and WARN once per newly-discovered
+     * collision (A16.6a).
+     * <p>
+     * The WARN is the whole point: per-environment keying is only safe while environments do not
+     * share a gateway host, and nothing in the data model prevents two documents from pointing at
+     * the same one. It fires once per host, at startup-ish time (the first time an environment's
+     * clients are built), names every environment involved, and is tier-1 admissible because its
+     * rate is bounded by the number of distinct gateway hosts.
+     */
+    private void recordGatewayHost(String environmentId, String apiGatewayUrl) {
+        String host = gatewayHost(apiGatewayUrl);
+        if (host == null || environmentId == null) {
+            return;
+        }
+        Set<String> sharing = environmentsByGatewayHost.computeIfAbsent(host,
+                h -> ConcurrentHashMap.newKeySet());
+        if (!sharing.add(environmentId) || sharing.size() < 2) {
+            return;
+        }
+        if (warnedGatewayHosts.add(host)) {
+            log.warn("Gateway host {} is shared by {} environments ({}) — Cloudflare's "
+                            + "1,000-requests-per-5-minutes rule is counted per source IP PER "
+                            + "GATEWAY HOST, but this app's budget is keyed per environment, so "
+                            + "these environments each get their own hard cap of {} against ONE "
+                            + "shared limit. Either point them at distinct gateways or lower "
+                            + "bot.gateway.budget.hard-cap so the sum stays under 1,000.",
+                    host, sharing.size(), sortedForDisplay(sharing), settings.hardCap());
+        }
+    }
+
+    /**
+     * The host of a gateway base URL, lower-cased; {@code null} if it cannot be parsed.
+     * <p>
+     * Host only, deliberately: the Cloudflare zone follows the hostname, not the scheme, the port
+     * or the path, so {@code https://gw.example/} and {@code http://gw.example:8080/x} are one
+     * limit. A URL we cannot parse is not worth failing a startup over — the budget still works,
+     * it is only the collision WARN that is skipped.
+     */
+    static String gatewayHost(String apiGatewayUrl) {
+        if (apiGatewayUrl == null || apiGatewayUrl.isBlank()) {
+            return null;
+        }
+        try {
+            String host = java.net.URI.create(apiGatewayUrl.trim()).getHost();
+            return host == null ? null : host.toLowerCase(java.util.Locale.ROOT);
+        } catch (IllegalArgumentException e) {
+            log.debug("Could not parse a gateway host out of '{}' — skipping the shared-host check",
+                    apiGatewayUrl);
+            return null;
+        }
+    }
+
+    /** Sorted at render time, never the set's iteration order, so the WARN is diffable. */
+    private static String sortedForDisplay(Set<String> values) {
+        return values.stream().sorted().collect(java.util.stream.Collectors.joining(", "));
     }
 
     /**
