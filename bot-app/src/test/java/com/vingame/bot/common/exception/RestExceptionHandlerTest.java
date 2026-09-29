@@ -93,6 +93,54 @@ class RestExceptionHandlerTest {
     }
 
     @Test
+    @DisplayName("GatewayBudgetExhaustedException -> 429 + Retry-After, NOT 502")
+    void budgetExhausted_returns429WithRetryAfter() throws Exception {
+        // GATEWAY_REQUEST_BUDGET AD-11. The status is the whole point: a 502 would say the
+        // upstream answered and the answer was unusable, and would send an operator to look at a
+        // gateway that is working perfectly. This says the app paced itself to stay under
+        // Cloudflare's 1,000-per-5-minutes rule.
+        mockMvc.perform(get("/__test/budget-exhausted"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().string("Retry-After", "42"))
+                .andExpect(jsonPath("$.type").value("Gateway budget exhausted"))
+                .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString("tier DEFAULT")))
+                .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString("env-1")));
+    }
+
+    @Test
+    @DisplayName("GatewayCircuitOpenException -> 503 + Retry-After, and the body carries the caveat")
+    void circuitOpen_returns503WithRetryAfter() throws Exception {
+        // A16.3: Retry-After here means "when we will next ASK", not "when it will work". An HTTP
+        // client needs a number, so the header carries the probe interval — but a block may need
+        // operator action and may outlive a day, which is why the truth is in the body.
+        mockMvc.perform(get("/__test/circuit-open"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(header().string("Retry-After", "3600"))
+                .andExpect(jsonPath("$.type").value("Gateway edge block"))
+                .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString("cf-ray")));
+    }
+
+    @Test
+    @DisplayName("a budget outcome with no retry-after omits the header rather than promising 0")
+    void unknownRetryAfterOmitsTheHeader() throws Exception {
+        // Retry-After: 0 invites an immediate retry, which for a client obeying the header is a
+        // tight loop against the exact condition that produced it.
+        mockMvc.perform(get("/__test/budget-exhausted-unknown"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().doesNotExist("Retry-After"));
+    }
+
+    @Test
+    @DisplayName("GatewayRequestCancelledException -> 429 naming the cancellation, not a sanitised 500")
+    void cancelled_returns429() throws Exception {
+        // Documented as never reaching REST. This arm exists so that "never" is an answer an
+        // operator can read rather than something found out from a support ticket.
+        mockMvc.perform(get("/__test/budget-cancelled"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(jsonPath("$.type").value("Gateway request cancelled"));
+    }
+
+    @Test
     @DisplayName("IllegalStateException -> 500 with sanitised body (msg does not echo e.getMessage())")
     void illegalState_returns500WithSanitisedBody() throws Exception {
         // Security: raw IllegalStateException messages from initialization
@@ -360,6 +408,30 @@ class RestExceptionHandlerTest {
             // just for this test.
             throw new UpstreamGatewayException("Custom upstream type",
                     "custom upstream failure") {};
+        }
+
+        @GetMapping("/__test/budget-exhausted")
+        public String budgetExhausted() {
+            throw new GatewayBudgetExhaustedException(
+                    com.vingame.bot.common.gateway.RequestTier.DEFAULT, "env-1",
+                    java.time.Duration.ofSeconds(42));
+        }
+
+        @GetMapping("/__test/budget-exhausted-unknown")
+        public String budgetExhaustedUnknownRetry() {
+            throw new GatewayBudgetExhaustedException(
+                    com.vingame.bot.common.gateway.RequestTier.DEFAULT, "env-1", null);
+        }
+
+        @GetMapping("/__test/circuit-open")
+        public String circuitOpen() {
+            throw new GatewayCircuitOpenException("env-1", "9a2c3f1-HKG",
+                    java.time.Duration.ofMinutes(60));
+        }
+
+        @GetMapping("/__test/budget-cancelled")
+        public String budgetCancelled() {
+            throw new GatewayRequestCancelledException("env-1", "group-1/authtestws1");
         }
 
         @GetMapping("/__test/leaky-mongo")

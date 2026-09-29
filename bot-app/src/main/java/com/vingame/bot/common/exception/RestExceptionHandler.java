@@ -43,6 +43,10 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
  *       {@link HttpMessageNotReadableException} &rarr; 400 with body</li>
  *   <li>{@link UpstreamGatewayException} (and subclasses) &rarr; 502 with body;
  *       {@code type} comes from {@link UpstreamGatewayException#getType()}</li>
+ *   <li>{@link GatewayBudgetExhaustedException} &rarr; 429 with {@code Retry-After};
+ *       {@link GatewayCircuitOpenException} &rarr; 503 with {@code Retry-After}. Neither is a
+ *       502, because 502 says the gateway failed and it did not — <b>this JVM declined to
+ *       send</b> (GATEWAY_REQUEST_BUDGET AD-11)</li>
  *   <li>{@link IllegalStateException} &rarr; 500 with sanitised body
  *       (transitional, see plan AD-8)</li>
  *   <li>Spring-managed exceptions ({@code HttpRequestMethodNotSupportedException},
@@ -121,6 +125,85 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
                 request.getRequestURI(), e.getMessage(), e);
         return ResponseEntity.status(HttpStatus.BAD_GATEWAY)
                 .body(new ErrorResponse(e.getType(), e.getMessage()));
+    }
+
+    /**
+     * The per-environment request window had no room within the tier's wait: <b>429</b> with
+     * {@code Retry-After} (GATEWAY_REQUEST_BUDGET AD-11).
+     * <p>
+     * Deliberately not a 502. A 502 says the upstream answered and the answer was unusable, and
+     * would send an operator to look at a gateway that is working perfectly; this says the app
+     * paced itself to stay under Cloudflare's 1,000-requests-per-5-minutes rule, and the remedy
+     * is to wait or to stagger. {@code Retry-After} is the seconds until the earliest stamp in
+     * the window expires — the soonest a retry could <em>possibly</em> be admitted. Advice, not
+     * a promise: a higher tier may take the freed slot first.
+     * <p>
+     * WARN, not ERROR: this is the feature working. It becomes interesting when it is sustained,
+     * which is what {@code GatewayBudgetSustainedQueue} watches.
+     */
+    @ExceptionHandler(GatewayBudgetExhaustedException.class)
+    public ResponseEntity<ErrorResponse> handleBudgetExhausted(GatewayBudgetExhaustedException e,
+                                                               HttpServletRequest request) {
+        log.warn("Handled {} from {}: {}", e.getClass().getSimpleName(),
+                request.getRequestURI(), e.getMessage());
+        return retryAfter(HttpStatus.TOO_MANY_REQUESTS, e.getRetryAfter())
+                .body(new ErrorResponse(e.getType(), e.getMessage()));
+    }
+
+    /**
+     * A Cloudflare edge block is in force for this environment's gateway: <b>503</b> with
+     * {@code Retry-After} (AD-11, as amended by A16.3).
+     * <p>
+     * <b>{@code Retry-After} here means "when we will next ASK", not "when it will work".</b> An
+     * HTTP client needs a number, so the header carries the probe interval — but the truth is in
+     * the body's {@code msg}, because the block may require operator action and may outlive a
+     * day. A {@code Retry-After} that promised fifteen minutes for a 24-hour outage would be a
+     * lie the UI repeats.
+     * <p>
+     * ERROR, unlike its sibling: every bot on that brand is unable to log in, re-authenticate,
+     * deposit or reconnect until a human acts.
+     */
+    @ExceptionHandler(GatewayCircuitOpenException.class)
+    public ResponseEntity<ErrorResponse> handleCircuitOpen(GatewayCircuitOpenException e,
+                                                           HttpServletRequest request) {
+        log.error("Handled {} from {}: {}", e.getClass().getSimpleName(),
+                request.getRequestURI(), e.getMessage());
+        return retryAfter(HttpStatus.SERVICE_UNAVAILABLE, e.getRetryAfter())
+                .body(new ErrorResponse(e.getType(), e.getMessage()));
+    }
+
+    /**
+     * Terminal fallback for the rest of the budget hierarchy.
+     * <p>
+     * {@link GatewayRequestCancelledException} is the only other member and it is documented as
+     * never reaching REST — it is thrown into a start something else already decided to abandon.
+     * This arm exists so that "never" is a <b>429 naming the cancellation</b> rather than a
+     * sanitised 500 with a class name, because the alternative to writing it down is finding out
+     * from a support ticket. Also catches any future subclass, at the sibling of the status its
+     * author would most likely have wanted.
+     */
+    @ExceptionHandler(GatewayBudgetException.class)
+    public ResponseEntity<ErrorResponse> handleBudget(GatewayBudgetException e,
+                                                      HttpServletRequest request) {
+        log.warn("Handled {} from {}: {}", e.getClass().getSimpleName(),
+                request.getRequestURI(), e.getMessage());
+        return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
+                .body(new ErrorResponse(e.getType(), e.getMessage()));
+    }
+
+    /**
+     * {@code Retry-After} in seconds, omitted entirely when the duration is unknown.
+     * <p>
+     * Never zero and never negative: {@code Retry-After: 0} invites an immediate retry, which for
+     * a client obeying the header is a tight loop against the exact condition that produced it.
+     * One second is the floor.
+     */
+    private static ResponseEntity.BodyBuilder retryAfter(HttpStatus status, java.time.Duration after) {
+        ResponseEntity.BodyBuilder builder = ResponseEntity.status(status);
+        if (after != null) {
+            builder.header(HttpHeaders.RETRY_AFTER, Long.toString(Math.max(1L, after.toSeconds())));
+        }
+        return builder;
     }
 
     /**

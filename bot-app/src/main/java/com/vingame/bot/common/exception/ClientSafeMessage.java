@@ -18,13 +18,30 @@ package com.vingame.bot.common.exception;
  * {@code Throwable.toString()} there would have been a second, contradictory policy on the same
  * repository's most sensitive question, so this class is the first one, extracted.
  * <p>
- * <b>The rule.</b> Our own {@link BotManagerException} hierarchy carries messages this codebase
- * wrote — {@code BadRequestException}'s validation text, {@code UpstreamGatewayException}'s
- * forwarded gateway envelope, {@code GatewayBudgetException}'s tier and retry-after — and the
- * handler already forwards all of them verbatim at 400/502/429/503. {@link IllegalArgumentException}
- * is forwarded at 400 for the same reason. Everything else is foreign: a driver, the JDK, Spring,
- * or ws-parser, whose login-failure text embeds a fragment of the upstream response body on a
+ * <b>The rule: our own hierarchy, whose messages we wrote.</b> {@link BotManagerException} carries
+ * text this codebase authored — {@code BadRequestException}'s validation message,
+ * {@code UpstreamGatewayException}'s forwarded gateway envelope, {@code GatewayBudgetException}'s
+ * tier and retry-after. {@link IllegalArgumentException} is included for the same reason (the
+ * handler forwards it at 400). Everything else is foreign: a driver, the JDK, Spring, or
+ * ws-parser, whose login-failure text embeds a fragment of the upstream response body on a
  * library separately known to log agency-token material.
+ * <p>
+ * <b>The rule is ours, not one inherited from the handler</b>, and the distinction matters
+ * because the handler's typed arms are <em>narrower</em> than {@code BotManagerException}
+ * (review RR4). Two members are forwarded here that the HTTP layer does not expose the same way:
+ * <ul>
+ *   <li>{@link ResourceNotFoundException} gets a <b>bodyless 404</b>, so its message has never
+ *       reached a client through HTTP at all. It is reachable on this path — a group deleted
+ *       mid-build makes {@code startLocked}'s {@code findById} throw it — and
+ *       {@code Bot group not found with id: …} is a strictly better {@code lastError} than
+ *       {@code Internal server error (ResourceNotFoundException)}. Forwarded deliberately.</li>
+ *   <li>{@link GatewayBudgetException} had <b>no arm at all</b> until GATEWAY_REQUEST_BUDGET
+ *       Phase 3 gave it 429/503. Its messages are self-authored and name only a tier, a duration
+ *       and an environment id, so forwarding them was right before the arm existed — but it was a
+ *       decision made here, not a policy inherited from there.</li>
+ * </ul>
+ * Stating it as "whatever the handler forwards" is how the next widening gets justified by a
+ * sentence that was never true.
  * <p>
  * <b>What is added over the handler, deliberately.</b> The sanitised form carries the exception's
  * {@code getSimpleName()}. The handler does not, because an HTTP client has a request URI and a
@@ -66,9 +83,11 @@ public final class ClientSafeMessage {
      * Whether {@code t}'s message was written by this codebase rather than by a library, the JDK
      * or an upstream server.
      * <p>
-     * {@link BotManagerException} is the whole of our own hierarchy and every subclass of it is
-     * already message-forwarded by {@link RestExceptionHandler}'s typed arms.
-     * {@link IllegalArgumentException} is forwarded there too (as a 400). Note what is
+     * {@link BotManagerException} is the whole of our own hierarchy: every one of its messages was
+     * written in this repository, which is the property that matters, rather than the weaker claim
+     * that {@link RestExceptionHandler} happens to forward each of them (it does not — see the
+     * class javadoc for the two exceptions). {@link IllegalArgumentException} is included because
+     * the handler forwards it at 400. Note what is
      * <em>not</em> here: {@link IllegalStateException}, which the handler sanitises explicitly
      * because its call sites in this codebase "carry internal class names that should not reach
      * the client" — a start failure of that type is therefore reported by class name only, and a
