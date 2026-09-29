@@ -43,7 +43,7 @@ public class GatewayBudgetConfig {
             @Value("${bot.gateway.budget.tier.essential.max-wait:0}") Duration essentialMaxWait,
             @Value("${bot.gateway.budget.registration.max-wait:15m}") Duration registrationMaxWait,
             @Value("${bot.gateway.budget.count-ws-upgrades:true}") boolean countWsUpgrades,
-            @Value("${bot.gateway.budget.block-cooldown:15m}") Duration blockCooldown) {
+            @Value("${bot.gateway.budget.block-probe-interval:60m}") Duration blockProbeInterval) {
 
         Map<RequestTier, Integer> ceilings = new EnumMap<>(RequestTier.class);
         ceilings.put(RequestTier.DEFAULT, defaultCeiling);
@@ -63,6 +63,6 @@ public class GatewayBudgetConfig {
                 maxWaits,
                 registrationMaxWait,
                 countWsUpgrades,
-                blockCooldown);
+                blockProbeInterval);
     }
 }

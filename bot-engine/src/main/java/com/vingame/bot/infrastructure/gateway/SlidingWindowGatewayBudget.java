@@ -1,5 +1,8 @@
 package com.vingame.bot.infrastructure.gateway;
 
+import com.vingame.bot.common.exception.GatewayBudgetExhaustedException;
+import com.vingame.bot.common.exception.GatewayCircuitOpenException;
+import com.vingame.bot.common.exception.GatewayRequestCancelledException;
 import com.vingame.bot.common.gateway.GatewayRequestScope;
 import com.vingame.bot.common.gateway.RequestTier;
 import io.micrometer.core.instrument.Counter;
@@ -11,46 +14,86 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.time.Duration;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.LongSupplier;
 
 /**
- * The per-environment sliding-window budget (GATEWAY_REQUEST_BUDGET AD-4).
+ * The per-environment sliding-window budget (GATEWAY_REQUEST_BUDGET AD-4, AD-6, AD-7).
  * <p>
  * A deque of monotonic acquisition stamps; {@code W} is the number of stamps younger than
  * {@code settings.window()}. This is the shape of the reference limiter that was written in
  * Python after the 2026-09-17 block ({@code scripts/bulk-create-accounts.py}), moved into
  * the app and made per-environment.
  * <p>
- * <b>What this class does in Phase 1, and what it deliberately does not.</b> It counts, it
- * publishes, and it logs. It does <b>not</b> queue, wait, refuse or open a circuit — there
- * are no waiter queues here yet, so {@link #execute} is exactly "stamp, then run", for both
- * modes. That is the whole point of shipping observe first: the only behaviour change on a
- * production fleet is that {@code W} becomes observable, which is what tells us whether the
- * ceilings the plan chose are the right ones before anything starts depending on them.
- * Enforcement (three waiter queues under one lock, a {@code CompletableFuture} per waiter,
- * one admission pass walking ESSENTIAL → PRIORITIZED → DEFAULT, wake-ups scheduled at the
- * earliest stamp expiry) lands in Phase 3, and the Cloudflare circuit breaker in Phase 4.
+ * <b>{@code observe} counts; {@code enforce} paces.</b> In {@code observe} every entry point is
+ * "stamp, then run" — byte-for-byte Phase 1 behaviour, which is what made that phase deployable
+ * to ten prod environments unchanged and what still makes {@code GATEWAY_BUDGET_MODE} a safe
+ * per-box switch. In {@code enforce} the same entry points queue.
+ * <p>
+ * <b>The admission rules</b> (AD-5), with {@code R_E} / {@code R_P} the outstanding declared
+ * demand of the tiers above:
+ * <pre>
+ *   DEFAULT      admitted iff W &lt; default.ceiling − R_E − R_P
+ *   PRIORITIZED  admitted iff W &lt; prioritized.ceiling − R_E
+ *   ESSENTIAL    admitted iff W &lt; essential.ceiling
+ *   every tier   and W &lt; hard-cap, and the circuit is closed
+ * </pre>
+ * The <em>gap</em> between two ceilings is the reservation for the tier above — there is no
+ * cadence prediction anywhere, and EWMA estimation is explicitly deferred (Open Item 9).
+ * Effective ceilings are floored at zero: a reservation larger than the window (3,000 bots × 3
+ * = 9,000 against a 900 cap is the real shape) simply zeroes the lower tiers until it is
+ * consumed or released, which is the intended strict priority and not a bug.
+ * <p>
+ * <b>Strict priority across tiers, FIFO within a tier, one admission pass</b> (AD-6). Waiters
+ * sit in three {@link ArrayDeque}s under one {@link ReentrantLock}, each holding its own
+ * {@link CompletableFuture} — never a shared {@code Condition}. With 3,000 ESSENTIAL waiters
+ * and ~3 admissions/s a {@code signalAll} would wake 9,000 threads a second for nothing.
+ * {@link #admitWaiters()} walks ESSENTIAL → PRIORITIZED → DEFAULT, admitting heads while their
+ * rule holds, and runs on every acquire, release, cancel, reserve and from a wake-up scheduled
+ * at the <b>earliest stamp expiry</b>.
+ * <p>
+ * <b>An unbounded wait is admissible only where progress is guaranteed</b> (A16.2). The window
+ * guarantees it, so {@code essential.max-wait=0} is legal for ESSENTIAL alone. An open circuit
+ * guarantees nothing — the observed block outlived an hour and the user's answer on its lifetime
+ * is "possibly ~24 hours, possibly until someone clears it manually" — so an open circuit
+ * <b>refuses every tier</b> rather than parking any of them. The state machine that opens it is
+ * Phase 5's; the refusal path is here so the two are not designed apart, and so that
+ * {@code FOLLOWUPS.md} P13 (a build that parks forever keeps its group's attempt open for the
+ * life of the JVM) has one fewer way to happen.
  * <p>
  * <b>Stamp on admission, not on completion.</b> A request that was admitted and then failed
- * still cost the edge a request; a request that timed out or was cancelled while queued
- * cost it nothing and is never stamped. The {@code gateway_budget_requests_total} counter
- * and {@code gateway_budget_window_requests} gauge must agree on that, or the dashboard
- * lies about the one number this feature exists to bound.
+ * still cost the edge a request; a request that timed out or was cancelled while queued cost it
+ * nothing and is never stamped. The {@code gateway_budget_requests_total} counter and
+ * {@code gateway_budget_window_requests} gauge must agree on that, or the dashboard lies about
+ * the one number this feature exists to bound. That is also why {@code count()} has its own
+ * {@code outcome="counted"}: a probe stamps the window without asking for admission, and
+ * without the fifth outcome the counter and the gauge provably could not reconcile.
  * <p>
  * <b>The clock is injected</b> ({@code LongSupplier nanos}, the {@code ScopedDebugRegistry}
  * seam) so every timing test is deterministic and nothing in the suite sleeps. Never
  * {@code System.currentTimeMillis} — the window must not move when the wall clock does.
  * <p>
- * Thread-safe: all window state is guarded by one {@link ReentrantLock}. The per-tier
- * counters are atomics read by gauges on the scrape thread.
+ * Thread-safe: all window, queue and reservation state is guarded by one {@link ReentrantLock}.
+ * The per-tier gauge counters are atomics read by the scrape thread.
  */
 @Slf4j
 public class SlidingWindowGatewayBudget implements GatewayBudget {
@@ -64,15 +107,43 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
     public static final String RESERVED = "gateway_budget_reserved";
     public static final String REQUESTS_TOTAL = "gateway_budget_requests_total";
     public static final String WAIT_TIMER = "gateway_budget_wait";
+    /**
+     * The configured per-tier ceiling, exported so the Grafana panel plots the policy this box
+     * is actually running instead of three literals baked into a dashboard JSON (A5.6/F5). A
+     * panel whose reference lines are hardcoded is a panel that lies the moment an operator
+     * uses the escape hatch the plan itself documents ({@code essential.ceiling=850}).
+     */
+    public static final String CEILING = "gateway_budget_ceiling";
+    /**
+     * The configured hard cap, for the same reason — and because {@code GatewayBudgetNearCap}
+     * is expressed as a <em>ratio</em> against it rather than against the literal 800, so
+     * lowering the cap tightens the alert instead of silently disarming it.
+     */
+    public static final String HARD_CAP = "gateway_budget_hard_cap";
 
     /** Bounded {@code outcome} label values of {@link #REQUESTS_TOTAL}. */
     public static final String OUTCOME_ADMITTED = "admitted";
     public static final String OUTCOME_TIMEOUT = "timeout";
     public static final String OUTCOME_CANCELLED = "cancelled";
     public static final String OUTCOME_CIRCUIT_OPEN = "circuit_open";
+    /** A stamp taken without asking for admission — {@link #count}. See the class javadoc. */
+    public static final String OUTCOME_COUNTED = "counted";
 
-    private static final String[] OUTCOMES =
-            {OUTCOME_ADMITTED, OUTCOME_TIMEOUT, OUTCOME_CANCELLED, OUTCOME_CIRCUIT_OPEN};
+    private static final String[] OUTCOMES = {
+            OUTCOME_ADMITTED, OUTCOME_TIMEOUT, OUTCOME_CANCELLED, OUTCOME_CIRCUIT_OPEN, OUTCOME_COUNTED};
+
+    /**
+     * How long a tier must stay un-throttled before another throttle WARN may be emitted for
+     * it (AD-20). A flapping edge must not be able to spam tier 1.
+     */
+    private static final Duration THROTTLE_LOG_REARM = Duration.ofMinutes(5);
+
+    /**
+     * Slack added to a wake-up so it lands <em>after</em> the stamp it is waiting on has
+     * expired rather than exactly on the boundary, where {@link #prune} would still be
+     * deciding. One millisecond, once per expiry — cheaper than a spurious empty pass.
+     */
+    private static final long WAKE_UP_SLACK_NANOS = Duration.ofMillis(1).toNanos();
 
     private final String environmentId;
     private final String environmentName;
@@ -84,18 +155,42 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
     private final ArrayDeque<Long> stamps = new ArrayDeque<>();
     private final ReentrantLock lock = new ReentrantLock();
 
+    /** One FIFO waiter queue per tier. Guarded by {@link #lock}. */
+    private final Map<RequestTier, ArrayDeque<Waiter>> queues = new EnumMap<>(RequestTier.class);
+
+    /**
+     * Live declared demand, by {@code tier|botGroupId}, so an admission can find the
+     * reservation it is drawing down. Guarded by {@link #lock}.
+     */
+    private final Map<String, TrackedReservation> reservations = new HashMap<>();
+
     private final Map<RequestTier, AtomicInteger> queued = new EnumMap<>(RequestTier.class);
     private final Map<RequestTier, AtomicInteger> reserved = new EnumMap<>(RequestTier.class);
     private final Map<RequestTier, Timer> waitTimers = new EnumMap<>(RequestTier.class);
     /** Every {@code {tier, outcome}} counter, resolved once at construction. */
     private final Map<String, Counter> outcomeCounters = new HashMap<>();
 
+    /** Throttle-logging state per tier: whether we have said so, and when (AD-20). */
+    private final Map<RequestTier, AtomicBoolean> throttleReported = new EnumMap<>(RequestTier.class);
+    private final Map<RequestTier, AtomicLong> throttleReportedAt = new EnumMap<>(RequestTier.class);
+
     /**
-     * Circuit state. Always closed in Phase 1 — the detector and the state machine land in
-     * Phase 4. Present now so {@link #snapshot()} (and therefore the rollup line) has its
-     * final shape and an operator reading {@code circuit=closed} is reading a real field.
+     * Circuit state. Always closed until Phase 5 installs the Cloudflare detector; the
+     * <em>consequences</em> of it being open are implemented here (every tier refused, nothing
+     * parked, {@code outcome="circuit_open"} counted) so that phase adds a trigger rather than
+     * a policy.
      */
     private final AtomicBoolean circuitOpen = new AtomicBoolean(false);
+
+    /**
+     * One single-threaded scheduler per budget, for wake-ups at the earliest stamp expiry.
+     * A virtual thread, so 10 environments cost 10 continuations rather than 10 platform
+     * threads. Never used to run a gateway call — only to re-run {@link #admitWaiters()}.
+     */
+    private final ScheduledExecutorService scheduler;
+    /** Guarded by {@link #lock}: the pending wake-up and the stamp deadline it was set for. */
+    private ScheduledFuture<?> wakeUp;
+    private long wakeUpAtNanos;
 
     public SlidingWindowGatewayBudget(String environmentId,
                                       String environmentName,
@@ -111,7 +206,13 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         for (RequestTier tier : RequestTier.values()) {
             queued.put(tier, new AtomicInteger());
             reserved.put(tier, new AtomicInteger());
+            queues.put(tier, new ArrayDeque<>());
+            throttleReported.put(tier, new AtomicBoolean());
+            throttleReportedAt.put(tier, new AtomicLong(Long.MIN_VALUE));
         }
+        ThreadFactory factory = Thread.ofVirtual()
+                .name("gateway-budget-" + environmentId).factory();
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(factory);
         registerMeters(registry);
     }
 
@@ -125,14 +226,19 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      * {@code increase()} over samples that are all {@code 1} is {@code last - first = 0}
      * with Prometheus' counter-start extrapolation gated on {@code resultValue > 0}. A rule
      * or panel over a lazily-registered counter therefore reads zero through the first
-     * occurrence of exactly the thing it is watching for. Twelve series per environment
-     * (3 tiers × 4 outcomes) is the price and it is bounded.
+     * occurrence of exactly the thing it is watching for. Fifteen series per environment
+     * (3 tiers × 5 outcomes) is the price and it is bounded.
      */
     private void registerMeters(MeterRegistry registry) {
         Tags tags = tags();
 
         Gauge.builder(WINDOW_REQUESTS, this, SlidingWindowGatewayBudget::windowRequests)
                 .description("Requests admitted to this environment's gateway in the current sliding window")
+                .tags(tags)
+                .register(registry);
+
+        Gauge.builder(HARD_CAP, this, budget -> budget.settings.hardCap())
+                .description("Configured hard cap: no tier is admitted past this many requests per window")
                 .tags(tags)
                 .register(registry);
 
@@ -146,6 +252,11 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
 
             Gauge.builder(RESERVED, reserved.get(tier), AtomicInteger::get)
                     .description("Outstanding declared demand at this tier")
+                    .tags(tierTags)
+                    .register(registry);
+
+            Gauge.builder(CEILING, this, budget -> budget.settings.ceiling(tier))
+                    .description("Configured ceiling for this tier")
                     .tags(tierTags)
                     .register(registry);
 
@@ -174,20 +285,34 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
 
     @Override
     public <T> T execute(RequestTier tier, GatewayRequestScope scope, Callable<T> call) throws Exception {
-        admit(tier, scope);
+        return execute(tier, scope, call, settings.maxWait(tier));
+    }
+
+    @Override
+    public <T> T execute(RequestTier tier, GatewayRequestScope scope, Callable<T> call, Duration maxWait)
+            throws Exception {
+        admitOrThrow(tier, scope, maxWait);
         return call.call();
     }
 
     @Override
     public void run(RequestTier tier, GatewayRequestScope scope, Runnable call) {
-        admit(tier, scope);
+        admitOrThrowUnchecked(tier, scope, settings.maxWait(tier));
         call.run();
     }
 
     @Override
     public void runWsUpgrade(RequestTier tier, GatewayRequestScope scope, Runnable upgrade) {
         if (settings.countWsUpgrades()) {
-            admit(tier, scope);
+            admitOrThrowUnchecked(tier, scope, settings.maxWait(tier));
+        } else {
+            // A5.2: not counted by the edge ⇒ not paced by us. But "uncounted" is not
+            // "un-cancellable" (a stopped group's queued upgrade must still die, or /stop's
+            // promptness would depend on a flag about Cloudflare's accounting) and it is not
+            // "sent into an open circuit" either (the edge is refusing this host whatever it
+            // counts). So: the two gates, and no window.
+            refuseIfCircuitOpen(tier);
+            refuseIfCancelled(tier, scope);
         }
         upgrade.run();
     }
@@ -195,20 +320,355 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
     @Override
     public <T> Optional<T> tryExecute(RequestTier tier, GatewayRequestScope scope,
                                       Callable<T> call, Duration maxWait) throws Exception {
-        // Phase 1: admission is unconditional, so a try is an execute. From Phase 3 this is
-        // where a DEFAULT drift read gives up immediately (maxWait = ZERO) rather than
-        // parking a library message-processor thread (AD-10).
-        admit(tier, scope);
+        if (!admitSoftly(tier, scope, maxWait)) {
+            return Optional.empty();
+        }
         return Optional.ofNullable(call.call());
     }
 
     /**
-     * Stamp the window for one admitted request and account for it.
+     * Admit one request, throwing the typed budget outcome if it cannot be.
+     *
+     * @throws InterruptedException              if the caller is interrupted while queued —
+     *                                           propagated with the flag restored, because a
+     *                                           caller that was interrupted has been told to
+     *                                           stop and must not silently continue.
+     * @throws GatewayBudgetExhaustedException   the wait elapsed with no room.
+     * @throws GatewayCircuitOpenException       the edge is blocking this host (Phase 5).
+     * @throws GatewayRequestCancelledException  the scope was called off.
+     */
+    private void admitOrThrow(RequestTier tier, GatewayRequestScope scope, Duration maxWait)
+            throws InterruptedException {
+        if (!admit(tier, scope, maxWait, false)) {
+            // Unreachable: hard mode either admits or throws. Belt and braces so a future
+            // edit to admit() cannot turn a refusal into a silent send.
+            throw new IllegalStateException("gateway budget admission returned false in hard mode");
+        }
+    }
+
+    /**
+     * {@link #admitOrThrow} for a {@link Runnable} caller, which cannot carry an
+     * {@code InterruptedException}. An interrupt while queued becomes
+     * {@code GatewayRequestCancelledException} with the flag restored — the honest translation,
+     * since an interrupt is a request to stop and the alternative (swallowing it, as
+     * {@code VingameWebSocketClient.connect()} does) is the defect AD-8 exists to avoid.
+     */
+    private void admitOrThrowUnchecked(RequestTier tier, GatewayRequestScope scope, Duration maxWait) {
+        try {
+            admitOrThrow(tier, scope, maxWait);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new GatewayRequestCancelledException(environmentId, describe(scope));
+        }
+    }
+
+    /**
+     * Admit one request, returning {@code false} rather than throwing when it cannot be —
+     * {@link #tryExecute}'s contract, and AD-10's requirement.
      * <p>
-     * In Phase 1 every request is admitted with a zero wait, in both modes. The wait timer
-     * is still recorded — a series that only exists once something goes wrong is a series
-     * nobody has a baseline for, and {@code gateway_budget_wait_seconds_max < 0.01} is the
-     * release check that observe mode really never parked anything.
+     * A drift balance read runs on a ws-parser message-processor thread, so it must neither
+     * park nor throw into the bot's message pipeline: it gives up, the caller uses its local
+     * estimate, and the deferral is recorded. An open circuit is reported the same way — as
+     * {@code outcome="circuit_open"} on the counter, not as an exception through the pipeline.
+     */
+    private boolean admitSoftly(RequestTier tier, GatewayRequestScope scope, Duration maxWait)
+            throws InterruptedException {
+        return admit(tier, scope, maxWait, true);
+    }
+
+    /**
+     * The admission path.
+     *
+     * @param soft when {@code true}, a refusal is {@code false} instead of an exception —
+     *             except for cancellation, which is always thrown, because a cancelled caller
+     *             must not mistake "called off" for "no room right now" and carry on.
+     * @return {@code true} if the request was admitted and stamped.
+     */
+    private boolean admit(RequestTier tier, GatewayRequestScope scope, Duration maxWait, boolean soft)
+            throws InterruptedException {
+        boolean admittedImmediately = false;
+        if (settings.mode() != GatewayBudgetMode.ENFORCE) {
+            // observe: byte-for-byte Phase 1. Stamp, account, run. Nothing waits, nothing is
+            // refused, and a cancelled scope's request is issued and therefore counted —
+            // there is no queue for it to be cancelled out of.
+            stampAdmitted(tier, scope, 0L);
+            return true;
+        }
+
+        long startedWaiting = nanos.getAsLong();
+        Waiter waiter = null;
+        lock.lock();
+        try {
+            // No admission pass here, deliberately. Every event that can CREATE room already
+            // runs one — a stamp expiry (the scheduled wake-up), a reservation release, a
+            // cancelScope, a probe's stamp — so a pass on the arrival path would be redundant
+            // work on the hottest path in the budget. It would also be a hazard: this block
+            // throws, and a pass whose admitted waiters were completed after the lock was
+            // released would lose those completions to the throw.
+            prune(startedWaiting);
+            expireStaleReservationsLocked(startedWaiting);
+
+            if (circuitOpen.get()) {
+                // A16.2: an open circuit refuses every tier, ESSENTIAL included. Parking on a
+                // block whose lifetime may be a day is parking a bot thread for a day.
+                counter(tier, OUTCOME_CIRCUIT_OPEN).increment();
+                if (soft) {
+                    return false;
+                }
+                throw new GatewayCircuitOpenException(environmentId, null, settings.blockProbeInterval());
+            }
+            if (scope != null && scope.isCancelled()) {
+                // Always thrown, even for a soft caller: "called off" must not be mistaken for
+                // "no room right now" by a caller that would then carry on with a cached value.
+                counter(tier, OUTCOME_CANCELLED).increment();
+                throw new GatewayRequestCancelledException(environmentId, describe(scope));
+            }
+            // FIFO within the tier: a request never overtakes a waiter of its own tier, even
+            // when there is room, or the head of a busy queue could starve behind arrivals.
+            if (queues.get(tier).isEmpty() && hasRoomLocked(tier)) {
+                consumeReservationLocked(tier, scope);
+                stampLocked(startedWaiting);
+                admittedImmediately = true;
+            } else if (maxWait != null && maxWait.isZero() && !settings.isUnboundedWait(tier)) {
+                // tryExecute(ZERO) — admit now or never, and nothing was sent.
+                counter(tier, OUTCOME_TIMEOUT).increment();
+                if (soft) {
+                    return false;
+                }
+                throw new GatewayBudgetExhaustedException(tier, environmentId, retryAfterLocked(startedWaiting));
+            } else {
+                waiter = new Waiter(tier, scope, startedWaiting);
+                queues.get(tier).addLast(waiter);
+                queued.get(tier).incrementAndGet();
+                scheduleWakeUpLocked(startedWaiting);
+            }
+        } finally {
+            lock.unlock();
+        }
+        if (admittedImmediately) {
+            recordAdmitted(tier, scope, 0L);
+            return true;
+        }
+        reportThrottleState();
+
+        return await(waiter, maxWait, soft);
+    }
+
+    /**
+     * Park on the waiter's future until it is admitted, cancelled, or the wait elapses.
+     * <p>
+     * The wait is on a per-waiter {@link CompletableFuture}, which is what makes it both
+     * interruptible and free of a thundering herd. {@code maxWait} of {@link Duration#ZERO} is
+     * an unbounded wait <em>for ESSENTIAL only</em> — legal because the window drains by
+     * construction (A16.2) — and it is always cancellable.
+     */
+    private boolean await(Waiter waiter, Duration maxWait, boolean soft) throws InterruptedException {
+        boolean unbounded = maxWait == null || maxWait.isZero();
+        try {
+            if (unbounded) {
+                waiter.admitted.get();
+            } else {
+                waiter.admitted.get(maxWait.toNanos(), TimeUnit.NANOSECONDS);
+            }
+            return true;
+        } catch (TimeoutException e) {
+            if (!dequeue(waiter)) {
+                // Admitted in the instant between the timeout firing and the lock: the stamp
+                // is already taken, so reporting a timeout here would make the counter and
+                // the window disagree — and the request really is going out.
+                return true;
+            }
+            counter(waiter.tier, OUTCOME_TIMEOUT).increment();
+            recordWait(waiter);
+            reportThrottleState();
+            if (soft) {
+                return false;
+            }
+            throw new GatewayBudgetExhaustedException(waiter.tier, environmentId, retryAfter());
+        } catch (InterruptedException e) {
+            dequeue(waiter);
+            reportThrottleState();
+            Thread.currentThread().interrupt();
+            throw e;
+        } catch (ExecutionException e) {
+            // The only exceptional completion is cancellation (admitWaitersLocked / cancelScope).
+            dequeue(waiter);
+            reportThrottleState();
+            if (e.getCause() instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            throw new IllegalStateException("unexpected gateway budget waiter failure", e.getCause());
+        }
+    }
+
+    /** Refuse outright if the edge is blocking this host — no tier parks on a block (A16.2). */
+    private void refuseIfCircuitOpen(RequestTier tier) {
+        if (settings.mode() == GatewayBudgetMode.ENFORCE && circuitOpen.get()) {
+            counter(tier, OUTCOME_CIRCUIT_OPEN).increment();
+            throw new GatewayCircuitOpenException(environmentId, null, settings.blockProbeInterval());
+        }
+    }
+
+    /** Refuse a request whose scope has been called off, without stamping anything. */
+    private void refuseIfCancelled(RequestTier tier, GatewayRequestScope scope) {
+        if (settings.mode() == GatewayBudgetMode.ENFORCE && scope != null && scope.isCancelled()) {
+            counter(tier, OUTCOME_CANCELLED).increment();
+            throw new GatewayRequestCancelledException(environmentId, describe(scope));
+        }
+    }
+
+    // ------------------------------------------------------------------ admission pass
+
+    /**
+     * Walk ESSENTIAL → PRIORITIZED → DEFAULT, admitting queue heads while their rule holds
+     * (AD-6). Package-private so tests can drive it directly on a manual clock.
+     */
+    void admitWaiters() {
+        long now = nanos.getAsLong();
+        List<Runnable> deferred;
+        lock.lock();
+        try {
+            deferred = admitWaitersLocked(now);
+        } finally {
+            lock.unlock();
+        }
+        runAfterUnlock(deferred);
+        reportThrottleState();
+    }
+
+    /**
+     * One admission pass. Caller holds {@link #lock}.
+     * <p>
+     * Returns the side effects that must <b>not</b> happen under the lock: completing a
+     * waiter's future runs that waiter's continuation, and a cancelled waiter's exceptional
+     * completion can run arbitrary downstream code. Doing either while holding the budget lock
+     * would let a bot thread re-enter the budget from inside the pass.
+     */
+    private List<Runnable> admitWaitersLocked(long now) {
+        List<Runnable> deferred = new ArrayList<>();
+        prune(now);
+        expireStaleReservationsLocked(now);
+
+        for (RequestTier tier : RequestTier.values()) {
+            ArrayDeque<Waiter> queue = queues.get(tier);
+            while (!queue.isEmpty()) {
+                Waiter head = queue.peekFirst();
+                if (head.scope != null && head.scope.isCancelled()) {
+                    // A waiter whose own scope says "no longer wanted" — a stopped bot, or a
+                    // group whose start was cancelled. Never stamped: it did not leave the JVM.
+                    queue.pollFirst();
+                    queued.get(tier).decrementAndGet();
+                    counter(tier, OUTCOME_CANCELLED).increment();
+                    deferred.add(() -> head.admitted.completeExceptionally(
+                            new GatewayRequestCancelledException(environmentId, describe(head.scope))));
+                    continue;
+                }
+                if (circuitOpen.get() || !hasRoomLocked(tier)) {
+                    break;
+                }
+                queue.pollFirst();
+                queued.get(tier).decrementAndGet();
+                consumeReservationLocked(tier, head.scope);
+                stampLocked(now);
+                long waited = now - head.enqueuedNanos;
+                deferred.add(() -> {
+                    recordAdmitted(tier, head.scope, waited);
+                    head.admitted.complete(null);
+                });
+            }
+        }
+        scheduleWakeUpLocked(now);
+        return deferred;
+    }
+
+    private void runAfterUnlock(List<Runnable> deferred) {
+        for (Runnable action : deferred) {
+            action.run();
+        }
+    }
+
+    /**
+     * Whether {@code tier}'s rule holds right now. Caller holds {@link #lock} and has pruned.
+     * <p>
+     * Every effective ceiling is floored at {@code 0} — see the class javadoc on oversized
+     * reservations. The hard cap applies to every tier including ESSENTIAL: 900 against a limit
+     * of 1,000 is the only margin for traffic this JVM cannot see, and it is the margin a
+     * day-long block is measured against.
+     */
+    private boolean hasRoomLocked(RequestTier tier) {
+        int window = stamps.size();
+        if (window >= settings.hardCap()) {
+            return false;
+        }
+        int effective = settings.ceiling(tier) - reservedAboveLocked(tier);
+        return window < Math.max(0, effective);
+    }
+
+    /** Outstanding declared demand of every tier <em>above</em> {@code tier} (AD-5, AD-7). */
+    private int reservedAboveLocked(RequestTier tier) {
+        int total = 0;
+        for (RequestTier other : RequestTier.values()) {
+            if (other.ordinal() < tier.ordinal()) {
+                total += reserved.get(other).get();
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Schedule the next wake-up at the earliest stamp expiry, if anything is waiting on it.
+     * Caller holds {@link #lock}.
+     * <p>
+     * Idempotent and single-threaded: the existing wake-up is replaced only when the deadline
+     * has actually moved, so a burst of admissions does not churn the scheduler. With no
+     * waiters there is nothing to wake for and no timer is kept alive.
+     */
+    private void scheduleWakeUpLocked(long now) {
+        boolean anyoneWaiting = false;
+        for (RequestTier tier : RequestTier.values()) {
+            if (!queues.get(tier).isEmpty()) {
+                anyoneWaiting = true;
+                break;
+            }
+        }
+        Long oldest = stamps.peekFirst();
+        if (!anyoneWaiting || oldest == null) {
+            return;
+        }
+        long deadline = oldest + settings.window().toNanos() + WAKE_UP_SLACK_NANOS;
+        if (wakeUp != null && !wakeUp.isDone() && wakeUpAtNanos == deadline) {
+            return;
+        }
+        if (wakeUp != null) {
+            wakeUp.cancel(false);
+        }
+        wakeUpAtNanos = deadline;
+        long delay = Math.max(0L, deadline - now);
+        try {
+            wakeUp = scheduler.schedule(this::admitWaiters, delay, TimeUnit.NANOSECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            // Shutdown in flight. The waiters are still cancellable and every bounded wait
+            // still times out, so this degrades to "no early wake-up", not to a hang.
+            log.debug("gateway budget: wake-up not scheduled for env {} — scheduler is shut down",
+                    environmentId);
+        }
+    }
+
+    /** Stamp, account and log one admitted request in observe mode (no lock held yet). */
+    private void stampAdmitted(RequestTier tier, GatewayRequestScope scope, long waitedNanos) {
+        long now = nanos.getAsLong();
+        lock.lock();
+        try {
+            prune(now);
+            stampLocked(now);
+        } finally {
+            lock.unlock();
+        }
+        recordAdmitted(tier, scope, waitedNanos);
+    }
+
+    /**
+     * The metrics and the DEBUG line for one admitted request.
      * <p>
      * The DEBUG line carries no identity of its own: on every path that matters it runs on a
      * thread whose MDC the bot already populated ({@code botGroupId}, {@code botId},
@@ -216,35 +676,66 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      * admissible at all under the tier model — it is DEBUG, so it reaches the detail track
      * and never Loki.
      */
-    private void admit(RequestTier tier, GatewayRequestScope scope) {
-        long waited = 0L;
-        int window = stamp();
-        waitTimers.get(tier).record(waited, java.util.concurrent.TimeUnit.NANOSECONDS);
+    private void recordAdmitted(RequestTier tier, GatewayRequestScope scope, long waitedNanos) {
+        waitTimers.get(tier).record(waitedNanos, TimeUnit.NANOSECONDS);
         counter(tier, OUTCOME_ADMITTED).increment();
         if (log.isDebugEnabled()) {
-            log.debug("gateway budget: admitted {} request for {} — window {}/{}",
-                    tier, scope == null ? "-" : scope.describe(), window, settings.hardCap());
+            log.debug("gateway budget: admitted {} request for {} — window {}/{}, waited {}ms",
+                    tier, describe(scope), windowRequests(), settings.hardCap(),
+                    TimeUnit.NANOSECONDS.toMillis(waitedNanos));
         }
+    }
+
+    private void recordWait(Waiter waiter) {
+        waitTimers.get(waiter.tier).record(
+                Math.max(0L, nanos.getAsLong() - waiter.enqueuedNanos), TimeUnit.NANOSECONDS);
     }
 
     @Override
     public void count(String reason) {
         int window = stamp();
+        counter(RequestTier.ESSENTIAL, OUTCOME_COUNTED).increment();
         log.debug("gateway budget: counted {} against env {} — window {}/{}",
                 reason, environmentId, window, settings.hardCap());
     }
 
-    /** Prune expired stamps, add one for now, and return the resulting window count. */
+    @Override
+    public void countWsUpgrade(String reason) {
+        if (!settings.countWsUpgrades()) {
+            log.debug("gateway budget: {} on env {} not counted — count-ws-upgrades=false",
+                    reason, environmentId);
+            return;
+        }
+        count(reason);
+    }
+
+    /**
+     * Prune expired stamps, add one for now, and return the resulting window count.
+     * <p>
+     * Also runs one admission pass: a probe's stamp can be the thing that pushes the window
+     * over a ceiling, and the same is true in reverse after a prune, so leaving the queues
+     * un-walked here would delay a legitimate admission until the next wake-up.
+     */
     private int stamp() {
         long now = nanos.getAsLong();
+        int window;
+        List<Runnable> deferred;
         lock.lock();
         try {
             prune(now);
-            stamps.addLast(now);
-            return stamps.size();
+            stampLocked(now);
+            window = stamps.size();
+            deferred = admitWaitersLocked(now);
         } finally {
             lock.unlock();
         }
+        runAfterUnlock(deferred);
+        return window;
+    }
+
+    /** Add one stamp for {@code now}. Caller holds {@link #lock} and has pruned. */
+    private void stampLocked(long now) {
+        stamps.addLast(now);
     }
 
     /**
@@ -274,45 +765,183 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         }
     }
 
+    /**
+     * Seconds until the earliest stamp in the window expires — the soonest moment a retry
+     * could possibly be admitted. Advice, not a promise: a higher tier may take the freed slot.
+     */
+    private Duration retryAfter() {
+        long now = nanos.getAsLong();
+        lock.lock();
+        try {
+            return retryAfterLocked(now);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private Duration retryAfterLocked(long now) {
+        Long oldest = stamps.peekFirst();
+        if (oldest == null) {
+            return Duration.ZERO;
+        }
+        long remaining = oldest + settings.window().toNanos() - now;
+        return remaining <= 0 ? Duration.ZERO : Duration.ofNanos(remaining);
+    }
+
     // ------------------------------------------------------------------ declared demand
 
     @Override
     public Reservation reserve(RequestTier tier, int permits, GatewayRequestScope scope) {
         int declared = Math.max(0, permits);
-        reserved.get(tier).addAndGet(declared);
+        String key = reservationKey(tier, scope);
+        TrackedReservation reservation = new TrackedReservation(tier, declared, key, nanos.getAsLong());
+        List<Runnable> deferred;
+        lock.lock();
+        try {
+            reserved.get(tier).addAndGet(declared);
+            if (key != null) {
+                // One start per group at a time (the attempt registry's putIfAbsent), so a
+                // second live reservation on the same key is not expressible. If one ever
+                // appears, the newer owns the key and the older still releases its own
+                // remainder — it just stops being consumable, which is the safe direction.
+                reservations.put(key, reservation);
+            }
+            deferred = admitWaitersLocked(nanos.getAsLong());
+        } finally {
+            lock.unlock();
+        }
+        runAfterUnlock(deferred);
         log.debug("gateway budget: reserved {} {} requests for {} on env {}",
-                declared, tier, scope == null ? "-" : scope.describe(), environmentId);
-        return new TrackedReservation(tier, declared);
+                declared, tier, describe(scope), environmentId);
+        return reservation;
+    }
+
+    /**
+     * Draw one permit down from the reservation this admission belongs to, if any.
+     * <p>
+     * Matched on {@code (tier, botGroupId)} — AD-7's rule — so a group's own flood consumes the
+     * demand it declared instead of paying for it twice. Caller holds {@link #lock}.
+     */
+    private void consumeReservationLocked(RequestTier tier, GatewayRequestScope scope) {
+        String key = reservationKey(tier, scope);
+        if (key == null) {
+            return;
+        }
+        TrackedReservation reservation = reservations.get(key);
+        if (reservation != null && reservation.consumeOneLocked()) {
+            reserved.get(tier).decrementAndGet();
+            if (reservation.outstanding == 0) {
+                reservations.remove(key, reservation);
+            }
+        }
+    }
+
+    /**
+     * Retire a reservation nobody released within {@code 2 × window} (AD-7).
+     * <p>
+     * A leaked reservation is worse than a missing one: it shrinks the lower tiers' ceilings
+     * for the life of the JVM, so registration and drift reads would be starved by a start
+     * that finished hours ago. {@code startLocked}'s {@code finally} releases it; this is the
+     * guard for the paths where that {@code finally} did not run. Caller holds {@link #lock}.
+     */
+    private void expireStaleReservationsLocked(long now) {
+        if (reservations.isEmpty()) {
+            return;
+        }
+        long ttl = settings.window().toNanos() * 2;
+        Iterator<Map.Entry<String, TrackedReservation>> it = reservations.entrySet().iterator();
+        while (it.hasNext()) {
+            TrackedReservation reservation = it.next().getValue();
+            if (now - reservation.createdNanos >= ttl) {
+                int remainder = reservation.retireLocked();
+                if (remainder > 0) {
+                    reserved.get(reservation.tier).addAndGet(-remainder);
+                    log.warn("env {} ({}): retiring a leaked {} reservation of {} unconsumed "
+                                    + "requests after {} — a start did not release its declared demand",
+                            environmentId, environmentName, reservation.tier, remainder,
+                            Duration.ofNanos(ttl));
+                }
+                it.remove();
+            }
+        }
+    }
+
+    private static String reservationKey(RequestTier tier, GatewayRequestScope scope) {
+        if (scope == null || scope.botGroupId() == null) {
+            return null;
+        }
+        return tier.name() + '|' + scope.botGroupId();
     }
 
     /**
      * Declared demand that gives itself back exactly once.
      * <p>
      * Idempotent release matters more than it looks: {@code startLocked}'s {@code finally}
-     * will release it, and so will the {@code try}-with-resources form if a caller uses one.
-     * A double release would drive the gauge negative and, from Phase 3, would hand the
-     * lower tiers ceiling room that was never returned.
+     * releases it, and so will the {@code try}-with-resources form if a caller uses one. A
+     * double release would drive the gauge negative and hand the lower tiers ceiling room that
+     * was never returned.
      */
     private final class TrackedReservation implements Reservation {
         private final RequestTier tier;
-        private final AtomicInteger outstanding;
+        private final String key;
+        private final long createdNanos;
+        /** Guarded by {@link SlidingWindowGatewayBudget#lock}. */
+        private int outstanding;
 
-        private TrackedReservation(RequestTier tier, int permits) {
+        private TrackedReservation(RequestTier tier, int permits, String key, long createdNanos) {
             this.tier = tier;
-            this.outstanding = new AtomicInteger(permits);
+            this.outstanding = permits;
+            this.key = key;
+            this.createdNanos = createdNanos;
         }
 
         @Override
         public void release() {
-            int remaining = outstanding.getAndSet(0);
-            if (remaining > 0) {
-                reserved.get(tier).addAndGet(-remaining);
+            int remainder;
+            List<Runnable> deferred;
+            lock.lock();
+            try {
+                remainder = outstanding;
+                outstanding = 0;
+                if (remainder > 0) {
+                    reserved.get(tier).addAndGet(-remainder);
+                }
+                if (key != null) {
+                    reservations.remove(key, this);
+                }
+                // Releasing the remainder raises the lower tiers' effective ceilings, so the
+                // queues have to be walked before this returns — otherwise a DEFAULT waiter
+                // sits until the next stamp expiry for room that already exists.
+                deferred = admitWaitersLocked(nanos.getAsLong());
+            } finally {
+                lock.unlock();
             }
+            runAfterUnlock(deferred);
         }
 
         @Override
         public int remaining() {
-            return outstanding.get();
+            lock.lock();
+            try {
+                return outstanding;
+            } finally {
+                lock.unlock();
+            }
+        }
+
+        /** @return true if a permit was available and has been drawn down. */
+        private boolean consumeOneLocked() {
+            if (outstanding <= 0) {
+                return false;
+            }
+            outstanding--;
+            return true;
+        }
+
+        private int retireLocked() {
+            int remainder = outstanding;
+            outstanding = 0;
+            return remainder;
         }
     }
 
@@ -320,12 +949,126 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
 
     @Override
     public void cancelScope(String botGroupId) {
-        // Nothing is ever queued in Phase 1, so there is nothing to wake. The method exists
-        // now because the CALL SITE ordering is the load-bearing part (AD-8/AD-16): stop()
-        // must cancel before it takes the group lock, and that ordering is introduced with
-        // the async start in Phase 2, before the queues it protects exist in Phase 3.
-        log.debug("gateway budget: cancelScope({}) on env {} — nothing queued (observe-only phase)",
-                botGroupId, environmentId);
+        if (botGroupId == null) {
+            return;
+        }
+        List<Runnable> deferred = new ArrayList<>();
+        int woken = 0;
+        lock.lock();
+        try {
+            for (RequestTier tier : RequestTier.values()) {
+                Iterator<Waiter> it = queues.get(tier).iterator();
+                while (it.hasNext()) {
+                    Waiter waiter = it.next();
+                    if (waiter.scope == null || !botGroupId.equals(waiter.scope.botGroupId())) {
+                        continue;
+                    }
+                    it.remove();
+                    queued.get(tier).decrementAndGet();
+                    counter(tier, OUTCOME_CANCELLED).increment();
+                    woken++;
+                    deferred.add(() -> waiter.admitted.completeExceptionally(
+                            new GatewayRequestCancelledException(environmentId, describe(waiter.scope))));
+                }
+            }
+            // Cancelling frees no window room (nothing was stamped) but it does free the
+            // reservation's pre-emptive shrink once startLocked's finally releases it, and it
+            // can unblock a tier whose head was a cancelled waiter behind a live one.
+            deferred.addAll(admitWaitersLocked(nanos.getAsLong()));
+        } finally {
+            lock.unlock();
+        }
+        runAfterUnlock(deferred);
+        reportThrottleState();
+        // DEBUG, not INFO: this fires on every /stop and every DELETE of a group, and the
+        // operator-facing statement ("stop requested while a start was in flight") is already
+        // one tier-1 line at the call site in BotGroupBehaviorService.
+        log.debug("gateway budget: cancelScope({}) on env {} woke {} queued requests",
+                botGroupId, environmentId, woken);
+    }
+
+    /** One queued request. The future is per-waiter — never a shared condition (AD-6). */
+    private static final class Waiter {
+        private final RequestTier tier;
+        private final GatewayRequestScope scope;
+        private final long enqueuedNanos;
+        private final CompletableFuture<Void> admitted = new CompletableFuture<>();
+
+        private Waiter(RequestTier tier, GatewayRequestScope scope, long enqueuedNanos) {
+            this.tier = tier;
+            this.scope = scope;
+            this.enqueuedNanos = enqueuedNanos;
+        }
+    }
+
+    /**
+     * Remove {@code waiter} from its queue.
+     *
+     * @return {@code true} if it was still queued — {@code false} means it was admitted
+     *         concurrently, and the caller must treat the request as going out.
+     */
+    private boolean dequeue(Waiter waiter) {
+        lock.lock();
+        try {
+            if (queues.get(waiter.tier).remove(waiter)) {
+                queued.get(waiter.tier).decrementAndGet();
+                return true;
+            }
+            return false;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    // ------------------------------------------------------------------ throttle reporting
+
+    /**
+     * One WARN when a tier first becomes throttled and one INFO when it clears, per
+     * environment per tier, with a 5-minute re-arm (AD-20).
+     * <p>
+     * Called <b>outside</b> the lock, always: this is an operator-facing line on the edge of a
+     * paced fleet, and emitting it from inside the budget lock would put a log-appender queue
+     * wait on the critical path of every admission.
+     * <p>
+     * Under {@code enforce} a queue that is briefly non-empty is <em>normal</em> — a 300-bot
+     * group start is one window of queueing by design (AD-18) — so the re-arm is what keeps
+     * this from becoming noise. The signal that actually hurts is sustained queueing, and that
+     * is a Prometheus rule ({@code GatewayBudgetSustainedQueue}) rather than a log line,
+     * because "still queued fifteen minutes later" is not a statement any single call site can
+     * make.
+     */
+    private void reportThrottleState() {
+        long now = nanos.getAsLong();
+        for (RequestTier tier : RequestTier.values()) {
+            int depth = queued.get(tier).get();
+            // `warned` means "a throttled WARN is outstanding for this tier and its matching
+            // cleared INFO has not been emitted". The two are paired deliberately: a WARN with
+            // no clear leaves an operator unable to tell a resolved burst from a live one, and
+            // a clear with no WARN is a line about something nobody was told about.
+            AtomicBoolean warned = throttleReported.get(tier);
+            AtomicLong lastWarn = throttleReportedAt.get(tier);
+            if (depth > 0) {
+                if (warned.get()) {
+                    continue;
+                }
+                long last = lastWarn.get();
+                if (last != Long.MIN_VALUE && now - last < THROTTLE_LOG_REARM.toNanos()) {
+                    // Inside the re-arm window: stay silent in BOTH directions, so a flapping
+                    // edge cannot spam tier 1 with alternating throttled/cleared pairs.
+                    continue;
+                }
+                if (!warned.compareAndSet(false, true)) {
+                    continue;
+                }
+                lastWarn.set(now);
+                log.warn("env {} ({}): {} tier throttled — window {}/{}, queue {}",
+                        environmentId, environmentName, tier, windowRequests(),
+                        settings.hardCap(), depth);
+            } else if (warned.compareAndSet(true, false)) {
+                log.info("env {} ({}): {} tier throttle cleared — window {}/{}",
+                        environmentId, environmentName, tier, windowRequests(), settings.hardCap());
+            }
+        }
     }
 
     // ------------------------------------------------------------------ reads
@@ -356,6 +1099,24 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
     }
 
     /**
+     * Stop the wake-up scheduler. Not wired to a Spring lifecycle: budgets live as long as the
+     * JVM (the registry never evicts one, so an environment's window survives its clients being
+     * rebuilt), and a bounded wait still times out and a cancel still wakes without a
+     * scheduler. Tests call it so a suite does not accumulate one virtual scheduler per fixture.
+     */
+    public void shutdown() {
+        lock.lock();
+        try {
+            if (wakeUp != null) {
+                wakeUp.cancel(false);
+            }
+        } finally {
+            lock.unlock();
+        }
+        scheduler.shutdownNow();
+    }
+
+    /**
      * The pre-registered counter for this {@code {tier, outcome}} pair. Never builds one on
      * the fly: an outcome that is not in {@link #OUTCOMES} is a bug (an unbounded label
      * value), and failing loudly here is better than quietly growing the label set.
@@ -371,6 +1132,10 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
 
     private static String counterKey(RequestTier tier, String outcome) {
         return tier.name() + '|' + outcome;
+    }
+
+    private static String describe(GatewayRequestScope scope) {
+        return scope == null ? "-" : scope.describe();
     }
 
     private static String nullSafe(String value) {

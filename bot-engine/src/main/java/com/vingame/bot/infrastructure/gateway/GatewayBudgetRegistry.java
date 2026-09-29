@@ -67,13 +67,17 @@ public class GatewayBudgetRegistry {
 
     /**
      * One startup line, at INFO, once per JVM — tier-1 admissible by construction, and the
-     * line the release verification greps to prove which posture a box is in.
+     * line the release verification greps to prove which posture a box is in (V3a greps
+     * {@code mode=enforce}).
      * <p>
-     * A budget built in {@code enforce} before Phase 3 would <em>not</em> enforce, so it says
-     * so explicitly at WARN. An operator who sets {@code GATEWAY_BUDGET_MODE=enforce} and
-     * believes the fleet is protected when it is not is the precise failure this whole
-     * feature exists to prevent, and it must not be discoverable only from a Cloudflare
-     * block page.
+     * <b>There is deliberately no second line qualifying it.</b> Until Phase 3 this method also
+     * logged a WARN saying that {@code mode=enforce} was set but nothing was being paced, which
+     * was true and important then — an operator who believes the fleet is protected when it is
+     * not is the precise failure this feature exists to prevent. Enforcement now exists, so that
+     * WARN would be a tier-1, Loki-visible, actively <em>false</em> statement about a production
+     * instance's posture, which is the same failure with the sign flipped.
+     * {@code GatewayBudgetRegistryTest.enforceModeSaysNothingBeyondThePosture} asserts its
+     * absence rather than trusting that it was deleted.
      */
     @PostConstruct
     void logStartupPosture() {
@@ -84,11 +88,6 @@ public class GatewayBudgetRegistry {
                 settings.hardCap(),
                 settings.describeCeilings(),
                 settings.countWsUpgrades());
-        if (settings.mode() == GatewayBudgetMode.ENFORCE) {
-            log.warn("bot.gateway.budget.mode=enforce, but enforcement is not implemented until "
-                    + "GATEWAY_REQUEST_BUDGET Phase 3 — this instance is counting and publishing "
-                    + "the window and NOTHING is being paced, queued or refused");
-        }
     }
 
     /**

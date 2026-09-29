@@ -25,11 +25,22 @@ import java.util.concurrent.Callable;
  * no cross-process coordination — if two instances ever share an egress IP that is a
  * deployment error, not something this interface will paper over.
  * <p>
- * <b>Phase 1 is observe-only.</b> Every method below counts, tags, logs and publishes;
- * none of them waits, refuses or opens a circuit. Enforcement (queues, per-tier ceilings,
- * cancellable waits) lands in Phase 3 behind {@code bot.gateway.budget.mode=enforce}, and
- * the circuit breaker in Phase 4. The shape is complete now so no call site has to be
- * revisited to get it.
+ * <b>Two modes, one shape.</b> In {@code bot.gateway.budget.mode=observe} every method below
+ * counts, tags, logs and publishes and none of them waits or refuses — that is what made
+ * Phase 1 deployable to ten prod environments unchanged. In {@code enforce} (Phase 3) the same
+ * methods queue by tier, admit by ceiling, time out per tier and refuse a cancelled scope. No
+ * call site differs between the two; the mode is read inside the budget.
+ * <p>
+ * <b>An unbounded wait is admissible only where progress is guaranteed</b> (A16.2). The sliding
+ * window guarantees it — stamps expire, so a 3,000-bot start is ~10 windows of monotonic
+ * progress — which is why {@code essential.max-wait=0} means "unbounded, cancellable" and is
+ * legal for {@link RequestTier#ESSENTIAL} alone. A Cloudflare edge block guarantees nothing
+ * (the user's answer to Open Item 7 is "possibly ~24 hours, possibly until someone clears it
+ * manually"), so an <b>open circuit refuses every tier</b> rather than parking any of them.
+ * Parking on a block is parking a bot thread for a day, and a start that parks forever inside
+ * the budget is exactly how {@code FOLLOWUPS.md} P13's attempt stays open for the life of the
+ * JVM. The circuit itself lands in Phase 5; the refusal path is here from Phase 3 so the two
+ * cannot be designed apart.
  * <p>
  * <b>Where the wait will happen matters.</b> {@link #execute} parks the <em>caller's</em>
  * thread. Group-start callers and reconnect loops are virtual threads, where parking is the
@@ -70,8 +81,29 @@ public interface GatewayBudget {
     <T> T execute(RequestTier tier, GatewayRequestScope scope, Callable<T> call) throws Exception;
 
     /**
+     * {@link #execute} with an explicit wait, overriding the tier's configured
+     * {@code max-wait}.
+     * <p>
+     * One caller today: user registration, which runs at {@link RequestTier#DEFAULT} but waits
+     * {@code bot.gateway.budget.registration.max-wait} (AD-19) rather than DEFAULT's 30 s, so
+     * that an admitted registration <b>finishes</b> rather than half-finishes when a group
+     * start floods the window mid-way. A half-registered group is the thing that gets
+     * forgotten; a slow one is not.
+     * <p>
+     * It is a wait override and nothing else: the tier still decides the ceiling, the priority
+     * and the queue. A longer wait cannot promote a request past a tier above it.
+     */
+    <T> T execute(RequestTier tier, GatewayRequestScope scope, Callable<T> call, Duration maxWait)
+            throws Exception;
+
+    /**
      * {@link #execute} for a call that throws nothing checked — the WebSocket upgrade path
      * and anything else whose failure is already unchecked.
+     * <p>
+     * A caller interrupted while queued gets {@code GatewayRequestCancelledException} with the
+     * interrupt flag restored, because a {@link Runnable} cannot carry an
+     * {@code InterruptedException} and swallowing it silently would let an interrupted upgrade
+     * proceed — which is the {@code connect()}-eats-interrupts defect AD-8 exists to avoid.
      */
     void run(RequestTier tier, GatewayRequestScope scope, Runnable call);
 
@@ -80,11 +112,24 @@ public interface GatewayBudget {
      * {@code bot.gateway.budget.count-ws-upgrades}.
      * <p>
      * Separate from {@link #run} because the question "does the edge count a WS upgrade
-     * against the same rule?" is open (Open Item 1): the WS hosts
-     * ({@code …-sock.stgame.win}, {@code s009-ws-proxy-119.stgame.win}) may or may not sit
-     * behind it. {@code true} is the conservative default and costs up to a third of the
-     * window on a group start; when the answer arrives it is one flag, in one place, rather
-     * than a condition duplicated at three {@code connect()} sites.
+     * against the same rule?" was open (Open Item 1). It is now <b>closed: the WS hosts sit
+     * behind the same Cloudflare rule as the API hosts</b> (A15, user-confirmed), so
+     * {@code count-ws-upgrades=true} is fact rather than the conservative guess it shipped as.
+     * The flag survives as a kill switch, in one place, rather than as a condition duplicated
+     * at three {@code connect()} sites.
+     * <p>
+     * <b>When the flag is off, this still checks cancellation and the circuit; it neither waits
+     * on nor consumes the window</b> (A5.2). "Not counted by the edge" implies "not paced by
+     * us"; it does not imply "un-cancellable" — a stopped group's queued upgrade must still
+     * die, or {@code /stop}'s promptness depends on a flag about Cloudflare's accounting — and
+     * it does not imply "sent into an open circuit", because the edge is refusing us regardless
+     * of what it counts.
+     * <p>
+     * That this path enforces at all is the load-bearing half of the feature rather than a
+     * completeness item (A15.3): every watchdog reconnect in the fleet is a counted upgrade,
+     * and the observed staging hot loop was ~180 of them per 5-minute window from two sick
+     * groups — 18% of the entire Cloudflare allowance, which makes a reconnect storm a
+     * plausible <em>cause</em> of a block and not only a symptom of a sick fleet.
      */
     void runWsUpgrade(RequestTier tier, GatewayRequestScope scope, Runnable upgrade);
 
@@ -110,6 +155,18 @@ public interface GatewayBudget {
     void count(String reason);
 
     /**
+     * {@link #count} for a probe that is a <b>WebSocket upgrade</b> rather than an HTTP
+     * request: it stamps only when {@code bot.gateway.budget.count-ws-upgrades} says an upgrade
+     * costs the edge a request (A5.3, reviewer F2).
+     * <p>
+     * Without this twin, answering Open Item 1 "no" would have silenced the three
+     * {@code connect()} sites and left the anonymous environment probe stamping anyway — one
+     * flag governing a decision in two halves. Phase 5's {@code count("circuit-probe")} is an
+     * HTTP GET and keeps the unconditional form.
+     */
+    void countWsUpgrade(String reason);
+
+    /**
      * Declare demand up front (AD-7): {@code permits} requests of {@code tier} are about to
      * be made on behalf of {@code scope}, and until the reservation is released the tiers
      * <em>below</em> {@code tier} should treat the window as that much fuller.
@@ -119,15 +176,28 @@ public interface GatewayBudget {
      * admission rules alone do the work. Always release it in a {@code finally} —
      * enforcement additionally retires a leaked reservation after {@code 2 × window}.
      * <p>
-     * Nothing calls this in Phase 1; the group-start reservation lands with enforcement in
-     * Phase 3. The accounting is live now so the {@code gateway_budget_reserved} gauge is
-     * real rather than a hardcoded zero.
+     * <b>Consumption is by scope and tier</b>: an admission at {@code tier} whose scope carries
+     * the same {@code botGroupId} draws one permit down, so a group's own flood does not also
+     * pay the pre-emptive price it declared. One caller —
+     * {@code BotGroupBehaviorService.createBotsInParallel}, at {@code botCount × 3} (login +
+     * WS upgrade + first balance read, A15.1) — and it is taken <b>after the runtime is
+     * published</b>, deliberately: {@code cancelStartInFlight} resolves the environment from
+     * the runtime, so a reservation taken before it would be unreleasable by a {@code /stop}
+     * landing in that window (A20.4).
      */
     Reservation reserve(RequestTier tier, int permits, GatewayRequestScope scope);
 
     /**
      * Wake every queued request whose scope carries {@code botGroupId}, completing it with
      * {@code GatewayRequestCancelledException} and stamping nothing.
+     * <p>
+     * <b>Wake, not merely mark</b> (A20.3). Before Phase 3 a cancelled build returned within one
+     * in-flight HTTP call per semaphore permit, so {@code /stop} was prompt whatever the budget
+     * did. With waiter queues a bot parked <em>inside</em> the budget cannot return until this
+     * method completes its future — so this is a <b>stop-latency</b> requirement on two paths,
+     * not a pacing nicety: both {@code /stop} and {@code DELETE} (through
+     * {@code stopAndLogout}, which takes the group lock since Phase 2) wait on the build
+     * unwinding.
      * <p>
      * The ordering at the call site is load-bearing (AD-8, AD-16): {@code stop()} must
      * cancel the attempt and the scope <b>before</b> it takes the group lock, or a

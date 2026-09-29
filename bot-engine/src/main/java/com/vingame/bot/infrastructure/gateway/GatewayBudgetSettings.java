@@ -38,8 +38,16 @@ import java.util.Map;
  * @param countWsUpgrades      whether a WebSocket upgrade is stamped into the window.
  *                             {@code true} is the conservative default — Open Item 1 is
  *                             whether the WS hosts sit behind the same rule at all.
- * @param blockCooldown        how long the circuit stays open after a Cloudflare block
- *                             (AD-13, used from Phase 4).
+ * @param blockProbeInterval   how often, while a Cloudflare edge block is in force, the
+ *                             circuit issues exactly one anonymous clearance probe (AD-13 as
+ *                             amended by A16.1; the state machine lands in Phase 5). It was
+ *                             called {@code block-cooldown} and that name was the wrong
+ *                             assumption written into the code: the user's answer on a block's
+ *                             lifetime is "possibly ~24 hours, possibly until someone clears it
+ *                             manually", so nothing "cools down" and traffic never resumes on a
+ *                             timer. 60 minutes costs 24 probes a day against a wall and still
+ *                             detects a human-cleared block within the hour; 15 bought nothing
+ *                             but 96.
  */
 public record GatewayBudgetSettings(
         GatewayBudgetMode mode,
@@ -49,7 +57,7 @@ public record GatewayBudgetSettings(
         Map<RequestTier, Duration> maxWaits,
         Duration registrationMaxWait,
         boolean countWsUpgrades,
-        Duration blockCooldown) {
+        Duration blockProbeInterval) {
 
     private static final Logger log = LoggerFactory.getLogger(GatewayBudgetSettings.class);
 
@@ -58,6 +66,12 @@ public record GatewayBudgetSettings(
 
     /** The hard cap above which the margin against {@link #CLOUDFLARE_LIMIT} is thin enough to warn. */
     public static final int RECOMMENDED_MAX_HARD_CAP = 900;
+
+    /**
+     * How often an open circuit asks whether a Cloudflare block has been cleared (A16.1). One
+     * hour, constant, never exponential — see the {@code blockProbeInterval} parameter doc.
+     */
+    public static final Duration BLOCK_PROBE_INTERVAL_DEFAULT = Duration.ofMinutes(60);
 
     public GatewayBudgetSettings {
         if (mode == null) {
@@ -79,9 +93,12 @@ public record GatewayBudgetSettings(
             throw new IllegalStateException(
                     "bot.gateway.budget.registration.max-wait must not be negative, was " + registrationMaxWait);
         }
-        if (blockCooldown == null || blockCooldown.isNegative()) {
-            throw new IllegalStateException(
-                    "bot.gateway.budget.block-cooldown must not be negative, was " + blockCooldown);
+        if (blockProbeInterval == null || blockProbeInterval.isZero() || blockProbeInterval.isNegative()) {
+            // Zero is rejected, not just negatives: a zero probe interval would mean probing
+            // continuously into an edge that is refusing us, which is the behaviour that kept
+            // the observed block alive.
+            throw new IllegalStateException("bot.gateway.budget.block-probe-interval must be "
+                    + "positive, was " + blockProbeInterval);
         }
 
         // Monotonic, bottom-up: DEFAULT <= PRIORITIZED <= ESSENTIAL <= hardCap. Walked in
@@ -108,9 +125,13 @@ public record GatewayBudgetSettings(
                 throw new IllegalStateException("bot.gateway.budget.tier." + key(tier)
                         + ".max-wait must not be negative, was " + maxWait);
             }
-            // Only ESSENTIAL may wait forever. An unbounded DEFAULT wait would park a
-            // registration thread (or, worse, a library message-processor thread) for the
-            // life of the process.
+            // Only ESSENTIAL may wait forever, and the rule behind that is A16.2: an
+            // unbounded wait is admissible only where progress is GUARANTEED. The sliding
+            // window guarantees it — stamps expire, so a 3,000-bot start is ~10 windows of
+            // monotonic progress. An unbounded DEFAULT wait would park a registration thread
+            // (or, worse, a library message-processor thread) for the life of the process, and
+            // nothing about a DEFAULT request's admission is guaranteed to arrive while higher
+            // tiers keep taking the room.
             if (maxWait.isZero() && tier != RequestTier.ESSENTIAL) {
                 throw new IllegalStateException("bot.gateway.budget.tier." + key(tier)
                         + ".max-wait=0 means unbounded, which only " + RequestTier.ESSENTIAL
@@ -159,7 +180,40 @@ public record GatewayBudgetSettings(
                 maxWaits,
                 Duration.ofMinutes(15),
                 true,
-                Duration.ofMinutes(15));
+                BLOCK_PROBE_INTERVAL_DEFAULT);
+    }
+
+    /**
+     * The same policy in the other mode — the fixture helper the tests were all open-coding,
+     * and the reason it lives here is that an eight-argument copy constructor written out by
+     * hand in a dozen test files is how one of those copies ends up with a different ceiling
+     * than the policy it claims to be testing.
+     */
+    public GatewayBudgetSettings withMode(GatewayBudgetMode other) {
+        return new GatewayBudgetSettings(other, window, hardCap, ceilings, maxWaits,
+                registrationMaxWait, countWsUpgrades, blockProbeInterval);
+    }
+
+    /** The same policy with {@code count-ws-upgrades} flipped — Open Item 1's kill switch. */
+    public GatewayBudgetSettings withCountWsUpgrades(boolean counted) {
+        return new GatewayBudgetSettings(mode, window, hardCap, ceilings, maxWaits,
+                registrationMaxWait, counted, blockProbeInterval);
+    }
+
+    /** The same policy with one tier's max-wait replaced. Tests only. */
+    public GatewayBudgetSettings withMaxWait(RequestTier tier, Duration maxWait) {
+        Map<RequestTier, Duration> replaced = new EnumMap<>(maxWaits);
+        replaced.put(tier, maxWait);
+        return new GatewayBudgetSettings(mode, window, hardCap, ceilings, replaced,
+                registrationMaxWait, countWsUpgrades, blockProbeInterval);
+    }
+
+    /** The same policy with one tier's ceiling replaced. Tests only. */
+    public GatewayBudgetSettings withCeiling(RequestTier tier, int ceiling) {
+        Map<RequestTier, Integer> replaced = new EnumMap<>(ceilings);
+        replaced.put(tier, ceiling);
+        return new GatewayBudgetSettings(mode, window, hardCap, replaced, maxWaits,
+                registrationMaxWait, countWsUpgrades, blockProbeInterval);
     }
 
     /** The configured ceiling for {@code tier}; never null (validated complete). */

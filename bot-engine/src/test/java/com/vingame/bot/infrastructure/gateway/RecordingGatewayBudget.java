@@ -27,7 +27,14 @@ public class RecordingGatewayBudget implements GatewayBudget {
         /** Record and run — for callers whose call is itself a mock. */
         RUN,
         /** Record and throw {@link Sentinel} without running — for callers that would do I/O. */
-        BLOCK
+        BLOCK,
+        /**
+         * Record and throw the configured {@link com.vingame.bot.common.exception.GatewayBudgetException}
+         * without running — what an exhausted window or an open circuit does under
+         * {@code enforce}. This is how a call-site test proves a budget outcome reaches (or is
+         * deliberately kept from reaching) its caller, with no queue, no clock and no socket.
+         */
+        REFUSE
     }
 
     /** Thrown instead of performing the recorded call in {@link Mode#BLOCK}. */
@@ -37,10 +44,13 @@ public class RecordingGatewayBudget implements GatewayBudget {
         }
     }
 
-    /** One submission: what tier it claimed, and on whose behalf. */
-    public record Submission(RequestTier tier, GatewayRequestScope scope, boolean wsUpgrade) {}
+    /** One submission: what tier it claimed, on whose behalf, and the wait it asked for. */
+    public record Submission(RequestTier tier, GatewayRequestScope scope, boolean wsUpgrade,
+                             Duration maxWait) {}
 
     private final Mode mode;
+    /** What {@link Mode#REFUSE} throws. Null in the other two modes. */
+    private final com.vingame.bot.common.exception.GatewayBudgetException refusal;
     /**
      * Thread-safe on purpose: a real budget is called from every bot thread at once, and
      * {@code registerUsers} fans out across virtual threads under a semaphore. A plain
@@ -49,6 +59,7 @@ public class RecordingGatewayBudget implements GatewayBudget {
      */
     private final List<Submission> submissions = new CopyOnWriteArrayList<>();
     private final List<String> counted = new CopyOnWriteArrayList<>();
+    private final List<String> countedWsUpgrades = new CopyOnWriteArrayList<>();
     private final List<String> cancelledScopes = new CopyOnWriteArrayList<>();
 
     public RecordingGatewayBudget() {
@@ -57,6 +68,18 @@ public class RecordingGatewayBudget implements GatewayBudget {
 
     public RecordingGatewayBudget(Mode mode) {
         this.mode = mode;
+        this.refusal = null;
+    }
+
+    /** A budget that records and then refuses with {@code refusal} — {@link Mode#REFUSE}. */
+    public static RecordingGatewayBudget refusing(
+            com.vingame.bot.common.exception.GatewayBudgetException refusal) {
+        return new RecordingGatewayBudget(refusal);
+    }
+
+    private RecordingGatewayBudget(com.vingame.bot.common.exception.GatewayBudgetException refusal) {
+        this.mode = Mode.REFUSE;
+        this.refusal = refusal;
     }
 
     public List<Submission> submissions() {
@@ -86,14 +109,23 @@ public class RecordingGatewayBudget implements GatewayBudget {
     public void clear() {
         submissions.clear();
         counted.clear();
+        countedWsUpgrades.clear();
         cancelledScopes.clear();
     }
 
     private <T> T record(RequestTier tier, GatewayRequestScope scope, boolean wsUpgrade, Callable<T> call)
             throws Exception {
-        submissions.add(new Submission(tier, scope, wsUpgrade));
+        return record(tier, scope, wsUpgrade, call, null);
+    }
+
+    private <T> T record(RequestTier tier, GatewayRequestScope scope, boolean wsUpgrade,
+                         Callable<T> call, Duration maxWait) throws Exception {
+        submissions.add(new Submission(tier, scope, wsUpgrade, maxWait));
         if (mode == Mode.BLOCK) {
             throw new Sentinel();
+        }
+        if (mode == Mode.REFUSE) {
+            throw refusal;
         }
         return call == null ? null : call.call();
     }
@@ -101,6 +133,12 @@ public class RecordingGatewayBudget implements GatewayBudget {
     @Override
     public <T> T execute(RequestTier tier, GatewayRequestScope scope, Callable<T> call) throws Exception {
         return record(tier, scope, false, call);
+    }
+
+    @Override
+    public <T> T execute(RequestTier tier, GatewayRequestScope scope, Callable<T> call,
+                         Duration maxWait) throws Exception {
+        return record(tier, scope, false, call, maxWait);
     }
 
     @Override
@@ -140,6 +178,17 @@ public class RecordingGatewayBudget implements GatewayBudget {
     @Override
     public void count(String reason) {
         counted.add(reason);
+    }
+
+    @Override
+    public void countWsUpgrade(String reason) {
+        countedWsUpgrades.add(reason);
+        counted.add(reason);
+    }
+
+    /** Only the probe stamps that went through the WS-aware twin (A5.3). */
+    public List<String> countedWsUpgrades() {
+        return List.copyOf(countedWsUpgrades);
     }
 
     @Override

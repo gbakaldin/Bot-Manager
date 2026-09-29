@@ -26,6 +26,12 @@ final class UnlimitedGatewayBudget implements GatewayBudget {
     }
 
     @Override
+    public <T> T execute(RequestTier tier, GatewayRequestScope scope, Callable<T> call,
+                         Duration maxWait) throws Exception {
+        return call.call();
+    }
+
+    @Override
     public void run(RequestTier tier, GatewayRequestScope scope, Runnable call) {
         call.run();
     }
@@ -43,6 +49,11 @@ final class UnlimitedGatewayBudget implements GatewayBudget {
 
     @Override
     public void count(String reason) {
+        // Nothing to count against.
+    }
+
+    @Override
+    public void countWsUpgrade(String reason) {
         // Nothing to count against.
     }
 

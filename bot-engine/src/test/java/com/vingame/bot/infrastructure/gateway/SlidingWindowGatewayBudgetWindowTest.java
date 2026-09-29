@@ -172,20 +172,29 @@ class SlidingWindowGatewayBudgetWindowTest {
     }
 
     @Test
-    @DisplayName("a cancelled scope is not stamped — but only from Phase 3")
-    void aCancelledScopeIsStillAdmittedInPhaseOne() throws Exception {
+    @DisplayName("a cancelled scope is not stamped under enforce, and is under observe")
+    void aCancelledScopeIsOnlyStampedWhenItIsReallySent() throws Exception {
+        // A5.5's rewrite of the Phase 1 tripwire. The old assertion pinned observe behaviour
+        // through a budget built from defaults() — i.e. mode=OBSERVE — which is why it would
+        // NOT have failed when enforcement landed, and why the thing it existed to force a
+        // look at would have gone unlooked-at. Both modes are now named explicitly, in the one
+        // test, so the pair cannot drift apart again.
         AtomicBoolean cancelled = new AtomicBoolean(true);
         GatewayRequestScope dead = GatewayRequestScope.forBot("group-1", "bot1", cancelled::get);
 
+        // observe: there is no queue to be cancelled out of, so the request really is issued —
+        // and a request that was issued must be counted, or the window under-reports.
         budget.execute(RequestTier.ESSENTIAL, dead, () -> "ok");
-
-        // Deliberately asserting today's behaviour rather than the target behaviour: in
-        // observe-only there is no queue for a request to be cancelled OUT of, so a cancelled
-        // scope whose request is issued anyway is honest — it really was sent, so it really
-        // must be counted. Phase 3 introduces the pre-admission check, and the assertion here
-        // is what will have to change with it (and will therefore be noticed).
         assertThat(budget.windowRequests()).isEqualTo(1);
+
+        // enforce: refused before admission, and therefore never stamped.
+        SlidingWindowGatewayBudget enforcing = new SlidingWindowGatewayBudget("env-1", "Staging", "116",
+                GatewayBudgetSettings.defaults().withMode(GatewayBudgetMode.ENFORCE), meters, clock::get);
+        assertThatThrownBy(() -> enforcing.execute(RequestTier.ESSENTIAL, dead, () -> "ok"))
+                .isInstanceOf(com.vingame.bot.common.exception.GatewayRequestCancelledException.class);
+        assertThat(enforcing.windowRequests()).isZero();
         assertThat(dead.isCancelled()).isTrue();
+        enforcing.shutdown();
     }
 
     @Test
@@ -307,6 +316,6 @@ class SlidingWindowGatewayBudgetWindowTest {
     private static GatewayBudgetSettings withWsUpgradesCounted(boolean counted) {
         GatewayBudgetSettings d = GatewayBudgetSettings.defaults();
         return new GatewayBudgetSettings(d.mode(), d.window(), d.hardCap(), d.ceilings(),
-                d.maxWaits(), d.registrationMaxWait(), counted, d.blockCooldown());
+                d.maxWaits(), d.registrationMaxWait(), counted, d.blockProbeInterval());
     }
 }

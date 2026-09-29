@@ -183,25 +183,34 @@ class GatewayBudgetRegistryTest {
         registry.forEnvironment("env-1", "Staging", "116");
         registry.forEnvironment("env-2", "Prod", "097");
 
-        // 37 meters per environment, and the arithmetic is worth writing down because the last
-        // term is not obvious:
+        // 44 meters per environment, and the arithmetic is worth writing down because two of
+        // the terms are not obvious:
         //   1  window gauge
-        //  +3  queue-depth gauges          (one per tier)
+        //  +1  hard-cap gauge               (exported so GatewayBudgetNearCap is a RATIO against
+        //      the configured cap rather than the literal 800 — lowering the cap then tightens
+        //      the alert instead of silently disarming it)
+        //  +3  queue-depth gauges           (one per tier)
         //  +3  reserved gauges
+        //  +3  ceiling gauges               (so the Grafana panel plots the policy this box is
+        //      running instead of three literals baked into a dashboard JSON — A5.6/F5)
         //  +3  wait timers
-        // +12  requests_total counters     (3 tiers x 4 bounded outcomes)
+        // +15  requests_total counters      (3 tiers x 5 bounded outcomes; the fifth is
+        //      `counted`, without which the counter and the window provably cannot reconcile,
+        //      because count() stamps without asking for admission — A5.6/F3)
         // +15  `gateway_budget_wait.histogram` gauges — the five SLO buckets per tier, which
         //      Micrometer materialises as separate meters carrying an `le` tag and which become
         //      gateway_budget_wait_seconds_bucket{le=...} in the Prometheus exposition. They are
         //      wanted (that is what makes a p95-by-tier panel possible), and they are counted
         //      here so that raising or removing an SLO bucket is a deliberate edit.
         // Asserted as a total so a duplicate registration for one environment is visible.
-        assertThat(meters.getMeters()).hasSize(2 * 37);
+        assertThat(meters.getMeters()).hasSize(2 * 44);
 
         for (String name : List.of(
                 SlidingWindowGatewayBudget.WINDOW_REQUESTS,
+                SlidingWindowGatewayBudget.HARD_CAP,
                 SlidingWindowGatewayBudget.QUEUE_DEPTH,
                 SlidingWindowGatewayBudget.RESERVED,
+                SlidingWindowGatewayBudget.CEILING,
                 SlidingWindowGatewayBudget.REQUESTS_TOTAL,
                 SlidingWindowGatewayBudget.WAIT_TIMER)) {
             List<Meter> named = meters.getMeters().stream()
@@ -260,24 +269,25 @@ class GatewayBudgetRegistryTest {
     }
 
     @Test
-    @DisplayName("an enforce-mode instance WARNs that it is not actually enforcing yet")
-    void enforceModeWarnsUntilPhaseThree() {
-        // The one failure mode this feature exists to remove is believing you are protected
-        // when you are not. `enforce` is settable today (compose passes it, Spring binds it,
-        // parse() accepts it) and Phase 3's enforcement does not exist, so the instance has to
-        // say so where an operator will see it — in Loki, at WARN, once per JVM.
-        GatewayBudgetSettings d = GatewayBudgetSettings.defaults();
-        GatewayBudgetSettings enforcing = new GatewayBudgetSettings(GatewayBudgetMode.ENFORCE,
-                d.window(), d.hardCap(), d.ceilings(), d.maxWaits(), d.registrationMaxWait(),
-                d.countWsUpgrades(), d.blockCooldown());
+    @DisplayName("an enforce-mode instance states its posture and nothing more")
+    void enforceModeSaysNothingBeyondThePosture() {
+        // A5.5's second half, inverted on purpose. Until Phase 3 this test asserted the PRESENCE
+        // of a WARN saying "enforce is set but NOTHING is being paced" — correct while that was
+        // true, and the single worst line to leave behind once it is not: tier 1, Loki-visible,
+        // and an actively false statement about a production instance's posture. Shipping
+        // enforcement while the app tells operators it is not enforcing is the one outcome that
+        // must be impossible, so its absence is asserted rather than assumed.
+        GatewayBudgetSettings enforcing =
+                GatewayBudgetSettings.defaults().withMode(GatewayBudgetMode.ENFORCE);
 
         new GatewayBudgetRegistry(enforcing, new SimpleMeterRegistry()).logStartupPosture();
 
         assertThat(linesAt(Level.INFO)).singleElement().asString()
+                .as("V3a greps this line to prove which posture a box is in")
                 .contains("mode=enforce");
-        assertThat(linesAt(Level.WARN)).singleElement().asString()
-                .contains("enforcement is not implemented")
-                .contains("NOTHING is being paced");
+        assertThat(linesAt(Level.WARN))
+                .as("no qualification, no caveat, nothing that contradicts the INFO line")
+                .isEmpty();
     }
 
     @Test
