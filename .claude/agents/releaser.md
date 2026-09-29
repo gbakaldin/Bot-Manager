@@ -63,9 +63,26 @@ sleep 75
 ssh Bot-1 'docker ps --filter name=bot-manager --format "table {{.Names}}\t{{.Status}}"'
 # Expect: "Up X minutes (healthy)"
 
-# 2. Spring Boot is up and auto-start has run
-ssh Bot-1 'docker logs --tail 200 $(docker ps --filter name=bot-manager --format "{{.Names}}" | head -1) 2>&1 | grep -E "Started Starter|startup complete"'
+# 2. Spring Boot is up and the fleet has been queued for start
+ssh Bot-1 'docker logs --tail 200 $(docker ps --filter name=bot-manager --format "{{.Names}}" | head -1) 2>&1 | grep -E "Started Starter|queued for daisy-chained start"'
 # Expect: at least one line matching each pattern
+```
+
+**Do not smoke-test on `startup complete`.** Since GATEWAY_REQUEST_BUDGET Phase 2 the
+fleet starts on a daisy-chain: `onStartup` is an `ApplicationReadyEvent` listener that
+queues the ACTIVE groups and returns, and `"Bot Manager startup complete"` is logged only
+when the **last** group has finished coming up — minutes today, and up to about an hour
+once the request budget paces group starts. Waiting for it here would abort healthy
+deploys. The liveness signal is `"queued for daisy-chained start"`, which is logged as
+soon as the chain is handed its work.
+
+`startup complete` is still worth checking, but as *chain completion*, later and
+non-blocking — e.g. while running the plan's verification steps:
+
+```bash
+# Optional, non-blocking: has the daisy-chain finished?
+ssh Bot-1 'docker logs --tail 2000 $(docker ps --filter name=bot-manager --format "{{.Names}}" | head -1) 2>&1 | grep -E "startup complete"'
+# Absent = groups are still coming up, which is normal. Not a failure.
 ```
 
 If either smoke check fails, **stop**. Capture the last 500 log lines into `release.md` and report failure. Do not proceed to plan-driven verification.
