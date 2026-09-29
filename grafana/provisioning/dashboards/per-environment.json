@@ -222,7 +222,7 @@
               },
               {
                 "color": "orange",
-                "value": 0.90
+                "value": 0.9
               },
               {
                 "color": "green",
@@ -782,7 +782,7 @@
       "id": 13,
       "type": "timeseries",
       "title": "Gateway request window vs ceilings (5 min)",
-      "description": "GATEWAY_REQUEST_BUDGET. Requests this environment has sent to its gwms gateway in the current 5-minute sliding window (gateway_budget_window_requests), against the app's hard cap and the three per-tier ceilings. Cloudflare blocks the whole host for that gateway at 1,000 requests / 5 min / source IP and the one observed block outlived an hour. While bot.gateway.budget.mode=observe nothing is paced, so a window above the ceilings means requests really went out at that rate.",
+      "description": "GATEWAY_REQUEST_BUDGET. Requests this environment has sent to its gwms gateway in the current 5-minute sliding window (gateway_budget_window_requests), against the app's own hard cap and the three per-tier ceilings — all four read from the box's OWN configuration (gateway_budget_hard_cap, gateway_budget_ceiling{tier}), not from literals in this dashboard, so an operator who uses the documented essential.ceiling=850 escape hatch sees the policy they are actually running. Cloudflare blocks the whole host for that gateway at 1,000 requests / 5 min / source IP and the one observed block outlived an hour. In bot.gateway.budget.mode=observe nothing is paced, so a window above the ceilings means requests really went out at that rate; in enforce, the window sitting AT the ceilings is the budget working — see the queue-depth panel for whether anything is stuck.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -812,7 +812,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "hard cap (900)"
+              "options": "hard cap"
             },
             "properties": [
               {
@@ -836,44 +836,8 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "ESSENTIAL ceiling"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dot",
-                  "dash": [
-                    2,
-                    6
-                  ]
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "PRIORITIZED ceiling"
-            },
-            "properties": [
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "fill": "dot",
-                  "dash": [
-                    2,
-                    6
-                  ]
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "DEFAULT ceiling"
+              "id": "byRegexp",
+              "options": "/ ceiling$/"
             },
             "properties": [
               {
@@ -918,8 +882,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "900",
-          "legendFormat": "hard cap (900)"
+          "expr": "gateway_budget_hard_cap{environmentId=\"$environmentId\"}",
+          "legendFormat": "hard cap"
         },
         {
           "refId": "C",
@@ -927,17 +891,124 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "750",
-          "legendFormat": "PRIORITIZED ceiling"
+          "expr": "gateway_budget_ceiling{environmentId=\"$environmentId\"}",
+          "legendFormat": "{{tier}} ceiling"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Gateway budget queue depth by tier",
+      "description": "GATEWAY_REQUEST_BUDGET AD-20. How many requests are WAITING for admission, per tier, in bot.gateway.budget.mode=enforce (in observe this is flat zero by construction). A DEFAULT queue is the design working — registration and drift balance reads are meant to yield. An ESSENTIAL queue means bots that are trying to come up are waiting, which is normal and expected during a large start (AD-18: a 300-bot group is one window, a 3,000-bot group is ten) and is a problem only when it never empties. GatewayBudgetSustainedQueue alerts on exactly that, at 15 minutes of continuous ESSENTIAL queueing.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 1,
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short",
+          "min": 0
         },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
         {
-          "refId": "D",
+          "refId": "A",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "500",
-          "legendFormat": "DEFAULT ceiling"
+          "expr": "gateway_budget_queue_depth{environmentId=\"$environmentId\"}",
+          "legendFormat": "{{tier}}"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Gateway budget admission wait p95 by tier",
+      "description": "GATEWAY_REQUEST_BUDGET AD-20. How long a request waited for admission, p95, per tier. The SLO buckets are 1s / 10s / 60s / 300s / 600s. In observe mode this is ~0 by construction, and gateway_budget_wait_seconds_max < 0.01 is the release check that observe really never parked anything. In enforce, PRIORITIZED rising towards its 10-minute max-wait means reconnects and deposits are being squeezed by a start, and DEFAULT hitting its 30s wait means registration and drift reads are being deferred — both expected during a large start, both worth reading if they persist. ESSENTIAL has no max-wait (0 = unbounded, cancellable) because the window drains by construction, so its p95 is the honest measure of how long a bot waits to come up.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never"
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (tier, le) (rate(gateway_budget_wait_seconds_bucket{environmentId=\"$environmentId\"}[5m])))",
+          "legendFormat": "{{tier}} p95"
         }
       ]
     }

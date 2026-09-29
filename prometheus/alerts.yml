@@ -449,19 +449,59 @@ groups:
       # matching child route they fall through to the viptalk receiver, and only a
       # `continue: true` child would have required a mandatory viptalk sibling.
       #
-      # While bot.gateway.budget.mode=observe (the shipped default) NOTHING is paced, so this
-      # firing means requests really are going out at that rate and the only protection is
-      # that someone reads it. That is the whole purpose of the observe phase.
+      # THIS RULE MEANS TWO DIFFERENT THINGS IN THE TWO MODES, and Phase 3 is where that
+      # changed (A20.10). In `observe` NOTHING is paced, so firing means requests really are
+      # going out at that rate and the only protection is that someone reads it. In `enforce`
+      # it means the app is saturating its OWN cap, which during a large group start is
+      # NORMAL and expected — AD-18: a 3,000-bot group is ~50 minutes of exactly this. So in
+      # enforce it is an FYI, not an incident, and the rule that matters is the sibling below.
+      #
+      # Expressed as a RATIO against the exported hard cap rather than the literal 800
+      # (A5.6/F5). gateway_budget_hard_cap carries the same {environmentId, product} labels
+      # from the same target, so the division matches element-wise. 0.89 x 900 = 801, i.e.
+      # the same threshold this rule always had — but lowering the cap now TIGHTENS the alert
+      # instead of silently disarming it, which is what a hardcoded 800 against a cap of 600
+      # would have done.
       - alert: GatewayBudgetNearCap
-        expr: gateway_budget_window_requests > 800
+        expr: gateway_budget_window_requests / gateway_budget_hard_cap > 0.89
         for: 1m
         labels:
           job: bot-manager
           severity: warning
           audience: internal
         annotations:
-          summary: "Environment {{ $labels.environmentId }} has sent {{ $value }} gateway requests in the last 5 minutes (cap 900, Cloudflare blocks at 1000)"
-          description: "This is the run-up to a whole-brand auth outage. In observe mode nothing is being paced — check what is driving it (a large group start, a reconnect storm, a bulk registration, or scripts/bulk-create-accounts.py running from this same host, which the app's budget cannot see) and stagger it. gateway_budget_requests_total by tier says which class of request it is; the 5-minute fleet rollup line carries the same window per environment."
+          summary: "Environment {{ $labels.environmentId }} is at {{ $value | humanizePercentage }} of its gateway request cap for the last 5 minutes (Cloudflare blocks at 1000)"
+          description: "In observe mode nothing is being paced, so this is the run-up to a whole-brand auth outage: check what is driving it (a large group start, a reconnect storm, a bulk registration, or scripts/bulk-create-accounts.py running from this same host, which the app's budget cannot see) and stagger it. In enforce mode the cap is holding and this is expected during a large start — AD-18 puts a 3,000-bot group at ~50 minutes — so treat it as an FYI and look at GatewayBudgetSustainedQueue instead. gateway_budget_requests_total by tier says which class of request it is; the 5-minute fleet rollup line carries the same window per environment."
+
+      # The rule that matters under `enforce`, and the gap A20.10 names: near-cap stops being
+      # the interesting shape once the cap is being enforced, because near-cap is what a
+      # working large start looks like. What hurts is SUSTAINED QUEUEING — a group that cannot
+      # finish coming up because something else keeps taking the window, or a reconnect storm
+      # (~180 upgrades per window from two sick groups was measured on staging, A15.3) holding
+      # the queue open indefinitely.
+      #
+      # ESSENTIAL only, deliberately. DEFAULT queueing is the design working: registration and
+      # drift balance reads are meant to yield, and a DEFAULT queue during a start is expected.
+      # An ESSENTIAL queue that is still non-empty after 15 minutes means bots that are trying
+      # to come up are not coming up, which is the only queue shape an operator must act on.
+      #
+      # for: 15m and not 5m. A 300-bot group start is one window of ESSENTIAL queueing by
+      # design (AD-18) and a 3,000-bot one is ten; 15 minutes is past the first but well inside
+      # the second, so this fires on a group that is STUCK rather than on one that is large.
+      # It is the alerting half of the answer to FOLLOWUPS P13 — a build parked inside the
+      # budget leaves no other trace until someone reads /status.
+      #
+      # audience: internal. Nothing is broken for a player: the bots are queued, not failing.
+      - alert: GatewayBudgetSustainedQueue
+        expr: min_over_time(gateway_budget_queue_depth{tier="ESSENTIAL"}[15m]) > 0
+        for: 15m
+        labels:
+          job: bot-manager
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "Environment {{ $labels.environmentId }} has had ESSENTIAL gateway requests queued continuously for 30 minutes ({{ $value }} still waiting)"
+          description: "Bots that are trying to come up are not coming up. min_over_time > 0 means the queue never emptied once in the window, so this is not a large start passing through — it is a start that cannot finish. Check gateway_budget_window_requests against gateway_budget_ceiling (who is consuming the window), gateway_budget_reserved (a leaked declared demand from a build whose teardown did not run), and GET /api/v1/bot-group/{id}/status for the group's botsUp and lastError. A reconnect storm on a sick group is the usual cause: bot_reconnects_total by group."
 
   - name: bot-manager-jvm
     rules:
