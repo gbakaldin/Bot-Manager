@@ -25,10 +25,16 @@ package com.vingame.bot.domain.botgroup.model;
  * poisoned document is never returned and never converted. The damage is on every read that
  * <em>does</em> convert the group — {@code GET /{id}} and especially
  * {@code POST /{envId}/filter}, the UI's list view for a whole environment, where one poisoned
- * group 500s the list for every healthy group beside it — and, on the <em>current</em> jar,
+ * group fails the list for every healthy group beside it — and, on the <em>current</em> jar,
  * the group silently drops out of {@code findByTargetStatus(ACTIVE)} and out of
  * {@code RecoveryEligibility}'s branches, so it never auto-starts and never auto-recovers
  * again. Rolling back to {@code vingame-bot:rollback-*} must stay a safe action at all times.
+ * <p>
+ * The status that failure presents as is a <b>400</b>, not a 500 — measured by the Phase 2
+ * compliance pass. Spring's conversion failure surfaces as an {@link IllegalArgumentException},
+ * which {@code RestExceptionHandler.handleIllegalArgument} maps to {@code 400 Bad request}. That
+ * is arguably worse than a 500 for the operator reading it: the request was not bad, and a 400
+ * invites them to go looking at their own query rather than at a poisoned document.
  * <p>
  * The perimeter is two things, both pinned by {@code BotGroupStatusPersistenceGuardTest}:
  * {@code BotGroupDTO.targetStatus} is {@code @JsonProperty(access = READ_ONLY)} so a request

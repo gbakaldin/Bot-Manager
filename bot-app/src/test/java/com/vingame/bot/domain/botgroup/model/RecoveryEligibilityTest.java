@@ -124,8 +124,10 @@ class RecoveryEligibilityTest {
      * a DEAD in-memory runtime for it survives. A lingering DEAD runtime is the
      * ordinary post-death state (both {@code handleBotGroupDeath} and the zero-bot
      * start guard leave it in {@code runningGroups} deliberately), and the pair is
-     * reachable through a {@code PATCH {"targetStatus":"STOPPED"}} and through a lost
-     * Mongo write in the zero-bot guard.
+     * reachable through a lost Mongo write in the zero-bot guard. (The {@code PATCH
+     * {"targetStatus":"STOPPED"}} route this used to cite alongside it was closed by
+     * GATEWAY_REQUEST_BUDGET Phase 2, which made the field {@code READ_ONLY} on the DTO
+     * and unmapped in both directions — stale evidence for a veto that still holds.)
      * <p>
      * This is the AD-5 invariant an operator's intent depends on, so it is asserted
      * against the predicate rather than against a reachability argument.

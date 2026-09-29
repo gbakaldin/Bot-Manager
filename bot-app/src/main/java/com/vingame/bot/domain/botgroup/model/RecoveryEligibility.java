@@ -54,10 +54,13 @@ public final class RecoveryEligibility {
      * therefore satisfies it through the second disjunct — and a lingering DEAD
      * runtime is the <em>ordinary</em> post-death state, since both
      * {@code handleBotGroupDeath} and {@code startLocked}'s zero-bot guard leave the
-     * runtime in {@code runningGroups} on purpose. Two known routes produce the pair:
-     * a {@code PATCH {"targetStatus":"STOPPED"}}, and a lost Mongo write in the
-     * zero-bot guard, which marks the runtime DEAD, keeps it in the map and only then
-     * saves. Neither is exotic, and no whole-program reachability argument may stand
+     * runtime in {@code runningGroups} on purpose. The route that produces the pair is
+     * a lost Mongo write in the zero-bot guard, which marks the runtime DEAD, keeps it
+     * in the map and only then saves. (This javadoc also cited a
+     * {@code PATCH {"targetStatus":"STOPPED"}}; GATEWAY_REQUEST_BUDGET Phase 2 closed
+     * that route — {@code targetStatus} is {@code READ_ONLY} on the DTO and unmapped in
+     * both directions — so it is stale evidence for a veto that is still correct.)
+     * The remaining route is not exotic, and no whole-program reachability argument may stand
      * in for the one operator opt-out from a feature that autonomously starts
      * money-spending bots: a future change to {@code stop()}, to the mapper, or a new
      * bulk status endpoint would invalidate such an argument silently, with no test

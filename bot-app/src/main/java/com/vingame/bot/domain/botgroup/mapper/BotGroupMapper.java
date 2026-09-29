@@ -96,9 +96,17 @@ public interface BotGroupMapper {
                 // READ_ONLY) already stops it arriving over HTTP; this stops an in-process caller
                 // (a script, a future controller, a test fixture) getting there another way.
                 .scheduledRestartTime(dto.getScheduledRestartTime())
-                .lastStartedAt(dto.getLastStartedAt())
-                .lastStoppedAt(dto.getLastStoppedAt())
-                .lastFailureReason(dto.getLastFailureReason())
+                // ...and neither are the other three system-managed fields (QA, Phase 2 re-check).
+                // They used to be copied from the DTO on the very next lines, beside the
+                // targetStatus line that was removed, while this method's own trailing comment in
+                // updateEntityFromDTO called all four "system-managed" — so a reader who saw
+                // targetStatus closed could reasonably assume the set was, and only one of them
+                // was. No rollback hazard (a String and two dates are readable by any jar), which
+                // is why this is a correctness tidy rather than a second blocker, but a create
+                // that accepted lastStartedAt would have let a client write the group's own start
+                // history: lastFailureReason is rendered to operators, lastStoppedAt gates the
+                // recovery settle window, and neither has any legitimate client-supplied value.
+                // startLocked and stop() are the only writers.
                 .build();
     }
 
@@ -185,7 +193,8 @@ public interface BotGroupMapper {
         entity.setSlotStrategyId(Optional.ofNullable(dto.getSlotStrategyId()).orElse(entity.getSlotStrategyId()));
         entity.setScheduledRestartTime(Optional.ofNullable(dto.getScheduledRestartTime()).orElse(entity.getScheduledRestartTime()));
         // Note: targetStatus, lastStartedAt, lastStoppedAt and lastFailureReason are
-        // system-managed, not updated via DTO.
+        // system-managed, not updated via DTO — and since the QA re-check, that is true of
+        // toEntity as well. It was true of this method alone for as long as the comment existed.
         //
         // targetStatus joined that list in GATEWAY_REQUEST_BUDGET Phase 2 and is the one whose
         // absence has teeth: PATCH {"targetStatus":"STARTING"} used to be a 200 that persisted a

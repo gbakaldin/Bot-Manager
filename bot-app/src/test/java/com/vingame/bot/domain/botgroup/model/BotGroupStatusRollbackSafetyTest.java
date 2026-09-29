@@ -28,9 +28,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>
  * A1 states the rule as an absolute: {@code STARTING}, {@code REGISTRATION_PENDING} and
  * {@code REGISTRATION_FAILED} may <b>never</b> reach {@code BotGroup.targetStatus}, because
- * rolling back to {@code vingame-bot:rollback-*} has to stay a safe action and
- * {@code findByTargetStatus(ACTIVE)} is on the application-ready boot path — one poisoned
- * document does not degrade one group, it fails the whole boot query.
+ * rolling back to {@code vingame-bot:rollback-*} has to stay a safe action.
+ * <p>
+ * <b>Its reason was wrong, and this file used to carry the wrong reason in four places</b>
+ * (A14, re-review RR6). The boot query does <em>not</em> fail:
+ * {@code findByTargetStatus(ACTIVE)} filters server-side on the string {@code "ACTIVE"}, so a
+ * poisoned document is never returned and never converted — {@code BlastRadius} below measures
+ * exactly that, through a real {@code QueryMapper}. What breaks is every read that <em>does</em>
+ * convert the group ({@code GET /{id}}, and worse {@code POST /{envId}/filter}, the UI's list
+ * view for a whole environment), and on the current jar the document silently drops out of the
+ * ACTIVE set and out of {@code RecoveryEligibility} — unmanaged, with nothing logged. The
+ * failure presents as a <b>400</b>, not a 500: Spring's conversion failure is an
+ * {@code IllegalArgumentException} and {@code RestExceptionHandler.handleIllegalArgument} maps
+ * it to {@code 400 Bad request}, which is worse for whoever reads it, because the request was
+ * not bad.
  * <p>
  * {@code BotGroupStatusPersistenceGuardTest} enforces that against the source, by scanning for
  * literal arguments to {@code setTargetStatus(}. This class is the other half, and it uses a
@@ -80,9 +91,11 @@ class BotGroupStatusRollbackSafetyTest {
 
         /**
          * Stands in for "{@code STARTING} read by a pre-Phase-2 jar": the reading jar's enum has
-         * no such constant. The failure is thrown while mapping <em>one</em> document, which on
-         * the {@code findByTargetStatus(ACTIVE)} boot path means the whole query — and therefore
-         * the whole startup — fails.
+         * no such constant. The failure is thrown while mapping <em>one</em> document — which on
+         * any query that <em>returns</em> that document (the environment list view, {@code GET
+         * /{id}}) takes the whole response down with it. Not the {@code findByTargetStatus(ACTIVE)}
+         * boot path, which filters server-side on the string and never converts it; see the class
+         * javadoc and {@code BlastRadius}.
          * <p>
          * <b>The type is not the one A1 names.</b> Both the amendment and
          * {@link BotGroupStatus}' own javadoc say {@code ConversionFailedException}; the
@@ -128,12 +141,13 @@ class BotGroupStatusRollbackSafetyTest {
     class WritePaths {
 
         /**
-         * <b>This is a defect report, not a specification.</b>
+         * <b>This was a defect report; the defect is fixed and these are now its regression
+         * guards.</b> They fail if either write path is ever reopened (RR6).
          * <p>
-         * A1's consumer audit asserts that "{@code BotGroupDTO.targetStatus} can still only
-         * carry the original three". That is true of what the API <em>renders</em> and false of
-         * what it <em>accepts</em>: {@code targetStatus} is a writable field on
-         * {@link BotGroupDTO}, and both request-body paths copy it into the entity that is then
+         * A1's consumer audit asserted that "{@code BotGroupDTO.targetStatus} can still only
+         * carry the original three". That was true of what the API <em>rendered</em> and false of
+         * what it <em>accepted</em>: {@code targetStatus} was a writable field on
+         * {@link BotGroupDTO}, and both request-body paths copied it into the entity that is then
          * handed to {@code repository.save} —
          * <ul>
          *   <li>{@code POST /api/v1/bot-group/} → {@code BotGroupMapper.toEntity}, which sets it
@@ -146,14 +160,17 @@ class BotGroupStatusRollbackSafetyTest {
          * downstream sanitises it — {@code BotGroupService.save} and
          * {@code BotGroupConfigValidationService.validate} never look at {@code targetStatus}.
          * <p>
-         * So a single request body is enough to put an unrollbackable value in Mongo, and it was
+         * So a single request body was enough to put an unrollbackable value in Mongo, and it was
          * <em>not</em> enough before this phase, when every constant the DTO could carry was one
-         * an older jar could read. The assertions below are the invariant A1 states; they fail
-         * today, and the fix belongs in production code (reject the three at the DTO boundary,
-         * or stop accepting {@code targetStatus} on the write side at all) rather than here.
+         * an older jar could read. The fix went where it belonged — in production code, on the
+         * write side: the DTO field is {@code @JsonProperty(access = READ_ONLY)} so it cannot
+         * arrive over HTTP at all, and {@code BotGroupMapper} copies it in neither write
+         * direction so an in-process caller cannot get there another way. Validation was
+         * deliberately NOT the fix: a 400 on a body that merely echoes a group back would have
+         * broken A3's read-modify-write shape.
          */
         @Test
-        @DisplayName("neither create nor patch may persist an appended constant (currently they do)")
+        @DisplayName("neither create nor patch may persist an appended constant")
         void requestBodiesCannotPoisonTargetStatus() {
             List<String> reachable = new ArrayList<>();
 

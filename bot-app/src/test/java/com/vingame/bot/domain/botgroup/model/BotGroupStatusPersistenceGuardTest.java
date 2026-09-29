@@ -39,12 +39,18 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * poisoned document is never returned and never converted. What breaks is every read that
  * <em>does</em> convert the group — {@code GET /{id}} and, worse,
  * {@code POST /{envId}/filter}, the UI's list view for a whole environment, where one poisoned
- * group 500s the list for every healthy group beside it. And on the <em>current</em> jar the
+ * group fails the list for every healthy group beside it. And on the <em>current</em> jar the
  * same document silently leaves {@code findByTargetStatus(ACTIVE)} and
  * {@code RecoveryEligibility}'s {@code ACTIVE}/{@code STOPPED}/{@code DEAD} branches, so the
  * group never auto-starts and never auto-recovers again: unmanaged, with nothing logged. Either
  * way a rollback to {@code vingame-bot:rollback-*} stops being a safe action, which is the one
  * thing this guard exists to keep true.
+ * <p>
+ * The failure presents as a <b>400</b>, not a 500 (measured by the Phase 2 compliance pass):
+ * Spring's conversion failure is an {@code IllegalArgumentException}, which
+ * {@code RestExceptionHandler.handleIllegalArgument} maps to {@code 400 Bad request}. Worse for
+ * whoever reads it, not better — the request was not bad, and a 400 sends them to look at their
+ * own query instead of at a poisoned document.
  * <p>
  * <b>Why a source scan at all.</b> No dynamic test can see the absence of a write; a
  * {@code setTargetStatus} call added in a year's time with the "obvious" argument would simply
@@ -92,7 +98,7 @@ class BotGroupStatusPersistenceGuardTest {
         assertThat(offenders)
                 .as("BotGroupStatus.%s must never be written to BotGroup.targetStatus: an older "
                                 + "jar cannot deserialise it (IllegalArgumentException out of "
-                                + "Enum.valueOf), which 500s GET /{id} and the whole env list "
+                                + "Enum.valueOf), which fails GET /{id} and the whole env list "
                                 + "view and makes a rollback unsafe. STARTING belongs to the "
                                 + "runtime; the registration states are derived at the DTO "
                                 + "boundary.",

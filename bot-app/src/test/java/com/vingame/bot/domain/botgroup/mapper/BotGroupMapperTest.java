@@ -190,9 +190,18 @@ class BotGroupMapperTest {
                             + "Lifecycle is what /start and /stop are for.")
                     .isNull();
             assertThat(entity.getScheduledRestartTime()).isEqualTo(now.plusDays(1));
-            assertThat(entity.getLastStartedAt()).isEqualTo(now.minusHours(2));
-            assertThat(entity.getLastStoppedAt()).isEqualTo(now.minusHours(1));
-            assertThat(entity.getLastFailureReason()).isEqualTo("failure");
+            assertThat(entity.getLastStartedAt())
+                    .as("the rest of the system-managed set, closed by the Phase 2 QA re-check. "
+                            + "These three were still copied from the DTO on the lines beside the "
+                            + "targetStatus one that was removed, while updateEntityFromDTO's own "
+                            + "comment called all four system-managed — so only one of them was. "
+                            + "No rollback hazard, but lastFailureReason is rendered to operators "
+                            + "and lastStoppedAt gates the recovery settle window, and neither has "
+                            + "a legitimate client-supplied value. startLocked and stop() write "
+                            + "them.")
+                    .isNull();
+            assertThat(entity.getLastStoppedAt()).isNull();
+            assertThat(entity.getLastFailureReason()).isNull();
         }
 
         @Test

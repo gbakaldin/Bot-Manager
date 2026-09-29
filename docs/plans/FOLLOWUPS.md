@@ -289,19 +289,39 @@ shipped instead is an honest `OUTCOME_SUCCESS` javadoc, an honest `startForRecov
   black hole, where the pre-Phase-2 shape at least left an operator looking at a hung HTTP
   request.
 - **Impact:** no data loss and no wrong money; a group that will not come up and cannot be
-  retried without a JVM restart. Diagnosable today, which is why this is a follow-up and not a
+  retried without a JVM restart — **and every attempt to stop or delete it costs a request thread
+  for the life of the JVM.** `/stop` has always blocked on the group lock, and since Phase 2's R6
+  fix `DELETE /{id}` does too (`stopAndLogout` takes it), so an operator who retries a few times
+  accumulates parked Tomcat workers (review RR3, QA re-check §5). Before that round a DELETE at
+  least returned. Two cheap mitigations would close this independently of the TTL problem below:
+  `tryLock` with a timeout and a `409`/`503` — which `handleBotGroupDeath` already does at
+  `BotGroupBehaviorService:3008`, with the reasoning written out — or bounding the
+  `semaphore.acquire()` in `createBotsInParallel`.
+- Diagnosable today, which is why this is a follow-up and not a
   fix: a second `/start` answers `200` and logs
   `a start is already in flight (origin REST, phase BUILDING, 12 up / 0 failed, elapsed 3600s)`,
-  so the age is already in front of whoever tries.
+  so the age is already in front of whoever tries. **Since Phase 3 there is also an alert** —
+  `GatewayBudgetSustainedQueue` fires on 15 minutes of continuously non-empty ESSENTIAL queue
+  depth, which is the signature of a build parked inside the budget.
 - **Why not fixed now:** the obvious fix is wrong. A TTL that *drops* a stuck attempt re-opens
   the race `750fc91` closed (dropping an open attempt uncancels its build, so a `/stop` that
   already answered `200` can be followed by the group coming up). A real fix has to either
   supersede the attempt *and* prove the old build can no longer act — which needs a generation
   number on the cancellation predicate, not a timer — or make the build itself bounded, which is
   Phase 3's territory since the unbounded wait it would bound is Phase 3's design.
-- **Surfaced by:** GATEWAY_REQUEST_BUDGET Phase 2 review, R9. **Phase 3 should re-read this
-  before giving `ESSENTIAL` an unbounded max-wait**, because that is the one production input
-  that turns "conceivable" into "expected".
+- **Surfaced by:** GATEWAY_REQUEST_BUDGET Phase 2 review, R9. **Phase 3 re-read this before
+  giving `ESSENTIAL` an unbounded max-wait**, as asked, and narrowed the entry's reachability
+  from both ends:
+  - the **unbounded login is gone** — `BoundedLogin` (commit `6a8d69e`) gives the library's
+    `AuthClient` call the same 10 s bound the four in-repo gateway calls have, and aborts the
+    exchange on expiry, so "a `createSingleBot` parked on a socket with no timeout" is no longer
+    one of the ways in;
+  - an **open circuit refuses every tier instead of parking ESSENTIAL** (A16.2), so the other
+    indefinite wait the entry names is not expressible either.
+  What remains is the sliding window itself, where the unbounded ESSENTIAL wait is *deliberate*
+  and safe because the window drains by construction — and `semaphore.acquire()`, which is still
+  unbounded. So P13 is narrower than it was and still open: the real fix is a generation number
+  on the cancellation predicate, or a bounded build, neither of which is Phase 3's.
 
 ### P14 — an unclean shutdown leaves the daisy-chain's already-authenticated bots connected
 
