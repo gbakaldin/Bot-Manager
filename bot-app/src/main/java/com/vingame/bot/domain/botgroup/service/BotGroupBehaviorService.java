@@ -39,6 +39,7 @@ import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.domain.game.sort.GameSortRow;
 import com.vingame.bot.domain.game.sort.GameSorter;
 import com.vingame.bot.infrastructure.gateway.GatewayBudget;
+import com.vingame.bot.common.exception.GatewayBudgetException;
 import com.vingame.bot.common.gateway.GatewayRequestScope;
 import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
@@ -3289,6 +3290,23 @@ public class BotGroupBehaviorService {
             Thread.currentThread().interrupt();
             log.warn("Periodic logout interrupted for bot {} in group {}",
                     bot.getUserName(), runtime.getGroupId());
+        } catch (GatewayBudgetException e) {
+            // AD-9, on the last path that still reported a budget outcome as a failure. The
+            // restart's WebSocket upgrade is DEFAULT — it is one bot per group per hour, nothing
+            // is broken and nothing is starting — so it is the FIRST thing a paced window
+            // refuses, and during a large group start it is expected to be refused. An ERROR
+            // here would page someone, once per group per interval, for the budget working.
+            //
+            // The consequence is bounded and self-healing: the bot is left logged out, and
+            // because Bot.logout() closes the socket without setting `stopped`, the library's
+            // channelInactive fires the disconnect listener and the bot's own reconnect loop
+            // brings it back at PRIORITIZED — a tier the same window is far less likely to be
+            // refusing. That spurious reconnect is pre-existing (Open Item 10, FOLLOWUPS P15)
+            // and is what makes this outcome recoverable rather than a bot left dark until the
+            // next cycle.
+            log.debug("Periodic logout for bot {} in group {} was refused by the gateway budget "
+                            + "({}) — the bot's own reconnect loop will bring it back",
+                    bot.getUserName(), runtime.getGroupId(), e.getMessage());
         } catch (Exception e) {
             log.error("Periodic logout failed for bot {} in group {}: {}",
                     bot.getUserName(), runtime.getGroupId(), e.getMessage(), e);
