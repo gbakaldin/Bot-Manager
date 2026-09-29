@@ -467,6 +467,93 @@ class BotReconnectTest {
         }
     }
 
+    /* ----- budget refusals must not wedge the reconnect machinery (QA, Phase 3) ----- */
+
+    @Nested
+    @DisplayName("a budget-refused re-auth leaves a loop running, never a wedged bot")
+    class BudgetRefusedReauthTests {
+
+        /**
+         * The wedge {@code ReauthOutcome} exists to prevent, asserted at the LOOP level rather
+         * than at {@code performReauth}'s return value.
+         * <p>
+         * Before enforcement {@code performReauth} was a {@code boolean} and {@code false} meant
+         * "marked DEAD, stop the loop". A budget refusal is neither of those: the gateway was
+         * never asked, so the bot is still viable — but if RETRYABLE is ever collapsed back into
+         * TERMINAL, {@code runAuthThenWsLoop} <b>returns</b> with {@code reconnecting} still set
+         * and no worker running. That bot then never reconnects, never goes DEAD, and never
+         * reports anything: {@code triggerFullReconnect} short-circuits for ever on the flag it
+         * left behind, so it does not even count toward its group's dead ratio.
+         * {@code BotReconnectTest.PerformReauthTests.aBudgetRefusalIsNotTerminal} pins the return
+         * value; nothing pinned the consequence.
+         */
+        @Test
+        @Timeout(value = 15, unit = TimeUnit.SECONDS)
+        @DisplayName("runAuthThenWsLoop falls into the backoff loop and still terminates bounded")
+        void aRefusedImmediateReauthEntersTheBackoffLoop() throws Exception {
+            setReconnecting(bot, true);
+
+            // Every re-auth is refused by the budget, which is exactly what a large group start on
+            // the same environment does to a reconnecting bot: PRIORITIZED yields to ESSENTIAL by
+            // design (AD-5's ceiling gap), for as long as the start lasts.
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenThrow(
+                    new com.vingame.bot.common.exception.GatewayBudgetExhaustedException(
+                            com.vingame.bot.common.gateway.RequestTier.PRIORITIZED, "env-1",
+                            java.time.Duration.ofSeconds(30)));
+            VingameWebSocketClient closedClient = mock(VingameWebSocketClient.class);
+            when(closedClient.isOpen()).thenReturn(false);
+            when(clientFactory.newClient(any(), anyString())).thenReturn(closedClient);
+
+            invokePrivate("runAuthThenWsLoop");
+
+            assertThat(bot.sleeps)
+                    .as("it entered the backoff loop rather than returning — a return here is the "
+                            + "wedge: reconnecting stays set and no worker is running")
+                    .isNotEmpty();
+            assertThat(bot.getStatus())
+                    .as("and the loop is still BOUNDED: MAX_RECONNECT_CYCLES converts 'the budget "
+                            + "keeps saying no' into a DEAD bot the group's dead ratio can see, "
+                            + "not into an invisible zombie")
+                    .isEqualTo(BotStatus.DEAD);
+            assertThat(getReconnecting(bot))
+                    .as("the flag is cleared on the way out, so a later disconnect can arm a new "
+                            + "loop")
+                    .isFalse();
+            // Entered at cycle 1 (the refused immediate re-auth counts), so cycles 2..9 re-auth
+            // in-loop and cycle 10 gives up: 9 attempts, the same budget the TERMINAL route gets.
+            // A RETRYABLE that reset the cycle counter would loop for ever and hit the @Timeout.
+            verify(apiGatewayClient, times(9)).authenticate(any(), any(), any());
+        }
+
+        /**
+         * The same property on the in-loop re-auth site, reached from the WS-disconnect route.
+         * {@code runWsReconnectLoop}'s {@code performReauth() == TERMINAL} check is a second,
+         * independent call site, and collapsing the tri-state there ends the worker mid-loop — a
+         * bot left RECONNECTING with its cycles unspent.
+         */
+        @Test
+        @Timeout(value = 15, unit = TimeUnit.SECONDS)
+        @DisplayName("runWsReconnectLoop keeps its remaining cycles when the budget refuses")
+        void aRefusedInLoopReauthDoesNotEndTheWorker() throws Exception {
+            setReconnecting(bot, true);
+
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenThrow(
+                    new com.vingame.bot.common.exception.GatewayCircuitOpenException(
+                            "env-1", "9a2c3-HKG", java.time.Duration.ofMinutes(60)));
+            VingameWebSocketClient closedClient = mock(VingameWebSocketClient.class);
+            when(closedClient.isOpen()).thenReturn(false);
+            when(clientFactory.newClient(any(), anyString())).thenReturn(closedClient);
+
+            invokePrivate("runWsReconnectLoop");
+
+            assertThat(bot.getStatus()).isEqualTo(BotStatus.DEAD);
+            assertThat(getReconnecting(bot)).isFalse();
+            // Entering at cycle 0: cycles 1..9 each re-auth, cycle 10 gives up. Ten in-loop
+            // re-auth points, nine of them reached.
+            verify(apiGatewayClient, times(9)).authenticate(any(), any(), any());
+        }
+    }
+
     /* ----- helpers ----- */
 
     private void invokePrivate(String name) throws Exception {
