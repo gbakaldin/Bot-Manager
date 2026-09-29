@@ -366,7 +366,7 @@ class BotReconnectTest {
     class PerformReauthTests {
 
         @Test
-        @DisplayName("On failure transitions to DEAD, clears reconnecting flag, returns false")
+        @DisplayName("On an upstream failure: DEAD, reconnecting cleared, outcome TERMINAL")
         void shouldMarkDeadOnFailure() throws Exception {
             setReconnecting(bot, true);
 
@@ -375,11 +375,42 @@ class BotReconnectTest {
 
             Method m = Bot.class.getDeclaredMethod("performReauth");
             m.setAccessible(true);
-            boolean result = (boolean) m.invoke(bot);
+            // Tri-state since GATEWAY_REQUEST_BUDGET AD-9 (was a boolean). Compared by name so
+            // the test does not need access to the private enum.
+            Object result = m.invoke(bot);
 
-            assertThat(result).isFalse();
+            assertThat(result).hasToString("TERMINAL");
             assertThat(bot.getStatus()).isEqualTo(BotStatus.DEAD);
             assertThat(getReconnecting(bot)).isFalse();
+        }
+
+        @Test
+        @DisplayName("On a BUDGET refusal: RECONNECTING, reconnecting still set, outcome RETRYABLE")
+        void aBudgetRefusalIsNotTerminal() throws Exception {
+            // AD-9, and the single most important consequence of enforcement: a request the JVM
+            // chose not to send is not a gateway refusal, so it must not kill the bot. Pacing a
+            // fleet's re-auths is what the budget DOES during a large group start; if that were
+            // terminal, enforcement would kill the bots it was pacing.
+            setReconnecting(bot, true);
+
+            when(apiGatewayClient.authenticate(any(), any(), any())).thenThrow(
+                    new com.vingame.bot.common.exception.GatewayBudgetExhaustedException(
+                            com.vingame.bot.common.gateway.RequestTier.PRIORITIZED, "env-1",
+                            java.time.Duration.ofSeconds(30)));
+
+            Method m = Bot.class.getDeclaredMethod("performReauth");
+            m.setAccessible(true);
+            Object result = m.invoke(bot);
+
+            assertThat(result).hasToString("RETRYABLE");
+            assertThat(bot.getStatus())
+                    .as("still viable, and still trying — the backoff loop keeps its remaining "
+                            + "cycles and MAX_RECONNECT_CYCLES still caps it")
+                    .isEqualTo(BotStatus.RECONNECTING);
+            assertThat(getReconnecting(bot))
+                    .as("the flag must STAY set: clearing it would let a concurrent "
+                            + "onWsDisconnected spawn a second reconnect loop beside this one")
+                    .isTrue();
         }
     }
 

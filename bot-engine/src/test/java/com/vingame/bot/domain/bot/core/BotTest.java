@@ -98,6 +98,24 @@ class BotTest {
 
     /* ----- creditBalance ----- */
 
+    /**
+     * Stub <b>both</b> server-balance entry points with one value.
+     * <p>
+     * Since GATEWAY_REQUEST_BUDGET Phase 3 (AD-10) they are two different calls with two
+     * different budget semantics: a <b>drift re-sync</b> goes through
+     * {@code getBalanceIfAdmitted} — DEFAULT, and it never waits, because it runs on a ws-parser
+     * message-processor thread whose stalling would freeze the bot's whole message pipeline —
+     * while the <b>first</b> read (ESSENTIAL, on the start path) and the post-deposit confirming
+     * read (PRIORITIZED) still go through the blocking {@code getBalance}. A test that stubs only
+     * one of the two silently exercises the other as an unstubbed no-op returning 0.
+     */
+    private void stubServerBalance(String token, long value) {
+        when(apiGatewayClient.getBalance(eq(token), eq("fp-1"), eq("botuser1"), any(), any()))
+                .thenReturn(value);
+        when(apiGatewayClient.getBalanceIfAdmitted(eq(token), eq("fp-1"), eq("botuser1"), any()))
+                .thenReturn(java.util.OptionalLong.of(value));
+    }
+
     @Nested
     @DisplayName("creditBalance")
     class CreditBalanceTests {
@@ -158,6 +176,8 @@ class BotTest {
 
             assertThat(result).isEqualTo(1_000_000L);
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
+            verify(apiGatewayClient, never())
+                    .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
         }
 
         @Test
@@ -170,11 +190,13 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("tok");
-            when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(4_900_000L);
+            stubServerBalance("tok", 4_900_000L);
 
             bot.checkBalanceExposed();
 
-            verify(apiGatewayClient).getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any());
+            // A DRIFT re-sync, so it goes through the deferrable entry point (AD-10).
+            verify(apiGatewayClient)
+                    .getBalanceIfAdmitted(eq("tok"), eq("fp-1"), eq("botuser1"), any());
         }
 
         @Test
@@ -190,13 +212,14 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("tok");
-            when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(5_000_000L);
+            stubServerBalance("tok", 5_000_000L);
 
             bot.checkBalanceExposed();
 
             // Server says nothing was debited — the local model is corrected back to 5M,
             // which is what makes the freeze observable rather than silent.
-            verify(apiGatewayClient).getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any());
+            verify(apiGatewayClient)
+                    .getBalanceIfAdmitted(eq("tok"), eq("fp-1"), eq("botuser1"), any());
             assertThat(bot.getExpectedBalance()).isEqualTo(5_000_000L);
         }
 
@@ -210,6 +233,8 @@ class BotTest {
             bot.checkBalanceExposed();
 
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
+            verify(apiGatewayClient, never())
+                    .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
         }
 
         @Test
@@ -226,14 +251,15 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-token-xyz");
-            when(apiGatewayClient.getBalance(eq("auth-token-xyz"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(7_500_000L);
+            stubServerBalance("auth-token-xyz", 7_500_000L);
 
             long result = bot.checkBalanceExposed();
 
             assertThat(result).isEqualTo(7_500_000L);
             assertThat(bot.getLastFetchedBalance()).isEqualTo(7_500_000L);
             assertThat(bot.getExpectedBalance()).isEqualTo(7_500_000L);
-            verify(apiGatewayClient).getBalance(eq("auth-token-xyz"), eq("fp-1"), eq("botuser1"), any(), any());
+            verify(apiGatewayClient)
+                    .getBalanceIfAdmitted(eq("auth-token-xyz"), eq("fp-1"), eq("botuser1"), any());
         }
 
         @Test
@@ -242,7 +268,7 @@ class BotTest {
             // Defaults: lastFetchedBalance=-1, expectedCurrentBalance=-100_000_000L. delta = ~100M -> refetch.
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-token");
-            when(apiGatewayClient.getBalance(eq("auth-token"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(50_000_000L);
+            stubServerBalance("auth-token", 50_000_000L);
 
             long result = bot.checkBalanceExposed();
 
@@ -275,7 +301,7 @@ class BotTest {
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
             when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any())).thenReturn(true);
-            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(999_999_999L);
+            stubServerBalance("auth-tok", 999_999_999L);
 
             bot.deposit();
 
@@ -297,6 +323,8 @@ class BotTest {
             assertThat(bot.getLastFetchedBalance()).isEqualTo(1_000_000L);
             assertThat(bot.getExpectedBalance()).isEqualTo(1_000_000L);
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
+            verify(apiGatewayClient, never())
+                    .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
         }
 
         @Test
@@ -448,7 +476,7 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(7_000_000L);
+            stubServerBalance("auth-tok", 7_000_000L);
 
             bot.checkBalanceExposed();
 
@@ -471,7 +499,7 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(8_000_000L);
+            stubServerBalance("auth-tok", 8_000_000L);
 
             bot.checkBalanceExposed();
 
@@ -485,7 +513,7 @@ class BotTest {
             // Defaults: lastFetchedBalance = -1 -> anchor only, no drain.
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(50_000_000L);
+            stubServerBalance("auth-tok", 50_000_000L);
 
             bot.checkBalanceExposed();
 
@@ -508,6 +536,8 @@ class BotTest {
 
             assertThat(result).isEqualTo(9_500_000L);
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
+            verify(apiGatewayClient, never())
+                    .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
             assertThat(drainCounter()).isNull();
             // anchor must be untouched by a cached read
             assertThat(bot.getLastFetchedBalance()).isEqualTo(10_000_000L);
@@ -524,13 +554,13 @@ class BotTest {
 
             // First drop: 10M -> 7M = 3M drain, anchor becomes 7M.
             expected.set(-100_000_000L);
-            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(7_000_000L);
+            stubServerBalance("auth-tok", 7_000_000L);
             bot.checkBalanceExposed();
 
             // Second drop computed from the NEW anchor (7M), not the original 10M:
             // 7M -> 5M = 2M, cumulative 5M.
             expected.set(-100_000_000L);
-            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(5_000_000L);
+            stubServerBalance("auth-tok", 5_000_000L);
             bot.checkBalanceExposed();
 
             assertThat(drainCounter().count()).isEqualTo(5_000_000.0);
@@ -546,7 +576,7 @@ class BotTest {
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
             when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any())).thenReturn(true);
-            when(apiGatewayClient.getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(1_005_000_000L);
+            stubServerBalance("auth-tok", 1_005_000_000L);
 
             bot.deposit();
 

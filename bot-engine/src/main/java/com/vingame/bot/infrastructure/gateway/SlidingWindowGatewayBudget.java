@@ -1093,6 +1093,11 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         return settings.countWsUpgrades();
     }
 
+    @Override
+    public Duration registrationMaxWait() {
+        return settings.registrationMaxWait();
+    }
+
     /** The policy this budget was built with. */
     public GatewayBudgetSettings settings() {
         return settings;

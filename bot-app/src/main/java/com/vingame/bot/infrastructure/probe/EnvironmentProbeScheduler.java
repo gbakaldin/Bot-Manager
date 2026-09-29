@@ -278,9 +278,15 @@ public class EnvironmentProbeScheduler {
             //
             // A live-sibling short-circuit sends nothing and is therefore not counted.
             if (!liveSibling) {
+                // countWsUpgrade, not count: the probe IS a WebSocket upgrade, so whether it
+                // costs the edge a request is the same question `count-ws-upgrades` answers for
+                // the three connect() sites (A5.3 / reviewer F2). With `count` here, answering
+                // Open Item 1 "no" would have silenced the bots' upgrades and left the probe
+                // stamping anyway — one flag governing a decision in two halves. The answer is
+                // now "yes" (A15), so this stamps; the flag survives as a kill switch.
                 gatewayBudgetRegistry
                         .forEnvironment(env.environmentId(), env.environmentName(), env.product())
-                        .count("ws-probe");
+                        .countWsUpgrade("ws-probe");
             }
             registry.counter(ENV_WS_PROBE_TOTAL,
                     "environmentId", nullSafe(env.environmentId()),

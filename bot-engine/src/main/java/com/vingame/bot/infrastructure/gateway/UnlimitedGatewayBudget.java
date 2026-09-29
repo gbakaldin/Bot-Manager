@@ -77,6 +77,12 @@ final class UnlimitedGatewayBudget implements GatewayBudget {
         return false;
     }
 
+    @Override
+    public Duration registrationMaxWait() {
+        // Nothing ever waits here, so the value is only ever passed back into a no-op.
+        return Duration.ZERO;
+    }
+
     private static final Reservation NO_RESERVATION = new Reservation() {
         @Override
         public void release() {

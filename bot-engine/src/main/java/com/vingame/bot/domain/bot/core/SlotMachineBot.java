@@ -175,13 +175,24 @@ public class SlotMachineBot extends Bot {
     private void onNewSession() {
         long balance = checkBalance();
         BotBehaviorConfig behavior = configuration.getBehaviorConfig();
-        if (behavior.isAutoDepositEnabled() && balance < getMinBalance()) {
+        // GATEWAY_REQUEST_BUDGET AD-10: depositIsWarranted re-reads the server balance at
+        // PRIORITIZED first if — and only if — the drift read that produced `balance` was
+        // deferred by the budget. A deposit is money, and it must not be triggered by a figure
+        // the budget kept us from refreshing. It also subsumes the old `balance < getMinBalance()`
+        // test, so the condition is not evaluated twice.
+        if (behavior.isAutoDepositEnabled() && depositIsWarranted(balance)) {
             // LOG_VOLUME_TIERING tier 1: DEBUG per bot, one INFO line per group per
             // deposit round from GroupLifecycleAggregator. One line per bot per
             // top-up is a bot-count-scaled INFO class, which the tier model forbids.
-            log.debug("Bot {}: balance {} below minimum {}, triggering deposit", getUserName(), balance, getMinBalance());
+            //
+            // Read from expectedCurrentBalance rather than from `balance`: a pre-deposit refresh
+            // may have replaced the estimate with the server's figure, and the aggregate should
+            // report the number the decision was actually made on.
+            long confirmed = expectedCurrentBalance.get();
+            log.debug("Bot {}: balance {} below minimum {}, triggering deposit",
+                    getUserName(), confirmed, getMinBalance());
             if (groupLifecycleAggregator != null) {
-                groupLifecycleAggregator.recordAutoDeposit(getMinBalance() - balance);
+                groupLifecycleAggregator.recordAutoDeposit(getMinBalance() - confirmed);
             }
             deposit();
         } else {

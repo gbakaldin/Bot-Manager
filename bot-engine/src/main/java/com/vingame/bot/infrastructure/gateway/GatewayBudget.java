@@ -212,6 +212,15 @@ public interface GatewayBudget {
     boolean countsWsUpgrades();
 
     /**
+     * The wait a registration request may use instead of {@link RequestTier#DEFAULT}'s (AD-19).
+     * <p>
+     * Exposed on the interface rather than read from the settings at the call site because
+     * {@code ApiGatewayClient} holds a {@link GatewayBudget}, not a
+     * {@code GatewayBudgetSettings}, and a fixture's {@link #UNLIMITED} has no settings at all.
+     */
+    Duration registrationMaxWait();
+
+    /**
      * A declared-demand reservation. {@link #release()} is idempotent and must be called
      * from a {@code finally}.
      */

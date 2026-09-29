@@ -39,6 +39,8 @@ import com.vingame.bot.domain.game.service.GameService;
 import com.vingame.bot.domain.game.sort.GameSortRow;
 import com.vingame.bot.domain.game.sort.GameSorter;
 import com.vingame.bot.infrastructure.gateway.GatewayBudget;
+import com.vingame.bot.common.gateway.GatewayRequestScope;
+import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
 import com.vingame.bot.infrastructure.runtime.BotGroupRuntime;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
@@ -775,6 +777,34 @@ public class BotGroupBehaviorService {
         }
     }
 
+    /**
+     * Gateway requests one bot costs to bring up: login + WebSocket upgrade + first balance read
+     * (GATEWAY_REQUEST_BUDGET AD-7, A15.1).
+     * <p>
+     * Three, unconditionally. Open Item 1 asked whether the WS hosts sit behind the same
+     * Cloudflare rule as the {@code /gwms/v1/*} API host; the user has confirmed they do, so the
+     * upgrade term is fact rather than the conservative guess it shipped as, and
+     * {@code count-ws-upgrades=false} survives only as a kill switch. Over-declaring by one is
+     * the safe direction anyway: the reservation is pre-emptive and its remainder is returned.
+     */
+    static final int REQUESTS_PER_BOT_AT_START = 3;
+
+    /**
+     * Minutes a paced start of {@code demand} requests is expected to take, for the one INFO line
+     * an operator reads before deciding whether something is wrong (AD-18).
+     * <p>
+     * Deliberately coarse — {@code ceil(demand / cap) x 5} — because the honest answer is "this
+     * many windows". At 900 / 5 min a 3,000-bot group is 9,000 requests, i.e. <b>~50 minutes</b>,
+     * and a 300-bot group is one window. That is the rule working, not a regression, and the line
+     * exists so nobody reports it as one.
+     */
+    static int estimatedStartMinutes(int demand, int hardCap) {
+        if (demand <= 0 || hardCap <= 0) {
+            return 0;
+        }
+        return (int) Math.ceil((double) demand / hardCap) * 5;
+    }
+
     private void startLocked(String id) {
         // Reclaim guard (AD-1, AD-2). A genuinely running group has
         // actualStatus=ACTIVE (set in the BotGroupRuntime constructor); the only
@@ -819,19 +849,16 @@ public class BotGroupBehaviorService {
         // Set by the cancellation check below, so the finally block can report a stop-cancelled
         // build as the INFO it is rather than as a failed start ERROR.
         boolean cancelled = false;
+        // AD-7's declared demand. Null until the runtime is published (see below); released in
+        // this method's finally on every path, success or failure, because a reservation that
+        // outlives its build shrinks the lower tiers' ceilings for the life of the JVM.
+        GatewayBudget.Reservation reservation = null;
         try {
             // The two 400s. Shared with submitLifecycle so REST answers them synchronously while
             // every other entry point still inherits them (AD-15).
             validateStartable(group);
 
             startAttempts.progress(id, StartAttemptRegistry.Phase.BUILDING);
-            // AD-18: expected durations are correct behaviour, and the operator learns them from
-            // this line. Phase 3 extends it with the declared demand, the live window and the
-            // estimate; this is the shape it extends. One line per group start — tier 1.
-            log.info("group {} ({}): start admitted — origin {}, {} bots",
-                    id, group.getName(),
-                    startAttempts.origin(id).map(Enum::name).orElse("DIRECT"),
-                    group.getBotCount());
 
             // Load environment (throws ResourceNotFoundException if not found)
             Environment environment = environmentService.findById(group.getEnvironmentId());
@@ -925,6 +952,36 @@ public class BotGroupBehaviorService {
                         group.getName(), game.getJackpotCeiling());
                 // AD-J9: optional coordinator-cap composition deferred
             }
+
+            // AD-7 / AD-18 — declared demand, and the ONE line per group start that tells an
+            // operator how long a paced build is expected to take.
+            //
+            // Taken HERE, deliberately: after `runningGroups.put(id, runtime)` above and before
+            // createBotsInParallel. cancelStartInFlight resolves the environment from the
+            // RUNTIME, so a reservation taken at the top of this method would be unreleasable by
+            // a /stop landing in that window — the reservation would go on shrinking the lower
+            // ceilings with nothing left to release it (A20.4; the 2 x window TTL in the budget
+            // is the backstop, not the plan).
+            //
+            // Demand is botCount x 3 unconditionally: login + WS upgrade + first balance read.
+            // A15 closed Open Item 1 — the WS hosts are behind the same Cloudflare rule — so the
+            // third term is fact, not a conservative guess, and count-ws-upgrades survives only
+            // as a kill switch.
+            GatewayBudget budget = gatewayBudgetRegistry.forEnvironment(
+                    group.getEnvironmentId(), environment.getName(),
+                    environment.getProductCode() != null
+                            ? environment.getProductCode().getCode() : null);
+            int declaredDemand = Math.max(0, group.getBotCount()) * REQUESTS_PER_BOT_AT_START;
+            reservation = budget.reserve(RequestTier.ESSENTIAL, declaredDemand,
+                    GatewayRequestScope.forBot(id, null, () -> startAttempts.isCancelled(id)));
+            GatewayBudget.Snapshot window = budget.snapshot();
+            log.info("group {} ({}): start admitted — origin {}, {} bots, declared demand {} "
+                            + "requests, env window {}/{}, estimated {} min",
+                    id, group.getName(),
+                    startAttempts.origin(id).map(Enum::name).orElse("DIRECT"),
+                    group.getBotCount(), declaredDemand,
+                    window.windowRequests(), window.hardCap(),
+                    estimatedStartMinutes(declaredDemand, window.hardCap()));
 
             log.info("Creating {} bots for group {} with parallel execution (parallelism={})",
                     group.getBotCount(), group.getName(), botCreationParallelism);
@@ -1058,6 +1115,13 @@ public class BotGroupBehaviorService {
             failure = t;
             throw t;
         } finally {
+            if (reservation != null) {
+                // Idempotent, and first in the finally: whatever else this teardown does, the
+                // declared demand goes back. Releasing it also walks the budget's waiter queues,
+                // so a registration or drift read that was being held back by this group's
+                // reservation is admitted immediately rather than at the next stamp expiry.
+                reservation.release();
+            }
             if (!started) {
                 BotGroupRuntime failedRuntime = runningGroups.remove(id);
                 if (failedRuntime != null) {

@@ -106,6 +106,20 @@ class BotGroupStartCancellationRaceTest {
 
     @BeforeEach
     void initConfigFields() {
+        // GATEWAY_REQUEST_BUDGET Phase 3: startLocked declares its demand up front
+        // (reserve(ESSENTIAL, botCount x 3)) and the registry is mocked here, so without this an
+        // unstubbed mock returns null and every start NPEs. UNLIMITED is the honest fixture
+        // budget: it runs every call immediately and its reservation is a no-op, which is the
+        // right shape for tests that are about the lifecycle rather than about pacing. The
+        // reservation itself is asserted against a recording budget in
+        // BotGroupBehaviorServiceReservationTest.
+        //
+        // lenient(), because most tests in this class never start a group and STRICT_STUBS would
+        // fail them for an unnecessary stubbing.
+        org.mockito.Mockito.lenient().when(gatewayBudgetRegistry.forEnvironment(
+                        org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+                        org.mockito.ArgumentMatchers.any()))
+                .thenReturn(com.vingame.bot.infrastructure.gateway.GatewayBudget.UNLIMITED);
         when(botGroupService.save(any(BotGroup.class))).thenAnswer(inv -> {
             BotGroup saved = inv.getArgument(0);
             persisted.add(saved.getTargetStatus());

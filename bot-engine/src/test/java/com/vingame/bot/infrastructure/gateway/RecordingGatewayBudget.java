@@ -221,4 +221,9 @@ public class RecordingGatewayBudget implements GatewayBudget {
     public boolean countsWsUpgrades() {
         return true;
     }
+
+    @Override
+    public Duration registrationMaxWait() {
+        return Duration.ofMinutes(15);
+    }
 }

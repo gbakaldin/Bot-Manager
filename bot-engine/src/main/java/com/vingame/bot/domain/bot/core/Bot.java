@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.core;
 
+import com.vingame.bot.common.exception.GatewayBudgetException;
 import com.vingame.bot.common.gateway.GatewayRequestScope;
 import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.common.logging.BotMdc;
@@ -459,23 +460,106 @@ public abstract class Bot {
         // PRIORITIZED (AD-3), for the deposit and the read that confirms it: a bot that
         // cannot top up stops betting, but it is already up, so it does not outrank a group
         // that is still coming up.
-        boolean success = apiGatewayClient.deposit(
-                userName, depositAmount, RequestTier.PRIORITIZED, scope());
+        boolean success;
+        try {
+            success = apiGatewayClient.deposit(
+                    userName, depositAmount, RequestTier.PRIORITIZED, scope());
+        } catch (GatewayBudgetException e) {
+            // AD-9: skip this round, and do not report it as a failed deposit. The next round
+            // re-triggers because the balance is still below the minimum, and
+            // bot_auto_deposit_total{outcome="failure"} must keep meaning "the gateway refused
+            // us" rather than "we paced ourselves".
+            log.debug("Bot {}: deposit was refused by the gateway budget ({}) — skipping this "
+                    + "round", userName, e.getMessage());
+            return;
+        }
         if (success) {
             log.debug("Bot {}: Deposit of {} successful, fetching new balance...", userName, depositAmount);
             if (metrics != null) metrics.incBotAutoDeposit(true);
-            recordFetchedBalance(apiGatewayClient.getBalance(
-                getClient().getAuthToken(),
-                credentials.getFingerprint(),
-                userName,
-                RequestTier.PRIORITIZED,
-                scope()
-            ));
-            expectedCurrentBalance.set(lastFetchedBalance);
-            log.debug("Bot {}: New balance: {}", userName, expectedCurrentBalance);
+            try {
+                recordFetchedBalance(apiGatewayClient.getBalance(
+                    getClient().getAuthToken(),
+                    credentials.getFingerprint(),
+                    userName,
+                    RequestTier.PRIORITIZED,
+                    scope()
+                ));
+                expectedCurrentBalance.set(lastFetchedBalance);
+                log.debug("Bot {}: New balance: {}", userName, expectedCurrentBalance);
+            } catch (GatewayBudgetException e) {
+                // The money moved; only the confirming read did not. Mark the local figure
+                // stale rather than throwing out of a SUCCESSFUL deposit — the next round's
+                // pre-deposit refresh is what stops the stale figure funding a second top-up.
+                balanceReadDeferred = true;
+                log.debug("Bot {}: deposit succeeded but the confirming balance read was refused "
+                        + "by the gateway budget ({}) — local figure marked stale",
+                        userName, e.getMessage());
+            }
         } else {
             log.warn("Bot {}: Deposit failed", userName);
             if (metrics != null) metrics.incBotAutoDeposit(false);
+        }
+    }
+
+    /**
+     * Whether the last drift balance re-sync was <b>skipped</b> because the gateway budget had
+     * no room for it (GATEWAY_REQUEST_BUDGET AD-10).
+     * <p>
+     * It exists for one reason, and it is a money reason: while this is {@code true} the local
+     * figure is an estimate the budget prevented us from refreshing, and
+     * {@link #depositIsWarranted(long)} must not top a bot up on the strength of it. Cleared by
+     * any successful read.
+     * <p>
+     * Not volatile, for the same reason {@code lastFetchedBalance} is not: every read and write
+     * happens on the bot's own session path ({@code onNewSession} and the deposit decision it
+     * makes immediately afterwards), on one thread at a time.
+     */
+    private boolean balanceReadDeferred = false;
+
+    /**
+     * Whether this bot should actually be topped up, given a balance figure that may be a local
+     * estimate (GATEWAY_REQUEST_BUDGET AD-10).
+     * <p>
+     * <b>A deposit is money, and it must not be triggered by a figure the budget kept us from
+     * refreshing.</b> If the last drift read was deferred, this does one <em>blocking</em>
+     * {@link RequestTier#PRIORITIZED} read — bounded by that tier's max-wait, and PRIORITIZED
+     * because a bot that cannot top up stops betting, while a bot that is merely stale is still
+     * playing — and deposits only if the fresh figure is still below the minimum.
+     * <p>
+     * On budget exhaustion of <em>that</em> read: no deposit this round. Nothing is lost by
+     * waiting — the next round re-enters this path, because the local balance is still below the
+     * minimum — and the alternative is depositing against a number we know to be stale.
+     *
+     * @param localBalance the figure {@link #checkBalance()} just returned
+     * @return {@code true} if a deposit is warranted by the freshest figure obtainable
+     */
+    protected boolean depositIsWarranted(long localBalance) {
+        if (localBalance >= getMinBalance()) {
+            return false;
+        }
+        if (!balanceReadDeferred) {
+            // The figure is authoritative: either it came from the server this round, or local
+            // drift has stayed inside the 1%-of-deposit sync threshold since it did.
+            return true;
+        }
+        try {
+            long fresh = apiGatewayClient.getBalance(
+                    getClient().getAuthToken(),
+                    credentials.getFingerprint(),
+                    userName,
+                    RequestTier.PRIORITIZED,
+                    scope());
+            recordFetchedBalance(fresh);
+            expectedCurrentBalance.set(fresh);
+            balanceReadDeferred = false;
+            log.debug("Bot {}: pre-deposit refresh returned {} (minimum {})",
+                    userName, fresh, getMinBalance());
+            return fresh < getMinBalance();
+        } catch (GatewayBudgetException e) {
+            // AD-9: never terminal. Skip the round; the next one re-enters this path.
+            log.debug("Bot {}: pre-deposit balance refresh was refused by the gateway budget "
+                    + "({}) — no deposit this round", userName, e.getMessage());
+            return false;
         }
     }
 
@@ -494,16 +578,44 @@ public abstract class Bot {
             // fires once per bot at start. A bot whose first read fails never installs its
             // scenario and becomes a silent zombie; a bot whose drift re-sync is deferred
             // simply plays on its local estimate for another round.
-            RequestTier tier = lastFetchedBalance < 0 ? RequestTier.ESSENTIAL : RequestTier.DEFAULT;
-            recordFetchedBalance(apiGatewayClient.getBalance(
-                getClient().getAuthToken(),
-                credentials.getFingerprint(),
-                userName,
-                tier,
-                scope()
-            ));
-            log.debug("checkBalance() fetched: {}", lastFetchedBalance);
-            expectedCurrentBalance.set(lastFetchedBalance);
+            if (lastFetchedBalance < 0) {
+                // The FIRST read: ESSENTIAL, and blocking. A bot that fails it never installs
+                // its scenario and becomes a silent zombie, so it waits for the window rather
+                // than giving up — ESSENTIAL's wait is unbounded and cancellable, and the
+                // window drains by construction.
+                recordFetchedBalance(apiGatewayClient.getBalance(
+                    getClient().getAuthToken(),
+                    credentials.getFingerprint(),
+                    userName,
+                    RequestTier.ESSENTIAL,
+                    scope()
+                ));
+                balanceReadDeferred = false;
+                log.debug("checkBalance() fetched: {}", lastFetchedBalance);
+                expectedCurrentBalance.set(lastFetchedBalance);
+            } else {
+                // A drift re-sync: DEFAULT, and it NEVER waits (AD-10). This runs on a
+                // ws-parser message-processor thread, so parking it would stall the bot's whole
+                // message pipeline. If the budget has no room the bot plays on its local
+                // estimate for another round and remembers that the figure is stale — which is
+                // what stops the deferral from silently becoming a reason to move money.
+                java.util.OptionalLong fresh = apiGatewayClient.getBalanceIfAdmitted(
+                    getClient().getAuthToken(),
+                    credentials.getFingerprint(),
+                    userName,
+                    scope()
+                );
+                if (fresh.isPresent()) {
+                    recordFetchedBalance(fresh.getAsLong());
+                    balanceReadDeferred = false;
+                    log.debug("checkBalance() fetched: {}", lastFetchedBalance);
+                    expectedCurrentBalance.set(lastFetchedBalance);
+                } else {
+                    balanceReadDeferred = true;
+                    log.debug("checkBalance() deferred by the gateway budget — using local "
+                            + "estimate {}", expectedCurrentBalance.get());
+                }
+            }
         } else {
             log.debug("checkBalance() using cached: {}", expectedCurrentBalance.get());
         }
@@ -801,7 +913,11 @@ public abstract class Bot {
                     closeClientQuietly();
                     return;
                 }
-                if (!performReauth()) return; // marks DEAD if auth fails
+                // A budget refusal is NOT terminal (AD-9): the cycle above has already been
+                // charged, so a RETRYABLE outcome simply falls back into the backoff below and
+                // tries again on the next cycle, still capped by MAX_RECONNECT_CYCLES. Only a
+                // real auth failure ends the loop, and performReauth marked the bot DEAD for it.
+                if (performReauth() == ReauthOutcome.TERMINAL) return;
                 attempt = 0;
             }
         }
@@ -813,7 +929,16 @@ public abstract class Bot {
         // tag is unused in current code; if a future caller needs it, increment
         // at that callsite before spawning this loop.
         if (stopped) return;
-        if (!performReauth()) return;
+        ReauthOutcome reauth = performReauth();
+        if (reauth == ReauthOutcome.TERMINAL) return;
+        if (reauth == ReauthOutcome.RETRYABLE) {
+            // The budget declined the immediate re-auth (AD-9). Do NOT try the WS upgrade on
+            // the strength of tokens we did not refresh — fall straight into the backoff loop,
+            // entering at cycle=1 exactly as the success path does below so the
+            // MAX_RECONNECT_CYCLES cap cannot be bypassed through this branch either.
+            runWsReconnectLoop(1);
+            return;
+        }
         if (stopped) return;
 
         if (tryReconnectWs()) {
@@ -830,7 +955,26 @@ public abstract class Bot {
         runWsReconnectLoop(1);
     }
 
-    private boolean performReauth() {
+    /**
+     * What one re-authentication attempt achieved (GATEWAY_REQUEST_BUDGET AD-9).
+     * <p>
+     * Before enforcement this was a {@code boolean}, and {@code false} meant "marked DEAD, stop
+     * the loop". The third value exists because a budget refusal is neither: the gateway was
+     * never asked, so the bot is still perfectly viable and the reconnect loop must keep its
+     * remaining cycles. Collapsing RETRYABLE into either of the other two is the bug — as
+     * TERMINAL it kills a healthy bot, and as SUCCESS the loop proceeds to a WS upgrade with
+     * tokens it did not refresh.
+     */
+    private enum ReauthOutcome {
+        /** Fresh tokens in hand. */
+        SUCCESS,
+        /** The JVM declined to send the login. Not the bot's fault, and not terminal. */
+        RETRYABLE,
+        /** The gateway refused the credentials (or worse). The bot has been marked DEAD. */
+        TERMINAL
+    }
+
+    private ReauthOutcome performReauth() {
         try {
             log.debug("Bot {}: re-authenticating", userName);
             transitionStatus(BotStatus.AUTHENTICATING);
@@ -841,7 +985,23 @@ public abstract class Bot {
             // JVM chose not to send is not a gateway refusal.
             this.tokens = apiGatewayClient.authenticate(credentials, RequestTier.PRIORITIZED, scope());
             transitionStatus(BotStatus.AUTHENTICATED);
-            return true;
+            return ReauthOutcome.SUCCESS;
+        } catch (GatewayBudgetException e) {
+            // AD-9, and it is the single most important consequence of enforcement. A request
+            // the JVM chose not to send is NOT a gateway refusal, so it must not be terminal:
+            // the bot stays RECONNECTING and this counts as one failed attempt of the existing
+            // backoff loop, still capped by MAX_RECONNECT_CYCLES. Marking DEAD here would mean
+            // that pacing a fleet's re-auths — which is what enforcement does during a large
+            // group start, by design — killed the bots it was pacing.
+            //
+            // The arm only works because ApiGatewayClient.authenticate rethrows this type ahead
+            // of its RuntimeException arm (A4): left rewrapped as UpstreamLoginException it
+            // would take the catch below and this comment would be describing nothing.
+            log.debug("Bot {}: re-authentication was refused by the gateway budget ({}) — "
+                    + "counting one failed attempt and continuing the backoff loop",
+                    userName, e.getMessage());
+            transitionStatus(BotStatus.RECONNECTING);
+            return ReauthOutcome.RETRYABLE;
         } catch (Exception e) {
             log.error("Bot {}: re-authentication failed — marking DEAD", userName);
             transitionStatus(BotStatus.DEAD);
@@ -849,7 +1009,7 @@ public abstract class Bot {
             // Terminal DEAD (e.g. "account does not exist"): close the last WS client so its
             // onDisconnect handler can't fire later and re-arm the reconnect machinery.
             closeClientQuietly();
-            return false;
+            return ReauthOutcome.TERMINAL;
         }
     }
 

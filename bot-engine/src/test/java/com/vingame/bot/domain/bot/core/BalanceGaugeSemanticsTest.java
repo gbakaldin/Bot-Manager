@@ -101,6 +101,22 @@ class BalanceGaugeSemanticsTest {
      * {@code lastFetchedBalance}</b>. If a future change ever set one without the other,
      * the filter would silently stop working and the sentinel would be back on the gauge.
      */
+    /**
+     * Stub <b>both</b> server-balance entry points with one value.
+     * <p>
+     * Since GATEWAY_REQUEST_BUDGET Phase 3 (AD-10) the <b>first</b> read goes through the
+     * blocking {@code getBalance} (ESSENTIAL, on the start path) while every <b>drift</b> re-sync
+     * goes through {@code getBalanceIfAdmitted} (DEFAULT, never waits). The 200-round loop below
+     * exercises the second one exclusively, so stubbing only the first would have made it measure
+     * drift against an unstubbed 0.
+     */
+    private void stubServerBalance(long value) {
+        when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any()))
+                .thenReturn(value);
+        when(apiGatewayClient.getBalanceIfAdmitted(eq("tok"), eq("fp-1"), eq("botuser1"), any()))
+                .thenReturn(java.util.OptionalLong.of(value));
+    }
+
     @Test
     @DisplayName("before the first server read: expected is the negative sentinel AND lastFetched is -1")
     void expectedBalanceIsANegativeSentinelBeforeTheFirstServerRead() {
@@ -116,12 +132,14 @@ class BalanceGaugeSemanticsTest {
         // No server read has happened: the group is eligible for the gauge as soon as the
         // socket is up, which is long before the first round.
         verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
+        verify(apiGatewayClient, never())
+                .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
     }
 
     @Test
     @DisplayName("the first checkBalance() replaces the sentinel with the authoritative server figure")
     void firstRoundSyncsExpectedToTheServer() {
-        when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(DEPOSIT);
+        stubServerBalance(DEPOSIT);
 
         long balance = bot.checkBalanceExposed();
 
@@ -147,7 +165,7 @@ class BalanceGaugeSemanticsTest {
     @Test
     @DisplayName("after the first read, expected stays within 1% of the deposit of server truth")
     void expectedNeverDriftsMoreThanOneSyncBandFromTheServer() {
-        when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(DEPOSIT);
+        stubServerBalance(DEPOSIT);
         bot.checkBalanceExposed();
 
         long syncBand = DEPOSIT / 100; // BALANCE_SYNC_PERCENT_OF_DEPOSIT = 1
@@ -178,7 +196,7 @@ class BalanceGaugeSemanticsTest {
     @Test
     @DisplayName("a bot that stops receiving rounds freezes the number the gauge reads (GameNoRounds' job)")
     void expectedFreezesWhenRoundsStop() {
-        when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any())).thenReturn(DEPOSIT);
+        stubServerBalance(DEPOSIT);
         bot.checkBalanceExposed();
         assertThat(bot.getExpectedBalance()).isEqualTo(DEPOSIT);
 

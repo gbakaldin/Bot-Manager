@@ -143,6 +143,7 @@ class SlidingWindowGatewayBudgetAdmissionTest {
         fill(RequestTier.DEFAULT, 500);
 
         CountDownLatch queued = new CountDownLatch(100);
+        CountDownLatch unwound = new CountDownLatch(100);
         List<Throwable> failures = new CopyOnWriteArrayList<>();
         for (int i = 0; i < 100; i++) {
             Thread.ofVirtual().name("default-waiter-" + i).start(() -> {
@@ -152,6 +153,8 @@ class SlidingWindowGatewayBudgetAdmissionTest {
                             Duration.ofSeconds(20));
                 } catch (Throwable e) {
                     failures.add(e);
+                } finally {
+                    unwound.countDown();
                 }
             });
         }
@@ -172,7 +175,11 @@ class SlidingWindowGatewayBudgetAdmissionTest {
                         + "room, it did not free any")
                 .isEqualTo(100);
 
+        // Await the unwind rather than sampling the list: cancelScope completes 100 futures, and
+        // each waiter's continuation then runs on its own virtual thread. Asserting the list size
+        // without a barrier is a race that fails ~30% of the time in a full-suite run.
         budget.cancelScope("group-1");
+        assertThat(unwound.await(10, TimeUnit.SECONDS)).isTrue();
         assertThat(failures).hasSize(100);
     }
 

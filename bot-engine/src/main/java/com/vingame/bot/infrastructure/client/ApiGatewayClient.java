@@ -33,6 +33,8 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -191,7 +193,62 @@ public class ApiGatewayClient {
      */
     private HttpResponse<String> send(RequestTier tier, GatewayRequestScope scope, HttpRequest request)
             throws IOException, InterruptedException {
-        return underBudget(tier, scope, () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString()));
+        return underBudget(tier, scope, httpCall(request));
+    }
+
+    /**
+     * {@link #send} with an explicit wait, overriding the tier's configured {@code max-wait}.
+     * <p>
+     * One caller: user registration, which runs at {@link RequestTier#DEFAULT} but waits
+     * {@code bot.gateway.budget.registration.max-wait} (AD-19), so that an admitted registration
+     * <b>finishes</b> rather than half-finishes when a group start floods the window mid-way. A
+     * half-registered group is precisely the thing that gets forgotten; a slow one is not.
+     */
+    private HttpResponse<String> send(RequestTier tier, GatewayRequestScope scope, HttpRequest request,
+                                      Duration maxWait) throws IOException, InterruptedException {
+        try {
+            return gatewayBudget.execute(tier, scope, httpCall(request), maxWait);
+        } catch (IOException | InterruptedException | RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Unexpected checked exception from the gateway budget funnel", e);
+        }
+    }
+
+    /**
+     * {@link #send}, but giving up immediately if the budget has no room — AD-10's
+     * {@code tryExecute(…, Duration.ZERO)}.
+     * <p>
+     * Used for the drift balance re-sync, which runs on a ws-parser message-processor thread.
+     * Parking that thread would stall the bot's whole message pipeline and throwing into it
+     * would break {@code onNewSession}, so the read is simply skipped and the bot plays on its
+     * local estimate for another round.
+     *
+     * @return empty when the request was <b>not</b> sent, in which case nothing was stamped.
+     */
+    private Optional<HttpResponse<String>> sendIfAdmitted(RequestTier tier, GatewayRequestScope scope,
+                                                          HttpRequest request)
+            throws IOException, InterruptedException {
+        try {
+            return gatewayBudget.tryExecute(tier, scope, httpCall(request), Duration.ZERO);
+        } catch (IOException | InterruptedException | RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Unexpected checked exception from the gateway budget funnel", e);
+        }
+    }
+
+    /**
+     * The one and only place this class hands a request to the JDK client.
+     * <p>
+     * Factored out so the three funnel entry points above share it: a second literal
+     * {@code httpClient.send(} would be an uncounted, unpaced escape from the budget, and
+     * {@code GatewayCallSiteGuardTest} fails the build on one.
+     */
+    private Callable<HttpResponse<String>> httpCall(HttpRequest request) {
+        return () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
     /**
@@ -451,8 +508,14 @@ public class ApiGatewayClient {
         // not recoverable. The scope carries the username PREFIX, which is the only identity
         // a registration has — it runs inside BotGroupService.save, before any bot of the
         // group exists, so there is no botGroupId to cancel it by.
+        //
+        // ...with the registration WAIT OVERRIDE (AD-19), not DEFAULT's 30 s. The tier still
+        // decides the ceiling and the priority; only the patience is different, because a
+        // registration that is refused half way through a group leaves a HALF-REGISTERED group,
+        // and that is the state nobody comes back to. A slow one is merely slow.
         HttpResponse<String> response = send(RequestTier.DEFAULT,
-                GatewayRequestScope.registration(userNamePrefix), httpRequest);
+                GatewayRequestScope.registration(userNamePrefix), httpRequest,
+                gatewayBudget.registrationMaxWait());
         String responseBody = response.body();
         log.debug("[Register] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
@@ -497,12 +560,16 @@ public class ApiGatewayClient {
                     .timeout(GATEWAY_REQUEST_TIMEOUT)
                     .build();
 
-            // DEFAULT tier, registration scope (AD-3). The identity available here is the
-            // full username rather than the prefix — this is called from the retry loop, one
-            // user at a time, and the username is what an operator greps when a bot ends up
-            // nameless (a nameless account stalls the ziczac round engine).
+            // DEFAULT tier, registration scope, registration wait override (AD-3, AD-19). The
+            // identity available here is the full username rather than the prefix — this is
+            // called from the retry loop, one user at a time, and the username is what an
+            // operator greps when a bot ends up nameless (a nameless account stalls the ziczac
+            // round engine). The override matters more here than on the register call: an
+            // account that exists without a display name is the one state a resumed
+            // registration cannot repair cheaply (it costs register + login + update-fullname).
             HttpResponse<String> response = send(RequestTier.DEFAULT,
-                    GatewayRequestScope.registration(username), httpRequest);
+                    GatewayRequestScope.registration(username), httpRequest,
+                    gatewayBudget.registrationMaxWait());
             String responseBody = response.body();
             log.debug("[UpdateFullname] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
@@ -641,6 +708,31 @@ public class ApiGatewayClient {
      */
     public long getBalance(String authToken, String fingerprint, String username,
                            RequestTier tier, GatewayRequestScope scope) {
+        return readBalance(authToken, fingerprint, username, tier, scope, false)
+                .orElseThrow(() -> new IllegalStateException(
+                        "a blocking balance read returned no value for user " + username));
+    }
+
+    /**
+     * Fetch balance <b>only if the budget has room right now</b>, at
+     * {@link RequestTier#DEFAULT} — the drift re-sync (AD-10).
+     * <p>
+     * This runs on a ws-parser message-processor thread (the {@code onEndGame → onNewSession}
+     * chain), which is the library's, not ours. Parking it would stall the bot's whole message
+     * pipeline and throwing into it would break the session handler, so an unadmitted read is
+     * simply skipped: the caller keeps its local estimate for another round and records that the
+     * figure is now stale. The first read is a different matter entirely — it is on the start
+     * path and blocking ESSENTIAL — and goes through {@link #getBalance}.
+     *
+     * @return the fresh balance, or empty when the budget had no room and <b>nothing was sent</b>
+     */
+    public OptionalLong getBalanceIfAdmitted(String authToken, String fingerprint, String username,
+                                             GatewayRequestScope scope) {
+        return readBalance(authToken, fingerprint, username, RequestTier.DEFAULT, scope, true);
+    }
+
+    private OptionalLong readBalance(String authToken, String fingerprint, String username,
+                                     RequestTier tier, GatewayRequestScope scope, boolean deferrable) {
         checkInitialized();
         try {
             Thread.sleep(500);
@@ -657,7 +749,23 @@ public class ApiGatewayClient {
                     .timeout(GATEWAY_REQUEST_TIMEOUT)
                     .build();
 
-            HttpResponse<String> response = send(tier, scope, httpRequest);
+            HttpResponse<String> maybeResponse;
+            if (deferrable) {
+                Optional<HttpResponse<String>> admitted = sendIfAdmitted(tier, scope, httpRequest);
+                if (admitted.isEmpty()) {
+                    // Deliberately not a metric increment and not a WARN: this is the budget
+                    // working, on the hottest path in the fleet (one per bot per round at scale).
+                    // gateway_budget_requests_total{outcome="timeout"} already counts it, per
+                    // tier, and the bot records the deferral so the pre-deposit refresh knows.
+                    log.debug("[VerifyToken] drift read deferred for user {} — the budget had no room",
+                            username);
+                    return OptionalLong.empty();
+                }
+                maybeResponse = admitted.get();
+            } else {
+                maybeResponse = send(tier, scope, httpRequest);
+            }
+            HttpResponse<String> response = maybeResponse;
             String responseBody = response.body();
             log.debug("[VerifyToken] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
@@ -666,7 +774,7 @@ public class ApiGatewayClient {
                 JsonNode firstElement = dataArray.get(0);
                 long balance = firstElement.get("main_balance").asLong();
                 metrics.incVerifyToken(true);
-                return balance;
+                return OptionalLong.of(balance);
             } else {
                 metrics.incVerifyToken(false);
                 throw new RuntimeException("User: " + username + ": Data array is missing or empty: " + responseBody);

@@ -114,11 +114,20 @@ class BotGatewayTierTest {
         org.mockito.Mockito.verify(apiGatewayClient).getBalance(anyString(), anyString(), anyString(),
                 org.mockito.ArgumentMatchers.eq(RequestTier.ESSENTIAL), any());
 
-        // Now drift the local estimate past the sync threshold and read again.
+        // Now drift the local estimate past the sync threshold and read again. Since Phase 3 the
+        // drift re-sync goes through getBalanceIfAdmitted, not getBalance: it is DEFAULT and it
+        // must NEVER wait, because it runs on a ws-parser message-processor thread (AD-10). The
+        // tier is therefore fixed inside ApiGatewayClient rather than passed by the caller, which
+        // is what makes "a drift read cannot be ESSENTIAL by accident" a type-level fact.
+        when(apiGatewayClient.getBalanceIfAdmitted(anyString(), anyString(), anyString(), any()))
+                .thenReturn(java.util.OptionalLong.of(1_500_000_000L));
         bot.driftBalance(500_000_000L);
         bot.checkBalanceExposed();
-        org.mockito.Mockito.verify(apiGatewayClient).getBalance(anyString(), anyString(), anyString(),
-                org.mockito.ArgumentMatchers.eq(RequestTier.DEFAULT), any());
+        org.mockito.Mockito.verify(apiGatewayClient)
+                .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
+        org.mockito.Mockito.verify(apiGatewayClient, org.mockito.Mockito.never())
+                .getBalance(anyString(), anyString(), anyString(),
+                        org.mockito.ArgumentMatchers.eq(RequestTier.DEFAULT), any());
     }
 
     @Test
@@ -167,7 +176,9 @@ class BotGatewayTierTest {
         // same reflection seam BotReconnectTest uses for the same reason.
         Method performReauth = Bot.class.getDeclaredMethod("performReauth");
         performReauth.setAccessible(true);
-        assertThat((boolean) performReauth.invoke(bot)).isTrue();
+        // Tri-state since AD-9: SUCCESS / RETRYABLE (the budget declined, not terminal) /
+        // TERMINAL (marked DEAD). Compared by name so the test does not need the private enum.
+        assertThat(performReauth.invoke(bot)).hasToString("SUCCESS");
 
         Method tryReconnectWs = Bot.class.getDeclaredMethod("tryReconnectWs");
         tryReconnectWs.setAccessible(true);
