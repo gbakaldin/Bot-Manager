@@ -1,17 +1,20 @@
 # QA — GATEWAY_REQUEST_BUDGET Phase 3 (enforcement behind `mode=enforce`)
 
 **Verdict:** PASS
-**Build:** `mvn test` → **2,356 tests, 0 failures, 0 errors, 0 skipped** (four full runs, identical)
+**Build:** `mvn test` → **2,356 tests, 0 failures, 0 errors, 0 skipped** (five full runs, identical)
 **Branch:** `feature/gateway-request-budget`, diff `b818e04..4bad37a` (12 commits: `6a8d69e`..`4bad37a`)
-**Verified in:** a detached `git worktree` at `4bad37a`, never in the working tree (58 dirty unrelated
-RIK/Aviator entries — `08c52a3` swept 134 lines of exactly that back out, and the same check caught a
-tip that did not compile in an earlier phase)
+**Verified in:** a detached `git worktree`, never in the working tree (59 dirty unrelated RIK/Aviator
+entries — `08c52a3` swept 134 lines of exactly that back out, and the same check caught a tip that did
+not compile in an earlier phase). Runs 1 and A-D are at Dev's tip `4bad37a`; the final run is at QA's
+own commit `391bdff`, whose parent `6762698` (the docs-only compliance pass) landed while I was
+measuring — so the final run covers the current branch tip, docs commit included.
 
 | Run | Tree | tests | failures | errors |
 |---|---|---|---|---|
 | 1 | `4bad37a` exactly as committed | **2,340** | 0 | 0 |
 | A, B, C | + QA's 16 tests | 2,357* | 0 | 0 |
 | D | + QA's 16 tests, surefire reports wiped first | **2,356** | 0 | 0 |
+| E | the committed tip `391bdff`, fresh worktree | **2,356** | 0 | 0 |
 
 \* 2,357 in runs A-C is an artefact of my own aggregation, not of the tree: surefire does not delete
 stale report files, so a `-Dtest=GatewayBudgetEscalationIT` report from a targeted run was still on
@@ -19,7 +22,8 @@ disk and being counted. Run D wiped `*/target/surefire-reports` first. **2,340 +
 and run D also confirms the escalation IT leaves no report in a default run — i.e. it really is
 excluded by name.
 
-`GatewayBudgetEscalationIT` on demand: **4 tests, 0 failures, 3 consecutive runs, ~37 s each.**
+`GatewayBudgetEscalationIT` on demand: **4 tests, 0 failures, 4 runs** (3 at `4bad37a`, 1 at the
+committed tip), ~37 s each.
 
 ```
 mvn -o -pl bot-engine -am test -Dtest=GatewayBudgetEscalationIT \
@@ -388,8 +392,8 @@ outrank configuration.
 
 ## Flake hunt
 
-- **Four full-suite runs, identical** (2,340 at the tip; 2,356 with QA's tests). **Three IT runs,
-  identical**, ~37 s each.
+- **Five full-suite runs, identical** (2,340 at Dev's tip; 2,356 with QA's tests, including one at the
+  committed tip in a fresh worktree). **Four IT runs, identical**, ~37 s each.
 - Every cross-thread assertion I added waits on a `CountDownLatch`, a `CompletableFuture`
   (`succeedsWithin`) or synchronous budget state — never a sleep-then-assert. Class-level `@Timeout` on
   all four new files, because the failure mode under test is *parking*, and a parked test hangs rather
@@ -403,4 +407,4 @@ outrank configuration.
 
 ## Failures
 
-None. Four full-suite runs and three IT runs, no failures, no errors, no flakes.
+None. Five full-suite runs and four IT runs, no failures, no errors, no flakes.
