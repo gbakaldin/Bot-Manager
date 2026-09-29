@@ -208,6 +208,18 @@ public record GatewayBudgetSettings(
                 registrationMaxWait, countWsUpgrades, blockProbeInterval);
     }
 
+    /** The same policy with a different window. Tests only — the real window is the rule. */
+    public GatewayBudgetSettings withWindow(Duration other) {
+        return new GatewayBudgetSettings(mode, other, hardCap, ceilings, maxWaits,
+                registrationMaxWait, countWsUpgrades, blockProbeInterval);
+    }
+
+    /** The same policy with a different hard cap. Tests only. */
+    public GatewayBudgetSettings withHardCap(int cap) {
+        return new GatewayBudgetSettings(mode, window, cap, ceilings, maxWaits,
+                registrationMaxWait, countWsUpgrades, blockProbeInterval);
+    }
+
     /** The same policy with one tier's ceiling replaced. Tests only. */
     public GatewayBudgetSettings withCeiling(RequestTier tier, int ceiling) {
         Map<RequestTier, Integer> replaced = new EnumMap<>(ceilings);

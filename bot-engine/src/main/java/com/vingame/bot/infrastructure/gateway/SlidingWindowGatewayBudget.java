@@ -82,7 +82,26 @@ import java.util.function.LongSupplier;
  * <p>
  * <b>Stamp on admission, not on completion.</b> A request that was admitted and then failed
  * still cost the edge a request; a request that timed out or was cancelled while queued cost it
- * nothing and is never stamped. The {@code gateway_budget_requests_total} counter and
+ * nothing and is never stamped.
+ * <p>
+ * <b>The clock is read inside the lock, and that is load-bearing.</b> A time captured before
+ * {@code lock.lock()} can be arbitrarily stale by the time the stamp lands — every bot thread of
+ * a group start arrives at once, so a thread may queue on the lock for as long as the admissions
+ * ahead of it take. A stamp dated earlier than its own admission expires early, and the window
+ * then admits again while that request is still in flight. {@code GatewayBudgetEscalationIT}
+ * measured it as 84 arrivals inside a 60-request window under a 24-thread fan-out.
+ * <p>
+ * <b>What an independent observer sees can still read slightly above the cap, and the margin is
+ * where that goes.</b> The invariant this class owes is exact: in any interval of length
+ * {@code window}, the admissions inside it are all counted by the last of them against its own
+ * lookback, so there can never be more than {@code hard-cap}. But <em>we</em> stamp at admission
+ * and <em>the edge</em> counts at arrival, so when the window rolls and a fresh burst is admitted,
+ * the tail of the previous burst may still be arriving: an observer's window can hold up to
+ * {@code cap + (requests in flight at the roll)}. In production that in-flight count is bounded
+ * by {@code bot.creation.parallelism} and {@code user.registration.parallelism} (10 each) against
+ * the 100-request gap between {@code hard-cap=900} and Cloudflare's 1,000 — which is exactly what
+ * AD-5 means by "the only margin for traffic the JVM cannot see". <b>It is also one more reason
+ * not to raise the hard cap.</b> The {@code gateway_budget_requests_total} counter and
  * {@code gateway_budget_window_requests} gauge must agree on that, or the dashboard lies about
  * the one number this feature exists to bound. That is also why {@code count()} has its own
  * {@code outcome="counted"}: a probe stamps the window without asking for admission, and
@@ -399,14 +418,24 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         Waiter waiter = null;
         lock.lock();
         try {
+            // The clock is read AGAIN, inside the lock, and the stamp uses THIS value — not the
+            // one taken before the lock. Under contention (every bot thread of a group start
+            // arrives at once) a thread can capture `startedWaiting`, queue on the lock for as
+            // long as the admissions ahead of it take, and then stamp a time from before it had
+            // permission to send. Such a stamp expires EARLY, which lets the window admit again
+            // while the request it belonged to is still in flight — measured as an 84-in-60
+            // overshoot by GatewayBudgetEscalationIT, against the stub's own arrival count.
+            // `startedWaiting` survives for one purpose: the wait timer, where "how long did the
+            // caller wait" is genuinely measured from before the lock.
+            long now = nanos.getAsLong();
             // No admission pass here, deliberately. Every event that can CREATE room already
             // runs one — a stamp expiry (the scheduled wake-up), a reservation release, a
             // cancelScope, a probe's stamp — so a pass on the arrival path would be redundant
             // work on the hottest path in the budget. It would also be a hazard: this block
             // throws, and a pass whose admitted waiters were completed after the lock was
             // released would lose those completions to the throw.
-            prune(startedWaiting);
-            expireStaleReservationsLocked(startedWaiting);
+            prune(now);
+            expireStaleReservationsLocked(now);
 
             if (circuitOpen.get()) {
                 // A16.2: an open circuit refuses every tier, ESSENTIAL included. Parking on a
@@ -427,7 +456,7 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             // when there is room, or the head of a busy queue could starve behind arrivals.
             if (queues.get(tier).isEmpty() && hasRoomLocked(tier)) {
                 consumeReservationLocked(tier, scope);
-                stampLocked(startedWaiting);
+                stampLocked(now);
                 admittedImmediately = true;
             } else if (maxWait != null && maxWait.isZero() && !settings.isUnboundedWait(tier)) {
                 // tryExecute(ZERO) — admit now or never, and nothing was sent.
@@ -435,12 +464,12 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                 if (soft) {
                     return false;
                 }
-                throw new GatewayBudgetExhaustedException(tier, environmentId, retryAfterLocked(startedWaiting));
+                throw new GatewayBudgetExhaustedException(tier, environmentId, retryAfterLocked(now));
             } else {
                 waiter = new Waiter(tier, scope, startedWaiting);
                 queues.get(tier).addLast(waiter);
                 queued.get(tier).incrementAndGet();
-                scheduleWakeUpLocked(startedWaiting);
+                scheduleWakeUpLocked(now);
             }
         } finally {
             lock.unlock();
@@ -524,11 +553,10 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      * (AD-6). Package-private so tests can drive it directly on a manual clock.
      */
     void admitWaiters() {
-        long now = nanos.getAsLong();
         List<Runnable> deferred;
         lock.lock();
         try {
-            deferred = admitWaitersLocked(now);
+            deferred = admitWaitersLocked(nanos.getAsLong());
         } finally {
             lock.unlock();
         }
@@ -656,9 +684,10 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
 
     /** Stamp, account and log one admitted request in observe mode (no lock held yet). */
     private void stampAdmitted(RequestTier tier, GatewayRequestScope scope, long waitedNanos) {
-        long now = nanos.getAsLong();
         lock.lock();
         try {
+            // Read under the lock, for the same reason the enforce path does — see admit().
+            long now = nanos.getAsLong();
             prune(now);
             stampLocked(now);
         } finally {
@@ -717,11 +746,11 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      * un-walked here would delay a legitimate admission until the next wake-up.
      */
     private int stamp() {
-        long now = nanos.getAsLong();
         int window;
         List<Runnable> deferred;
         lock.lock();
         try {
+            long now = nanos.getAsLong();
             prune(now);
             stampLocked(now);
             window = stamps.size();
