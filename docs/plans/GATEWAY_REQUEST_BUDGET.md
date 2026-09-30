@@ -2529,3 +2529,124 @@ arm, so when Phase 5 supplies the trigger, an open circuit already suspends regi
 spending a group's attempt budget. That path is covered by
 `RegistrationWorkerTest.aBudgetRefusalCostsNothing` through the exhausted sibling, and Phase 5
 should add the circuit-open case to it rather than writing a new one.
+
+## Amendment — 2026-09-30 (Phase 4 fix round; A31)
+
+### A31 — what the Phase 4 review and QA round changed, and the two places the plan was wrong again
+
+`docs/reviews/GATEWAY_REQUEST_BUDGET/review-phase4.md` (CHANGES_REQUESTED: B1-B5, SEC1, S1-S7,
+T1-T8) and `docs/reviews/GATEWAY_REQUEST_BUDGET/qa-phase4.md` (PASS with defect F-1 and gaps
+G-1..G-4) are both discharged. **This amendment is the authority over A2.7 and A30.5 where they
+collide.** The phase boundary is unchanged: nothing from A29 (Cloudflare classification, the
+`circuitOpen` setter) has moved forward.
+
+**1. A2.7's trigger was described correctly and implemented as something else, and the difference
+was a production hazard (review B1).** A2.7 says raising `botCount` extends the registration
+target. The code tested `botCount > registeredCount`, which is **unconditionally true for every
+group created before this feature** — Mongo has no `registeredCount` field on those documents and
+Spring Data maps the absent field to `int` `0`. So the real trigger was "this group predates
+Phase 4", and *any* PATCH fired it: a live 250-bot group became `REGISTRATION_PENDING` (hence
+unstartable), the worker walked all 250 indices, and because `namedCount` is absent for the same
+reason **every one of those live accounts was renamed from the display-name pool**. ~500 gateway
+requests on a config edit, half the Cloudflare five-minute allowance, from the feature built to
+stay under it.
+
+The decision now comes from the PATCH — merged `botCount` against **pre-merge** `botCount` — and a
+raise on a group with **no registration history** seeds `registeredCount`/`namedCount` at the old
+target rather than leaving them at zero. Two consequences worth recording:
+
+- A2.7 still works on a legacy or `existingGroup=true` group, which is what A30's "no special case"
+  intended; what it does not do is re-register and re-name the accounts that already exist. A30 §5
+  priced the `EXISTED` re-registration ("two requests each and no harm") and **did not price the
+  rename**, which is the half that mutates production.
+- The seeding is an **assumption**, stated at the site: if a legacy group's original synchronous
+  registration had partially failed, the missing index is not created here and surfaces exactly as
+  it always has — one bot that cannot authenticate at start. The alternative is `2 x botCount`
+  requests plus the rename on every routine PATCH.
+
+**2. The repair this feature advises in three places did not work (review B4).** `FAILED` was
+cleared by `retryRegistration` and nowhere else, and `update()` could only ever *set* `PENDING` and
+was gated off for a `FAILED` group — so "PATCH `botCount` down to what registered and start it"
+returned the same 400 repeating the same advice. Lowering the target to a **met** one now clears the
+state in `update()`, because the state is a statement about an *unmet* target. The `PENDING` half of
+the same advice needed nothing: the worker's next pass completes such a group without a single
+gateway request, since `isComplete` is evaluated before any call. Both 400s also stop offering
+"PATCH botCount down to 0", which is not advice and is the commonest stopping point of all.
+
+**3. A28.5's guard was attached one line too high (review B3).** The activation reconciler's
+registration guard returned **above** `ActivationEvaluator.decide`, so a SCHEDULED group with a
+registration state was removed from reconciliation entirely — `STOP` included. A group can acquire
+one *while running* (that is A2.7), so its window closed and it kept placing real bets; and a
+`FAILED` registration, which never clears on its own, pinned it there indefinitely. The guard now
+gates `case START` only.
+
+**4. A2.6 was right that a budget deferral must cost no attempt, and incomplete about what it must
+cost (review B2).** Selection is "oldest PENDING that is due" and `isDue` reads only the attempt
+state, so a deferred group was the oldest *due* group again on the next tick, forever: one starved
+environment held the single worker thread for up to `registration.max-wait` per pass and **no group
+on any other environment registered anything** for the duration. A deferral now writes a
+`notBefore` (`bot.registration.deferral-backoff-seconds`, floored at one tick) while charging
+neither counter. This is `DeadGroupRecoveryScheduler`'s anti-starvation half, which the worker's
+javadoc claimed the benefit of without having copied. Under Phase 5 the same arm catches
+`GatewayCircuitOpenException` — A30 §8's approving note was describing a path that would have
+suspended account creation fleet-wide for the duration of one brand's block.
+
+Nothing surfaced it, either: `RegistrationStalled` reads `registration_failed_groups` and a deferred
+group is `PENDING`. `prometheus/alerts.yml` adds **`RegistrationNotProgressing`** — at least one
+pending group **and** zero accounts created anywhere for 30 minutes. The conjunction is what makes
+it precise rather than noisy: a legitimately slow 500-account group is incrementing
+`registration_accounts_total` throughout, so it cannot fire this.
+
+**5. A30.5's "self-correcting race" was self-correcting for the counter and not for the completion
+decision (QA F-1).** `register()` captured `target = group.getBotCount()` once, from a document a
+pass may hold for hours, and `recordCompletion` cleared `registrationState` against that stale
+value. A raise landing mid-pass was therefore **erased**: `botCount` 20, `registeredCount` 10, not
+`PENDING`, so nothing ever selected the group again — and the bots built on the missing indices
+failed to authenticate at start, presenting as an auth outage rather than as a create that lied.
+The window was the whole duration of a pass, i.e. it contradicted A2.7 exactly under load. Two
+changes: the target is **re-read per index** (one indexed read against a gateway call of 100-300 ms,
+and it honours a *lowered* count too), and the completion write is **conditional on the document's
+own `botCount`**, so the microseconds-wide remainder is decided by Mongo and not by our arithmetic.
+
+**6. `BoundedLogin` had a fourth exit (review B5).** F6's `boolean settled` covered success and
+`ExecutionException`; `result.get`'s `InterruptedException` — declared and propagated — left the JDK
+`HttpClient` and its `SelectorManager` **platform** thread for GC. That is the *mass* path (every
+executor teardown that catches a login in flight), so a `/stop` on a 500-bot group mid-build leaked
+one platform thread per interrupted login: the Bot-1 sawtooth shape. The `finally` is unconditional
+and the flag is gone; `abort()` swallows and `shutdownNow()` is idempotent, so the reason for
+excluding the timeout path cost nothing either.
+
+**7. Three registration properties exist that the plan does not mention**, all in
+`application.properties` with their reasons: `bot.registration.deferral-backoff-seconds` (60, item
+4), `bot.registration.max-transport-attempts-per-user` (10 — an `IOException` anywhere in the cause
+chain is charged against its own, larger budget, because "we could not ask" is neither a yes nor a
+no and a ~60 s blip must not permanently `FAIL` a 500-account create, review S3), and the existing
+`failure-backoff-seconds` now bounding both.
+
+**8. Where a finding was itself wrong or narrower than stated, and what was done instead.**
+
+- **QA G-3 is right that F3/F4 have no external seam through the head predicate, and review S1 is
+  right that a strand is still reachable.** They are describing different throws.
+  `admitWhileRoomLocked` consults `head.scope.isCancelled()` **before** dequeuing, so a throwing
+  head wedges every later pass and there is no observable "the healthy waiter still gets through" —
+  QA was correct to discard that test. The reachable strand is a throw *after* an earlier tier's
+  waiters were dequeued and stamped, which discards their completions and is not a property of any
+  predicate. The list is therefore hoisted to all five callers and run from the unlocking
+  `finally`; F4's comment is **corrected in place** to say the re-armed timer yields a silent
+  permanent retry loop in the predicate case, rather than the code being changed for it.
+- **S2 is real and its consequence is worse than "coupling":** the F12 pass was gated on whether a
+  WARN had been produced, so throttling that log would have reverted F12 with no test failing. The
+  freed remainder is now reported separately.
+- **T2 was a behaviour change, not a tidy-up**, and is recorded as one:
+  `isDisplayNameTaken` now matches case-insensitively like `registerOne` always has. The asymmetry
+  pointed the wrong way — a brand answering `existed` fell through to the generic throw and
+  reproduced the 2026-09-18 ziczac freeze, while reading it as a conflict costs one re-rolled name.
+- **A30.7's claim is broader than its test (QA G-4), and stays as written with this note.**
+  `RegistrationStartGuardTest.aGamelessGroupRegistersAndNeverStarts` covers the **start** path only;
+  the account-factory follow-up would also touch **create-time** validation
+  (`BotGroupDTO.gameId`'s `@NotBlank(groups = OnCreate.class)`), which is the change A30.7 names but
+  which no assertion pins.
+- **SEC1 is pre-existing and is fixed at four sites, not one.** Every `X-TOKEN` in
+  `ApiGatewayClient` is truncated to the house ten characters, and `[Login]`'s response line — which
+  dumped all three bot tokens in full — with it. The request bodies keep their envelope (it is what
+  a brand's register failure is compared against) with the password removed.
