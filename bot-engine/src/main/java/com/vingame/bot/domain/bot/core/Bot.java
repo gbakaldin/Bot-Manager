@@ -574,6 +574,10 @@ public abstract class Bot {
         Duration derived = Duration.ofSeconds(
                 Math.max(1L, watchdogSeconds / SESSION_WAIT_FRACTION_OF_WATCHDOG));
         Duration tierWait = gatewayBudget.maxWait(RequestTier.PRIORITIZED);
+        // null is "this tier waits unbounded" or, for GatewayBudget.UNLIMITED, "there is no
+        // policy" (review S4) — the derived bound wins in both cases, and it is harmless against
+        // a budget that never waits. The isZero() arm is kept for a fixture that still answers
+        // ZERO; it is not reachable from a configured budget, which rejects a zero max-wait.
         if (tierWait == null || tierWait.isZero() || derived.compareTo(tierWait) < 0) {
             return derived;
         }

@@ -492,9 +492,16 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             // reserved{tier}, so this path owes the queues a pass (review F12) — the comment above
             // is otherwise not quite true, and it is the sentence a future reader would use to
             // justify skipping a pass somewhere else. Collected, not run: this block throws.
-            deferredHere.addAll(expireStaleReservationsLocked(now));
-            if (!deferredHere.isEmpty()) {
-                deferredHere.addAll(admitWaitersLocked(now));
+            //
+            // Gated on the FREED REMAINDER, not on whether a warning was produced (review S2). The
+            // two happen to have the same answer today, because expireStaleReservationsLocked
+            // returns a warning on exactly the condition that creates room — so "should I walk the
+            // queues?" was being decided by "did we emit a WARN?", and throttling that WARN, or
+            // dropping it to DEBUG for a small remainder, would silently revert F12 with no test
+            // failing.
+            int freed = expireStaleReservationsLocked(now, deferredHere);
+            if (freed > 0) {
+                admitWaitersLocked(now, deferredHere);
             }
 
             if (circuitOpen.get()) {
@@ -549,9 +556,11 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      * Park on the waiter's future until it is admitted, cancelled, or the wait elapses.
      * <p>
      * The wait is on a per-waiter {@link CompletableFuture}, which is what makes it both
-     * interruptible and free of a thundering herd. {@code maxWait} of {@link Duration#ZERO} is
-     * an unbounded wait <em>for ESSENTIAL only</em> — legal because the window drains by
-     * construction (A16.2) — and it is always cancellable.
+     * interruptible and free of a thundering herd. A {@code null} {@code maxWait} is an unbounded
+     * wait <em>for ESSENTIAL only</em> — legal because the window drains by construction (A16.2) —
+     * and it is always cancellable. <b>{@link Duration#ZERO} never reaches this method</b>: it is
+     * resolved to now-or-never before a waiter exists (review F5). This paragraph said ZERO was
+     * the unbounded encoding until review T1, three lines above the comment that contradicts it.
      */
     private boolean await(Waiter waiter, Duration maxWait, boolean soft) throws InterruptedException {
         // F5: null is the ONLY encoding of unbounded here. A ZERO never reaches this method — it
@@ -636,27 +645,37 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
     }
 
     void admitWaiters() {
-        List<Runnable> deferred;
+        // The list is OURS, not the locked method's return value (review S1). A throw inside the
+        // pass used to mean the assignment never happened, so runAfterUnlock was never reached and
+        // every waiter the loop had already dequeued and stamped was left in no queue, on no timer
+        // and with its future never completed — an ESSENTIAL waiter parks for the life of the JVM,
+        // which is the exact FOLLOWUPS P13 outcome F3 was written to remove. Owning the list here
+        // makes the partial pass run from the same finally that re-arms the timer.
+        List<Runnable> deferred = new ArrayList<>();
         lock.lock();
         try {
-            deferred = admitWaitersLocked(nanos.getAsLong());
+            admitWaitersLocked(nanos.getAsLong(), deferred);
         } finally {
             lock.unlock();
+            runAfterUnlock(deferred);
         }
-        runAfterUnlock(deferred);
         reportThrottleState();
     }
 
     /**
      * One admission pass. Caller holds {@link #lock}.
      * <p>
-     * Returns the side effects that must <b>not</b> happen under the lock: completing a
-     * waiter's future runs that waiter's continuation, and a cancelled waiter's exceptional
-     * completion can run arbitrary downstream code. Doing either while holding the budget lock
-     * would let a bot thread re-enter the budget from inside the pass.
+     * <b>Accumulates</b> into the caller's {@code deferred} list the side effects that must
+     * <b>not</b> happen under the lock: completing a waiter's future runs that waiter's
+     * continuation, and a cancelled waiter's exceptional completion can run arbitrary downstream
+     * code. Doing either while holding the budget lock would let a bot thread re-enter the budget
+     * from inside the pass.
+     * <p>
+     * The list belongs to the caller rather than being returned (review S1) so that a partial pass
+     * — one that threw after dequeuing and stamping some waiters — is still run. A returned list is
+     * lost on a throw, and a lost {@code complete(null)} is an unreleased waiter.
      */
-    private List<Runnable> admitWaitersLocked(long now) {
-        List<Runnable> deferred = new ArrayList<>();
+    private void admitWaitersLocked(long now, List<Runnable> deferred) {
         try {
             admitWhileRoomLocked(now, deferred);
         } finally {
@@ -666,9 +685,17 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             // a one-shot ScheduledFuture nobody calls get() on, i.e. it is not logged at all. With
             // no other traffic on this budget there is then no later event to re-arm it, and every
             // queued waiter waits out its max-wait for room that exists.
+            //
+            // NARROWER THAN IT READS (QA G-3): that benefit holds for a throw from prune() or
+            // expireStaleReservationsLocked, where a later pass would get through. It does NOT
+            // hold for a throw from the head waiter's own isCancelled() predicate, because
+            // admitWhileRoomLocked consults the head BEFORE dequeuing it: the re-armed timer then
+            // produces a silent permanent retry loop that throws at the same head and never
+            // drains. The re-arm is still right — a queue with a timer is strictly better than one
+            // without — but the fix for a throwing predicate is the contract on
+            // GatewayRequestScope.cancelled, not this finally.
             scheduleWakeUpLocked(now);
         }
-        return deferred;
     }
 
     /**
@@ -683,8 +710,9 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      */
     private void admitWhileRoomLocked(long now, List<Runnable> deferred) {
         prune(now);
-        List<Runnable> expiryWarnings = expireStaleReservationsLocked(now);
-        deferred.addAll(expiryWarnings);
+        // The freed remainder is irrelevant here: this IS the pass, and it is about to walk every
+        // tier regardless. admit() is the caller that has to decide whether to walk them at all.
+        expireStaleReservationsLocked(now, deferred);
 
         for (RequestTier tier : RequestTier.values()) {
             ArrayDeque<Waiter> queue = queues.get(tier);
@@ -897,18 +925,20 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      */
     private int stamp() {
         int window;
-        List<Runnable> deferred;
+        // Owned here and run from the finally, so a throw inside the pass cannot strand a waiter
+        // that was already dequeued and stamped (review S1).
+        List<Runnable> deferred = new ArrayList<>();
         lock.lock();
         try {
             long now = nanos.getAsLong();
             prune(now);
             stampLocked(now);
             window = stamps.size();
-            deferred = admitWaitersLocked(now);
+            admitWaitersLocked(now, deferred);
         } finally {
             lock.unlock();
+            runAfterUnlock(deferred);
         }
-        runAfterUnlock(deferred);
         return window;
     }
 
@@ -974,7 +1004,6 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         int declared = Math.max(0, permits);
         String key = reservationKey(tier, scope);
         TrackedReservation reservation;
-        List<Runnable> deferred;
         List<Runnable> deferredHere = new ArrayList<>();
         lock.lock();
         try {
@@ -1007,12 +1036,11 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                             environmentId, environmentName, tier, key, orphaned));
                 }
             }
-            deferred = admitWaitersLocked(nanos.getAsLong());
+            admitWaitersLocked(nanos.getAsLong(), deferredHere);
         } finally {
             lock.unlock();
+            runAfterUnlock(deferredHere);
         }
-        runAfterUnlock(deferredHere);
-        runAfterUnlock(deferred);
         log.debug("gateway budget: reserved {} {} requests for {} on env {}",
                 declared, tier, describe(scope), environmentId);
         return reservation;
@@ -1046,11 +1074,11 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      * that finished hours ago. {@code startLocked}'s {@code finally} releases it; this is the
      * guard for the paths where that {@code finally} did not run. Caller holds {@link #lock}.
      */
-    private List<Runnable> expireStaleReservationsLocked(long now) {
+    private int expireStaleReservationsLocked(long now, List<Runnable> warnings) {
         if (reservations.isEmpty()) {
-            return List.of();
+            return 0;
         }
-        List<Runnable> warnings = new ArrayList<>();
+        int freed = 0;
         long ttl = settings.window().toNanos() * 2;
         Iterator<Map.Entry<String, TrackedReservation>> it = reservations.entrySet().iterator();
         while (it.hasNext()) {
@@ -1058,6 +1086,7 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             if (now - reservation.createdNanos >= ttl) {
                 int remainder = reservation.retireLocked();
                 if (remainder > 0) {
+                    freed += remainder;
                     reserved.get(reservation.tier).addAndGet(-remainder);
                     RequestTier tier = reservation.tier;
                     // Returned as a deferred action rather than logged here (review F10). This
@@ -1075,7 +1104,7 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                 it.remove();
             }
         }
-        return warnings;
+        return freed;
     }
 
     private static String reservationKey(RequestTier tier, GatewayRequestScope scope) {
@@ -1110,7 +1139,7 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         @Override
         public void release() {
             int remainder;
-            List<Runnable> deferred;
+            List<Runnable> deferred = new ArrayList<>();
             lock.lock();
             try {
                 remainder = outstanding;
@@ -1124,11 +1153,11 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                 // Releasing the remainder raises the lower tiers' effective ceilings, so the
                 // queues have to be walked before this returns — otherwise a DEFAULT waiter
                 // sits until the next stamp expiry for room that already exists.
-                deferred = admitWaitersLocked(nanos.getAsLong());
+                admitWaitersLocked(nanos.getAsLong(), deferred);
             } finally {
                 lock.unlock();
+                runAfterUnlock(deferred);
             }
-            runAfterUnlock(deferred);
         }
 
         @Override
@@ -1186,11 +1215,11 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             // Cancelling frees no window room (nothing was stamped) but it does free the
             // reservation's pre-emptive shrink once startLocked's finally releases it, and it
             // can unblock a tier whose head was a cancelled waiter behind a live one.
-            deferred.addAll(admitWaitersLocked(nanos.getAsLong()));
+            admitWaitersLocked(nanos.getAsLong(), deferred);
         } finally {
             lock.unlock();
+            runAfterUnlock(deferred);
         }
-        runAfterUnlock(deferred);
         reportThrottleState();
         // DEBUG, not INFO: this fires on every /stop and every DELETE of a group, and the
         // operator-facing statement ("stop requested while a start was in flight") is already

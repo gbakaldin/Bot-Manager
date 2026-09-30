@@ -79,9 +79,14 @@ final class UnlimitedGatewayBudget implements GatewayBudget {
 
     @Override
     public Duration maxWait(RequestTier tier) {
-        // Nothing ever waits here, so every tier is effectively "no wait at all"; null would
-        // claim "unbounded", which is the opposite.
-        return Duration.ZERO;
+        // null — "there is no policy" — and NOT ZERO (review S4). This method's contract is
+        // "the configured wait, or null when that tier waits unbounded", and from a CALLER ZERO
+        // means `now or never` (review F5). Answering ZERO here gave it a third meaning, "no wait
+        // is needed", which was safe only because the single consumer special-cases isZero():
+        // a future caller doing the obvious execute(tier, scope, call, budget.maxWait(tier)) would
+        // have got fail-fast semantics from the budget that admits everything. There is no policy
+        // here, nothing ever waits, and null is how this interface says so.
+        return null;
     }
 
     @Override

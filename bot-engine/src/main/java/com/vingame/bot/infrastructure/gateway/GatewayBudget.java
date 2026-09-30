@@ -274,7 +274,11 @@ public interface GatewayBudget {
      * than the watchdog's patience, and a bound is only ever allowed to make a wait shorter.
      * <p>
      * {@code null} rather than {@link Duration#ZERO} for unbounded, deliberately: from a caller
-     * {@code ZERO} means <em>now or never</em>, and that ambiguity is review F5.
+     * {@code ZERO} means <em>now or never</em>, and that ambiguity is review F5. For the same
+     * reason {@code null} is also the answer of a budget that has <b>no policy at all</b>
+     * ({@link #UNLIMITED}, review S4) — {@code ZERO} from this method must never be a third
+     * meaning, so a caller may always pass what it reads here straight back into
+     * {@code execute(…, maxWait)}.
      */
     Duration maxWait(RequestTier tier);
 
