@@ -6,6 +6,7 @@ import com.vingame.bot.domain.botgroup.model.ActivationEvaluator;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.RegistrationState;
 import com.vingame.bot.domain.botgroup.model.StartOrigin;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import jakarta.annotation.PostConstruct;
@@ -129,19 +130,6 @@ public class ActivationScheduler {
     private void reconcileGroup(BotGroup group, Instant now) {
         String id = group.getId();
 
-        // A group whose accounts are still being created is not startable (A28.5), and this
-        // reconciler needs its own guard because it selects by activation MODE, not by status:
-        // startLocked's 400 would otherwise be thrown, caught and logged here once a minute, for
-        // the whole duration of a 500-account registration. DEBUG, because the rate is a function
-        // of how many scheduled groups are registering and the group-level statement is the
-        // worker's own completion line.
-        if (group.getRegistrationState() != null) {
-            log.debug("Activation reconcile: group {} is still registering ({}/{} accounts) → "
-                            + "skipping until it completes",
-                    id, group.getRegisteredCount(), group.getBotCount());
-            return;
-        }
-
         boolean running = behaviorService.isGroupRunning(id);
         boolean dead = group.getTargetStatus() == BotGroupStatus.DEAD
                 || behaviorService.getActualStatus(id) == BotGroupStatus.DEAD;
@@ -149,6 +137,29 @@ public class ActivationScheduler {
         ActivationDecision decision = ActivationEvaluator.decide(
                 group.getActivationMode(), group.getActivationWindow(),
                 running, dead, now, zone);
+
+        // A group whose accounts are still being created is not startable (A28.5), and this
+        // reconciler needs its own guard because it selects by activation MODE, not by status:
+        // startLocked's 400 would otherwise be thrown, caught and logged here once a minute, for
+        // the whole duration of a 500-account registration. DEBUG, because the rate is a function
+        // of how many scheduled groups are registering and the group-level statement is the
+        // worker's own completion line.
+        //
+        // BELOW decide(), and gating START ONLY (review B3). The guard used to return before the
+        // decision was even computed, which removed the group from reconciliation entirely — STOP
+        // included. A group can acquire a registrationState WHILE IT IS RUNNING (that is A2.7's
+        // "register 200 more bots for this group"), and from that moment the reconciler never
+        // looked at it again: its window closed and it kept placing real bets, and if registration
+        // then went FAILED it never stopped at all. Stopping a group whose accounts are half
+        // created is always safe; it is the start that is not.
+        if (decision == ActivationDecision.START
+                && RegistrationState.isIncomplete(group.getRegistrationState())) {
+            log.debug("Activation reconcile: group {} is still registering ({}/{} accounts, {}) → "
+                            + "skipping the START until it completes",
+                    id, group.getRegisteredCount(), group.getBotCount(),
+                    group.getRegistrationState());
+            return;
+        }
 
         switch (decision) {
             case START -> {

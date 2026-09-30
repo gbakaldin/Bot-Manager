@@ -193,4 +193,68 @@ class RegistrationStartGuardTest {
         verify(behavior, never()).startAsync(anyString(), any(), any());
         verify(behavior, never()).stop(anyString());
     }
+
+    @Test
+    @DisplayName("the activation reconciler still STOPS a registering group whose window has closed")
+    void theActivationReconcilerStillStopsARegisteringGroup() {
+        // Review B3. The registration guard used to `return` ABOVE ActivationEvaluator.decide, so a
+        // group that acquired a registrationState was removed from reconciliation entirely — STOP
+        // included. A group can acquire one WHILE RUNNING: that is A2.7's "register 200 more bots
+        // for this group". From that moment the reconciler never looked at it again, so its window
+        // closed and it kept placing real bets outside the hours an operator configured; and if
+        // registration then went FAILED it never stopped at all, because FAILED is equally non-null
+        // and was equally skipped.
+        BotGroupRepository repository = org.mockito.Mockito.mock(BotGroupRepository.class);
+        BotGroupBehaviorService behavior = org.mockito.Mockito.mock(BotGroupBehaviorService.class);
+
+        BotGroup scheduled = BotGroup.builder()
+                .id("g-1").name("Scheduled").environmentId("env-1").gameId("game-1")
+                .botCount(700).registeredCount(500)
+                .registrationState(RegistrationState.PENDING)
+                .activationMode(ActivationMode.SCHEDULED)
+                // A window that is closed at every instant this test can run.
+                .activationWindow(ActivationWindow.builder()
+                        .from(java.time.LocalTime.of(3, 0))
+                        .to(java.time.LocalTime.of(3, 1))
+                        .days(Set.of(DayOfWeek.values()))
+                        .build())
+                .build();
+        when(repository.findByActivationMode(ActivationMode.SCHEDULED)).thenReturn(List.of(scheduled));
+        // …and it is running, which is what makes the decision STOP rather than NONE.
+        when(behavior.isGroupRunning("g-1")).thenReturn(true);
+
+        new ActivationScheduler(repository, behavior, "Asia/Ho_Chi_Minh", 60).reconcileAll();
+
+        // Stopping a group whose accounts are half created is always safe; it is the START that is
+        // not. So the guard gates one arm and not the switch.
+        verify(behavior).stop("g-1");
+        verify(behavior, never()).startAsync(anyString(), any(), any());
+    }
+
+    @Test
+    @DisplayName("a FAILED registration does not pin a running group outside its window either")
+    void aFailedRegistrationDoesNotPinARunningGroup() {
+        BotGroupRepository repository = org.mockito.Mockito.mock(BotGroupRepository.class);
+        BotGroupBehaviorService behavior = org.mockito.Mockito.mock(BotGroupBehaviorService.class);
+
+        BotGroup scheduled = BotGroup.builder()
+                .id("g-1").name("Scheduled").environmentId("env-1").gameId("game-1")
+                .botCount(700).registeredCount(500)
+                .registrationState(RegistrationState.FAILED)
+                .activationMode(ActivationMode.SCHEDULED)
+                .activationWindow(ActivationWindow.builder()
+                        .from(java.time.LocalTime.of(3, 0))
+                        .to(java.time.LocalTime.of(3, 1))
+                        .days(Set.of(DayOfWeek.values()))
+                        .build())
+                .build();
+        when(repository.findByActivationMode(ActivationMode.SCHEDULED)).thenReturn(List.of(scheduled));
+        when(behavior.isGroupRunning("g-1")).thenReturn(true);
+
+        new ActivationScheduler(repository, behavior, "Asia/Ho_Chi_Minh", 60).reconcileAll();
+
+        // This was the worse half of B3: FAILED never clears on its own, so the group would have
+        // kept betting outside its window until a human noticed.
+        verify(behavior).stop("g-1");
+    }
 }
