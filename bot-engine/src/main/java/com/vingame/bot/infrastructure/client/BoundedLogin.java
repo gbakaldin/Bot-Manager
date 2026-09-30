@@ -116,36 +116,33 @@ final class BoundedLogin {
             }
         });
 
-        boolean settled = false;
         try {
-            TokensProvider tokens = result.get(bound.toMillis(), TimeUnit.MILLISECONDS);
-            settled = true;
-            return tokens;
+            return result.get(bound.toMillis(), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
-            // Kill the exchange the worker is parked on, so it does not outlive us. Without
-            // this the bound would only move the leak from the caller to a thread nobody can
-            // see, still holding a socket against a gateway we have given up on.
-            client.abort();
+            // The abort that unblocks the parked worker is the finally's, below — the throw here
+            // reaches it. Without it the bound would only move the leak from the caller to a
+            // thread nobody can see, still holding a socket against a gateway we have given up on.
             throw new HttpTimeoutException("login for user '" + username + "' did not answer within "
                     + bound.toMillis() + "ms");
         } catch (ExecutionException e) {
-            settled = true;
             throw rethrowUnchecked(e.getCause() == null ? e : e.getCause());
         } finally {
-            // Release the client on the SUCCESS and LIBRARY-FAILURE paths too (review F6). Both
-            // used to return without touching it, so every login left a JDK HttpClient — and its
-            // SelectorManager PLATFORM thread — for GC to reclaim whenever it got round to the
-            // unreachable client. That is the plan's own Findings item ("a 3k-bot start briefly
-            // spawns ~3k platform threads") and the shape MEMORY records as the Bot-1 thread-leak
-            // sawtooth. The subclass exists precisely to reach the client, so making the release
-            // deterministic is free — and it is the difference between "this class bounds the wait"
-            // and "this class owns the login's resources", which is what its name claims.
+            // UNCONDITIONAL, on all four exits (review F6, then review B5). Release-on-success and
+            // release-on-library-failure were the F6 fix; both used to return without touching the
+            // client, so every login left a JDK HttpClient — and its SelectorManager PLATFORM
+            // thread — for GC to reclaim whenever it got round to the unreachable client. That is
+            // the plan's own Findings item ("a 3k-bot start briefly spawns ~3k platform threads")
+            // and the shape MEMORY records as the Bot-1 thread-leak sawtooth.
             //
-            // Not on the timeout path: the abort already did it, and calling it twice on a client
-            // whose exchange is still unwinding buys nothing.
-            if (settled) {
-                client.abort();
-            }
+            // The fourth exit is result.get()'s InterruptedException, which this method declares
+            // and propagates, and the `boolean settled` guard F6 shipped skipped exactly that one.
+            // It is not the exotic path, it is the MASS path: BotGroupRuntime.shutdown,
+            // stopAndLogout, a /stop landing on a building group, RegistrationWorker's
+            // shutdownNow(), JVM shutdown — a /stop on a 500-bot group mid-build leaked one
+            // platform thread per interrupted login. Guarding the call bought nothing anyway:
+            // abort() swallows its own RuntimeException and HttpClient.shutdownNow() is
+            // idempotent, so calling it twice on the timeout path is free.
+            client.abort();
         }
     }
 
@@ -190,9 +187,12 @@ final class BoundedLogin {
          * Release the underlying JDK {@code HttpClient}: terminate any in-flight exchange and let
          * its {@code SelectorManager} platform thread exit.
          * <p>
-         * Called on <b>every</b> path — the timeout (where it is what unblocks the parked worker),
-         * the success and the library failure (where it is what stops the selector thread being
-         * GC-dependent). Named {@code abort} for the first of those; it is a release on the others.
+         * Called on <b>every</b> path, from one unconditional {@code finally} — the timeout (where
+         * it is what unblocks the parked worker), the success, the library failure and the
+         * <b>interrupt</b> (where it is what stops the selector thread being GC-dependent). Named
+         * {@code abort} for the first of those; it is a release on the other three. "Every path"
+         * meant three of four until review B5, and the one it missed was the interrupt — i.e. every
+         * executor teardown that catches a login in flight.
          * <p>
          * {@code shutdownNow()} unblocks a {@code send()} parked on a connection; it does
          * <b>not</b> unblock a worker parked in address resolution, so "the worker fails and
@@ -203,8 +203,9 @@ final class BoundedLogin {
             try {
                 getHttpClient().shutdownNow();
             } catch (RuntimeException e) {
-                // Never let the abort mask the timeout the caller is about to report.
-                log.debug("Could not shut down the login HttpClient after a timeout: {}", e.toString());
+                // Never let the release mask the outcome the caller is about to report — a
+                // timeout, an interrupt, or a perfectly good TokensProvider.
+                log.debug("Could not shut down the login HttpClient: {}", e.toString());
             }
         }
     }

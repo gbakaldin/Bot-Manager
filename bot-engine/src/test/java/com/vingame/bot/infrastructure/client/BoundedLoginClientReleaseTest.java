@@ -26,9 +26,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * {@link BoundedLogin} releases its JDK {@code HttpClient} on the <b>success</b> and
- * <b>library-failure</b> paths, not only on the timeout (GATEWAY_REQUEST_BUDGET Phase 3 review
- * finding F6).
+ * {@link BoundedLogin} releases its JDK {@code HttpClient} on the <b>success</b>, the
+ * <b>library-failure</b> and the <b>interrupt</b> paths, not only on the timeout
+ * (GATEWAY_REQUEST_BUDGET Phase 3 review finding F6, then Phase 4 review finding B5).
  *
  * <p><b>Why QA is adding this.</b> F6 is the finding with the most direct production history:
  * before it, {@code login()} returned from the success path without touching the client, so every
@@ -42,6 +42,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * it: {@code aSuccessfulLoginIsUnchanged} asserts the returned tokens, which is exactly as true
  * with the leak as without it. {@code theAbandonedExchangeIsAborted} covers the timeout path only
  * — the one path that was never broken.
+ *
+ * <p><b>And the fourth path, which F6's fix missed.</b> F6 shipped as a {@code boolean settled}
+ * flag set on the success and {@code ExecutionException} arms, so {@code result.get}'s
+ * {@code InterruptedException} — declared and propagated by {@code login} — still returned with the
+ * client untouched. That is not an exotic path, it is the <em>mass</em> path: every executor
+ * teardown that catches a login in flight goes through it ({@code BotGroupRuntime.shutdown},
+ * {@code stopAndLogout}, a {@code /stop} on a building group, {@code RegistrationWorker}'s
+ * {@code shutdownNow()}, JVM shutdown), so a {@code /stop} on a 500-bot group mid-build leaked one
+ * platform thread per interrupted login. {@code theInterruptPathReleasesItsHttpClient} is the one
+ * that covers it, and it is why the {@code finally} is now unconditional.
  *
  * <p><b>How it is measured, and why the measurement is not vacuous.</b> The JDK names that thread
  * {@code HttpClient-<n>-SelectorManager} and {@code HttpClient.shutdownNow()} makes it exit
@@ -201,6 +211,50 @@ class BoundedLoginClientReleaseTest {
                 .as("every successful login must give its HttpClient back. Before F6 this path "
                         + "returned without touching the client, so a 3k-bot start left ~3k "
                         + "SelectorManager PLATFORM threads for GC — the Bot-1 sawtooth")
+                .hasSizeLessThanOrEqualTo(baseline);
+    }
+
+    @Test
+    @DisplayName("an INTERRUPTED login releases its HttpClient — review B5, the mass path")
+    void theInterruptPathReleasesItsHttpClient() throws Exception {
+        serveSilence();
+        int baseline = liveSelectorThreads().size();
+
+        java.util.concurrent.atomic.AtomicReference<Throwable> thrown =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        // A generous bound, so the ONLY way out of the wait is the interrupt. If the bound expired
+        // instead, this test would be a second copy of the timeout test and would pass with the
+        // defect in place.
+        Thread login = Thread.ofVirtual().name("interrupted-login").start(() -> {
+            try {
+                BoundedLogin.login(ctx(), c -> new StubLoginRequest(), "authtestws1",
+                        Duration.ofSeconds(120));
+            } catch (Throwable t) {
+                thrown.set(t);
+            }
+        });
+
+        // Wait until the exchange is genuinely in flight — interrupting before the HttpClient
+        // exists would prove nothing.
+        long deadline = System.nanoTime() + Duration.ofSeconds(15).toNanos();
+        while (liveSelectorThreads().size() <= baseline && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+        assertThat(liveSelectorThreads().size())
+                .as("the login must be in flight before the interrupt")
+                .isGreaterThan(baseline);
+
+        login.interrupt();
+        login.join(TimeUnit.SECONDS.toMillis(20));
+
+        assertThat(thrown.get())
+                .as("the interrupt is propagated, not swallowed — that is the caller's signal that "
+                        + "the executor is going down")
+                .isInstanceOf(InterruptedException.class);
+        assertThat(awaitSelectorsDownTo(baseline))
+                .as("the interrupt path must release the client too. F6's `settled` flag skipped "
+                        + "exactly this arm, and it is the one every executor teardown takes — one "
+                        + "leaked platform thread per interrupted login is the Bot-1 sawtooth")
                 .hasSizeLessThanOrEqualTo(baseline);
     }
 
