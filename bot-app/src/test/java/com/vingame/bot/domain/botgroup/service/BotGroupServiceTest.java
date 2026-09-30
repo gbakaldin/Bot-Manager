@@ -504,6 +504,123 @@ class BotGroupServiceTest {
             // anything. The group is now startable with what it has.
             assertThat(result.getRegisteredCount()).isEqualTo(120);
             verify(registrationWorker, never()).enqueue(anyString());
+
+            // AND THE STATE, which is the only thing that makes the sentence above true (review
+            // B4). This test asserted the count and the absence of an enqueue while claiming
+            // startability, and the claim was false: FAILED was cleared by retryRegistration and
+            // nowhere else, so /start answered the same 400 repeating the same advice — a loop the
+            // operator could not get out of. Lowering the target to a met one discharges the state
+            // here, because the state is a statement about an UNMET target.
+            assertThat(result.getRegistrationState())
+                    .as("a met target is not a failed registration")
+                    .isNull();
+            assertThat(result.getRegistrationError()).isNull();
+        }
+
+        @Test
+        @DisplayName("lowering botCount short of what registered leaves FAILED alone")
+        void loweringBotCountShortOfRegisteredKeepsFailed() {
+            BotGroup existing = BotGroup.builder()
+                    .id("g-1").name("G").environmentId("env-1").namePrefix("bot")
+                    .botCount(500).registeredCount(120).namedCount(120)
+                    .registrationState(RegistrationState.FAILED)
+                    .registrationError("stopped at 121")
+                    .build();
+            when(repository.findById("g-1")).thenReturn(Optional.of(existing));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            org.mockito.Mockito.doAnswer(inv -> {
+                inv.<BotGroup>getArgument(1).setBotCount(300);
+                return null;
+            }).when(mapper).updateEntityFromDTO(any(BotGroupDTO.class), any(BotGroup.class));
+
+            BotGroup result = service.update("g-1", BotGroupDTO.builder().botCount(300).build());
+
+            // 300 > 120: the target is still unmet, so the group still needs the operator's
+            // decision. Clearing the state here would hide a half-registered group behind a 200.
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.FAILED);
+            assertThat(result.getRegistrationError()).isEqualTo("stopped at 121");
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("B1: an unrelated PATCH of a LEGACY group does not re-register or rename anything")
+        void anUnrelatedPatchOfALegacyGroupDoesNotTouchItsAccounts() {
+            // Every group in production before Phase 4: Mongo has no registeredCount field, so
+            // Spring Data maps the absent field to int 0, and no registrationState either.
+            BotGroup legacy = BotGroup.builder()
+                    .id("g-1").name("Prod 250").environmentId("env-1").namePrefix("bot")
+                    .botCount(250)
+                    .build();
+            when(repository.findById("g-1")).thenReturn(Optional.of(legacy));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            // A routine PATCH that has nothing to do with accounts.
+            org.mockito.Mockito.doAnswer(inv -> {
+                inv.<BotGroup>getArgument(1).setMaxBet(50_000L);
+                return null;
+            }).when(mapper).updateEntityFromDTO(any(BotGroupDTO.class), any(BotGroup.class));
+
+            BotGroup result = service.update("g-1", BotGroupDTO.builder().maxBet(50_000L).build());
+
+            // The predecessor tested `botCount > registeredCount`, which is UNCONDITIONALLY TRUE
+            // for such a group, so this PATCH used to: make a live 250-bot group unstartable,
+            // hand the worker 250 indices, spend ~250 EXISTED requests — and, because namedCount
+            // is absent for the same reason, RENAME all 250 live accounts from the display-name
+            // pool. That is half the Cloudflare five-minute allowance on a maxBet edit, plus an
+            // unrequested mutation of production accounts (MEMORY's RIK hand-naming recipe is
+            // exactly the work it undoes).
+            assertThat(result.getRegistrationState()).isNull();
+            assertThat(result.getRegisteredCount()).isZero();
+            assertThat(result.getNamedCount()).isZero();
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("B1: an unrelated PATCH of an existingGroup=true group is equally untouched")
+        void anUnrelatedPatchOfAMigratedGroupDoesNotTouchItsAccounts() {
+            BotGroup migrated = BotGroup.builder()
+                    .id("g-1").name("Migrated").environmentId("env-1").namePrefix("bot")
+                    .botCount(50)
+                    .build();
+            when(repository.findById("g-1")).thenReturn(Optional.of(migrated));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            org.mockito.Mockito.doAnswer(inv -> {
+                inv.<BotGroup>getArgument(1).setName("Renamed");
+                return null;
+            }).when(mapper).updateEntityFromDTO(any(BotGroupDTO.class), any(BotGroup.class));
+
+            BotGroup result = service.update("g-1", BotGroupDTO.builder().name("Renamed").build());
+
+            assertThat(result.getRegistrationState()).isNull();
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("B1: raising botCount on an untracked group registers ONLY the new indices")
+        void raisingBotCountOnAnUntrackedGroupSeedsTheHighWaterMark() {
+            BotGroup migrated = BotGroup.builder()
+                    .id("g-1").name("Migrated").environmentId("env-1").namePrefix("bot")
+                    .botCount(50)
+                    .build();
+            when(repository.findById("g-1")).thenReturn(Optional.of(migrated));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            org.mockito.Mockito.doAnswer(inv -> {
+                inv.<BotGroup>getArgument(1).setBotCount(60);
+                return null;
+            }).when(mapper).updateEntityFromDTO(any(BotGroupDTO.class), any(BotGroup.class));
+
+            BotGroup result = service.update("g-1", BotGroupDTO.builder().botCount(60).build());
+
+            // A2.7 still works on a migrated or legacy group — that is the whole point of
+            // including it — but the counters are SEEDED at the old target rather than left at
+            // zero, so the worker starts at index 51. Leaving them at zero is what made this
+            // feature re-register and rename the fifty accounts that already existed.
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.PENDING);
+            assertThat(result.getRegisteredCount()).isEqualTo(50);
+            assertThat(result.getNamedCount())
+                    .as("namedCount is seeded too, or the naming half walks every existing index "
+                            + "and overwrites live display names")
+                    .isEqualTo(50);
+            verify(registrationWorker).enqueue("g-1");
         }
 
         @Test

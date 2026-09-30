@@ -653,6 +653,28 @@ public class BotGroupBehaviorService {
      * leaves the startup chain, the activation reconciler and auto-recovery free to start a
      * group whose accounts do not exist yet.
      */
+    /**
+     * The ", or PATCH botCount down to N" half of the two registration 400s — <b>only when there
+     * is something to start with</b>.
+     * <p>
+     * This advice now works, which it did not when it was written (review B4): lowering
+     * {@code botCount} to a met target clears {@code REGISTRATION_FAILED} in
+     * {@code BotGroupService.update}, and a {@code PENDING} group whose target has been lowered is
+     * completed by the worker's next pass without a single gateway request. Before that, the only
+     * thing that cleared {@code FAILED} was {@code retryRegistration}, so an operator following
+     * this sentence got the same 400 back, repeating the same sentence.
+     * <p>
+     * At {@code registeredCount == 0} it is omitted entirely: "PATCH botCount down to 0" is not
+     * advice, and zero is the commonest stopping point of all (a bad prefix, a bad password, a
+     * brand-side username rule).
+     */
+    private static String lowerTheTargetAdvice(BotGroup group) {
+        return group.getRegisteredCount() > 0
+                ? String.format(", or PATCH botCount down to %d to start with the accounts that "
+                        + "exist.", group.getRegisteredCount())
+                : ". No accounts exist yet, so there is nothing to start with.";
+    }
+
     private static void validateStartable(BotGroup group) {
         // Verify environment exists
         if (group.getEnvironmentId() == null) {
@@ -678,19 +700,16 @@ public class BotGroupBehaviorService {
         if (RegistrationState.isPending(group.getRegistrationState())) {
             throw new BadRequestException(String.format(
                     "Bot group %s is still registering (%d/%d accounts). Wait for "
-                            + "REGISTRATION_PENDING to clear, or PATCH botCount down to %d to "
-                            + "start with the accounts that exist.",
+                            + "REGISTRATION_PENDING to clear%s",
                     group.getName(), group.getRegisteredCount(), group.getBotCount(),
-                    group.getRegisteredCount()));
+                    lowerTheTargetAdvice(group)));
         }
         if (RegistrationState.isFailed(group.getRegistrationState())) {
             throw new BadRequestException(String.format(
                     "Bot group %s stopped registering at %d/%d accounts and will not resume on "
-                            + "its own. POST /api/v1/bot-group/%s/registration/retry to resume, "
-                            + "or PATCH botCount down to %d to start with the accounts that "
-                            + "exist.",
+                            + "its own. POST /api/v1/bot-group/%s/registration/retry to resume%s",
                     group.getName(), group.getRegisteredCount(), group.getBotCount(),
-                    group.getId(), group.getRegisteredCount()));
+                    group.getId(), lowerTheTargetAdvice(group)));
         }
     }
 

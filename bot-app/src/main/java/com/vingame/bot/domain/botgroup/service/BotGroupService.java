@@ -3,7 +3,6 @@ package com.vingame.bot.domain.botgroup.service;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
-import com.vingame.bot.common.exception.UpstreamRegistrationException;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
@@ -315,39 +314,117 @@ public class BotGroupService {
      * PATCH one bot group, merging the DTO's non-null fields over the persisted document.
      * <p>
      * <b>Raising {@code botCount} extends the registration target</b> (GATEWAY_REQUEST_BUDGET
-     * A2.7). That is what turns "register 200 more bots for this group" from a script into a
-     * product feature: the merged group goes back to {@code REGISTRATION_PENDING} and the worker
+     * A2.7, A31.1). That is what turns "register 200 more bots for this group" from a script into
+     * a product feature: the merged group goes back to {@code REGISTRATION_PENDING} and the worker
      * resumes from {@code registeredCount + 1}, so the accounts that exist are never touched.
+     * <b>Only a raise does it</b>, and a raise is a comparison against the <em>pre-merge</em>
+     * {@code botCount} — see {@link #applyRegistrationTargetChange}, which is where review B1
+     * lived.
      * <p>
      * <b>Lowering it never un-registers anything</b>, and {@code registeredCount} is allowed to
      * exceed {@code botCount} as a result — it is a fact about accounts that exist, not an
      * intent. That is also the clean exit from a half-failed 500-account group: PATCH
-     * {@code botCount} down to whatever registered, and start it.
+     * {@code botCount} down to whatever registered, and start it — which works because lowering
+     * the target to a met one clears {@code REGISTRATION_FAILED} here (review B4).
      */
     public BotGroup update(String id, BotGroupDTO updateDTO) {
         BotGroup existing = findById(id);
+        // Both captured BEFORE the merge. "Did this PATCH ask for more accounts?" is a question
+        // about the body's effect on the target, and it is only answerable against the target the
+        // document carried on the way in (review B1).
+        int botCountBefore = existing.getBotCount();
+        boolean registrationUntracked = isRegistrationUntracked(existing);
+
         mapper.updateEntityFromDTO(updateDTO, existing);
         // Validate the post-merge entity (AD-6) so cross-field PATCH rules — e.g.
         // lowering maxBet below the persisted minBet — are caught before save.
         configValidation.validate(existing);
 
-        // A2.7. Checked AFTER the merge, against the merged count, because "did this PATCH ask
-        // for more accounts than exist?" is a question about the result and not about the body.
-        // A group created with existingGroup=true is deliberately included: its accounts were
-        // migrated, so raising its botCount has to register the NEW indices, and there is no
-        // other way to ask for that. registeredCount is 0 for such a group, so the worker starts
-        // at index 1 and the migrated accounts answer EXISTED — two requests each and no harm,
-        // which is why this does not need a special case.
-        if (existing.getBotCount() > existing.getRegisteredCount()
-                && !RegistrationState.isFailed(existing.getRegistrationState())) {
-            existing.setRegistrationState(RegistrationState.PENDING);
-        }
+        applyRegistrationTargetChange(existing, botCountBefore, registrationUntracked);
 
         // Route through save so updatedAt is (re)stamped on every mutation (AD-16);
         // existing has an id so this is the update path (no new-group branch). save() also owns
         // the enqueue — its guard is on the PERSISTED state, so a PATCH that just set PENDING
         // above is picked up there and must not be enqueued a second time here.
         return save(existing);
+    }
+
+    /**
+     * Whether this group has <b>no registration history at all</b> — a group created before
+     * asynchronous registration existed, or one created with {@code existingGroup=true}.
+     * <p>
+     * This is the same encoding {@code BotGroupMapper.toDTO} and
+     * {@code BotGroupBehaviorService.renderedRegisteredCount} already read the other way round,
+     * and for the reason written there: {@code registrationState == null && registeredCount == 0}
+     * means <em>"nobody ever tracked this group's accounts"</em>, which is the opposite situation
+     * from <em>"this group has no accounts"</em>. Review B1 is exactly what happens when the
+     * update path infers the second from the first.
+     */
+    private static boolean isRegistrationUntracked(BotGroup group) {
+        return group.getRegistrationState() == null && group.getRegisteredCount() == 0;
+    }
+
+    /**
+     * Apply a PATCH's effect on the registration target (A2.7 / A31.1, reviews B1 and B4).
+     *
+     * <p><b>A raise, and only a raise, re-arms registration.</b> The predecessor tested
+     * {@code botCount > registeredCount}, which reads like "did this PATCH ask for more accounts
+     * than exist" and is in fact <em>unconditionally true for every group that predates Phase
+     * 4</em>: Mongo has no {@code registeredCount} field on those documents, so Spring Data maps
+     * the absent field to {@code int} {@code 0}. Any PATCH at all — a {@code maxBet} change, a
+     * rename — therefore flipped a live 250-bot group to {@code REGISTRATION_PENDING}, made it
+     * unstartable, and handed the worker 250 indices to walk. The {@code EXISTED} answers make the
+     * <em>registration</em> half harmless; the <b>naming</b> half is not, because
+     * {@code namedCount} is absent for the same reason, so every one of those live accounts would
+     * be renamed from the display-name pool. That is ~500 gateway requests — half the Cloudflare
+     * five-minute allowance — and it silently undoes hand-naming work.
+     *
+     * <p><b>An untracked group's counters are seeded, not walked.</b> When a raise lands on a
+     * group with no registration history, the accounts for indices {@code 1..botCountBefore}
+     * already exist (that is what the group asked for when it was created) and nothing about them
+     * needs touching, so the high-water mark is set to the old target and the worker starts at the
+     * first genuinely new index. The assumption is explicit: if a legacy group's original
+     * synchronous registration had partially failed, the missing index is not re-created here and
+     * surfaces as it always has — one bot that cannot authenticate at start. The alternative is
+     * {@code 2 x botCount} gateway requests plus the rename, on every routine PATCH.
+     *
+     * <p><b>Lowering the target to a met one clears {@code REGISTRATION_FAILED}.</b> The state is
+     * a statement about an <em>unmet</em> target, so meeting the target discharges it. Without
+     * this, the repair the 400, the hand-off ERROR and the {@code RegistrationStalled} annotation
+     * all advise — "PATCH botCount down to what registered and start it" — could not work:
+     * {@code FAILED} was cleared in {@code retryRegistration} and nowhere else, so the operator
+     * looped on the same 400 repeating the same advice (review B4). A trailing index that
+     * registered but was never named stays nameless; {@code /registration/retry} is the way to
+     * finish that, and the worker's WARN is how it is known.
+     *
+     * <p>The {@code PENDING} half of the same advice needs nothing here: a {@code PENDING} group
+     * whose target has been lowered to a met one is completed by the worker's own next pass,
+     * without a single gateway request, because {@code isComplete} is evaluated before any call.
+     */
+    private void applyRegistrationTargetChange(BotGroup group, int botCountBefore,
+                                               boolean untracked) {
+        if (group.getBotCount() > botCountBefore
+                && !RegistrationState.isFailed(group.getRegistrationState())) {
+            if (untracked) {
+                group.setRegisteredCount(botCountBefore);
+                group.setNamedCount(botCountBefore);
+                log.info("Bot group '{}' ({}): botCount raised {} → {} on a group with no "
+                                + "registration history — indices 1-{} are assumed to exist and "
+                                + "are left untouched; registering {} new accounts",
+                        group.getName(), group.getId(), botCountBefore, group.getBotCount(),
+                        botCountBefore, group.getBotCount() - botCountBefore);
+            }
+            group.setRegistrationState(RegistrationState.PENDING);
+            return;
+        }
+        if (RegistrationState.isFailed(group.getRegistrationState())
+                && group.getBotCount() <= group.getRegisteredCount()) {
+            log.info("Bot group '{}' ({}): botCount lowered to {} with {} accounts registered — "
+                            + "REGISTRATION_FAILED cleared, the group is startable with what it has",
+                    group.getName(), group.getId(), group.getBotCount(), group.getRegisteredCount());
+            group.setRegistrationState(null);
+            group.setRegistrationError(null);
+        }
     }
 
     /**
