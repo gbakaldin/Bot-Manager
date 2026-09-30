@@ -640,10 +640,14 @@ Bot creation and user registration use parallel execution with Semaphore-based r
 **Configuration** (`application.properties`):
 ```properties
 bot.creation.parallelism=10       # Max concurrent bot authentications during group start
-user.registration.parallelism=10  # Max concurrent user registrations during group creation
 ```
 
 This pattern provides explicit rate limiting to avoid overwhelming the game server's auth endpoint, while virtual threads handle the I/O-bound waiting efficiently.
+
+**`user.registration.parallelism` no longer exists** (GATEWAY_REQUEST_BUDGET Phase 4). It sized a
+`Semaphore` around a registration fan-out that has been deleted: registration is now a single
+serial `RegistrationWorker` running off the request thread, and `registeredCount = k` only means
+"accounts 1..k exist" while that stays true. Setting the property today does nothing.
 
 ### Message System
 
@@ -672,6 +676,7 @@ mapper.registerSubtypes(messageTypes.getTypeRegistrations(offset, game.isMd5()))
 | POST | `/{id}/start` | **Accept** a start — 200 + `BotGroupStatusDTO`, bots come up in the background |
 | POST | `/{id}/stop` | Stop all bots in group |
 | POST | `/{id}/restart` | **Accept** a restart — 200 + `BotGroupStatusDTO`, same async shape as `/start` |
+| POST | `/{id}/registration/retry` | Resume a `REGISTRATION_FAILED` group from `registeredCount + 1` |
 | POST | `/{id}/schedule-restart` | Schedule a restart |
 | GET | `/{id}/health` | Per-group bot health (public-facing UI feature) |
 | GET | `/{id}/status` | Target vs actual status |
@@ -684,6 +689,16 @@ minutes to come up, which is why the HTTP call no longer waits for it. `STARTING
 **in-memory `actualStatus` value only and is never persisted** — a `targetStatus`
 document holding it would fail an older jar's `findByTargetStatus(ACTIVE)` on boot and
 break rollback. The synchronous 404 and the two 400s still happen before acceptance.
+
+**`POST /` is asynchronous too** since GATEWAY_REQUEST_BUDGET Phase 4. Creating a group no longer
+registers its accounts on the request thread — it answers `200` with `targetStatus:
+"REGISTRATION_PENDING"` and `registeredCount: 0`, and `RegistrationWorker` creates the accounts one
+at a time in the background. Poll `GET /{id}` or `GET /{id}/status` for `registeredCount` /
+`namedCount` climbing toward `botCount`. A group in `REGISTRATION_PENDING` or
+`REGISTRATION_FAILED` **cannot be started** (400, naming the counts and the way out); the way
+forward from a failure is either the retry endpoint above or PATCHing `botCount` down to what
+registered. PATCHing `botCount` **up** extends the target and resumes; down never un-registers
+anything. `existingGroup=true` is unchanged and still synchronous — it makes no upstream call.
 
 There is **no `GET /api/v1/bot-group/`** and no `POST /filter/` — listing is
 `POST /{envId}/filter` with a JSON body, and the old rows in this table returned

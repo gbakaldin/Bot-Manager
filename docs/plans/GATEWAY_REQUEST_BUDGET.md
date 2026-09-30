@@ -2429,3 +2429,103 @@ in the order they will be met.
    `GatewayBudgetSustainedQueue` annotation, `classifyCreationFailure`'s "inert" comment) and
    AD-13's `count("circuit-probe")` keeps the unconditional form — it is an HTTP GET, not an
    upgrade (A5.3).
+
+---
+
+## Amendment — 2026-09-30 (Phase 4 shipped; A30)
+
+### A30 — what Phase 4 found, and the one place the plan was factually wrong
+
+Phase 4 (asynchronous registration) is implemented. A28's seven items are all discharged; this
+records the places where the code and the plan diverge, and why. **This amendment is the
+authority** over A17.3 and A28.3 where they collide.
+
+**1. The resume path costs TWO gateway requests, not three, and the login the plan budgets for
+does not exist.** A17.3 and A28.3 both say an index that registered but was never named needs
+`register + login + update-fullname`, reasoning that a re-register returns no `session_id` and
+`setDisplayName` needs one. The first half is true — the captured envelope carries no tokens at
+all. The second half is **false in this codebase**: `ApiGatewayClient.setDisplayName` authenticates
+with the per-environment admin `X-TOKEN` and identifies the account by the `username` in the body,
+exactly like `register.aspx` and `deposit.aspx`. Its `sessionToken` parameter was documented as
+"retained for signature compatibility; no longer used" and was **never read** — measured, not
+inferred: `ApiGatewayClientRegisterOneTest.resumingDoesNotLogIn` drives a real HTTP exchange
+against the loopback stub and asserts `login.aspx` is hit **zero** times while the resume
+completes.
+
+Consequences, in order of how much they matter:
+
+- The parameter is **gone** from `setDisplayName` / `setDisplayNameWithRetry`, replaced by the
+  caller's `GatewayRequestScope`. Leaving a dead parameter in place while an amendment explains
+  that it is dead is how the three-request arithmetic gets re-derived by the next reader.
+- **`registeredCount` / `namedCount` survive as two counters** and A17.3's *structural* half
+  stands. The two-counter shape was justified partly by the resume cost and partly by needing to
+  express "registered but not named" at all — and only the second reason was load-bearing. A
+  single counter still cannot say which half of an index is outstanding, and a worker that
+  re-registered to find out would spend a request per resumed index to learn something the
+  document could have told it.
+- **Do not add a login back on the strength of the plan's arithmetic.** It would be a wasted
+  gateway request per resumed index, on the one feature whose entire purpose is spending fewer of
+  them. Both the javadoc on `setDisplayName` and the test above say so in place.
+
+**2. `observeModePacing()` is an abstract interface method, not a `Snapshot` field and not a
+`default`.** A28.1 offered both shapes. The abstract method won because a `default` returning zero
+means a budget that forgot to implement it silently unpaces the one unpaced caller in the system —
+which is the exact failure the method exists to prevent. It answers `window / default.ceiling`
+(600 ms on the shipped policy) under `observe` and `ZERO` under `enforce`, so the mode test lives
+in one place and `RegistrationWorker` sleeps whatever it is told. Four implementations, two of them
+fixtures.
+
+A28.1's related trap is closed on **both** sides: the Phase 3 fix round already made
+`GatewayBudgetSettings` reject a zero `registration.max-wait` (review F5), and the worker
+additionally floors what it reads at 30 s — for `GatewayBudget.UNLIMITED`, which answers
+`Duration.ZERO` and is what every fixture carries.
+
+**3. `registration_failed_groups` is a GAUGE, so A28.7's pre-registration applies to the counter
+only.** `registration_accounts_total{outcome=success|exists|failed}` is materialised at zero under
+the group MDC at the top of every registration pass, exactly as `group_recovery_*` is, for the
+reason CLAUDE.md spells out. The two gauges are registered at context refresh and exist from boot,
+so they have no such problem — and a gauge is the right shape for `RegistrationStalled` anyway:
+what needs alerting is "a group is sitting half-registered **right now** with nothing that will
+move it", not "an account failed at some point". It falls to zero the moment someone presses retry.
+
+**4. Three deletions the phase makes, which A25 predicted and which are worth naming.**
+`ApiGatewayClient.registerUsers` is gone, and with it the `Semaphore`, the `CompletableFuture`
+fan-out, `user.registration.parallelism`, `UserRegistrationResult`, and both of A25's live
+enforce-mode defects (a budget refusal surfacing as a 502; an HTTP thread parked for hours).
+`BotGroupService` no longer takes `EnvironmentClientRegistry` at all — registration was its only
+use. QA's **G1 / Open Item 15** (`Semaphore(registrationParallelism)` hanging a non-Spring caller)
+is closed by deletion rather than by a floor, as A28.4 required.
+
+**5. Two implementation decisions the plan does not cover.**
+
+- **The worker persists progress with a targeted Mongo `$set`, not `repository.save(group)`.** It
+  holds a document it read minutes ago; saving the whole thing would revert any PATCH made in the
+  meantime — including the `botCount` raise A2.7 makes a product feature. The narrow race that
+  remains is the other way round (a PATCH's read-modify-write reverting a counter advanced in the
+  millisecond between) and is self-correcting: the re-registered index answers `EXISTED` and costs
+  one request.
+- **With no display-name pool, `namedCount` stays 0 and completion is
+  `registered >= target && (!hasNames || named >= target)`.** Advancing `namedCount` in lockstep
+  would make the group complete uniformly but would claim N accounts were named when none were.
+
+**6. `ApplicationReadyEvent` announces the resumption; it does not drive it.** A2.2 asks for a
+listener that "enqueues every group whose `registrationState == PENDING`". The worker selects by
+the **persisted** state on every tick — `DeadGroupRecoveryScheduler`'s idiom, for its reason: a
+group interrupted by a restart is absent from every in-memory structure and is the case with the
+longest time-to-notice. So resumption needs no enqueue at all, and the listener exists for the one
+INFO line an operator needs at boot. A2.2's ordering constraint ("registration before the start
+chain") is moot for the same reason the guard exists: a registering group cannot be started.
+
+**7. Open Item 14 is answered as A2 recommended — recorded, not built.**
+`RegistrationStartGuardTest.aGamelessGroupRegistersAndNeverStarts` asserts that a group with a null
+`gameId` registers normally and is refused a start with the existing 400. So enabling the
+account-factory follow-up is a change to `BotGroupDTO.gameId`'s `@NotBlank(groups = OnCreate.class)`
+and nothing else on this path; if that assertion ever stops holding, the follow-up has grown a
+second requirement.
+
+**8. What Phase 5 inherits from this phase.** Nothing new — A29 stands unchanged. One note: the
+worker treats `GatewayCircuitOpenException` as a re-queue through its `GatewayBudgetException`
+arm, so when Phase 5 supplies the trigger, an open circuit already suspends registration without
+spending a group's attempt budget. That path is covered by
+`RegistrationWorkerTest.aBudgetRefusalCostsNothing` through the exhausted sibling, and Phase 5
+should add the circuit-open case to it rather than writing a new one.
