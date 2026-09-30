@@ -52,10 +52,12 @@ public class RecordingGatewayBudget implements GatewayBudget {
     /** What {@link Mode#REFUSE} throws. Null in the other two modes. */
     private final com.vingame.bot.common.exception.GatewayBudgetException refusal;
     /**
-     * Thread-safe on purpose: a real budget is called from every bot thread at once, and
-     * {@code registerUsers} fans out across virtual threads under a semaphore. A plain
-     * {@code ArrayList} here loses or corrupts entries under that fan-out, and it does so
-     * intermittently — the kind of test that passes alone and fails in the full suite.
+     * Thread-safe on purpose: a real budget is called from every bot thread at once (a group start
+     * is {@code bot.creation.parallelism} concurrent authentications). A plain {@code ArrayList}
+     * here loses or corrupts entries under that fan-out, and it does so intermittently — the kind
+     * of test that passes alone and fails in the full suite. (The second fan-out this named,
+     * {@code registerUsers}, was deleted in Phase 4; registration is now one serial worker —
+     * review T3.)
      */
     private final List<Submission> submissions = new CopyOnWriteArrayList<>();
     private final List<String> counted = new CopyOnWriteArrayList<>();

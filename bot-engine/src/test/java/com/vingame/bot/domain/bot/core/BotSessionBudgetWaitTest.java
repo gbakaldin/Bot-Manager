@@ -27,7 +27,6 @@ import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 
 /**
@@ -62,7 +61,15 @@ class BotSessionBudgetWaitTest {
     private static Properties shippedProperties() {
         Path path = PROPERTY_PATHS.stream().map(Path::of).filter(Files::isRegularFile)
                 .findFirst().orElse(null);
-        assumeTrue(path != null, "application.properties not found from " + Path.of("").toAbsolutePath());
+        // An assertion, not an assumption (review T6). The file is committed and the two candidate
+        // paths are exhaustive (module dir, reactor root), so there is no environment in which
+        // skipping is the right answer — and a module layout change would otherwise turn the F1
+        // guard into a permanently green skip, which is the one way this test can stop guarding.
+        assertThat(path)
+                .as("application.properties must be found from %s — if the module layout changed, "
+                        + "add the new path rather than letting this test skip itself",
+                        Path.of("").toAbsolutePath())
+                .isNotNull();
         Properties properties = new Properties();
         try (InputStream in = Files.newInputStream(path)) {
             properties.load(in);

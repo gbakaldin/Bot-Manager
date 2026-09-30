@@ -1248,10 +1248,12 @@ class BotGroupBehaviorServiceRestartTest {
     /**
      * The money invariant, and what it actually is.
      * <p>
-     * <b>Registration is proved structurally.</b> {@code registerUsers} has one call
-     * site, inside {@code if (isNewGroup)} in {@code BotGroupService.save}, and
-     * {@code isNewGroup} is "id is null or empty". Every save captured here carries
-     * {@code "g-1"}, so the branch is provably not taken.
+     * <b>Registration is proved structurally.</b> The only thing that can start a registration is
+     * {@code BotGroupService.save}'s {@code if (isNewGroup)} branch (which sets
+     * {@code REGISTRATION_PENDING} and enqueues the worker), and {@code isNewGroup} is "id is null
+     * or empty". Every save captured here carries {@code "g-1"}, so the branch is provably not
+     * taken. (This paragraph named {@code registerUsers} until review T3; that method was deleted
+     * in Phase 4 along with the synchronous fan-out.)
      * <p>
      * <b>Deposits are a different claim and the old assertion did not make it.</b>
      * The test used to scan captured log lines for "registr"/"deposit" — an

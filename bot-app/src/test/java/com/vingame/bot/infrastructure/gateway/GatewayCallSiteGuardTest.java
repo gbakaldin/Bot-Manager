@@ -253,6 +253,65 @@ class GatewayCallSiteGuardTest {
     }
 
     @Test
+    @DisplayName("every production registration scope names its bot group")
+    void noProductionRegistrationScopeIsGroupLess() {
+        // QA G-1. GatewayRequestScope.registration(String) — no group, NEVER_CANCELLED — has no
+        // production caller since Phase 4 and is deliberately kept as a separate overload so that
+        // "this call site has no group" is a statement rather than a defaulted null. Nothing
+        // enforced it: a Phase 5 caller reaching for the shorter overload gets a registration that
+        // GatewayBudget.cancelScope(botGroupId) cannot reach at all, which is the exact defect
+        // A28.6 fixed — a DELETE then waits out up to fifteen minutes of registration.max-wait on
+        // an HTTP thread for an account nobody wants.
+        Path root = repoRoot();
+        List<String> offenders = new ArrayList<>();
+        for (String module : List.of("bot-api", "bot-engine", "bot-messages", "bot-strategies", "bot-app")) {
+            Path main = root.resolve(module).resolve("src/main/java");
+            if (!Files.isDirectory(main)) {
+                continue;
+            }
+            try (var walk = Files.walk(main)) {
+                walk.filter(p -> p.getFileName().toString().endsWith(".java"))
+                        // The record itself declares both overloads; it is not a call site.
+                        .filter(p -> !p.getFileName().toString().equals("GatewayRequestScope.java"))
+                        .forEach(p -> {
+                            if (isGroupLessRegistrationCall(String.join(" ", codeLines(p)))) {
+                                offenders.add(root.relativize(p).toString());
+                            }
+                        });
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+        assertThat(offenders)
+                .as("GatewayRequestScope.registration(name) builds an UNCANCELLABLE registration "
+                        + "scope. Production registration runs from RegistrationWorker, which "
+                        + "always has a group id — use registration(botGroupId, name, cancelled).")
+                .isEmpty();
+    }
+
+    /**
+     * Whether {@code joined} contains a {@code GatewayRequestScope.registration(...)} call with a
+     * single argument.
+     * <p>
+     * Counts commas between the call and its statement terminator rather than parsing Java: the
+     * three-argument form is {@code (id, prefix, () -> …)} — two commas at least — and the
+     * one-argument form has none. Proven against a synthetic file in {@link #theScannerHasTeeth}.
+     */
+    private static boolean isGroupLessRegistrationCall(String joined) {
+        String needle = "GatewayRequestScope.registration(";
+        int at = joined.indexOf(needle);
+        while (at >= 0) {
+            int end = joined.indexOf(';', at);
+            String args = end < 0 ? joined.substring(at) : joined.substring(at + needle.length(), end);
+            if (!args.contains(",")) {
+                return true;
+            }
+            at = joined.indexOf(needle, at + 1);
+        }
+        return false;
+    }
+
+    @Test
     @DisplayName("the production ApiGatewayClient is initialised WITH a budget")
     void theProductionClientIsInitialisedWithABudget() {
         List<String> code = codeLines(repoRoot().resolve(ENVIRONMENT_CLIENT_REGISTRY));
@@ -325,6 +384,33 @@ class GatewayCallSiteGuardTest {
         List<String> proseCode = codeLines(prose);
         assertThat(occurrences(proseCode, "httpClient.send(")).isZero();
         assertThat(occurrences(proseCode, "HttpClient.newHttpClient()")).isZero();
+
+        // …and the registration-scope arity scanner (QA G-1), which is a different kind of needle:
+        // it has to tell two overloads of the same method apart.
+        Path scopes = tmp.resolve("Scopes.java");
+        Files.writeString(scopes, String.join("\n",
+                "package fake;",
+                "class Scopes {",
+                "    void groupLess() {",
+                "        var s = GatewayRequestScope.registration(\"bot\");",
+                "    }",
+                "}"));
+        assertThat(isGroupLessRegistrationCall(String.join(" ", codeLines(scopes))))
+                .as("the one-argument overload must be seen")
+                .isTrue();
+
+        Path withGroup = tmp.resolve("WithGroup.java");
+        Files.writeString(withGroup, String.join("\n",
+                "package fake;",
+                "class WithGroup {",
+                "    void ok() {",
+                "        var s = GatewayRequestScope.registration(",
+                "                id, group.getNamePrefix(), () -> cancelled.contains(id));",
+                "    }",
+                "}"));
+        assertThat(isGroupLessRegistrationCall(String.join(" ", codeLines(withGroup))))
+                .as("the three-argument overload, wrapped across lines, must NOT be flagged")
+                .isFalse();
     }
 
     /**
