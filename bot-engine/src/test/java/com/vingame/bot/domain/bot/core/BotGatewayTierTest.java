@@ -137,17 +137,19 @@ class BotGatewayTierTest {
         bot.client = wsClient;
         when(apiGatewayClient.getBalance(anyString(), anyString(), anyString(), any(), any()))
                 .thenReturn(1_000_000L);
+        when(apiGatewayClient.getBalance(anyString(), anyString(), anyString(), any(), any(), any()))
+                .thenReturn(1_000_000L);
         bot.checkBalanceExposed();   // seeds lastFetchedBalance so deposit() is not a no-op
-        when(apiGatewayClient.deposit(anyString(), org.mockito.ArgumentMatchers.anyLong(), any(), any()))
+        when(apiGatewayClient.deposit(anyString(), org.mockito.ArgumentMatchers.anyLong(), any(), any(), any()))
                 .thenReturn(true);
 
         bot.deposit();
 
         org.mockito.Mockito.verify(apiGatewayClient).deposit(anyString(),
                 org.mockito.ArgumentMatchers.anyLong(),
-                org.mockito.ArgumentMatchers.eq(RequestTier.PRIORITIZED), any());
+                org.mockito.ArgumentMatchers.eq(RequestTier.PRIORITIZED), any(), any());
         org.mockito.Mockito.verify(apiGatewayClient).getBalance(anyString(), anyString(), anyString(),
-                org.mockito.ArgumentMatchers.eq(RequestTier.PRIORITIZED), any());
+                org.mockito.ArgumentMatchers.eq(RequestTier.PRIORITIZED), any(), any());
     }
 
     @Test

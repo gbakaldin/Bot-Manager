@@ -110,7 +110,12 @@ class BotTest {
      * one of the two silently exercises the other as an unstubbed no-op returning 0.
      */
     private void stubServerBalance(String token, long value) {
+        // BOTH getBalance overloads: the first read (ESSENTIAL) takes the five-argument one, and
+        // every session-path read takes the six-argument one with the watchdog-derived bound
+        // (review F1). Stubbing one of them leaves the other returning an unstubbed 0.
         when(apiGatewayClient.getBalance(eq(token), eq("fp-1"), eq("botuser1"), any(), any()))
+                .thenReturn(value);
+        when(apiGatewayClient.getBalance(eq(token), eq("fp-1"), eq("botuser1"), any(), any(), any()))
                 .thenReturn(value);
         when(apiGatewayClient.getBalanceIfAdmitted(eq(token), eq("fp-1"), eq("botuser1"), any()))
                 .thenReturn(java.util.OptionalLong.of(value));
@@ -177,6 +182,8 @@ class BotTest {
             assertThat(result).isEqualTo(1_000_000L);
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
             verify(apiGatewayClient, never())
+                    .getBalance(anyString(), anyString(), anyString(), any(), any(), any());
+            verify(apiGatewayClient, never())
                     .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
         }
 
@@ -234,6 +241,8 @@ class BotTest {
 
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
             verify(apiGatewayClient, never())
+                    .getBalance(anyString(), anyString(), anyString(), any(), any(), any());
+            verify(apiGatewayClient, never())
                     .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
         }
 
@@ -289,7 +298,7 @@ class BotTest {
             // default lastFetchedBalance = -1
             bot.deposit();
 
-            verify(apiGatewayClient, never()).deposit(anyString(), anyLong(), any(), any());
+            verify(apiGatewayClient, never()).deposit(anyString(), anyLong(), any(), any(), any());
         }
 
         @Test
@@ -300,14 +309,14 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any())).thenReturn(true);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any(), any())).thenReturn(true);
             stubServerBalance("auth-tok", 999_999_999L);
 
             bot.deposit();
 
             assertThat(bot.getLastFetchedBalance()).isEqualTo(999_999_999L);
             assertThat(bot.getExpectedBalance()).isEqualTo(999_999_999L);
-            verify(apiGatewayClient).getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any());
+            verify(apiGatewayClient).getBalance(eq("auth-tok"), eq("fp-1"), eq("botuser1"), any(), any(), any());
         }
 
         @Test
@@ -316,13 +325,15 @@ class BotTest {
             setLong(bot, "lastFetchedBalance", 1_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
 
-            when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any())).thenReturn(false);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any(), any())).thenReturn(false);
 
             bot.deposit();
 
             assertThat(bot.getLastFetchedBalance()).isEqualTo(1_000_000L);
             assertThat(bot.getExpectedBalance()).isEqualTo(1_000_000L);
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
+            verify(apiGatewayClient, never())
+                    .getBalance(anyString(), anyString(), anyString(), any(), any(), any());
             verify(apiGatewayClient, never())
                     .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
         }
@@ -334,12 +345,12 @@ class BotTest {
             setLong(bot, "lastFetchedBalance", 1_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
 
-            when(apiGatewayClient.deposit(eq("botuser1"), eq(5_000_000L), any(), any())).thenReturn(false);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(5_000_000L), any(), any(), any())).thenReturn(false);
 
             bot.deposit();
 
-            verify(apiGatewayClient).deposit(eq("botuser1"), eq(5_000_000L), any(), any());
-            verify(apiGatewayClient, never()).deposit(eq("botuser1"), eq(Bot.DEFAULT_DEPOSIT_AMOUNT), any(), any());
+            verify(apiGatewayClient).deposit(eq("botuser1"), eq(5_000_000L), any(), any(), any());
+            verify(apiGatewayClient, never()).deposit(eq("botuser1"), eq(Bot.DEFAULT_DEPOSIT_AMOUNT), any(), any(), any());
         }
 
         @Test
@@ -382,11 +393,11 @@ class BotTest {
             setLong(bot, "lastFetchedBalance", 1_000_000L);
             ((AtomicLong) getField(bot, "expectedCurrentBalance")).set(1_000_000L);
 
-            when(apiGatewayClient.deposit(eq("botuser1"), eq(Bot.DEFAULT_DEPOSIT_AMOUNT), any(), any())).thenReturn(false);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(Bot.DEFAULT_DEPOSIT_AMOUNT), any(), any(), any())).thenReturn(false);
 
             bot.deposit();
 
-            verify(apiGatewayClient).deposit(eq("botuser1"), eq(Bot.DEFAULT_DEPOSIT_AMOUNT), any(), any());
+            verify(apiGatewayClient).deposit(eq("botuser1"), eq(Bot.DEFAULT_DEPOSIT_AMOUNT), any(), any(), any());
         }
     }
 
@@ -537,6 +548,8 @@ class BotTest {
             assertThat(result).isEqualTo(9_500_000L);
             verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(), any(), any());
             verify(apiGatewayClient, never())
+                    .getBalance(anyString(), anyString(), anyString(), any(), any(), any());
+            verify(apiGatewayClient, never())
                     .getBalanceIfAdmitted(anyString(), anyString(), anyString(), any());
             assertThat(drainCounter()).isNull();
             // anchor must be untouched by a cached read
@@ -575,7 +588,7 @@ class BotTest {
 
             bot.client = wsClient;
             when(wsClient.getAuthToken()).thenReturn("auth-tok");
-            when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any())).thenReturn(true);
+            when(apiGatewayClient.deposit(eq("botuser1"), eq(1_000_000_000L), any(), any(), any())).thenReturn(true);
             stubServerBalance("auth-tok", 1_005_000_000L);
 
             bot.deposit();

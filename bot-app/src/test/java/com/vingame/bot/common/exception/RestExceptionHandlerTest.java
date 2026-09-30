@@ -108,7 +108,7 @@ class RestExceptionHandlerTest {
     }
 
     @Test
-    @DisplayName("GatewayCircuitOpenException -> 503 + Retry-After, and the body carries the caveat")
+    @DisplayName("GatewayCircuitOpenException -> 503 + Retry-After, and the body says the block may outlive it")
     void circuitOpen_returns503WithRetryAfter() throws Exception {
         // A16.3: Retry-After here means "when we will next ASK", not "when it will work". An HTTP
         // client needs a number, so the header carries the probe interval — but a block may need
@@ -117,7 +117,14 @@ class RestExceptionHandlerTest {
                 .andExpect(status().isServiceUnavailable())
                 .andExpect(header().string("Retry-After", "3600"))
                 .andExpect(jsonPath("$.type").value("Gateway edge block"))
-                .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString("cf-ray")));
+                .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString("cf-ray")))
+                // Review F7: assert the CAVEAT, not just the cf-ray. The DisplayName claimed the
+                // body carried it while the body said "circuit open for another 3600s" — the same
+                // promise the header was excused for making.
+                .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString("no automatic recovery")))
+                .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.containsString("day or more")))
+                .andExpect(jsonPath("$.msg").value(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString("circuit open for another"))));
     }
 
     @Test

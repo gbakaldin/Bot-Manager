@@ -22,8 +22,18 @@ import java.util.Map;
  * <p>
  * A {@code hardCap} above 900 is legal but logs one WARN: 900 is the margin the plan chose
  * against a limit of 1,000 that we do not control the accounting of (does the edge count
- * 4xx? does a WebSocket upgrade count? — Open Item 1), and the one observed breach
- * (~1,140 requests) outlived a full hour.
+ * 4xx? does a WebSocket upgrade count? — Open Item 1, since answered yes), and the one observed
+ * breach (~1,140 requests) outlived a full hour.
+ * <p>
+ * <b>{@code hardCap} is what the ceilings are validated against, not a second gate they pass
+ * through</b> (QA Q4). Because {@code essential.ceiling <= hardCap} is enforced here and ESSENTIAL
+ * has no tier above it to reserve for, ESSENTIAL's ceiling is <em>always</em> the binding limit and
+ * the hard-cap check in the admission rule is unreachable by construction — kept as belt and
+ * braces, not as the mechanism. The consequence worth knowing is that the documented
+ * {@code essential.ceiling=850} escape hatch <b>lowers the effective cap to 850</b> rather than
+ * reserving 50 for the tiers below; and it does not reserve anything for PRIORITIZED either,
+ * because {@code prioritized.ceiling=750} binds first. {@code GatewayBudgetSettingsTest} pins that
+ * arithmetic.
  *
  * @param mode                 observe (count only) or enforce (pace). See {@link GatewayBudgetMode}.
  * @param window               width of the sliding window. The Cloudflare rule is 5 minutes.
@@ -34,7 +44,10 @@ import java.util.Map;
  *                             which is the only tier allowed to wait forever.
  * @param registrationMaxWait  wait override for registration (AD-19), so an admitted
  *                             registration finishes rather than half-finishes when a group
- *                             start floods the window mid-way.
+ *                             start floods the window mid-way. <b>Must be positive.</b> It is
+ *                             passed to the budget as an explicit caller wait, where
+ *                             {@link Duration#ZERO} means <em>now or never</em> — the opposite of
+ *                             what a zero in {@code maxWaits} means (review F5).
  * @param countWsUpgrades      whether a WebSocket upgrade is stamped into the window.
  *                             {@code true} is the conservative default — Open Item 1 is
  *                             whether the WS hosts sit behind the same rule at all.
@@ -89,9 +102,17 @@ public record GatewayBudgetSettings(
         }
         ceilings = requireComplete(ceilings, "ceiling");
         maxWaits = requireComplete(maxWaits, "max-wait");
-        if (registrationMaxWait == null || registrationMaxWait.isNegative()) {
-            throw new IllegalStateException(
-                    "bot.gateway.budget.registration.max-wait must not be negative, was " + registrationMaxWait);
+        if (registrationMaxWait == null || registrationMaxWait.isZero() || registrationMaxWait.isNegative()) {
+            // Zero rejected, and for the same reason its per-tier siblings reject it — except that
+            // HERE zero means the opposite (review F5). A tier's `max-wait=0` means "unbounded" and
+            // is legal for ESSENTIAL; this value is handed to a caller as an explicit wait, where
+            // ZERO means NOW OR NEVER, so a zero here would make every registration a 429 the
+            // moment the DEFAULT queue is non-empty. Two fields, same type, same literal, opposite
+            // meanings — one of them was validated and one was not.
+            throw new IllegalStateException("bot.gateway.budget.registration.max-wait must be "
+                    + "positive (here, unlike the per-tier waits, 0 would mean 'never wait' and "
+                    + "would make every registration fail the moment the DEFAULT queue is "
+                    + "non-empty), was " + registrationMaxWait);
         }
         if (blockProbeInterval == null || blockProbeInterval.isZero() || blockProbeInterval.isNegative()) {
             // Zero is rejected, not just negatives: a zero probe interval would mean probing

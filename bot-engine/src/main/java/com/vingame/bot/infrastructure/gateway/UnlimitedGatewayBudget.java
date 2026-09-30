@@ -78,6 +78,13 @@ final class UnlimitedGatewayBudget implements GatewayBudget {
     }
 
     @Override
+    public Duration maxWait(RequestTier tier) {
+        // Nothing ever waits here, so every tier is effectively "no wait at all"; null would
+        // claim "unbounded", which is the opposite.
+        return Duration.ZERO;
+    }
+
+    @Override
     public Duration registrationMaxWait() {
         // Nothing ever waits here, so the value is only ever passed back into a no-op.
         return Duration.ZERO;

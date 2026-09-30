@@ -226,4 +226,9 @@ public class RecordingGatewayBudget implements GatewayBudget {
     public Duration registrationMaxWait() {
         return Duration.ofMinutes(15);
     }
+
+    @Override
+    public Duration maxWait(RequestTier tier) {
+        return tier == RequestTier.ESSENTIAL ? null : Duration.ofMinutes(10);
+    }
 }

@@ -92,13 +92,26 @@ public interface GatewayBudget {
      * <p>
      * It is a wait override and nothing else: the tier still decides the ceiling, the priority
      * and the queue. A longer wait cannot promote a request past a tier above it.
+     * <p>
+     * <b>{@code maxWait} has exactly one meaning per value, whatever the tier</b> (review F5):
+     * {@link Duration#ZERO} is <em>now or never</em>, a positive value is a bounded wait, and
+     * {@code null} means "use the tier's configured policy" (which for
+     * {@link RequestTier#ESSENTIAL} is unbounded-but-cancellable). A caller's word is final —
+     * {@code ZERO} previously parked <em>unboundedly</em> on any tier configured unbounded, which
+     * is the opposite of what it says and was a trap sitting exactly where AD-10's "never park a
+     * message-processor thread" rule lives.
      */
     <T> T execute(RequestTier tier, GatewayRequestScope scope, Callable<T> call, Duration maxWait)
             throws Exception;
 
     /**
-     * {@link #execute} for a call that throws nothing checked — the WebSocket upgrade path
-     * and anything else whose failure is already unchecked.
+     * {@link #execute} for a call that throws nothing checked.
+     * <p>
+     * <b>No production caller today</b> (review F13), and that is worth knowing rather than
+     * looking for: it is {@link #runWsUpgrade}'s non-WS twin, kept because A5.1 required
+     * enforcement to reach both and because the next unchecked-only gateway call should not have
+     * to re-derive it. Its enforcement path is the same one {@code runWsUpgrade} uses and is
+     * covered by {@code SlidingWindowGatewayBudgetAdmissionTest.everyEntryPointIsPaced}.
      * <p>
      * A caller interrupted while queued gets {@code GatewayRequestCancelledException} with the
      * interrupt flag restored, because a {@link Runnable} cannot carry an
@@ -137,6 +150,9 @@ public interface GatewayBudget {
      * Try to admit one request, giving up after {@code maxWait}. {@link Duration#ZERO} means
      * "admit now or not at all".
      *
+     * @param maxWait {@link Duration#ZERO} for now-or-never (whatever the tier), a positive value
+     *                for a bounded wait, {@code null} for the tier's configured policy — see
+     *                {@link #execute(RequestTier, GatewayRequestScope, Callable, Duration)}
      * @return the call's result, or {@link Optional#empty()} if it was never admitted — in
      *         which case <b>nothing was stamped</b>, because nothing was sent.
      */
@@ -219,6 +235,20 @@ public interface GatewayBudget {
      * {@code GatewayBudgetSettings}, and a fixture's {@link #UNLIMITED} has no settings at all.
      */
     Duration registrationMaxWait();
+
+    /**
+     * The configured maximum wait for {@code tier}, or {@code null} when that tier is configured
+     * to wait <b>unbounded</b> (which only {@link RequestTier#ESSENTIAL} may be).
+     * <p>
+     * Exposed so a caller that has its own, stricter reason to bound a wait can take the
+     * <em>smaller</em> of the two rather than replacing the policy. {@code Bot.sessionBudgetWait()}
+     * is the one such caller: a wait taken on a ws-parser message-processor thread must be shorter
+     * than the watchdog's patience, and a bound is only ever allowed to make a wait shorter.
+     * <p>
+     * {@code null} rather than {@link Duration#ZERO} for unbounded, deliberately: from a caller
+     * {@code ZERO} means <em>now or never</em>, and that ambiguity is review F5.
+     */
+    Duration maxWait(RequestTier tier);
 
     /**
      * A declared-demand reservation. {@link #release()} is idempotent and must be called

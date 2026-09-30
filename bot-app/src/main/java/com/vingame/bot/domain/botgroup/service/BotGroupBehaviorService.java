@@ -1341,9 +1341,18 @@ public class BotGroupBehaviorService {
                     // Unwrap CompletionException → real cause; users care about the
                     // actual auth/validation failure, not the wrapper.
                     Throwable cause = e.getCause() != null ? e.getCause() : e;
-                    log.error("Failed to create bot {}/{} for group {} (env {}): {}",
-                            i + 1, botCount, group.getId(), group.getEnvironmentId(),
-                            cause.toString(), cause);
+                    if (cause instanceof com.vingame.bot.common.exception.GatewayRequestCancelledException) {
+                        // A bot the operator's /stop woke out of the budget queue (QA Q3). DEBUG:
+                        // the cancellation is already one tier-1 line at the call site, and an
+                        // ERROR here pages someone for a /stop that worked. Still counted — with
+                        // its own label — because a cancelled build's shape is worth seeing.
+                        log.debug("Bot {}/{} of group {} was cancelled while queued at the gateway "
+                                        + "budget", i + 1, botCount, group.getId());
+                    } else {
+                        log.error("Failed to create bot {}/{} for group {} (env {}): {}",
+                                i + 1, botCount, group.getId(), group.getEnvironmentId(),
+                                cause.toString(), cause);
+                    }
                     botMetrics.incBotCreationFailure(classifyCreationFailure(cause));
                     errors.add(e);
                 }
@@ -1375,16 +1384,30 @@ public class BotGroupBehaviorService {
      * {@code bot_creation_failures_total}. Bounded labels keep Prometheus
      * cardinality low. RESTART_LIFECYCLE_FIX Architecture Decision 5.
      * <p>
-     * The bounded value set is {@code validation | auth | budget | unknown}.
+     * The bounded value set is {@code validation | auth | budget | cancelled | unknown}.
      */
     private static String classifyCreationFailure(Throwable cause) {
-        // GATEWAY_REQUEST_BUDGET AD-9 — a NEW bounded label value, and it must be tested
-        // FIRST. "budget" means this JVM chose not to send the request: the gateway was never
-        // asked, so counting it as "auth" would put a self-imposed pacing decision in the
-        // same bucket as a rejected credential and make EnvironmentLoginFailing fire on our
-        // own throttling. Inert until Phase 3 — nothing throws a GatewayBudgetException while
-        // the facade is in observe mode — and first, rather than last, because the heuristic
-        // below matches on the substring "token" and these messages can carry it.
+        // GATEWAY_REQUEST_BUDGET AD-9 — two NEW bounded label values, and they must be tested
+        // FIRST, before the heuristic below, which matches on the substring "token" and can
+        // appear in these messages.
+        //
+        // "cancelled" ahead of "budget" (QA Q3): GatewayRequestCancelledException IS a
+        // GatewayBudgetException, so a bot woken by cancelScope during a deliberate /stop used to
+        // land in "budget" — an ERROR line plus a metric that reads as throttling, for an operator
+        // action that succeeded. Bounded by bot.creation.parallelism rather than by botCount (only
+        // the <=10 bots holding a permit can be inside the budget; the rest return null and are
+        // counted `skipped`), so a cancelled 3,000-bot start cost ~10 of them, not 3,000 — but
+        // A20.2 makes this tag one of only three places a budget outcome during a build is visible
+        // at all, and /stop was writing into it.
+        if (cause instanceof com.vingame.bot.common.exception.GatewayRequestCancelledException) {
+            return "cancelled";
+        }
+        // "budget" means this JVM chose not to send the request: the gateway was never asked, so
+        // counting it as "auth" would put a self-imposed pacing decision in the same bucket as a
+        // rejected credential and make EnvironmentLoginFailing fire on our own throttling. LIVE
+        // since Phase 3 (A27.3 — this comment used to say "inert until Phase 3"), and one of only
+        // three places a budget outcome during a build is visible at all now that /start has no
+        // HTTP response.
         if (cause instanceof com.vingame.bot.common.exception.GatewayBudgetException) {
             return "budget";
         }

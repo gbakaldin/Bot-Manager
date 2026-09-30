@@ -231,21 +231,34 @@ class GatewayBudgetEscalationIT {
         //    admitted, the tail of the previous burst may still be arriving. An observer's window
         //    can therefore hold up to `cap + (requests in flight at the roll)`.
         //
-        //    That bound is what the 100-request gap between hard-cap=900 and Cloudflare's 1,000
-        //    exists to absorb — AD-5 calls it "the only margin for traffic the JVM cannot see",
-        //    and this is one of the things it cannot see. In production the in-flight count is
-        //    bounded by `bot.creation.parallelism` and `user.registration.parallelism` (10 each),
-        //    i.e. an order of magnitude inside that margin, and admissions are ~3/s rather than a
-        //    burst. Here it is bounded by the thread count, deliberately, because a compressed
-        //    window exaggerates the ratio of flush time to window length by ~60x.
+        //    That is what the 100-request gap between hard-cap=900 and Cloudflare's 1,000 exists
+        //    to absorb — AD-5 calls it "the only margin for traffic the JVM cannot see", and this
+        //    is one of the things it cannot see. The bound on it is ADMISSION RATE x LATENCY
+        //    JITTER, not the two concurrency semaphores: the first-read burst has no semaphore at
+        //    all ("the one truly unbounded burst in the start path", per the plan's Findings), and
+        //    neither do drift reads or reconnect upgrades. At production rates that is ~3
+        //    admissions/s against sub-second jitter, an order of magnitude inside the margin; here
+        //    it is ~12/s against connection-pool jitter, which is why a compressed window
+        //    exaggerates the ratio so badly.
         //
-        //    Measured before this was understood: 84 in a 60-request window with 24 threads —
-        //    which is 60 + 24 exactly, and it is what sent us looking and found the stale-clock
-        //    defect fixed alongside this test (the stamp used to be dated from before the lock).
+        //    THE BOUND HAS HEADROOM, AND THE HEADROOM IS THE POINT (QA Q2). `threads` is a PROXY
+        //    for in-flight, not a derivation of it: the real quantity is admissions x jitter, and
+        //    jitter grows on a loaded or slower machine. Measured here at 79-84 against a bound of
+        //    84 — i.e. none at all — which is a flake waiting for a busy CI box rather than a
+        //    tight assertion. Doubling the allowance keeps every failure this can catch: a genuine
+        //    cap breach is unbounded growth (the window never drains), not cap + a small multiple
+        //    of the concurrency, and the EXACT assertion is the one above on the budget's own
+        //    window, which has no allowance at all.
+        //
+        //    Also corrected: 84 was once credited to the stale-clock defect. It is not evidence of
+        //    it — QA reverted that fix and measured the same figure, because 84 is exactly this
+        //    bound (60 + 24). The defect is pinned deterministically by
+        //    SlidingWindowGatewayBudgetClockDisciplineTest instead.
+        int inFlightAllowance = 2 * threads;
         assertThat(observedMax.get())
                 .as("the stub's own sliding count of requests it actually received, sampled "
                         + "continuously during the run (paths: %s)", gateway.describe())
-                .isLessThanOrEqualTo(HARD_CAP + threads);
+                .isLessThanOrEqualTo(HARD_CAP + inFlightAllowance);
 
         // ...and the two sides agree on what happened, which is what makes the dashboard honest.
         assertThat(gateway.totalReceived())

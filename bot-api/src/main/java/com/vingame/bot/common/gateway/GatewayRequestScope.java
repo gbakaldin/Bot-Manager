@@ -34,6 +34,14 @@ import java.util.function.BooleanSupplier;
  * @param cancelled  asked (cheaply, possibly repeatedly, possibly from another thread)
  *                   whether this request should still be sent. Never {@code null}; use
  *                   {@link #NEVER_CANCELLED} for a request nobody can call off.
+ *                   <p>
+ *                   <b>It is asked while the budget's own lock is held</b> (review F4), which is
+ *                   the constraint that matters and was not written down. It must therefore not
+ *                   block, must not log, and must not take another lock: a predicate that does any
+ *                   of those is a stall — or a lock-ordering deadlock — on <em>every</em> gateway
+ *                   request of that environment, not just on its own. The two live
+ *                   implementations ({@code Bot.requestCancelled} and a start attempt's cancel
+ *                   flag) are plain volatile reads.
  */
 public record GatewayRequestScope(String botGroupId, String botId, BooleanSupplier cancelled) {
 

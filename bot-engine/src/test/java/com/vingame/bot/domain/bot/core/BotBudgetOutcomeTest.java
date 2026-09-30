@@ -133,13 +133,13 @@ class BotBudgetOutcomeTest {
         bot.checkBalanceExposed();                // marks the figure stale
 
         when(apiGatewayClient.getBalance(anyString(), anyString(), anyString(),
-                eq(RequestTier.PRIORITIZED), any())).thenReturn(DEPOSIT);
+                eq(RequestTier.PRIORITIZED), any(), any())).thenReturn(DEPOSIT);
 
         assertThat(bot.depositIsWarrantedExposed(100_000L))
                 .as("the fresh figure is above the minimum, so no money moves")
                 .isFalse();
         verify(apiGatewayClient).getBalance(anyString(), anyString(), anyString(),
-                eq(RequestTier.PRIORITIZED), any());
+                eq(RequestTier.PRIORITIZED), any(), any());
         assertThat(bot.getExpectedBalance())
                 .as("and the refresh corrected the local model on the way past")
                 .isEqualTo(DEPOSIT);
@@ -170,7 +170,7 @@ class BotBudgetOutcomeTest {
         assertThat(bot.depositIsWarrantedExposed(100_000L)).isTrue();
 
         verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(),
-                eq(RequestTier.PRIORITIZED), any());
+                eq(RequestTier.PRIORITIZED), any(), any());
     }
 
     @Test
@@ -182,7 +182,7 @@ class BotBudgetOutcomeTest {
         bot.checkBalanceExposed();
 
         when(apiGatewayClient.getBalance(anyString(), anyString(), anyString(),
-                eq(RequestTier.PRIORITIZED), any())).thenThrow(refused(RequestTier.PRIORITIZED));
+                eq(RequestTier.PRIORITIZED), any(), any())).thenThrow(refused(RequestTier.PRIORITIZED));
 
         assertThat(bot.depositIsWarrantedExposed(100_000L))
                 .as("no deposit against a figure we could not refresh. Nothing is lost: the local "
@@ -195,7 +195,7 @@ class BotBudgetOutcomeTest {
     @DisplayName("a refused deposit is skipped, not counted as a failed deposit")
     void aRefusedDepositIsNotAFailedDeposit() throws Exception {
         setAnchor(100_000L, 100_000L);
-        when(apiGatewayClient.deposit(anyString(), anyLong(), any(), any()))
+        when(apiGatewayClient.deposit(anyString(), anyLong(), any(), any(), any()))
                 .thenThrow(refused(RequestTier.PRIORITIZED));
 
         bot.deposit();
@@ -210,9 +210,9 @@ class BotBudgetOutcomeTest {
     @DisplayName("a successful deposit whose confirming read is refused marks the figure stale")
     void aRefusedConfirmingReadMarksTheFigureStale() throws Exception {
         setAnchor(100_000L, 100_000L);
-        when(apiGatewayClient.deposit(anyString(), anyLong(), any(), any())).thenReturn(true);
+        when(apiGatewayClient.deposit(anyString(), anyLong(), any(), any(), any())).thenReturn(true);
         when(apiGatewayClient.getBalance(anyString(), anyString(), anyString(),
-                eq(RequestTier.PRIORITIZED), any())).thenThrow(refused(RequestTier.PRIORITIZED));
+                eq(RequestTier.PRIORITIZED), any(), any())).thenThrow(refused(RequestTier.PRIORITIZED));
 
         bot.deposit();
 
@@ -228,6 +228,45 @@ class BotBudgetOutcomeTest {
                 .isFalse();   // the stubbed refresh still throws, so: no deposit this round
     }
 
+    @Test
+    @DisplayName("all three session-path PRIORITIZED calls carry the watchdog-bounded wait (F1)")
+    void everySessionPathCallIsBounded() throws Exception {
+        // Review F1. The bound being computed correctly is one thing (BotSessionBudgetWaitTest);
+        // it reaching all three call sites is the other, and a missed one is invisible — the code
+        // still works, it just parks for ten minutes on a thread watched at three.
+        //
+        // The fixture's watchdog is 120 s, so the derived bound is 30 s.
+        Duration expected = Duration.ofSeconds(30);
+        assertThat(bot.sessionBudgetWaitExposed()).isEqualTo(expected);
+
+        setAnchor(DEPOSIT, 100_000L);
+        when(apiGatewayClient.getBalanceIfAdmitted(anyString(), anyString(), anyString(), any()))
+                .thenReturn(OptionalLong.empty());
+        bot.checkBalanceExposed();                       // marks the figure stale
+        when(apiGatewayClient.getBalance(anyString(), anyString(), anyString(),
+                eq(RequestTier.PRIORITIZED), any(), any())).thenReturn(50_000L);
+        when(apiGatewayClient.deposit(anyString(), anyLong(), any(), any(), any())).thenReturn(true);
+
+        assertThat(bot.depositIsWarrantedExposed(100_000L)).isTrue();
+        // 1. the pre-deposit refresh
+        verify(apiGatewayClient).getBalance(anyString(), anyString(), anyString(),
+                eq(RequestTier.PRIORITIZED), any(), eq(expected));
+
+        bot.deposit();
+        // 2. the deposit itself and 3. the confirming read
+        verify(apiGatewayClient).deposit(anyString(), anyLong(), eq(RequestTier.PRIORITIZED),
+                any(), eq(expected));
+        verify(apiGatewayClient, org.mockito.Mockito.times(2)).getBalance(anyString(), anyString(),
+                anyString(), eq(RequestTier.PRIORITIZED), any(), eq(expected));
+
+        // And nothing on this path may reach the unbounded overload, which is what "the tier's own
+        // ten minutes" would look like.
+        verify(apiGatewayClient, never()).getBalance(anyString(), anyString(), anyString(),
+                eq(RequestTier.PRIORITIZED), any());
+        verify(apiGatewayClient, never()).deposit(anyString(), anyLong(),
+                eq(RequestTier.PRIORITIZED), any());
+    }
+
     private static boolean anyBoolean() {
         return org.mockito.ArgumentMatchers.anyBoolean();
     }
@@ -241,5 +280,7 @@ class BotBudgetOutcomeTest {
         long checkBalanceExposed() { return checkBalance(); }
 
         boolean depositIsWarrantedExposed(long local) { return depositIsWarranted(local); }
+
+        Duration sessionBudgetWaitExposed() { return sessionBudgetWait(); }
     }
 }

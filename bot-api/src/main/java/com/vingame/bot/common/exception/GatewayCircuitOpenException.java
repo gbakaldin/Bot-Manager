@@ -26,10 +26,18 @@ public class GatewayCircuitOpenException extends GatewayBudgetException {
     private final Duration retryAfter;
 
     public GatewayCircuitOpenException(String environmentId, String cfRay, Duration retryAfter) {
+        // A16.3, and review F7: the BODY is where the truth goes. `retryAfter` is the interval at
+        // which we will next ASK — not a deadline — and the message used to render it as
+        // "circuit open for another 3600s", which is exactly the promise the Retry-After header was
+        // excused for making, in the one place that had room to qualify it. A block may require
+        // operator action and may outlive a day; a message that implies an hour is a lie the UI
+        // repeats.
         super(environmentId, "Gateway edge block on environment " + environmentId
                 + (cfRay == null ? "" : " (cf-ray " + cfRay + ")")
-                + "; circuit open for another "
-                + (retryAfter == null ? "unknown" : retryAfter.toSeconds() + "s"));
+                + " — this host is being refused by the edge and there is no automatic recovery: "
+                + "it may require operator action and may last a day or more. Next clearance probe "
+                + "in " + (retryAfter == null ? "an unknown interval" : retryAfter.toSeconds() + "s")
+                + "; the circuit only closes when a probe is answered.");
         this.cfRay = cfRay;
         this.retryAfter = retryAfter;
     }
@@ -44,7 +52,14 @@ public class GatewayCircuitOpenException extends GatewayBudgetException {
         return cfRay;
     }
 
-    /** Time until the cooldown ends and one clearance probe is issued. */
+    /**
+     * Time until the next clearance probe — <b>not</b> a deadline by which the block clears.
+     * <p>
+     * The distinction is A16.3's and it is load-bearing: the circuit only ever closes because a
+     * probe was answered, never because an interval elapsed. This value is what the
+     * {@code Retry-After} header carries (an HTTP client needs a number) and the message above is
+     * what says so.
+     */
     public Duration getRetryAfter() {
         return retryAfter;
     }

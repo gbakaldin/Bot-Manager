@@ -5,7 +5,9 @@ import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
+import com.vingame.bot.common.exception.GatewayBudgetExhaustedException;
 import com.vingame.bot.common.exception.UpstreamRegistrationException;
+import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
@@ -165,6 +167,27 @@ public class BotGroupService {
                         botGroup.getNamePrefix(),
                         botGroup.getPassword(),
                         botGroup.getBotCount());
+
+                if (registrationResult.isCompleteDeferral()) {
+                    // AD-11 / review F2. Nothing was created and nothing was refused: the budget
+                    // declined to send, so a 502 "Game server error" would point an operator at a
+                    // gateway that is working perfectly, which is the whole reason AD-11 exists.
+                    // 429 with Retry-After is the honest answer, and it is what V3d asks for
+                    // ("never a 502").
+                    //
+                    // Narrower than isCompleteFailure() on purpose: one genuine upstream rejection
+                    // in the batch makes it a real failure again, because then something really did
+                    // refuse us. A deferral is resumable — nothing was created, so a retry is a
+                    // first registration and not the EXISTED case — which is what makes answering
+                    // "try again" correct rather than merely polite.
+                    log.warn("Registration for bot group '{}' was entirely deferred by the gateway "
+                                    + "budget ({} of {} users) — nothing was created and nothing "
+                                    + "was refused upstream",
+                            botGroup.getName(), registrationResult.getDeferredCount(),
+                            registrationResult.getTotalRequested());
+                    throw new GatewayBudgetExhaustedException(RequestTier.DEFAULT,
+                            botGroup.getEnvironmentId(), null);
+                }
 
                 if (registrationResult.isCompleteFailure()) {
                     String errorMsg = String.format(

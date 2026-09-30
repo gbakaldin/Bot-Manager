@@ -462,6 +462,12 @@ groups:
       # the same threshold this rule always had — but lowering the cap now TIGHTENS the alert
       # instead of silently disarming it, which is what a hardcoded 800 against a cap of 600
       # would have done.
+      #
+      # THE COST IS A SECOND SERIES TO LOSE (review F16). A missing, renamed or not-yet-scraped
+      # denominator makes this expression return NO SAMPLES, and a rule with no samples never
+      # fires — the same "healthiest reading there is" trap CLAUDE.md spells out for
+      # LogQueueSaturated's vanished appender. GatewayBudgetCapSeriesMissing below is the
+      # companion that makes that state loud instead of silent.
       - alert: GatewayBudgetNearCap
         expr: gateway_budget_window_requests / gateway_budget_hard_cap > 0.89
         for: 1m
@@ -472,6 +478,27 @@ groups:
         annotations:
           summary: "Environment {{ $labels.environmentId }} is at {{ $value | humanizePercentage }} of its gateway request cap for the last 5 minutes (Cloudflare blocks at 1000)"
           description: "In observe mode nothing is being paced, so this is the run-up to a whole-brand auth outage: check what is driving it (a large group start, a reconnect storm, a bulk registration, or scripts/bulk-create-accounts.py running from this same host, which the app's budget cannot see) and stagger it. In enforce mode the cap is holding and this is expected during a large start — AD-18 puts a 3,000-bot group at ~50 minutes — so treat it as an FYI and look at GatewayBudgetSustainedQueue instead. gateway_budget_requests_total by tier says which class of request it is; the 5-minute fleet rollup line carries the same window per environment."
+
+      # The companion F16 asks for: the denominator vanishing must not look like health.
+      # `gateway_budget_window_requests` without a matching `gateway_budget_hard_cap` means
+      # GatewayBudgetNearCap above is evaluating to nothing at all — an environment sending
+      # traffic with its cap series gone is unwatched, not safe. Both gauges are registered
+      # together in SlidingWindowGatewayBudget.registerMeters, so this fires only on a rename or
+      # a partial scrape, which is exactly when nobody is looking for it.
+      # absent(), not `unless`: the two gauges are registered together per budget
+      # (SlidingWindowGatewayBudget.registerMeters), so per-environment partial absence is not
+      # expressible — what IS expressible is a rename or a scrape that stopped returning the
+      # denominator at all, and absent() is the idiom for exactly that.
+      - alert: GatewayBudgetCapSeriesMissing
+        expr: absent(gateway_budget_hard_cap) and (count(gateway_budget_window_requests) > 0)
+        for: 10m
+        labels:
+          job: bot-manager
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "gateway_budget_hard_cap is missing while gateway_budget_window_requests is being scraped"
+          description: "GatewayBudgetNearCap is a ratio of the two, so with the denominator gone it returns no samples and can never fire — the run-up to a whole-brand Cloudflare block would be completely unalerted. Both gauges are registered together in SlidingWindowGatewayBudget.registerMeters, so check for a metric rename in that method, or a scrape that is only partially succeeding."
 
       # The rule that matters under `enforce`, and the gap A20.10 names: near-cap stops being
       # the interesting shape once the cap is being enforced, because near-cap is what a
@@ -485,11 +512,21 @@ groups:
       # An ESSENTIAL queue that is still non-empty after 15 minutes means bots that are trying
       # to come up are not coming up, which is the only queue shape an operator must act on.
       #
-      # for: 15m and not 5m. A 300-bot group start is one window of ESSENTIAL queueing by
-      # design (AD-18) and a 3,000-bot one is ten; 15 minutes is past the first but well inside
-      # the second, so this fires on a group that is STUCK rather than on one that is large.
-      # It is the alerting half of the answer to FOLLOWUPS P13 — a build parked inside the
-      # budget leaves no other trace until someone reads /status.
+      # for: 15m over a min_over_time[15m], i.e. ~30 minutes of a continuously non-empty
+      # ESSENTIAL queue.
+      #
+      # IT FIRES ON THE LARGEST LEGITIMATE START, AND THE ANNOTATION SAYS SO (QA Q5.2 / A27.2).
+      # AD-18 puts a 3,000-bot group at 33-50 minutes of exactly this shape, so a start of more
+      # than ~1,800 bots will trip it for the remainder of its build. The first version of this
+      # rule's description said "this is not a large start passing through — it is a start that
+      # cannot finish", which is false for precisely the case the feature was sized against. It
+      # is `warning` + `audience: internal` and falls through to viptalk, so the cost is one
+      # spurious warning per very large start, and A20.10 explicitly allowed "or accept that V3
+      # is read by hand" — so the rule is a bonus rather than a requirement.
+      #
+      # DECIDE THE THRESHOLD AT PHASE 6, with V3b's real numbers in hand: either widen `for:` to
+      # 45m (which gives up on detecting a stuck small group inside an hour) or keep 15m and rely
+      # on the correlation the annotation asks for. Do not silently leave a false annotation.
       #
       # audience: internal. Nothing is broken for a player: the bots are queued, not failing.
       - alert: GatewayBudgetSustainedQueue
@@ -500,8 +537,8 @@ groups:
           severity: warning
           audience: internal
         annotations:
-          summary: "Environment {{ $labels.environmentId }} has had ESSENTIAL gateway requests queued continuously for 30 minutes ({{ $value }} still waiting)"
-          description: "Bots that are trying to come up are not coming up. min_over_time > 0 means the queue never emptied once in the window, so this is not a large start passing through — it is a start that cannot finish. Check gateway_budget_window_requests against gateway_budget_ceiling (who is consuming the window), gateway_budget_reserved (a leaked declared demand from a build whose teardown did not run), and GET /api/v1/bot-group/{id}/status for the group's botsUp and lastError. A reconnect storm on a sick group is the usual cause: bot_reconnects_total by group."
+          summary: "Environment {{ $labels.environmentId }} has had ESSENTIAL gateway requests queued continuously for ~30 minutes ({{ $value }} still waiting)"
+          description: "Bots that are trying to come up are being paced. min_over_time > 0 means the queue never emptied once in the window. FIRST correlate with the group's 'start admitted — declared demand N requests, env window W/900, estimated M min' INFO line: a start of more than ~1,800 bots is EXPECTED to hold this queue for its whole build (AD-18: ~50 minutes for 3,000 bots), and that is the budget working. It is a problem when no such start is in flight, or when the queue outlives the estimate. Then check gateway_budget_window_requests against gateway_budget_ceiling (who is consuming the window), gateway_budget_reserved (a leaked declared demand from a build whose teardown did not run), and GET /api/v1/bot-group/{id}/status for botsUp and lastError. A reconnect storm on a sick group is the other usual cause: bot_reconnects_total by group."
 
   - name: bot-manager-jvm
     rules:

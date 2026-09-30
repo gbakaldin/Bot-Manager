@@ -111,7 +111,10 @@ class BalanceGaugeSemanticsTest {
      * drift against an unstubbed 0.
      */
     private void stubServerBalance(long value) {
+        // Both overloads — see BotTest.stubServerBalance (review F1).
         when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any()))
+                .thenReturn(value);
+        when(apiGatewayClient.getBalance(eq("tok"), eq("fp-1"), eq("botuser1"), any(), any(), any()))
                 .thenReturn(value);
         when(apiGatewayClient.getBalanceIfAdmitted(eq("tok"), eq("fp-1"), eq("botuser1"), any()))
                 .thenReturn(java.util.OptionalLong.of(value));

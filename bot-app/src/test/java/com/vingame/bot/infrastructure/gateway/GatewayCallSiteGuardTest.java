@@ -195,7 +195,7 @@ class GatewayCallSiteGuardTest {
     }
 
     @Test
-    @DisplayName("only the three known classes build a JDK HttpClient at all")
+    @DisplayName("only known classes build a JDK HttpClient, or construct the library AuthClient")
     void onlyKnownClassesBuildAnHttpClient() {
         Path root = repoRoot();
         List<String> offenders = new ArrayList<>();
@@ -210,7 +210,13 @@ class GatewayCallSiteGuardTest {
         //    If it is ever revived against a gwms host it must be routed through the budget.
         List<String> allowed = List.of(
                 "ApiGatewayClient.java", "EnvironmentWsProbe.java",
-                "HttpPrometheusQueryClient.java", "VipTalkClient.java", "GameMsClient.java");
+                "HttpPrometheusQueryClient.java", "VipTalkClient.java", "GameMsClient.java",
+                //  - BoundedLogin: the ONE place that constructs the library's AuthClient, which
+                //    builds its own HttpClient internally. It is on this list for the
+                //    `new AuthClient(` needle below, not for the JDK ones — it builds no JDK client
+                //    itself — and it is allowed because it is the class that bounds and releases
+                //    the one it inherits (review F6, F8).
+                "BoundedLogin.java");
         for (String module : List.of("bot-api", "bot-engine", "bot-messages", "bot-strategies", "bot-app")) {
             Path main = root.resolve(module).resolve("src/main/java");
             if (!Files.isDirectory(main)) {
@@ -220,8 +226,17 @@ class GatewayCallSiteGuardTest {
                 walk.filter(p -> p.getFileName().toString().endsWith(".java"))
                         .filter(p -> !allowed.contains(p.getFileName().toString()))
                         .forEach(p -> {
-                            if (occurrences(codeLines(p), "HttpClient.newHttpClient()") > 0
-                                    || occurrences(codeLines(p), "HttpClient.newBuilder()") > 0) {
+                            List<String> lines = codeLines(p);
+                            if (occurrences(lines, "HttpClient.newHttpClient()") > 0
+                                    || occurrences(lines, "HttpClient.newBuilder()") > 0
+                                    // AD-21's rule, restored to the whole-tree scan (review F8).
+                                    // The two needles above cannot see it: AuthClient builds its
+                                    // HttpClient INSIDE THE LIBRARY, so a new production class
+                                    // doing `new AuthClient(ctx, factory).authenticate()` would be
+                                    // an unbudgeted, uncounted, UNBOUNDED login against a gwms host
+                                    // that no guard in this file saw. That is the entire class of
+                                    // thing this test exists for.
+                                    || occurrences(lines, "new AuthClient(") > 0) {
                                 offenders.add(root.relativize(p).toString());
                             }
                         });
@@ -230,9 +245,10 @@ class GatewayCallSiteGuardTest {
             }
         }
         assertThat(offenders)
-                .as("a new JDK HttpClient pointed at a gwms gateway would send traffic the budget "
-                        + "cannot see. If the new client talks to a different host, add it to the "
-                        + "allow-list above with that reason written down.")
+                .as("a new JDK HttpClient — or a new `new AuthClient(` — pointed at a gwms gateway "
+                        + "would send traffic the budget cannot see. If the new client talks to a "
+                        + "different host, add it to the allow-list above with that reason written "
+                        + "down.")
                 .isEmpty();
     }
 
@@ -312,14 +328,21 @@ class GatewayCallSiteGuardTest {
     }
 
     /**
-     * The funnel is only a funnel if every public method that reaches it takes the tier from
-     * its caller. An overload that defaults the tier would compile, would be picked up by
-     * exactly the call sites in a hurry, and would silently re-introduce the category the
-     * tiers exist to separate (a start-path login and a reconnect login are not the same
-     * request), while every count above still read 1.
+     * The funnel is only a funnel if <b>every</b> public method that reaches it takes the tier from
+     * its caller. An overload that defaulted the tier would compile, would be picked up by exactly
+     * the call sites in a hurry, and would silently re-introduce the category the tiers exist to
+     * separate (a start-path login and a reconnect login are not the same request).
+     * <p>
+     * <b>The rule is "every declaration names a {@code RequestTier}", not "there is exactly one
+     * declaration".</b> It was the latter until review F1, which legitimately added
+     * {@code getBalance(…, maxWait)} and {@code deposit(…, maxWait)} — overloads that differ in the
+     * <em>wait</em>, not in the tier, and exist because a wait taken on a ws-parser
+     * message-processor thread must be shorter than the watchdog's patience. Forbidding a second
+     * declaration outright would have blocked that and protected nothing extra: what matters is
+     * that none of them lets a caller off naming its intent.
      */
     @Test
-    @DisplayName("no public ApiGatewayClient request method omits the tier")
+    @DisplayName("every public ApiGatewayClient request method names the caller's tier")
     void noRequestMethodDefaultsItsTier() {
         List<String> code = codeLines(repoRoot().resolve(API_GATEWAY_CLIENT));
 
@@ -331,18 +354,26 @@ class GatewayCallSiteGuardTest {
                 "public TokensProvider authenticate(",
                 "public long getBalance(",
                 "public boolean deposit(")) {
-            int first = joined.indexOf(signature);
-            assertThat(first)
+            int at = joined.indexOf(signature);
+            assertThat(at)
                     .as("%s must still exist — if it was renamed, update this guard", signature)
                     .isNotNegative();
-            assertThat(joined.indexOf(signature, first + 1))
-                    .as("exactly one declaration of %s — a tier-less overload beside it is how "
-                            + "the tier assignment quietly stops being a decision", signature)
-                    .isEqualTo(-1);
-            int close = joined.indexOf(')', first);
-            assertThat(joined.substring(first, close))
-                    .as("%s must take the caller's RequestTier", signature)
-                    .contains("RequestTier");
+            int declarations = 0;
+            while (at >= 0) {
+                declarations++;
+                int close = joined.indexOf(')', at);
+                assertThat(joined.substring(at, close))
+                        .as("declaration %d of %s must take the caller's RequestTier — an overload "
+                                + "that defaults it is how the tier assignment quietly stops being "
+                                + "a decision", declarations, signature)
+                        .contains("RequestTier");
+                at = joined.indexOf(signature, at + 1);
+            }
+            // Anti-vacuity: prove the scan walked the overloads rather than finding one and
+            // stopping. getBalance and deposit each have the F1 wait overload beside them.
+            assertThat(declarations)
+                    .as("%s: at least one declaration scanned", signature)
+                    .isPositive();
         }
     }
 }

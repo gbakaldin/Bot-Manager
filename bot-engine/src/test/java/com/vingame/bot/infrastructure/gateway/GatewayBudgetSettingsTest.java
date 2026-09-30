@@ -176,4 +176,31 @@ class GatewayBudgetSettingsTest {
         assertThatThrownBy(() -> GatewayBudgetMode.parse(null))
                 .isInstanceOf(IllegalStateException.class);
     }
+
+    @Test
+    @DisplayName("essential.ceiling=850 LOWERS the effective cap; it reserves nothing for PRIORITIZED")
+    void theEssentialCeilingEscapeHatchLowersTheCap() {
+        // QA Q4, and the reason this is a test rather than a comment: `essential.ceiling=850` is a
+        // knob an operator has been TOLD exists, described in A9/Open Item 5 as leaving "50
+        // requests per window for re-auth/deposit". It does not. Two facts, both pinned here so the
+        // description cannot drift from the arithmetic again.
+        GatewayBudgetSettings hatch = build(900, ceilings(500, 750, 850), SHIPPED_WAITS);
+
+        // 1. ESSENTIAL's ceiling is the binding limit, so the effective cap is 850 and not 900.
+        //    The hard-cap check in the admission rule is unreachable: validation enforces
+        //    essential.ceiling <= hard-cap and ESSENTIAL has no tier above it to reserve for.
+        assertThat(hatch.ceiling(RequestTier.ESSENTIAL))
+                .as("the number that actually binds the window")
+                .isEqualTo(850)
+                .isLessThan(hatch.hardCap());
+
+        // 2. The 50 between 850 and 900 is reachable by NOTHING. PRIORITIZED is refused at 750
+        //    whatever ESSENTIAL's ceiling says, so lowering ESSENTIAL hands it nothing at all.
+        assertThat(hatch.ceiling(RequestTier.PRIORITIZED))
+                .as("PRIORITIZED binds first, so the gap the escape hatch opens is unusable by the "
+                        + "tier it was supposed to protect")
+                .isEqualTo(750)
+                .isLessThan(hatch.ceiling(RequestTier.ESSENTIAL));
+        assertThat(hatch.ceiling(RequestTier.DEFAULT)).isEqualTo(500);
+    }
 }

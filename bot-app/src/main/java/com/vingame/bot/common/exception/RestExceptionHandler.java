@@ -155,10 +155,11 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
      * {@code Retry-After} (AD-11, as amended by A16.3).
      * <p>
      * <b>{@code Retry-After} here means "when we will next ASK", not "when it will work".</b> An
-     * HTTP client needs a number, so the header carries the probe interval — but the truth is in
-     * the body's {@code msg}, because the block may require operator action and may outlive a
-     * day. A {@code Retry-After} that promised fifteen minutes for a 24-hour outage would be a
-     * lie the UI repeats.
+     * HTTP client needs a number, so the header carries the probe interval, and the truth is in the
+     * body's {@code msg} — which since review F7 actually says it: the block may require operator
+     * action, may last a day or more, and the circuit closes only when a probe is answered. Until
+     * F7 the body said "circuit open for another 3600s", i.e. it repeated the promise the header
+     * was excused for making, in the one place that had room to qualify it.
      * <p>
      * ERROR, unlike its sibling: every bot on that brand is unable to log in, re-authenticate,
      * deposit or reconnect until a human acts.

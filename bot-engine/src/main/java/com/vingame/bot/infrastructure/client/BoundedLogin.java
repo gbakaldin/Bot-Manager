@@ -116,8 +116,11 @@ final class BoundedLogin {
             }
         });
 
+        boolean settled = false;
         try {
-            return result.get(bound.toMillis(), TimeUnit.MILLISECONDS);
+            TokensProvider tokens = result.get(bound.toMillis(), TimeUnit.MILLISECONDS);
+            settled = true;
+            return tokens;
         } catch (TimeoutException e) {
             // Kill the exchange the worker is parked on, so it does not outlive us. Without
             // this the bound would only move the leak from the caller to a thread nobody can
@@ -126,7 +129,23 @@ final class BoundedLogin {
             throw new HttpTimeoutException("login for user '" + username + "' did not answer within "
                     + bound.toMillis() + "ms");
         } catch (ExecutionException e) {
+            settled = true;
             throw rethrowUnchecked(e.getCause() == null ? e : e.getCause());
+        } finally {
+            // Release the client on the SUCCESS and LIBRARY-FAILURE paths too (review F6). Both
+            // used to return without touching it, so every login left a JDK HttpClient — and its
+            // SelectorManager PLATFORM thread — for GC to reclaim whenever it got round to the
+            // unreachable client. That is the plan's own Findings item ("a 3k-bot start briefly
+            // spawns ~3k platform threads") and the shape MEMORY records as the Bot-1 thread-leak
+            // sawtooth. The subclass exists precisely to reach the client, so making the release
+            // deterministic is free — and it is the difference between "this class bounds the wait"
+            // and "this class owns the login's resources", which is what its name claims.
+            //
+            // Not on the timeout path: the abort already did it, and calling it twice on a client
+            // whose exchange is still unwinding buys nothing.
+            if (settled) {
+                client.abort();
+            }
         }
     }
 
@@ -167,6 +186,19 @@ final class BoundedLogin {
             super(ctx, factory);
         }
 
+        /**
+         * Release the underlying JDK {@code HttpClient}: terminate any in-flight exchange and let
+         * its {@code SelectorManager} platform thread exit.
+         * <p>
+         * Called on <b>every</b> path — the timeout (where it is what unblocks the parked worker),
+         * the success and the library failure (where it is what stops the selector thread being
+         * GC-dependent). Named {@code abort} for the first of those; it is a release on the others.
+         * <p>
+         * {@code shutdownNow()} unblocks a {@code send()} parked on a connection; it does
+         * <b>not</b> unblock a worker parked in address resolution, so "the worker fails and
+         * exits" is exact for a connected exchange and best-effort otherwise. Harmless — the worker
+         * is a virtual thread — but the javadoc above used to state it flatly.
+         */
         void abort() {
             try {
                 getHttpClient().shutdownNow();

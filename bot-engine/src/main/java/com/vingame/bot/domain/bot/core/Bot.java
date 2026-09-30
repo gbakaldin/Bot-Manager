@@ -26,8 +26,8 @@ import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 
-import java.time.Duration;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -463,7 +463,7 @@ public abstract class Bot {
         boolean success;
         try {
             success = apiGatewayClient.deposit(
-                    userName, depositAmount, RequestTier.PRIORITIZED, scope());
+                    userName, depositAmount, RequestTier.PRIORITIZED, scope(), sessionBudgetWait());
         } catch (GatewayBudgetException e) {
             // AD-9: skip this round, and do not report it as a failed deposit. The next round
             // re-triggers because the balance is still below the minimum, and
@@ -482,7 +482,8 @@ public abstract class Bot {
                     credentials.getFingerprint(),
                     userName,
                     RequestTier.PRIORITIZED,
-                    scope()
+                    scope(),
+                    sessionBudgetWait()
                 ));
                 expectedCurrentBalance.set(lastFetchedBalance);
                 log.debug("Bot {}: New balance: {}", userName, expectedCurrentBalance);
@@ -517,6 +518,69 @@ public abstract class Bot {
     private boolean balanceReadDeferred = false;
 
     /**
+     * Fraction of the watchdog's patience a budget wait on the session path may consume
+     * (GATEWAY_REQUEST_BUDGET, review F1).
+     * <p>
+     * A quarter, so the derived bound is unambiguously below the watchdog even with the round-trip
+     * and the two later calls of the same {@code onNewSession} added on top: three sequential
+     * waits at a quarter each still leave a quarter of the window for the request itself and for
+     * the game message that resets the watchdog. It is a fraction rather than a constant so that
+     * lowering {@code bot.watchdog.timeout.seconds} lowers this too — the invariant has to survive
+     * a config change nobody remembers to cross-check.
+     */
+    private static final int SESSION_WAIT_FRACTION_OF_WATCHDOG = 4;
+
+    /**
+     * The longest a budget wait may take on the <b>session path</b>, i.e. on the ws-parser
+     * message-processor thread (GATEWAY_REQUEST_BUDGET, review F1).
+     * <p>
+     * <b>The invariant is {@code sessionBudgetWait() < watchdog timeout}, and it is load-bearing.</b>
+     * {@code onNewSession} runs on the library's per-client {@code netty-ws-message-processor-*}
+     * worker, and {@code BettingMiniGameBot.onEndGame} arms the watchdog on the line immediately
+     * before calling it. Under {@code enforce} that thread can block on the budget three times —
+     * the pre-deposit refresh, the deposit, and the confirming read — and at PRIORITIZED's
+     * configured {@code max-wait} of ten minutes against a 180-second watchdog, each one of them
+     * alone is a 33x overrun. What the watchdog then does is call {@code triggerFullReconnect} on a
+     * bot that is <em>working</em>: a PRIORITIZED re-auth plus a PRIORITIZED WS upgrade, i.e. the
+     * pacing manufacturing the reconnect storm A15.3 identifies as a plausible cause of an edge
+     * block. And the trigger is the normal state during a large start, not an exotic one: an
+     * ESSENTIAL reservation of {@code botCount x 3} drives DEFAULT's effective ceiling to zero for
+     * any group over ~250 bots, so every drift read on the environment defers, every auto-deposit
+     * bot therefore has a stale figure, and PRIORITIZED is starved behind the same reservation.
+     * <p>
+     * <b>Derived from the watchdog, never a literal.</b> {@code BotSessionBudgetWaitTest} asserts
+     * the inequality against the real {@code bot.watchdog.timeout.seconds} and the real
+     * {@code prioritized.max-wait} from {@code application.properties}, so a later change to
+     * either cannot silently re-open this.
+     * <p>
+     * Capped at the tier's own wait as well, because a bound is only ever allowed to make a wait
+     * shorter: if someone lowers {@code prioritized.max-wait} below this, that is the number that
+     * should win.
+     * <p>
+     * <b>Not applied to the first balance read, and that is deliberate.</b> The first read is
+     * blocking ESSENTIAL by AD-3 and genuinely wants to wait out a paced start — bounding it would
+     * fail bots en masse during exactly the start it exists to survive. It cannot reach a
+     * message-processor thread: {@code onStart} performs it <em>before</em> installing any
+     * scenario and rethrows on failure, so no message handler can run until it has succeeded, and
+     * {@code lastFetchedBalance} is never reset to a negative afterwards.
+     */
+    protected Duration sessionBudgetWait() {
+        long watchdogSeconds = configuration == null ? 0L : configuration.getWatchdogTimeoutSeconds();
+        if (watchdogSeconds <= 0L) {
+            // No watchdog configured (fixtures, and any product that opts out): nothing is going
+            // to convert a long wait into a reconnect, so the tier's own wait is the honest bound.
+            return null;
+        }
+        Duration derived = Duration.ofSeconds(
+                Math.max(1L, watchdogSeconds / SESSION_WAIT_FRACTION_OF_WATCHDOG));
+        Duration tierWait = gatewayBudget.maxWait(RequestTier.PRIORITIZED);
+        if (tierWait == null || tierWait.isZero() || derived.compareTo(tierWait) < 0) {
+            return derived;
+        }
+        return tierWait;
+    }
+
+    /**
      * Whether this bot should actually be topped up, given a balance figure that may be a local
      * estimate (GATEWAY_REQUEST_BUDGET AD-10).
      * <p>
@@ -548,7 +612,11 @@ public abstract class Bot {
                     credentials.getFingerprint(),
                     userName,
                     RequestTier.PRIORITIZED,
-                    scope());
+                    scope(),
+                    // F1: bounded below the watchdog, because this runs on the message-processor
+                    // thread. "We could not find out" is already a first-class answer here — it
+                    // returns false and the next round asks again.
+                    sessionBudgetWait());
             recordFetchedBalance(fresh);
             expectedCurrentBalance.set(fresh);
             balanceReadDeferred = false;
@@ -932,10 +1000,19 @@ public abstract class Bot {
         ReauthOutcome reauth = performReauth();
         if (reauth == ReauthOutcome.TERMINAL) return;
         if (reauth == ReauthOutcome.RETRYABLE) {
-            // The budget declined the immediate re-auth (AD-9). Do NOT try the WS upgrade on
-            // the strength of tokens we did not refresh — fall straight into the backoff loop,
-            // entering at cycle=1 exactly as the success path does below so the
-            // MAX_RECONNECT_CYCLES cap cannot be bypassed through this branch either.
+            // The budget declined the immediate re-auth (AD-9). Skip the IMMEDIATE upgrade and
+            // hand over to the backoff loop, entering at cycle=1 exactly as the success path does
+            // below, so the MAX_RECONNECT_CYCLES cap cannot be bypassed through this branch.
+            //
+            // To be precise about what that does and does not avoid (review F15): the loop sleeps
+            // one backoff and then calls tryReconnectWs(), which performs a WS upgrade with the
+            // same unrefreshed tokens. So this is not "never upgrade on stale tokens" — it is
+            // "do not upgrade RIGHT NOW, on a window that just refused us". The behaviour is the
+            // same one the success path takes when its own upgrade does not hold, and a budget
+            // refusal inside tryReconnectWs is caught there as one charged attempt rather than a
+            // death. The earlier version of this comment claimed the stronger avoidance, on the
+            // tri-state whose whole justification is that the three outcomes are not
+            // interchangeable.
             runWsReconnectLoop(1);
             return;
         }

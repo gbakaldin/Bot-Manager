@@ -380,9 +380,20 @@ public class ApiGatewayClient {
 
         AtomicInteger successCount = new AtomicInteger(0);
         AtomicInteger failureCount = new AtomicInteger(0);
+        AtomicInteger deferredCount = new AtomicInteger(0);
         List<String> errors = Collections.synchronizedList(new ArrayList<>());
 
         Semaphore semaphore = new Semaphore(registrationParallelism);
+
+        // ONE deadline for the whole batch, not one per user (review F2 / A25.2). Each user waits
+        // at most `registration.max-wait`, and with `allOf(...).join()` over ceil(N/10) batches
+        // that used to compound: a 200-bot create was a worst case of ~5 hours on a single Tomcat
+        // worker. With a shared deadline the whole call is bounded by the 15 minutes the property
+        // actually promises, and users past it are deferred immediately rather than queueing for a
+        // window that is already gone. A deferral is resumable — nothing was created — so giving
+        // up early costs an operator a retry, not an account.
+        long registrationDeadlineNanos =
+                System.nanoTime() + gatewayBudget.registrationMaxWait().toNanos();
 
         // Use virtual threads for parallel registration
         try (ExecutorService executor = Executors.newThreadPerTaskExecutor(
@@ -399,7 +410,8 @@ public class ApiGatewayClient {
                         // Acquire permit (blocks if at max concurrency)
                         semaphore.acquire();
                         try {
-                            registerSingleUserWithDisplayName(userNamePrefix, password, userIndex, count);
+                            registerSingleUserWithDisplayName(userNamePrefix, password, userIndex, count,
+                                    remainingRegistrationWait(registrationDeadlineNanos));
                             successCount.incrementAndGet();
                         } finally {
                             semaphore.release();
@@ -410,6 +422,20 @@ public class ApiGatewayClient {
                         String errorMsg = String.format("Registration interrupted for %s", username);
                         errors.add(errorMsg);
                         log.error(errorMsg);
+                    } catch (GatewayBudgetException e) {
+                        // AD-9 / review F2: this is the ONE path in the phase that still reported a
+                        // budget outcome as an upstream failure, and it did it twice over — as a
+                        // per-user `failureCount` that turns into a 502 "Game server error" about a
+                        // gateway that was never asked, and as an ERROR line PER USER, so a starved
+                        // 300-user registration produced 300 page-worthy lines for the budget
+                        // working exactly as designed.
+                        //
+                        // DEBUG, not WARN: the rate is a function of user count, which CLAUDE.md's
+                        // tier rule puts below INFO outright. The group-level statement is the one
+                        // summary line below, and the operator-facing outcome is the 429.
+                        deferredCount.incrementAndGet();
+                        log.debug("Registration of {} was deferred by the gateway budget: {}",
+                                username, e.getMessage());
                     } catch (Exception e) {
                         failureCount.incrementAndGet();
                         String errorMsg = String.format("Failed to register %s: %s", username, e.getMessage());
@@ -425,15 +451,30 @@ public class ApiGatewayClient {
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         }
 
-        log.info("Parallel user registration completed. Success: {}, Failures: {}",
-                successCount.get(), failureCount.get());
+        log.info("Parallel user registration completed. Success: {}, Failures: {}, "
+                        + "deferred by the gateway budget: {}",
+                successCount.get(), failureCount.get(), deferredCount.get());
 
         return UserRegistrationResult.builder()
                 .totalRequested(count)
                 .successCount(successCount.get())
                 .failureCount(failureCount.get())
+                .deferredCount(deferredCount.get())
                 .errors(errors)
                 .build();
+    }
+
+    /**
+     * How long this user's registration may still wait, against the batch's shared deadline
+     * (review F2).
+     * <p>
+     * {@link Duration#ZERO} once the deadline has passed, which the budget reads as
+     * <b>now-or-never</b> — so the tail of an over-long batch is deferred immediately instead of
+     * each user starting its own fifteen-minute clock.
+     */
+    private static Duration remainingRegistrationWait(long deadlineNanos) {
+        long remaining = deadlineNanos - System.nanoTime();
+        return remaining <= 0 ? Duration.ZERO : Duration.ofNanos(remaining);
     }
 
     /**
@@ -447,16 +488,18 @@ public class ApiGatewayClient {
      * @param index          User index (1-based)
      * @param totalCount     Total number of users being registered (for logging)
      */
-    private void registerSingleUserWithDisplayName(String userNamePrefix, String password, int index, int totalCount) {
+    private void registerSingleUserWithDisplayName(String userNamePrefix, String password, int index,
+                                                   int totalCount, Duration remainingWait) {
         String username = userNamePrefix + index;
 
         try {
-            RegistrationResult result = registerSingleUser(userNamePrefix, password, index);
+            RegistrationResult result = registerSingleUser(userNamePrefix, password, index, remainingWait);
             log.debug("Successfully registered user {}/{}: {}", index, totalCount, username);
 
             if (displayNameService.hasDisplayNames()) {
                 try {
-                    String displayName = setDisplayNameWithRetry(username, result.authToken(), 5);
+                    String displayName = setDisplayNameWithRetry(username, result.authToken(), 5,
+                            remainingWait);
                     if (displayName != null) {
                         log.debug("Set display name '{}' for user {}", displayName, username);
                     } else {
@@ -473,7 +516,13 @@ public class ApiGatewayClient {
 
     private record RegistrationResult(String agencyToken, String authToken, String fingerprint) {}
 
-    private RegistrationResult registerSingleUser(String userNamePrefix, String password, int index) throws IOException, InterruptedException {
+    private RegistrationResult registerSingleUser(String userNamePrefix, String password, int index)
+            throws IOException, InterruptedException {
+        return registerSingleUser(userNamePrefix, password, index, gatewayBudget.registrationMaxWait());
+    }
+
+    private RegistrationResult registerSingleUser(String userNamePrefix, String password, int index,
+                                                  Duration maxWait) throws IOException, InterruptedException {
         String ip = botIp;
         String username = userNamePrefix + index;
         String fingerprint = AuthClient.generateFingerprint();
@@ -514,8 +563,7 @@ public class ApiGatewayClient {
         // registration that is refused half way through a group leaves a HALF-REGISTERED group,
         // and that is the state nobody comes back to. A slow one is merely slow.
         HttpResponse<String> response = send(RequestTier.DEFAULT,
-                GatewayRequestScope.registration(userNamePrefix), httpRequest,
-                gatewayBudget.registrationMaxWait());
+                GatewayRequestScope.registration(userNamePrefix), httpRequest, maxWait);
         String responseBody = response.body();
         log.debug("[Register] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
@@ -544,6 +592,16 @@ public class ApiGatewayClient {
      * @return true if successful, false if name is already taken
      */
     public boolean setDisplayName(String username, String sessionToken, String displayName) {
+        return setDisplayName(username, sessionToken, displayName,
+                gatewayBudget.registrationMaxWait());
+    }
+
+    /**
+     * {@link #setDisplayName(String, String, String)} with an explicit registration wait
+     * (review F2).
+     */
+    public boolean setDisplayName(String username, String sessionToken, String displayName,
+                                  Duration maxWait) {
         checkInitialized();
         try {
             Object body = java.util.Map.of("username", username, "fullname", displayName);
@@ -568,8 +626,7 @@ public class ApiGatewayClient {
             // account that exists without a display name is the one state a resumed
             // registration cannot repair cheaply (it costs register + login + update-fullname).
             HttpResponse<String> response = send(RequestTier.DEFAULT,
-                    GatewayRequestScope.registration(username), httpRequest,
-                    gatewayBudget.registrationMaxWait());
+                    GatewayRequestScope.registration(username), httpRequest, maxWait);
             String responseBody = response.body();
             log.debug("[UpdateFullname] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
@@ -619,6 +676,16 @@ public class ApiGatewayClient {
      * @return The display name that was set, or null if all attempts failed
      */
     public String setDisplayNameWithRetry(String username, String sessionToken, int maxRetries) {
+        return setDisplayNameWithRetry(username, sessionToken, maxRetries,
+                gatewayBudget.registrationMaxWait());
+    }
+
+    /**
+     * {@link #setDisplayNameWithRetry(String, String, int)} against the batch's shared registration
+     * deadline rather than a fresh wait per attempt (review F2).
+     */
+    public String setDisplayNameWithRetry(String username, String sessionToken, int maxRetries,
+                                         Duration maxWait) {
         if (!displayNameService.hasDisplayNames()) {
             log.warn("No display names available, skipping display name assignment");
             return null;
@@ -631,7 +698,7 @@ public class ApiGatewayClient {
                 continue;
             }
 
-            if (setDisplayName(username, sessionToken, displayName)) {
+            if (setDisplayName(username, sessionToken, displayName, maxWait)) {
                 return displayName;
             }
 
@@ -661,6 +728,21 @@ public class ApiGatewayClient {
      * @return true if the deposit succeeded (HTTP 200)
      */
     public boolean deposit(String username, long amount, RequestTier tier, GatewayRequestScope scope) {
+        return deposit(username, amount, tier, scope, null);
+    }
+
+    /**
+     * {@link #deposit(String, long, RequestTier, GatewayRequestScope)} with an explicit wait,
+     * overriding the tier's configured {@code max-wait}.
+     * <p>
+     * The one caller that needs it is {@code Bot.deposit}, which runs on a ws-parser
+     * message-processor thread and must not park there longer than the watchdog's patience — see
+     * {@code Bot.sessionBudgetWait()} (review F1).
+     *
+     * @param maxWait {@code null} to use the tier's configured wait
+     */
+    public boolean deposit(String username, long amount, RequestTier tier, GatewayRequestScope scope,
+                           Duration maxWait) {
         checkInitialized();
         try {
             Object body = java.util.Map.of("username", username, "amount", amount);
@@ -677,7 +759,9 @@ public class ApiGatewayClient {
                     .timeout(GATEWAY_REQUEST_TIMEOUT)
                     .build();
 
-            HttpResponse<String> response = send(tier, scope, httpRequest);
+            HttpResponse<String> response = maxWait == null
+                    ? send(tier, scope, httpRequest)
+                    : send(tier, scope, httpRequest, maxWait);
             String responseBody = response.body();
             boolean success = response.statusCode() == 200;
             if (success) {
@@ -708,7 +792,22 @@ public class ApiGatewayClient {
      */
     public long getBalance(String authToken, String fingerprint, String username,
                            RequestTier tier, GatewayRequestScope scope) {
-        return readBalance(authToken, fingerprint, username, tier, scope, false)
+        return getBalance(authToken, fingerprint, username, tier, scope, null);
+    }
+
+    /**
+     * {@link #getBalance(String, String, String, RequestTier, GatewayRequestScope)} with an
+     * explicit wait, overriding the tier's configured {@code max-wait}.
+     * <p>
+     * Used by every balance read {@code Bot} takes from its session path, because that path runs
+     * on a ws-parser message-processor thread and a wait longer than the watchdog's patience turns
+     * a healthy bot into a reconnect — see {@code Bot.sessionBudgetWait()} (review F1).
+     *
+     * @param maxWait {@code null} to use the tier's configured wait
+     */
+    public long getBalance(String authToken, String fingerprint, String username,
+                           RequestTier tier, GatewayRequestScope scope, Duration maxWait) {
+        return readBalance(authToken, fingerprint, username, tier, scope, false, maxWait)
                 .orElseThrow(() -> new IllegalStateException(
                         "a blocking balance read returned no value for user " + username));
     }
@@ -728,11 +827,12 @@ public class ApiGatewayClient {
      */
     public OptionalLong getBalanceIfAdmitted(String authToken, String fingerprint, String username,
                                              GatewayRequestScope scope) {
-        return readBalance(authToken, fingerprint, username, RequestTier.DEFAULT, scope, true);
+        return readBalance(authToken, fingerprint, username, RequestTier.DEFAULT, scope, true, null);
     }
 
     private OptionalLong readBalance(String authToken, String fingerprint, String username,
-                                     RequestTier tier, GatewayRequestScope scope, boolean deferrable) {
+                                     RequestTier tier, GatewayRequestScope scope, boolean deferrable,
+                                     Duration maxWait) {
         checkInitialized();
         try {
             Thread.sleep(500);
@@ -762,8 +862,10 @@ public class ApiGatewayClient {
                     return OptionalLong.empty();
                 }
                 maybeResponse = admitted.get();
-            } else {
+            } else if (maxWait == null) {
                 maybeResponse = send(tier, scope, httpRequest);
+            } else {
+                maybeResponse = send(tier, scope, httpRequest, maxWait);
             }
             HttpResponse<String> response = maybeResponse;
             String responseBody = response.body();
