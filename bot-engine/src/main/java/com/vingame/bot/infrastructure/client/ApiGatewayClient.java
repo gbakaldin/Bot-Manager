@@ -176,14 +176,51 @@ public class ApiGatewayClient {
     }
 
     /**
+     * A credential rendered for a log line: the first ten characters and nothing more (review
+     * SEC1, CLAUDE.md's house idiom).
+     * <p>
+     * The {@code X-TOKEN} these lines used to print in full is the <b>environment's admin
+     * credential</b> — the one that authorises {@code update-fullname} and {@code deposit} for
+     * every account on the brand — and they are DEBUG lines, which staging runs at
+     * ({@code BOT_LOG_LEVEL=DEBUG}), once per account on the one feature that creates accounts in
+     * bulk. Ten characters is enough to tell two tokens apart and to recognise the {@code 18-}
+     * agency prefix that CLAUDE.md's token table turns on; it is not enough to use.
+     */
+    private static String masked(String secret) {
+        if (secret == null || secret.isEmpty()) {
+            return "<none>";
+        }
+        return secret.length() <= 10 ? "***" : secret.substring(0, 10) + "...";
+    }
+
+    /**
+     * The same body, with every {@code password} value replaced (review SEC1).
+     * <p>
+     * The envelope itself is genuinely diagnostic — {@code appId}, {@code ip}, {@code source} and
+     * {@code type} are what a brand's register failure is compared against
+     * ({@code gwms-register-envelope.md}) — so the body is kept and the one field that is never
+     * diagnostic is removed, rather than dropping the line.
+     */
+    private static String withoutSecrets(String requestBody) {
+        return requestBody == null ? null
+                : PASSWORD_VALUE.matcher(requestBody).replaceAll("\"password\":\"***\"");
+    }
+
+    /** {@code "password": "…"} in a serialised request body, escapes included. */
+    private static final java.util.regex.Pattern PASSWORD_VALUE =
+            java.util.regex.Pattern.compile("\"password\"\\s*:\\s*\"(?:\\\\.|[^\"\\\\])*\"");
+
+    /**
      * <b>The single funnel.</b> Every HTTP request this class makes is admitted by the
      * environment's budget here and nowhere else.
      * <p>
      * This is the only {@code httpClient.send(} call site in the class and
-     * {@code GatewayCallSiteGuardTest} keeps it that way. From Phase 4 this is also where
-     * every response is classified before it is parsed, so a Cloudflare block page becomes
-     * "edge block, cf-ray …" instead of {@code Unexpected character ('<')} — the exact
-     * message that was misdiagnosed for an hour on 2026-09-17.
+     * {@code GatewayCallSiteGuardTest} keeps it that way. It is <b>also where response
+     * classification will go in Phase 5</b> (A29), so a Cloudflare block page becomes "edge block,
+     * cf-ray …" instead of {@code Unexpected character ('<')} — the exact message that was
+     * misdiagnosed for an hour on 2026-09-17. It classifies nothing today: this method is
+     * {@code underBudget(tier, scope, httpCall(request))} and that sentence named Phase 4 until
+     * review T4, i.e. it claimed a feature of a phase a reader had just been told was complete.
      * <p>
      * The caller's checked exceptions are rethrown unwrapped: the funnel must not change the
      * exception a caller already handles.
@@ -300,7 +337,7 @@ public class ApiGatewayClient {
         try {
             String requestBody = mapper.writeValueAsString(loginRequestFactory.apply(ctx));
             log.debug("[Login] POST {} | X-TOKEN: {} | body: {}",
-                    apiGateway + loginPath, xToken, requestBody);
+                    apiGateway + loginPath, masked(xToken), withoutSecrets(requestBody));
         } catch (Exception e) {
             log.warn("[Login] Could not serialize login request for logging: {}", e.getMessage());
         }
@@ -309,7 +346,8 @@ public class ApiGatewayClient {
             TokensProvider tokens = underBudget(tier, scope,
                     () -> BoundedLogin.login(ctx, loginRequestFactory, credentials.getUsername()));
             log.debug("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
-                    tokens.getAgencyToken(), tokens.getAuthToken(), tokens.getJwtToken());
+                    masked(tokens.getAgencyToken()), masked(tokens.getAuthToken()),
+                    masked(tokens.getJwtToken()));
             metrics.incLogin(true);
             return tokens;
         } catch (IOException | InterruptedException e) {
@@ -417,8 +455,9 @@ public class ApiGatewayClient {
                 .build();
 
         String requestBody = mapper.writeValueAsString(request);
-        log.debug("[Register] POST {} | X-TOKEN: {} | body: {}",
-                apiGateway + registrationPath, xToken, requestBody);
+        log.debug("[Register] POST {} | X-TOKEN: {} | user: {} | body: {}",
+                apiGateway + registrationPath, masked(xToken), username,
+                withoutSecrets(requestBody));
 
         HttpRequest httpRequest = HttpRequest.newBuilder()
                 .uri(URI.create(apiGateway + registrationPath))
@@ -509,7 +548,7 @@ public class ApiGatewayClient {
 
             String requestBody = mapper.writeValueAsString(body);
             String url = apiGateway + updateFullnamePath;
-            log.debug("[UpdateFullname] POST {} | X-TOKEN: {} | body: {}", url, xToken, requestBody);
+            log.debug("[UpdateFullname] POST {} | X-TOKEN: {} | body: {}", url, masked(xToken), requestBody);
 
             HttpRequest httpRequest = HttpRequest.newBuilder()
                     .uri(URI.create(url))
@@ -535,7 +574,7 @@ public class ApiGatewayClient {
                 return false;
             }
 
-            if ("OK".equals(status)) {
+            if ("OK".equalsIgnoreCase(status)) {
                 log.debug("Display name set successfully to: {}", displayName);
                 return true;
             }
@@ -559,9 +598,16 @@ public class ApiGatewayClient {
      * collision — 19 of 100 bots in a 2026-09-18 group registered nameless, and the
      * ziczac room froze until they were named by hand (a nameless account in the room
      * stalls the round engine).
+     * <p>
+     * <b>Case-insensitive, like {@code registerOne}'s reading of the same constant</b> (review
+     * T2). It used to be the only case-<em>sensitive</em> comparison against
+     * {@link #STATUS_EXISTED} in the class, and the two strictnesses pointed the wrong way: a
+     * brand answering {@code existed} would fall through to the generic throw and reproduce the
+     * 2026-09-18 freeze exactly, while the fail-safe reading merely re-rolls a name. The envelope's
+     * casing is not something we control.
      */
     static boolean isDisplayNameTaken(String status) {
-        return "INVALID".equals(status) || STATUS_EXISTED.equals(status);
+        return "INVALID".equalsIgnoreCase(status) || STATUS_EXISTED.equalsIgnoreCase(status);
     }
 
     /**
@@ -683,7 +729,7 @@ public class ApiGatewayClient {
             Object body = java.util.Map.of("username", username, "amount", amount);
             String requestBody = mapper.writeValueAsString(body);
             String url = apiGateway + BOT_DEPOSIT_ENDPOINT;
-            log.debug("[BotDeposit] POST {} | X-TOKEN: {} | body: {}", url, xToken, requestBody);
+            log.debug("[BotDeposit] POST {} | X-TOKEN: {} | body: {}", url, masked(xToken), requestBody);
 
             HttpRequest httpRequest = HttpRequest.newBuilder()
                     .uri(URI.create(url))
