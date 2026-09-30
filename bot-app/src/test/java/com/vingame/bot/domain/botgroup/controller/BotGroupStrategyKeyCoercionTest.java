@@ -7,6 +7,7 @@ import com.vingame.bot.domain.botgroup.mapper.BotGroupMapperImpl;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
+import com.vingame.bot.domain.botgroup.service.RegistrationWorker;
 import com.vingame.bot.domain.botgroup.service.BotGroupService;
 import com.vingame.bot.domain.botgroup.validation.BettingMiniConfigValidator;
 import com.vingame.bot.domain.botgroup.validation.BotGroupConfigValidationService;
@@ -133,6 +134,14 @@ class BotGroupStrategyKeyCoercionTest {
 
     @MockitoBean
     private BotGroupBehaviorService behaviorService;
+
+    /**
+     * Required since GATEWAY_REQUEST_BUDGET Phase 4: {@code BotGroupService} takes the
+     * registration worker as a constructor dependency, so this slice cannot build without it.
+     * Unused by these tests — validation happens before anything is enqueued.
+     */
+    @MockitoBean
+    private RegistrationWorker registrationWorker;
 
     @BeforeEach
     void stubGames() {

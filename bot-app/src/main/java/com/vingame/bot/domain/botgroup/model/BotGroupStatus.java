@@ -75,17 +75,27 @@ public enum BotGroupStatus {
 
     /**
      * Accounts are still being registered for this group. <b>Derived at the DTO boundary
-     * only</b>, from the additive {@code registrationState} document field that arrives with
-     * asynchronous registration (Phase 4); never persisted in {@code targetStatus}, never
-     * held by a runtime. Declared here now so the enum's final order is fixed in one place
-     * and Phase 4 cannot be tempted to insert.
+     * only</b>, from the additive {@code registrationState} document field (Phase 4,
+     * asynchronous registration); never persisted in {@code targetStatus}, never held by a
+     * runtime.
+     * <p>
+     * The single producer is {@code BotGroupMapper.renderedStatus}, which
+     * {@code BotGroupController.statusDTO} also calls so {@code GET /{id}} and
+     * {@code GET /{id}/status} cannot disagree. A group in this state is <b>not startable</b> —
+     * {@code validateStartable} answers 400 naming the counts and the way out — and it is what
+     * {@code POST /api/v1/bot-group/} renders on its {@code 200} (A3).
      */
     REGISTRATION_PENDING,
 
     /**
-     * Registration stopped on a failed account and will not resume without an operator
-     * action. Same derived-only rules as {@link #REGISTRATION_PENDING}; produced from Phase 4
-     * onward.
+     * Registration stopped on an account that failed
+     * {@code bot.registration.max-attempts-per-user} times and will not resume without an
+     * operator action ({@code POST /{id}/registration/retry}). Same derived-only rules as
+     * {@link #REGISTRATION_PENDING}, and equally not startable.
+     * <p>
+     * Note what this does <em>not</em> mean: a budget refusal or an open Cloudflare circuit is
+     * "not now", not "this account cannot be created", and re-queues the group without spending
+     * an attempt (A2.6). Only the gateway refusing an account reaches this state.
      */
     REGISTRATION_FAILED
 }

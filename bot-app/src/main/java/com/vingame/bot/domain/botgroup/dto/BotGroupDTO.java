@@ -164,6 +164,36 @@ public class BotGroupDTO {
     @JsonProperty(access = JsonProperty.Access.READ_ONLY)
     private BotGroupStatus targetStatus;
 
+    /**
+     * Accounts known to exist for this group, so a list view can render "120/500" without a
+     * second call (GATEWAY_REQUEST_BUDGET A1 / A17.3). {@code null} for a group that pre-dates
+     * asynchronous registration or was created with {@code existingGroup=true}.
+     * <p>
+     * <b>{@code READ_ONLY}, and the mapper copies it in neither write direction</b> — the same
+     * pair {@code targetStatus} uses, for a sharper reason. This is the high-water mark the
+     * worker resumes from: a request body that could set it would make the worker skip a block of
+     * accounts that were never created, or re-register a block that already exists and spend the
+     * Cloudflare window doing it. {@code BotGroupStatusPersistenceGuardTest} asserts by value
+     * that neither {@code toEntity} nor {@code updateEntityFromDTO} carries it.
+     */
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+    private Integer registeredCount;
+
+    /**
+     * Accounts that also have a display name — never ahead of {@link #registeredCount}, and the
+     * field that makes "registered but not named" a distinguishable resume state (A17.3).
+     * Same {@code READ_ONLY} + no-mapper-write rules, for the same reason.
+     */
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+    private Integer namedCount;
+
+    /**
+     * Why registration stopped, when {@code targetStatus} renders {@code REGISTRATION_FAILED}.
+     * Read-only; {@code POST /{id}/registration/retry} is what clears it.
+     */
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+    private String registrationError;
+
     // Scheduled operations
     private LocalDateTime scheduledRestartTime;
 

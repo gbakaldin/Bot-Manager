@@ -2,14 +2,12 @@ package com.vingame.bot.domain.botgroup.service;
 
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
-import com.vingame.bot.common.exception.UpstreamRegistrationException;
-import com.vingame.bot.config.client.EnvironmentClientRegistry;
-import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.RegistrationState;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import com.vingame.bot.domain.botgroup.validation.BotGroupConfigValidationService;
 import com.vingame.bot.domain.brand.model.ProductCode;
@@ -17,8 +15,6 @@ import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.service.GameService;
-import com.vingame.bot.infrastructure.client.ApiGatewayClient;
-import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -57,9 +53,6 @@ class BotGroupServiceTest {
     private BotGroupMapper mapper;
 
     @Mock
-    private EnvironmentClientRegistry clientRegistry;
-
-    @Mock
     private EnvironmentService environmentService;
 
     @Mock
@@ -69,16 +62,13 @@ class BotGroupServiceTest {
     private MongoTemplate mongoTemplate;
 
     @Mock
-    private EnvironmentClients environmentClients;
-
-    @Mock
-    private ApiGatewayClient apiGatewayClient;
-
-    @Mock
     private BotGroupConfigValidationService configValidation;
 
     @Mock
     private BotGroupBehaviorService behaviorService;
+
+    @Mock
+    private RegistrationWorker registrationWorker;
 
     @Captor
     private ArgumentCaptor<Query> queryCaptor;
@@ -258,12 +248,12 @@ class BotGroupServiceTest {
     }
 
     @Nested
-    @DisplayName("save - new group")
+    @DisplayName("save - new group (asynchronous registration, GATEWAY_REQUEST_BUDGET A2)")
     class SaveNewGroupTests {
 
         @Test
-        @DisplayName("Should register users and generate ID for new group")
-        void shouldRegisterUsersAndGenerateId() {
+        @DisplayName("persists REGISTRATION_PENDING at 0/botCount and makes no upstream call")
+        void shouldPersistPendingAndRegisterNothingSynchronously() {
             BotGroup group = BotGroup.builder()
                     .name("New Group")
                     .environmentId("env-1")
@@ -272,83 +262,68 @@ class BotGroupServiceTest {
                     .botCount(5)
                     .build();
 
-            UserRegistrationResult successResult = UserRegistrationResult.builder()
-                    .totalRequested(5)
-                    .successCount(5)
-                    .failureCount(0)
-                    .build();
-
             when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
-            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers("bot", "pass", 5)).thenReturn(successResult);
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
 
             BotGroup result = service.save(group);
 
             assertThat(result.getId()).isNotNull().isNotEmpty();
-            verify(apiGatewayClient).registerUsers("bot", "pass", 5);
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.PENDING);
+            assertThat(result.getRegisteredCount()).isZero();
+            assertThat(result.getNamedCount()).isZero();
             verify(repository).save(group);
+            verify(registrationWorker).enqueue(result.getId());
         }
 
         @Test
-        @DisplayName("Should throw when user registration completely fails")
-        void shouldThrowWhenRegistrationFails() {
+        @DisplayName("the create is not where accounts are created — nothing can 502 here any more")
+        void createNeverReportsAnUpstreamFailure() {
+            // The predecessor of this test asserted an UpstreamRegistrationException (502) when
+            // every account failed. That outcome no longer exists at create time and its absence
+            // is the point (A25.1): save() makes no gateway call, so it cannot report one as
+            // failed, and our own pacing can no longer surface as "Game server error" about a
+            // gateway that was never asked. A refusal now belongs to RegistrationWorker, which
+            // charges it against max-attempts-per-user and reports it on the document.
             BotGroup group = BotGroup.builder()
                     .name("Failing Group")
                     .environmentId("env-1")
                     .namePrefix("bot")
                     .password("pass")
-                    .botCount(5)
-                    .build();
-
-            UserRegistrationResult failResult = UserRegistrationResult.builder()
-                    .totalRequested(5)
-                    .successCount(0)
-                    .failureCount(5)
-                    .errors(List.of("Connection refused"))
+                    .botCount(500)
                     .build();
 
             when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
-            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers("bot", "pass", 5)).thenReturn(failResult);
-
-            assertThatThrownBy(() -> service.save(group))
-                    .isInstanceOf(UpstreamRegistrationException.class)
-                    .hasMessageContaining("Failed to register any users");
-
-            verify(repository, never()).save(any());
-        }
-
-        @Test
-        @DisplayName("Should still save when registration is partial success")
-        void shouldSaveOnPartialSuccess() {
-            BotGroup group = BotGroup.builder()
-                    .name("Partial Group")
-                    .environmentId("env-1")
-                    .namePrefix("bot")
-                    .password("pass")
-                    .botCount(5)
-                    .build();
-
-            UserRegistrationResult partialResult = UserRegistrationResult.builder()
-                    .totalRequested(5)
-                    .successCount(3)
-                    .failureCount(2)
-                    .errors(List.of("User already exists"))
-                    .build();
-
-            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
-            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers("bot", "pass", 5)).thenReturn(partialResult);
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
 
             BotGroup result = service.save(group);
 
-            assertThat(result.getId()).isNotNull();
-            verify(repository).save(group);
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.PENDING);
+            assertThat(result.getRegistrationError())
+                    .as("a fresh create carries no failure — the worker is what records one")
+                    .isNull();
+        }
+
+        @Test
+        @DisplayName("enqueues only after the persist, so the worker cannot look for a missing doc")
+        void enqueuesAfterThePersist() {
+            BotGroup group = BotGroup.builder()
+                    .name("Ordered Group")
+                    .environmentId("env-1")
+                    .namePrefix("bot")
+                    .password("pass")
+                    .botCount(3)
+                    .build();
+
+            when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            service.save(group);
+
+            // The worker selects by the PERSISTED state, so an enqueue that overtook the save
+            // would find nothing and the group would wait a whole tick for no reason.
+            org.mockito.InOrder order = org.mockito.Mockito.inOrder(repository, registrationWorker);
+            order.verify(repository).save(any(BotGroup.class));
+            order.verify(registrationWorker).enqueue(anyString());
         }
     }
 
@@ -370,7 +345,6 @@ class BotGroupServiceTest {
             BotGroup result = service.save(group);
 
             assertThat(result.getId()).isEqualTo("existing-id");
-            verify(clientRegistry, never()).getClients(anyString());
             verify(repository).save(group);
         }
     }
@@ -398,8 +372,6 @@ class BotGroupServiceTest {
             assertThat(result.getId()).isNotNull().isNotEmpty();
 
             // No environment client was looked up, no users registered
-            verify(clientRegistry, never()).getClients(anyString());
-            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
             verify(repository).save(group);
         }
 
@@ -414,22 +386,12 @@ class BotGroupServiceTest {
                     .botCount(3)
                     .build();
 
-            UserRegistrationResult successResult = UserRegistrationResult.builder()
-                    .totalRequested(3)
-                    .successCount(3)
-                    .failureCount(0)
-                    .build();
-
             when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
-            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers("bot", "pass", 3)).thenReturn(successResult);
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
 
             BotGroup result = service.save(group, false);
 
             assertThat(result.getId()).isNotNull().isNotEmpty();
-            verify(apiGatewayClient).registerUsers("bot", "pass", 3);
             verify(repository).save(group);
         }
 
@@ -447,8 +409,6 @@ class BotGroupServiceTest {
             BotGroup result = service.save(group, true);
 
             assertThat(result.getId()).isEqualTo("existing-id");
-            verify(clientRegistry, never()).getClients(anyString());
-            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
             verify(repository).save(group);
         }
 
@@ -463,22 +423,150 @@ class BotGroupServiceTest {
                     .botCount(2)
                     .build();
 
-            UserRegistrationResult successResult = UserRegistrationResult.builder()
-                    .totalRequested(2)
-                    .successCount(2)
-                    .failureCount(0)
-                    .build();
-
             when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
-            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers("bot", "pass", 2)).thenReturn(successResult);
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
 
             service.save(group);
 
-            verify(apiGatewayClient).registerUsers("bot", "pass", 2);
             verify(repository).save(group);
+        }
+    }
+
+    @Nested
+    @DisplayName("registration lifecycle (GATEWAY_REQUEST_BUDGET A2)")
+    class RegistrationLifecycleTests {
+
+        @Test
+        @DisplayName("existingGroup=true leaves no registration state and enqueues nothing")
+        void migrationPathLeavesNoRegistrationState() {
+            BotGroup group = BotGroup.builder()
+                    .name("Migrated").environmentId("env-1").namePrefix("bot")
+                    .password("pass").botCount(50)
+                    .build();
+
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.save(group, true);
+
+            // A2.8. The accounts already exist, so there is nothing to pace and nothing to
+            // resume — and "no registration state" is exactly the state a group created before
+            // this feature has, which is what keeps the two indistinguishable everywhere else.
+            assertThat(result.getRegistrationState()).isNull();
+            assertThat(result.getRegisteredCount()).isZero();
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("PATCH botCount up extends the target and re-enqueues")
+        void raisingBotCountReEnqueues() {
+            BotGroup existing = BotGroup.builder()
+                    .id("g-1").name("G").environmentId("env-1").namePrefix("bot")
+                    .botCount(100).registeredCount(100).namedCount(100)
+                    .build();
+            when(repository.findById("g-1")).thenReturn(Optional.of(existing));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            // The mapper is a mock here, so apply the merge the real one would.
+            org.mockito.Mockito.doAnswer(inv -> {
+                inv.<BotGroup>getArgument(1).setBotCount(300);
+                return null;
+            }).when(mapper).updateEntityFromDTO(any(BotGroupDTO.class), any(BotGroup.class));
+
+            BotGroup result = service.update("g-1", BotGroupDTO.builder().botCount(300).build());
+
+            // A2.7 — this is what turns "register 200 more bots for this group" from a script
+            // into a product feature. The worker resumes at 101; the hundred that exist are never
+            // touched.
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.PENDING);
+            assertThat(result.getRegisteredCount()).isEqualTo(100);
+            verify(registrationWorker).enqueue("g-1");
+        }
+
+        @Test
+        @DisplayName("PATCH botCount down never un-registers and does not re-enqueue")
+        void loweringBotCountNeverUnregisters() {
+            BotGroup existing = BotGroup.builder()
+                    .id("g-1").name("G").environmentId("env-1").namePrefix("bot")
+                    .botCount(500).registeredCount(120).namedCount(120)
+                    .registrationState(RegistrationState.FAILED)
+                    .registrationError("stopped at 121")
+                    .build();
+            when(repository.findById("g-1")).thenReturn(Optional.of(existing));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            org.mockito.Mockito.doAnswer(inv -> {
+                inv.<BotGroup>getArgument(1).setBotCount(120);
+                return null;
+            }).when(mapper).updateEntityFromDTO(any(BotGroupDTO.class), any(BotGroup.class));
+
+            BotGroup result = service.update("g-1", BotGroupDTO.builder().botCount(120).build());
+
+            // The clean exit from a half-failed 500-account group: registeredCount is a fact
+            // about accounts that exist, not an intent, so lowering the target cannot destroy
+            // anything. The group is now startable with what it has.
+            assertThat(result.getRegisteredCount()).isEqualTo(120);
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("retry clears FAILED back to PENDING and resumes rather than starting over")
+        void retryResumesFromTheHighWaterMark() {
+            BotGroup failed = BotGroup.builder()
+                    .id("g-1").name("G").environmentId("env-1").namePrefix("bot")
+                    .botCount(500).registeredCount(63)
+                    .registrationState(RegistrationState.FAILED)
+                    .registrationError("Registration stopped at account 64 of 500")
+                    .build();
+            when(repository.findById("g-1")).thenReturn(Optional.of(failed));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.retryRegistration("g-1");
+
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.PENDING);
+            assertThat(result.getRegistrationError()).isNull();
+            assertThat(result.getRegisteredCount())
+                    .as("resuming is the whole point — re-creating 63 accounts that exist would "
+                            + "spend the Cloudflare window twice over for nothing")
+                    .isEqualTo(63);
+            verify(registrationWorker).enqueue("g-1");
+        }
+
+        @Test
+        @DisplayName("retrying a group that is not FAILED is a 400 naming the state")
+        void retryOfAHealthyGroupIsRejected() {
+            BotGroup pending = BotGroup.builder()
+                    .id("g-1").name("G").botCount(500).registeredCount(200)
+                    .registrationState(RegistrationState.PENDING)
+                    .build();
+            when(repository.findById("g-1")).thenReturn(Optional.of(pending));
+
+            assertThatThrownBy(() -> service.retryRegistration("g-1"))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("200/500")
+                    .hasMessageContaining("PENDING");
+
+            verify(repository, never()).save(any());
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("delete calls the registration off before taking the group lock")
+        void deleteCancelsRegistrationFirst() {
+            BotGroup registering = BotGroup.builder()
+                    .id("g-1").name("G").environmentId("env-1")
+                    .registrationState(RegistrationState.PENDING)
+                    .build();
+            when(repository.findById("g-1")).thenReturn(Optional.of(registering));
+
+            service.delete("g-1");
+
+            // A28.6 / the same cancel-then-lock ordering stop() uses: a registration parked
+            // inside the budget can be waiting up to registration.max-wait (15 m), and only
+            // cancelScope wakes it. Cancelling after stopAndLogout took the lock would make the
+            // DELETE wait that out on an HTTP thread.
+            org.mockito.InOrder order =
+                    org.mockito.Mockito.inOrder(registrationWorker, behaviorService, repository);
+            order.verify(registrationWorker).cancel("g-1", "env-1");
+            order.verify(behaviorService).stopAndLogout("g-1");
+            order.verify(repository).deleteById("g-1");
         }
     }
 
@@ -656,22 +744,12 @@ class BotGroupServiceTest {
                     .botCount(9999)
                     .build();
 
-            UserRegistrationResult successResult = UserRegistrationResult.builder()
-                    .totalRequested(9999)
-                    .successCount(9999)
-                    .failureCount(0)
-                    .build();
-
             when(environmentService.findById("env-tip")).thenReturn(envWithProductCode(ProductCode.P_116));
-            when(clientRegistry.getClients("env-tip")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers("authtest", "pass", 9999)).thenReturn(successResult);
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
 
             BotGroup result = service.save(group);
 
             assertThat(result.getId()).isNotNull().isNotEmpty();
-            verify(apiGatewayClient).registerUsers("authtest", "pass", 9999);
             verify(repository).save(group);
         }
 
@@ -698,8 +776,6 @@ class BotGroupServiceTest {
                     .hasMessageContaining("12");
 
             // Pre-flight must run BEFORE any auth/registration fan-out and BEFORE persistence.
-            verify(clientRegistry, never()).getClients(anyString());
-            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
             verify(repository, never()).save(any());
         }
 
@@ -715,16 +791,7 @@ class BotGroupServiceTest {
                     .botCount(50)
                     .build();
 
-            UserRegistrationResult successResult = UserRegistrationResult.builder()
-                    .totalRequested(50)
-                    .successCount(50)
-                    .failureCount(0)
-                    .build();
-
             when(environmentService.findById("env-bom")).thenReturn(envWithProductCode(ProductCode.P_097));
-            when(clientRegistry.getClients("env-bom")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers(anyString(), eq("pass"), eq(50))).thenReturn(successResult);
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
 
             BotGroup result = service.save(group);
@@ -752,8 +819,6 @@ class BotGroupServiceTest {
 
             assertThat(result.getId()).isNotNull().isNotEmpty();
             verify(environmentService, never()).findById(anyString());
-            verify(clientRegistry, never()).getClients(anyString());
-            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
         }
     }
 
@@ -783,8 +848,6 @@ class BotGroupServiceTest {
                     .hasMessageContaining("env-1");
 
             // Validation runs before any registration fan-out and before persistence.
-            verify(clientRegistry, never()).getClients(anyString());
-            verify(apiGatewayClient, never()).registerUsers(anyString(), anyString(), anyInt());
             verify(repository, never()).save(any());
         }
 
@@ -803,16 +866,7 @@ class BotGroupServiceTest {
             when(gameService.findById("game-1"))
                     .thenReturn(Game.builder().id("game-1").environmentId("env-1").build());
 
-            UserRegistrationResult successResult = UserRegistrationResult.builder()
-                    .totalRequested(3)
-                    .successCount(3)
-                    .failureCount(0)
-                    .build();
-
             when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
-            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers("bot", "pass", 3)).thenReturn(successResult);
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
 
             BotGroup result = service.save(group);
@@ -836,16 +890,7 @@ class BotGroupServiceTest {
             when(gameService.findById("game-unmigrated"))
                     .thenReturn(Game.builder().id("game-unmigrated").environmentId(null).build());
 
-            UserRegistrationResult successResult = UserRegistrationResult.builder()
-                    .totalRequested(2)
-                    .successCount(2)
-                    .failureCount(0)
-                    .build();
-
             when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
-            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers("bot", "pass", 2)).thenReturn(successResult);
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
 
             BotGroup result = service.save(group);
@@ -878,7 +923,6 @@ class BotGroupServiceTest {
                     .hasMessageContaining("env-1");
 
             // Rejected before persistence; the skip path never touched the registry either.
-            verify(clientRegistry, never()).getClients(anyString());
             verify(repository, never()).save(any());
         }
 
@@ -913,16 +957,7 @@ class BotGroupServiceTest {
                     .botCount(2)
                     .build();
 
-            UserRegistrationResult successResult = UserRegistrationResult.builder()
-                    .totalRequested(2)
-                    .successCount(2)
-                    .failureCount(0)
-                    .build();
-
             when(environmentService.findById("env-1")).thenReturn(envWithoutCap());
-            when(clientRegistry.getClients("env-1")).thenReturn(environmentClients);
-            when(environmentClients.getApiGatewayClient()).thenReturn(apiGatewayClient);
-            when(apiGatewayClient.registerUsers("bot", "pass", 2)).thenReturn(successResult);
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
 
             service.save(group);

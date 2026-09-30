@@ -96,6 +96,27 @@ public class BotMetrics {
     public static final String GROUP_RECOVERY_ATTEMPTS_TOTAL = "group_recovery_attempts_total";
     public static final String GROUP_RECOVERY_EXHAUSTED_TOTAL = "group_recovery_exhausted_total";
 
+    /**
+     * GATEWAY_REQUEST_BUDGET A6 Phase 4 item 6 — one increment per <b>account</b>
+     * {@code RegistrationWorker} finishes with, tagged {@code outcome}:
+     * {@code success | exists | failed}.
+     * <p>
+     * Per account rather than per group deliberately, and it does not contradict CLAUDE.md's
+     * logging tier rule: that rule is about <em>log lines</em>, whose cost is bytes on a disk
+     * with a 10 GB cap. A counter's cost is one time series per {@code (group, outcome)} pair,
+     * whatever the account count, and the per-account rate is exactly the thing an operator needs
+     * to see (a 500-account create that has moved 3 accounts in ten minutes looks identical to a
+     * healthy one in every group-level signal there is).
+     * <p>
+     * {@code exists} is carried from day one even though it is rare, because V4e's "no username
+     * was registered twice" check has nothing to read without it — and because the difference
+     * between a resumed registration and a re-registering loop is exactly this counter climbing.
+     * Same {@code group_}-style naming rule as the recovery counters: no {@code bot_} prefix, so
+     * {@code BotMdcTagsMeterFilter} does not touch it and the tags come from
+     * {@link #mdcTags()} under the worker's per-group MDC.
+     */
+    public static final String REGISTRATION_ACCOUNTS_TOTAL = "registration_accounts_total";
+
     private final MeterRegistry registry;
 
     public BotMetrics(MeterRegistry registry) {
@@ -516,5 +537,53 @@ public class BotMetrics {
                 .tags(mdcTags())
                 .register(registry)
                 .increment();
+    }
+
+    /**
+     * Count one account {@code RegistrationWorker} has finished with
+     * (GATEWAY_REQUEST_BUDGET A6 Phase 4 item 6).
+     *
+     * @param outcome bounded: {@code success} (created), {@code exists} (already there — a
+     *                resumed index, which is a success), {@code failed} (the gateway refused it
+     *                and the index spent an attempt). A budget refusal is <b>none of these</b>:
+     *                nothing was sent, nothing was created, and the group is simply re-queued
+     *                (A2.6). Counting it here would make our own pacing indistinguishable from an
+     *                upstream that is rejecting accounts.
+     */
+    public void incRegistrationAccount(String outcome) {
+        Counter.builder(REGISTRATION_ACCOUNTS_TOTAL)
+                .tag("outcome", outcome)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * Materialise every {@code registration_accounts_total} series for the group whose MDC is
+     * currently set, at zero, before any of them can be incremented. Called once at the top of
+     * every group's registration pass.
+     *
+     * <p>The reason is the one spelled out at length on
+     * {@link #initGroupRecoverySeries(String...)} and it applies verbatim: a Micrometer counter
+     * does not exist until it is registered, so a counter first registered at increment time has
+     * {@code 1} as its very first scraped sample, and {@code increase()} over samples that are
+     * all {@code 1} is {@code last - first == 0}. Prometheus' counter-start extrapolation does
+     * not rescue it either — that correction is gated on {@code resultValue > 0}. A rule reading
+     * {@code increase(registration_accounts_total{outcome="failed"}[15m]) > 0} would therefore be
+     * unable to fire on a group's <em>first</em> failed account, which for a group that fails is
+     * usually the only one there is.
+     *
+     * <p>The same "the tags must match the later increments exactly" constraint applies: call it
+     * under the same group MDC the increments run under, or it registers a second series and
+     * fixes nothing.
+     */
+    public void initRegistrationSeries(String... outcomes) {
+        Tags tags = mdcTags();
+        for (String outcome : outcomes) {
+            Counter.builder(REGISTRATION_ACCOUNTS_TOTAL)
+                    .tag("outcome", outcome)
+                    .tags(tags)
+                    .register(registry);
+        }
     }
 }

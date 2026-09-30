@@ -2,6 +2,7 @@ package com.vingame.bot.infrastructure.observability;
 
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
+import com.vingame.bot.domain.botgroup.service.RegistrationWorker;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.binder.MeterBinder;
 import io.micrometer.core.instrument.config.MeterFilter;
@@ -83,6 +84,42 @@ public class ObservabilityConfig {
                             BotGroupBehaviorService::countGroupsDeadCurrently)
                     .strongReference(true)
                     .description("Number of bot groups currently in DEAD state")
+                    .register(registry);
+        };
+    }
+
+    /**
+     * The two asynchronous-registration gauges (GATEWAY_REQUEST_BUDGET A6 Phase 4 item 6).
+     * <p>
+     * {@code registration_failed_groups} is the one the {@code RegistrationStalled} rule reads,
+     * and it is a <b>gauge</b> rather than a counter on purpose: what an operator needs to be
+     * paged about is not "a registration failed at some point", it is "a group is sitting
+     * half-registered <em>right now</em> and nothing will move it". It falls to zero the moment
+     * someone presses retry, which is exactly when the alert should resolve.
+     * <p>
+     * Both read cached ints the worker refreshes on its own tick, so a Prometheus scrape never
+     * issues a Mongo query — a scrape is every 10 s across three app instances and this is the
+     * kind of gauge that quietly becomes a database load problem.
+     * <p>
+     * Unlabelled fleet aggregates, like their neighbours above. They do not need a
+     * {@code BotMdcTagsMeterFilter} allow-list entry (the filter only tags {@code bot_}-prefixed
+     * names) but they do need to stay un-prefixed — see {@code group_recovery_*}, which is
+     * un-prefixed for the same reason.
+     */
+    @Bean
+    public MeterBinder registrationGauges(RegistrationWorker registrationWorker) {
+        return registry -> {
+            Gauge.builder("registration_pending_groups", registrationWorker,
+                            RegistrationWorker::getPendingGroupCount)
+                    .strongReference(true)
+                    .description("Bot groups whose gateway accounts are still being created")
+                    .register(registry);
+
+            Gauge.builder("registration_failed_groups", registrationWorker,
+                            RegistrationWorker::getFailedGroupCount)
+                    .strongReference(true)
+                    .description("Bot groups whose account registration stopped and will not "
+                            + "resume without an operator action")
                     .register(registry);
         };
     }

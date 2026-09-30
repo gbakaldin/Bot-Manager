@@ -26,8 +26,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * real one and actually sent would cost the brand an hour-long Cloudflare block.
  * <p>
  * What this proves, per method, is exactly what a reviewer cannot see by reading: that the tier
- * a caller passes is the tier that reaches the budget, and that registration requests carry a
- * registration scope (no {@code botGroupId}) rather than a bot's.
+ * a caller passes is the tier that reaches the budget, and that a registration request carries
+ * the caller's registration scope — which since Phase 4 <b>does</b> name a {@code botGroupId},
+ * because that is the key {@code cancelScope} uses to call one off (A28.6).
  */
 @org.junit.jupiter.api.Timeout(value = 60, unit = java.util.concurrent.TimeUnit.SECONDS)
 @DisplayName("ApiGatewayClient — tier and scope of every request")
@@ -35,6 +36,10 @@ class ApiGatewayClientTierTest {
 
     private static final GatewayRequestScope BOT_SCOPE =
             GatewayRequestScope.forBot("group-1", "authtestws1", () -> false);
+
+    /** What RegistrationWorker builds: the group, the account, and a live cancel read. */
+    private static final GatewayRequestScope REGISTRATION_SCOPE =
+            GatewayRequestScope.registration("group-1", "authtestws1", () -> false);
 
     private RecordingGatewayBudget budget;
     private ApiGatewayClient client;
@@ -47,11 +52,6 @@ class ApiGatewayClientTierTest {
                 new AuthProfile("/gwms/v1/bot/login.aspx", "/gwms/v1/bot/register.aspx",
                         "/gwms/v1/bot/update-fullname.aspx", "x-tok", ctx -> null),
                 budget);
-        // registrationParallelism is a @Value field, so a client built with `new` gets 0 —
-        // and registerUsers' Semaphore(0) then parks every registration thread forever.
-        // Pre-existing, unrelated to the budget, and this is the first test to exercise
-        // registerUsers outside Spring; set it the way the container would.
-        ReflectionTestUtils.setField(client, "registrationParallelism", 2);
     }
 
     @Test
@@ -105,73 +105,71 @@ class ApiGatewayClientTierTest {
     }
 
     @Test
-    @DisplayName("setDisplayName is DEFAULT with a registration scope carrying the username")
+    @DisplayName("setDisplayName is DEFAULT and submits the caller's scope verbatim")
     void setDisplayNameIsDefaultWithARegistrationScope() {
-        assertThatThrownBy(() -> client.setDisplayName("authtestws1", "session", "Gấu Bự"))
+        assertThatThrownBy(() -> client.setDisplayName("authtestws1", "Gấu Bự",
+                REGISTRATION_SCOPE, java.time.Duration.ofMinutes(15)))
                 .isInstanceOf(RecordingGatewayBudget.Sentinel.class);
 
         assertThat(budget.only().tier()).isEqualTo(RequestTier.DEFAULT);
-        assertThat(budget.only().scope().botGroupId())
-                .as("registration runs before any bot of the group exists, so there is no group "
-                        + "to cancel it by and claiming one would be a lie")
-                .isNull();
+        assertThat(budget.only().scope())
+                .as("the caller's scope reaches the budget unchanged — it used to be replaced "
+                        + "here by a group-less one, which made a queued update-fullname "
+                        + "uncancellable by the DELETE that wanted the group gone (A28.6)")
+                .isSameAs(REGISTRATION_SCOPE);
+        assertThat(budget.only().scope().botGroupId()).isEqualTo("group-1");
         assertThat(budget.only().scope().botId()).isEqualTo("authtestws1");
     }
 
     @Test
-    // SEPARATE_THREAD, and not the class-level @Timeout, because this is the one test in the
-    // build that can HANG rather than fail. registerUsers acquires a
-    // Semaphore(registrationParallelism); that field is a @Value, so a client built with `new`
-    // has it at 0 and every registration thread parks forever (pre-existing defect, reported
-    // in the QA verdict — the fix belongs in production code, not here). The reflection set in
-    // setUp() is what avoids it; this is the belt to that braces, because a plain @Timeout runs
-    // on the test's own thread and can only report a timeout AFTER the test returns, which a
-    // parked semaphore never does. Without this, one careless edit to setUp() does not fail a
-    // build, it wedges it.
-    @org.junit.jupiter.api.Timeout(value = 30, unit = java.util.concurrent.TimeUnit.SECONDS,
-            threadMode = org.junit.jupiter.api.Timeout.ThreadMode.SEPARATE_THREAD)
-    @DisplayName("registerUsers routes every request as DEFAULT with a registration scope")
-    void registerUsersIsDefaultWithARegistrationScope() {
-        // registerUsers catches per-user failures and reports them in its result, so the
-        // sentinel becomes a recorded failure rather than a throw. Two users, so this also
-        // proves the fan-out does not accidentally share one scope object with a bot's.
-        var result = client.registerUsers("authtestws", "pw", 2);
+    @DisplayName("registerOne is DEFAULT and submits the caller's scope verbatim")
+    void registerOneIsDefaultWithTheCallersScope() {
+        assertThatThrownBy(() -> client.registerOne("authtestws", "pw", 1,
+                REGISTRATION_SCOPE, java.time.Duration.ofMinutes(15)))
+                .isInstanceOf(RecordingGatewayBudget.Sentinel.class);
 
-        assertThat(result.getSuccessCount()).isZero();
-        assertThat(result.getFailureCount()).isEqualTo(2);
-        assertThat(budget.submissions()).hasSize(2);
-        assertThat(budget.tiers()).containsExactly(RequestTier.DEFAULT, RequestTier.DEFAULT);
-        assertThat(budget.submissions())
-                .allSatisfy(submission -> {
-                    assertThat(submission.scope().botGroupId()).isNull();
-                    assertThat(submission.scope().botId()).isEqualTo("authtestws");
-                    assertThat(submission.wsUpgrade()).isFalse();
-                });
+        assertThat(budget.submissions()).hasSize(1);
+        assertThat(budget.only().tier()).isEqualTo(RequestTier.DEFAULT);
+        assertThat(budget.only().scope()).isSameAs(REGISTRATION_SCOPE);
+        assertThat(budget.only().wsUpgrade()).isFalse();
     }
 
     @Test
-    @DisplayName("KNOWN DEFECT: a client built outside Spring has registrationParallelism=0")
-    void registrationParallelismIsZeroOutsideSpring() {
-        // Pre-existing and unrelated to the budget, but it is now load-bearing for this test
-        // file, so it is pinned rather than left as folklore in a setUp() comment.
-        //
-        // registerUsers does `new Semaphore(registrationParallelism)` and then acquire() on
-        // every registration thread. The field is a @Value, so a client the container did not
-        // build carries 0, and Semaphore(0).acquire() parks forever: not a failure, a HANG.
-        // Nothing in production hits it (EnvironmentClientRegistry resolves the bean from the
-        // context), and the fix — a sane floor, or a constructor parameter — belongs in
-        // production code, which QA does not touch.
-        //
-        // If this ever starts failing because the field gained a default, delete this test and
-        // the ReflectionTestUtils line in setUp() together.
+    @DisplayName("registerOne makes exactly one request, and a budget refusal is not swallowed")
+    void registerOneDoesNotSwallowABudgetRefusal() {
+        // The bulk predecessor caught Exception per user into a failureCount, which is how a
+        // budget refusal became an UpstreamRegistrationException and then a 502 about a gateway
+        // that was never asked (A25.1, review F2). One index, one request, and the refusal
+        // propagates to RegistrationWorker, which is the only component that can tell "not now"
+        // from "this account cannot be created" and re-queue rather than fail the group.
+        assertThatThrownBy(() -> client.registerOne("authtestws", "pw", 7,
+                REGISTRATION_SCOPE, java.time.Duration.ofMinutes(15)))
+                .isInstanceOf(RecordingGatewayBudget.Sentinel.class);
+
+        assertThat(budget.submissions())
+                .as("one index is one gateway request — no fan-out, no semaphore, nothing to "
+                        + "size from a @Value field that is zero outside Spring (QA G1)")
+                .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("a client built outside Spring registers without hanging")
+    void aClientBuiltOutsideSpringDoesNotHang() {
+        // The predecessor of this test pinned a KNOWN DEFECT: registerUsers sized a Semaphore
+        // from the `user.registration.parallelism` @Value field, so a client the container did
+        // not build carried 0 and Semaphore(0).acquire() parked every registration thread
+        // forever — a HANG, not a failure, which is why the old test carried a SEPARATE_THREAD
+        // timeout as a wedge guard. Deleting the fan-out deleted the defect: there is no
+        // concurrency here to bound and no field to forget to set.
         ApiGatewayClient raw = new ApiGatewayClient(
                 new DisplayNameService(), new BotMetrics(new SimpleMeterRegistry()));
+        raw.init("http://127.0.0.1:1/never-reached", "bc114097",
+                new AuthProfile("/l", "/r", "/u", "x", ctx -> null), budget);
+        ReflectionTestUtils.setField(raw, "botIp", "127.0.0.1");
 
-        assertThat(ReflectionTestUtils.getField(raw, "registrationParallelism"))
-                .as("a zero here is why every test that exercises registerUsers outside Spring "
-                        + "must set this field, and why the one that does carries a preemptive "
-                        + "timeout")
-                .isEqualTo(0);
+        assertThatThrownBy(() -> raw.registerOne("authtestws", "pw", 1,
+                REGISTRATION_SCOPE, java.time.Duration.ofMinutes(15)))
+                .isInstanceOf(RecordingGatewayBudget.Sentinel.class);
     }
 
     @Test

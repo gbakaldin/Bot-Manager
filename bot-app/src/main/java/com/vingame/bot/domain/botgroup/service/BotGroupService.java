@@ -1,18 +1,15 @@
 package com.vingame.bot.domain.botgroup.service;
 
-import com.vingame.bot.config.client.EnvironmentClientRegistry;
-import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
-import com.vingame.bot.common.exception.GatewayBudgetExhaustedException;
 import com.vingame.bot.common.exception.UpstreamRegistrationException;
-import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.ActivationMode;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.RegistrationState;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import com.vingame.bot.domain.botgroup.validation.BotGroupConfigValidationService;
 import com.vingame.bot.domain.brand.model.ProductCode;
@@ -20,7 +17,6 @@ import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.service.GameService;
-import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.data.mongodb.core.MongoTemplate;
@@ -39,28 +35,28 @@ public class BotGroupService {
 
     private final BotGroupRepository repository;
     private final BotGroupMapper mapper;
-    private final EnvironmentClientRegistry clientRegistry;
     private final EnvironmentService environmentService;
     private final GameService gameService;
     private final MongoTemplate mongoTemplate;
     private final BotGroupConfigValidationService configValidation;
     private final BotGroupBehaviorService behaviorService;
+    private final RegistrationWorker registrationWorker;
 
     public BotGroupService(BotGroupRepository repository, BotGroupMapper mapper,
-                           EnvironmentClientRegistry clientRegistry,
                            EnvironmentService environmentService,
                            GameService gameService,
                            MongoTemplate mongoTemplate,
                            BotGroupConfigValidationService configValidation,
-                           @Lazy BotGroupBehaviorService behaviorService) {
+                           @Lazy BotGroupBehaviorService behaviorService,
+                           RegistrationWorker registrationWorker) {
         this.repository = repository;
         this.mapper = mapper;
-        this.clientRegistry = clientRegistry;
         this.environmentService = environmentService;
         this.gameService = gameService;
         this.mongoTemplate = mongoTemplate;
         this.configValidation = configValidation;
         this.behaviorService = behaviorService;
+        this.registrationWorker = registrationWorker;
     }
 
     public BotGroup findById(String id) {
@@ -119,22 +115,22 @@ public class BotGroupService {
     /**
      * Save or update a bot group.
      * <p>
-     * If the bot group is NEW (ID is null):
-     * - Registers all bot users on the authentication server (unless skipRegistration is true)
-     * - Generates a new ID
-     * - Persists to MongoDB
-     * - Throws exception if user registration completely fails
+     * If the bot group is NEW (ID is null): validates, generates an id, persists, and — unless
+     * {@code skipRegistration} — marks it {@code REGISTRATION_PENDING} so
+     * {@link RegistrationWorker} creates its accounts in the background. <b>No upstream call is
+     * made on this thread</b> (GATEWAY_REQUEST_BUDGET A2, Phase 4); the 200 means the record
+     * exists, not that the accounts do.
      * <p>
-     * If the bot group ALREADY EXISTS (ID is set):
-     * - Skips user registration (users already registered)
-     * - Updates the existing document
+     * If the bot group ALREADY EXISTS (ID is set): updates the document. No registration state is
+     * touched here — {@link #update(String, BotGroupDTO)} owns the one PATCH that can restart
+     * registration (a {@code botCount} raise, A2.7).
      *
      * @param botGroup The bot group to save or update
-     * @param skipRegistration If true, skips user registration (for migrating existing bots)
-     * @return The saved/updated bot group
-     * @throws UpstreamRegistrationException if user registration completely fails (new groups only);
-     *         mapped to HTTP 502 by {@link com.vingame.bot.common.exception.RestExceptionHandler}.
+     * @param skipRegistration If true, no accounts are registered at all (migrating existing bots)
+     * @return The saved/updated bot group, carrying its generated id
      * @throws ResourceNotFoundException if the environment doesn't exist
+     * @throws BadRequestException on a config or username-length problem — still answered
+     *         synchronously, because those are decidable without asking the gateway anything
      */
     public BotGroup save(BotGroup botGroup, boolean skipRegistration) {
         boolean isNewGroup = (botGroup.getId() == null || botGroup.getId().isEmpty());
@@ -153,63 +149,34 @@ public class BotGroupService {
             validateGameEnvironmentMatch(botGroup);
 
             if (skipRegistration) {
+                // existingGroup=true. No upstream call, so there is nothing to pace and nothing
+                // to resume: the group is left with no registration state at all, exactly as it
+                // has been since the migration flag existed (A2.8).
                 log.info("Skipping user registration for bot group '{}' (existing group migration)",
                          botGroup.getName());
             } else {
                 validateUsernameLength(botGroup);
 
-                EnvironmentClients clients = clientRegistry.getClients(botGroup.getEnvironmentId());
-
-                log.info("Registering {} users with prefix '{}' and password '{}'",
-                         botGroup.getBotCount(), botGroup.getNamePrefix(), botGroup.getPassword());
-
-                UserRegistrationResult registrationResult = clients.getApiGatewayClient().registerUsers(
-                        botGroup.getNamePrefix(),
-                        botGroup.getPassword(),
-                        botGroup.getBotCount());
-
-                if (registrationResult.isCompleteDeferral()) {
-                    // AD-11 / review F2. Nothing was created and nothing was refused: the budget
-                    // declined to send, so a 502 "Game server error" would point an operator at a
-                    // gateway that is working perfectly, which is the whole reason AD-11 exists.
-                    // 429 with Retry-After is the honest answer, and it is what V3d asks for
-                    // ("never a 502").
-                    //
-                    // Narrower than isCompleteFailure() on purpose: one genuine upstream rejection
-                    // in the batch makes it a real failure again, because then something really did
-                    // refuse us. A deferral is resumable — nothing was created, so a retry is a
-                    // first registration and not the EXISTED case — which is what makes answering
-                    // "try again" correct rather than merely polite.
-                    log.warn("Registration for bot group '{}' was entirely deferred by the gateway "
-                                    + "budget ({} of {} users) — nothing was created and nothing "
-                                    + "was refused upstream",
-                            botGroup.getName(), registrationResult.getDeferredCount(),
-                            registrationResult.getTotalRequested());
-                    throw new GatewayBudgetExhaustedException(RequestTier.DEFAULT,
-                            botGroup.getEnvironmentId(), null);
-                }
-
-                if (registrationResult.isCompleteFailure()) {
-                    String errorMsg = String.format(
-                        "Failed to register any users for bot group '%s'. Errors: %s",
-                        botGroup.getName(),
-                        String.join("; ", registrationResult.getErrors())
-                    );
-                    log.error(errorMsg);
-                    throw new UpstreamRegistrationException(errorMsg);
-                }
-
-                if (registrationResult.isPartialSuccess()) {
-                    log.warn("Partial user registration for bot group '{}': {}/{} succeeded. Errors: {}",
-                             botGroup.getName(),
-                             registrationResult.getSuccessCount(),
-                             registrationResult.getTotalRequested(),
-                             String.join("; ", registrationResult.getErrors()));
-                } else {
-                    log.info("Successfully registered all {} users for bot group '{}'",
-                             registrationResult.getSuccessCount(),
-                             botGroup.getName());
-                }
+                // ASYNCHRONOUS from Phase 4 (A2). Nothing upstream happens on this thread: the
+                // group is persisted as REGISTRATION_PENDING at 0/botCount and RegistrationWorker
+                // creates the accounts one at a time, off the request thread.
+                //
+                // The predecessor called registerUsers(prefix, password, botCount) right here,
+                // synchronously, and waited for all of it. Under the Cloudflare budget that is not
+                // a slow endpoint, it is an impossible one: a 200-account create was a worst case
+                // of ~5 hours parked on a Tomcat worker (A25.2), and a restart in the middle left
+                // a group whose document said nothing about how many accounts existed.
+                //
+                // What a client sees: 200 with targetStatus "REGISTRATION_PENDING" and
+                // registeredCount 0, then GET /{id} or GET /{id}/status for progress. Same
+                // 200-means-accepted contract as /start and /restart (A3).
+                botGroup.setRegistrationState(RegistrationState.PENDING);
+                botGroup.setRegisteredCount(0);
+                botGroup.setNamedCount(0);
+                botGroup.setRegistrationError(null);
+                log.info("Bot group '{}' will register {} accounts with prefix '{}' in the "
+                                + "background", botGroup.getName(), botGroup.getBotCount(),
+                        botGroup.getNamePrefix());
             }
 
             botGroup.setId(UUID.randomUUID().toString());
@@ -227,7 +194,17 @@ public class BotGroupService {
         }
         botGroup.setUpdatedAt(now);
 
-        return repository.save(botGroup);
+        BotGroup saved = repository.save(botGroup);
+
+        // AFTER the persist, never before: the worker selects by the persisted state, so a group
+        // enqueued ahead of its own document would be looked for and not found. Purely a
+        // promptness hand-off — the next tick would pick it up regardless, which is also what
+        // makes it safe for the enqueue to be lost.
+        if (RegistrationState.isPending(saved.getRegistrationState())) {
+            registrationWorker.enqueue(saved.getId());
+        }
+
+        return saved;
     }
 
     /**
@@ -334,15 +311,78 @@ public class BotGroupService {
         repository.save(group);
     }
 
+    /**
+     * PATCH one bot group, merging the DTO's non-null fields over the persisted document.
+     * <p>
+     * <b>Raising {@code botCount} extends the registration target</b> (GATEWAY_REQUEST_BUDGET
+     * A2.7). That is what turns "register 200 more bots for this group" from a script into a
+     * product feature: the merged group goes back to {@code REGISTRATION_PENDING} and the worker
+     * resumes from {@code registeredCount + 1}, so the accounts that exist are never touched.
+     * <p>
+     * <b>Lowering it never un-registers anything</b>, and {@code registeredCount} is allowed to
+     * exceed {@code botCount} as a result — it is a fact about accounts that exist, not an
+     * intent. That is also the clean exit from a half-failed 500-account group: PATCH
+     * {@code botCount} down to whatever registered, and start it.
+     */
     public BotGroup update(String id, BotGroupDTO updateDTO) {
         BotGroup existing = findById(id);
         mapper.updateEntityFromDTO(updateDTO, existing);
         // Validate the post-merge entity (AD-6) so cross-field PATCH rules — e.g.
         // lowering maxBet below the persisted minBet — are caught before save.
         configValidation.validate(existing);
+
+        // A2.7. Checked AFTER the merge, against the merged count, because "did this PATCH ask
+        // for more accounts than exist?" is a question about the result and not about the body.
+        // A group created with existingGroup=true is deliberately included: its accounts were
+        // migrated, so raising its botCount has to register the NEW indices, and there is no
+        // other way to ask for that. registeredCount is 0 for such a group, so the worker starts
+        // at index 1 and the migrated accounts answer EXISTED — two requests each and no harm,
+        // which is why this does not need a special case.
+        if (existing.getBotCount() > existing.getRegisteredCount()
+                && !RegistrationState.isFailed(existing.getRegistrationState())) {
+            existing.setRegistrationState(RegistrationState.PENDING);
+        }
+
         // Route through save so updatedAt is (re)stamped on every mutation (AD-16);
-        // existing has an id so this is the update path (no registration).
+        // existing has an id so this is the update path (no new-group branch). save() also owns
+        // the enqueue — its guard is on the PERSISTED state, so a PATCH that just set PENDING
+        // above is picked up there and must not be enqueued a second time here.
         return save(existing);
+    }
+
+    /**
+     * Resume a registration that stopped on a refused account
+     * (GATEWAY_REQUEST_BUDGET A2.6) — the one new action endpoint this feature adds.
+     * <p>
+     * Clears {@code FAILED} back to {@code PENDING}, clears the recorded reason, and re-enqueues.
+     * The worker resumes from {@code registeredCount + 1}: <b>nothing starts over</b>, and the
+     * accounts that exist are not re-created. It also resets the in-memory attempt budget, which
+     * is what makes this an operator action rather than a retry the worker could have done
+     * itself — a group that has run out of attempts has already been reported as needing a human,
+     * and retrying it silently is exactly what the budget exists to stop.
+     *
+     * @throws BadRequestException if the group is not in {@code REGISTRATION_FAILED}. A retry of
+     *         a group that is registering happily, or of one that finished, is a client mistake
+     *         worth naming rather than a no-op worth hiding.
+     */
+    public BotGroup retryRegistration(String id) {
+        BotGroup group = findById(id);
+        if (!RegistrationState.isFailed(group.getRegistrationState())) {
+            throw new BadRequestException(String.format(
+                    "Bot group '%s' is not in REGISTRATION_FAILED (%d/%d accounts registered, "
+                            + "state %s), so there is nothing to retry.",
+                    group.getName(), group.getRegisteredCount(), group.getBotCount(),
+                    group.getRegistrationState() == null ? "complete"
+                            : group.getRegistrationState()));
+        }
+        group.setRegistrationState(RegistrationState.PENDING);
+        group.setRegistrationError(null);
+        group.setUpdatedAt(Instant.now());
+        BotGroup saved = repository.save(group);
+        log.info("group {} ({}): registration retry requested — resuming from account {}",
+                id, saved.getName(), saved.getRegisteredCount() + 1);
+        registrationWorker.enqueue(id);
+        return saved;
     }
 
     /**
@@ -355,6 +395,16 @@ public class BotGroupService {
      * the bot server — there is no such API and leftover accounts are expected.
      */
     public void delete(String id) {
+        // Call the registration off FIRST, before stopAndLogout takes the group lock
+        // (GATEWAY_REQUEST_BUDGET A28.6). Same ordering rule as stop()'s cancel-then-lock: a
+        // registration request parked inside the budget can be waiting up to
+        // `registration.max-wait` (15 m), and cancelScope is the only thing that wakes it. It is
+        // a no-op for a group that is not registering, which is the common case.
+        //
+        // Read before the delete because the environment id is how the budget is found, and the
+        // document is about to stop existing.
+        repository.findById(id).ifPresent(
+                group -> registrationWorker.cancel(id, group.getEnvironmentId()));
         behaviorService.stopAndLogout(id);
         repository.deleteById(id);
     }

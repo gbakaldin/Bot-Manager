@@ -227,6 +227,16 @@ public class RecordingGatewayBudget implements GatewayBudget {
         return Duration.ofMinutes(15);
     }
 
+    /**
+     * Zero, i.e. "this budget paces you" — a recording fixture must never make its caller sleep
+     * 600 ms per account, which would turn a five-account test into a three-second one and a
+     * fifty-account test into a build no one runs.
+     */
+    @Override
+    public Duration observeModePacing() {
+        return Duration.ZERO;
+    }
+
     @Override
     public Duration maxWait(RequestTier tier) {
         return tier == RequestTier.ESSENTIAL ? null : Duration.ofMinutes(10);

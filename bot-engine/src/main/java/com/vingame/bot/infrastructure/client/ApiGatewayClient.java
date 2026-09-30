@@ -9,8 +9,8 @@ import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.infrastructure.auth.AuthProfile;
 import com.vingame.bot.infrastructure.gateway.GatewayBudget;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationRequest;
+import com.vingame.bot.infrastructure.client.dto.RegistrationOutcome;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResponse;
-import com.vingame.bot.infrastructure.client.dto.UserRegistrationResult;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.websocketparser.auth.AuthClient;
@@ -30,17 +30,9 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.Callable;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 /**
@@ -75,6 +67,24 @@ public class ApiGatewayClient {
     private static final String SESSION_TOKEN_HEADER = "X-TOKEN";
 
     /**
+     * The gwms body status meaning "that already exists" — <b>at HTTP 200</b>, with
+     * {@code code: 409} beside it. One string, two meanings, and which one it has depends
+     * entirely on the endpoint that was called (A28.3):
+     * <ul>
+     *   <li>from {@code register.aspx} it means <b>this account already exists</b>, i.e. this
+     *       index is already done — which is what makes a resumed registration possible at all
+     *       ({@link RegistrationOutcome#ALREADY_EXISTED});</li>
+     *   <li>from {@code update-fullname.aspx} it means <b>that display name is taken</b>, i.e.
+     *       re-roll ({@link #isDisplayNameTaken}).</li>
+     * </ul>
+     * Reading it against the wrong endpoint gets both cases exactly backwards: a resumed account
+     * would look like a naming collision, and a collided name would look like a finished account.
+     * Captured live on 097/BOM staging —
+     * {@code docs/reviews/GATEWAY_REQUEST_BUDGET/gwms-register-envelope.md}.
+     */
+    static final String STATUS_EXISTED = "EXISTED";
+
+    /**
      * The house bound on one gateway round trip, on every request this class makes.
      * <p>
      * It used to be four copies of {@code Duration.ofSeconds(10)} and one request with no
@@ -88,19 +98,6 @@ public class ApiGatewayClient {
     private final DisplayNameService displayNameService;
     private final BotMetrics metrics;
     private final HttpClient httpClient;
-
-    /**
-     * Max number of users to register simultaneously.
-     * Controls concurrency to avoid overwhelming the auth server.
-     * Configurable via application.properties: user.registration.parallelism
-     * <p>
-     * This bounds <b>concurrency</b> (how many sockets are open at once), not <b>rate</b>.
-     * Since GATEWAY_REQUEST_BUDGET AD-2 the rate is the environment's
-     * {@link GatewayBudget}'s business, so raising this number no longer raises the request
-     * rate against the gateway — it only makes the admitted requests overlap more.
-     */
-    @Value("${user.registration.parallelism:10}")
-    private int registrationParallelism;
 
     @Value("${bot.ip}")
     private String botIp;
@@ -361,171 +358,50 @@ public class ApiGatewayClient {
     }
 
     /**
-     * Bulk register users on the authentication server using parallel execution.
+     * Register <b>one</b> account — {@code userNamePrefix + index} — on the auth gateway
+     * (GATEWAY_REQUEST_BUDGET A6 Phase 4 item 5).
      * <p>
-     * Uses virtual threads with controlled concurrency (configurable via user.registration.parallelism).
-     * This dramatically reduces registration time compared to sequential execution:
-     * - Sequential (old): 100 users × 3s = 300s (~5 minutes)
-     * - Parallel (new): 100 users / 10 parallelism × ~3s = ~30s
+     * <b>This replaced a bulk, fan-out {@code registerUsers(prefix, password, count)}</b>, and
+     * the fan-out is what had to go rather than be tuned. It ran {@code count} virtual threads
+     * under a {@code Semaphore(user.registration.parallelism)} and joined them with
+     * {@code allOf(...).join()}, which means:
+     * <ul>
+     *   <li>a 200-account create was a worst case of ~5 hours parked on one Tomcat worker, once
+     *       each user could wait {@code registration.max-wait} (A25.2);</li>
+     *   <li>a budget refusal came back as a per-user failure string and then as an
+     *       {@code UpstreamRegistrationException} — a <b>502 about a gateway that was never
+     *       asked</b> (A25.1, review F2);</li>
+     *   <li>the semaphore was sized from a {@code @Value} field, so any caller the Spring
+     *       container did not build got {@code Semaphore(0)} and <b>hung</b> rather than failed
+     *       (QA's G1 / Open Item 15).</li>
+     * </ul>
+     * All three were properties of the bulk method. {@code RegistrationWorker} calls this one
+     * index at a time from a single virtual thread, so there is no concurrency to bound, no
+     * request thread to park, and no batch whose failure has to be summarised.
+     * <p>
+     * <b>The caller supplies the scope and the wait, and neither has a default here.</b> The
+     * scope must carry the {@code botGroupId} (A28.6) or a {@code DELETE} arriving mid-
+     * registration cannot call off a queued request — {@code GatewayBudget.cancelScope} keys on
+     * exactly that. The wait is the batch-wide {@code registration.max-wait}, passed down rather
+     * than re-read, so an index admitted late does not restart the clock.
+     * <p>
+     * The tier is <b>not</b> a parameter: registration is {@link RequestTier#DEFAULT} by
+     * definition (AD-3) — it is the one class of gateway work whose deferral costs nothing that
+     * is not recoverable, because an unattempted index is simply attempted later. There is no
+     * call site that could honestly ask for anything else.
      *
-     * @param userNamePrefix Prefix for usernames (e.g., "bot" creates "bot1", "bot2", etc.)
-     * @param password       Password for all created users
-     * @param count          Number of users to create
-     * @return UserRegistrationResult with success/failure details
+     * @return {@link RegistrationOutcome#CREATED} or {@link RegistrationOutcome#ALREADY_EXISTED};
+     *         both mean "this index is done"
+     * @throws RuntimeException on any other envelope — fail closed (A28.3). A 200 is not proof of
+     *         anything here, so an unrecognised {@code status} costs the index an attempt rather
+     *         than being optimistically believed.
      */
-    public UserRegistrationResult registerUsers(String userNamePrefix, String password, int count) {
-        checkInitialized();
-        log.info("Starting parallel user registration: {} users with prefix '{}' (parallelism={})",
-                count, userNamePrefix, registrationParallelism);
-
-        AtomicInteger successCount = new AtomicInteger(0);
-        AtomicInteger failureCount = new AtomicInteger(0);
-        AtomicInteger deferredCount = new AtomicInteger(0);
-        List<String> errors = Collections.synchronizedList(new ArrayList<>());
-
-        Semaphore semaphore = new Semaphore(registrationParallelism);
-
-        // ONE deadline for the whole batch, not one per user (review F2 / A25.2). Each user waits
-        // at most `registration.max-wait`, and with `allOf(...).join()` over ceil(N/10) batches
-        // that used to compound: a 200-bot create was a worst case of ~5 hours on a single Tomcat
-        // worker. With a shared deadline the whole call is bounded by the 15 minutes the property
-        // actually promises, and users past it are deferred immediately rather than queueing for a
-        // window that is already gone. A deferral is resumable — nothing was created — so giving
-        // up early costs an operator a retry, not an account.
-        long registrationDeadlineNanos =
-                System.nanoTime() + gatewayBudget.registrationMaxWait().toNanos();
-
-        // Use virtual threads for parallel registration
-        try (ExecutorService executor = Executors.newThreadPerTaskExecutor(
-                Thread.ofVirtual().name("user-registration-", 0).factory())) {
-
-            List<CompletableFuture<Void>> futures = new ArrayList<>(count);
-
-            for (int i = 1; i <= count; i++) {
-                final int userIndex = i;
-                final String username = userNamePrefix + userIndex;
-
-                CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-                    try {
-                        // Acquire permit (blocks if at max concurrency)
-                        semaphore.acquire();
-                        try {
-                            registerSingleUserWithDisplayName(userNamePrefix, password, userIndex, count,
-                                    remainingRegistrationWait(registrationDeadlineNanos));
-                            successCount.incrementAndGet();
-                        } finally {
-                            semaphore.release();
-                        }
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        failureCount.incrementAndGet();
-                        String errorMsg = String.format("Registration interrupted for %s", username);
-                        errors.add(errorMsg);
-                        log.error(errorMsg);
-                    } catch (GatewayBudgetException e) {
-                        // AD-9 / review F2: this is the ONE path in the phase that still reported a
-                        // budget outcome as an upstream failure, and it did it twice over — as a
-                        // per-user `failureCount` that turns into a 502 "Game server error" about a
-                        // gateway that was never asked, and as an ERROR line PER USER, so a starved
-                        // 300-user registration produced 300 page-worthy lines for the budget
-                        // working exactly as designed.
-                        //
-                        // DEBUG, not WARN: the rate is a function of user count, which CLAUDE.md's
-                        // tier rule puts below INFO outright. The group-level statement is the one
-                        // summary line below, and the operator-facing outcome is the 429.
-                        deferredCount.incrementAndGet();
-                        log.debug("Registration of {} was deferred by the gateway budget: {}",
-                                username, e.getMessage());
-                    } catch (Exception e) {
-                        failureCount.incrementAndGet();
-                        String errorMsg = String.format("Failed to register %s: %s", username, e.getMessage());
-                        errors.add(errorMsg);
-                        log.error(errorMsg);
-                    }
-                }, executor);
-
-                futures.add(future);
-            }
-
-            // Wait for all registrations to complete
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-        }
-
-        log.info("Parallel user registration completed. Success: {}, Failures: {}, "
-                        + "deferred by the gateway budget: {}",
-                successCount.get(), failureCount.get(), deferredCount.get());
-
-        return UserRegistrationResult.builder()
-                .totalRequested(count)
-                .successCount(successCount.get())
-                .failureCount(failureCount.get())
-                .deferredCount(deferredCount.get())
-                .errors(errors)
-                .build();
-    }
-
-    /**
-     * How long this user's registration may still wait, against the batch's shared deadline
-     * (review F2).
-     * <p>
-     * {@link Duration#ZERO} once the deadline has passed, which the budget reads as
-     * <b>now-or-never</b> — so the tail of an over-long batch is deferred immediately instead of
-     * each user starting its own fifteen-minute clock.
-     */
-    private static Duration remainingRegistrationWait(long deadlineNanos) {
-        long remaining = deadlineNanos - System.nanoTime();
-        return remaining <= 0 ? Duration.ZERO : Duration.ofNanos(remaining);
-    }
-
-    /**
-     * Register a single user and set their display name.
-     * This method is called in parallel from registerUsers().
-     * <p>
-     * Uses tokens returned directly from the register response — no re-authentication needed.
-     *
-     * @param userNamePrefix Username prefix
-     * @param password       Password
-     * @param index          User index (1-based)
-     * @param totalCount     Total number of users being registered (for logging)
-     */
-    private void registerSingleUserWithDisplayName(String userNamePrefix, String password, int index,
-                                                   int totalCount, Duration remainingWait) {
-        String username = userNamePrefix + index;
-
-        try {
-            RegistrationResult result = registerSingleUser(userNamePrefix, password, index, remainingWait);
-            log.debug("Successfully registered user {}/{}: {}", index, totalCount, username);
-
-            if (displayNameService.hasDisplayNames()) {
-                try {
-                    String displayName = setDisplayNameWithRetry(username, result.authToken(), 5,
-                            remainingWait);
-                    if (displayName != null) {
-                        log.debug("Set display name '{}' for user {}", displayName, username);
-                    } else {
-                        log.warn("Could not set display name for user {}", username);
-                    }
-                } catch (Exception e) {
-                    log.warn("Failed to set display name for {}: {}", username, e.getMessage());
-                }
-            }
-        } catch (IOException | InterruptedException e) {
-            throw new RuntimeException("Failed to register user: " + username, e);
-        }
-    }
-
-    private record RegistrationResult(String agencyToken, String authToken, String fingerprint) {}
-
-    private RegistrationResult registerSingleUser(String userNamePrefix, String password, int index)
+    public RegistrationOutcome registerOne(String userNamePrefix, String password, int index,
+                                           GatewayRequestScope scope, Duration maxWait)
             throws IOException, InterruptedException {
-        return registerSingleUser(userNamePrefix, password, index, gatewayBudget.registrationMaxWait());
-    }
-
-    private RegistrationResult registerSingleUser(String userNamePrefix, String password, int index,
-                                                  Duration maxWait) throws IOException, InterruptedException {
+        checkInitialized();
         String ip = botIp;
         String username = userNamePrefix + index;
-        String fingerprint = AuthClient.generateFingerprint();
 
         UserRegistrationRequest request = UserRegistrationRequest.builder()
                 .username(username)
@@ -539,69 +415,94 @@ public class ApiGatewayClient {
                 .source(appId)
                 .type("BOT")
                 .build();
-        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder()
-                .uri(URI.create(apiGateway + registrationPath))
-                .header("Content-Type", "application/json")
-                .header(SESSION_TOKEN_HEADER, xToken);
 
         String requestBody = mapper.writeValueAsString(request);
         log.debug("[Register] POST {} | X-TOKEN: {} | body: {}",
                 apiGateway + registrationPath, xToken, requestBody);
 
-        HttpRequest httpRequest = requestBuilder
+        HttpRequest httpRequest = HttpRequest.newBuilder()
+                .uri(URI.create(apiGateway + registrationPath))
+                .header("Content-Type", "application/json")
+                .header(SESSION_TOKEN_HEADER, xToken)
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                 .timeout(GATEWAY_REQUEST_TIMEOUT)
                 .build();
 
-        // DEFAULT tier (AD-3): registration is the work whose deferral costs nothing that is
-        // not recoverable. The scope carries the username PREFIX, which is the only identity
-        // a registration has — it runs inside BotGroupService.save, before any bot of the
-        // group exists, so there is no botGroupId to cancel it by.
-        //
-        // ...with the registration WAIT OVERRIDE (AD-19), not DEFAULT's 30 s. The tier still
-        // decides the ceiling and the priority; only the patience is different, because a
-        // registration that is refused half way through a group leaves a HALF-REGISTERED group,
-        // and that is the state nobody comes back to. A slow one is merely slow.
-        HttpResponse<String> response = send(RequestTier.DEFAULT,
-                GatewayRequestScope.registration(userNamePrefix), httpRequest, maxWait);
+        // DEFAULT tier with the registration WAIT OVERRIDE (AD-3, AD-19), not DEFAULT's 30 s.
+        // The tier still decides the ceiling and the priority; only the patience is different,
+        // because a registration refused half way through a group leaves a HALF-REGISTERED
+        // group, and that is the state nobody comes back to. A slow one is merely slow.
+        HttpResponse<String> response = send(RequestTier.DEFAULT, scope, httpRequest, maxWait);
         String responseBody = response.body();
         log.debug("[Register] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
-        UserRegistrationResponse registrationResponse = mapper.readValue(responseBody, UserRegistrationResponse.class);
+        UserRegistrationResponse registrationResponse =
+                mapper.readValue(responseBody, UserRegistrationResponse.class);
+        String status = registrationResponse.getStatus();
 
-        if (!registrationResponse.isSuccess() || registrationResponse.getError() != null) {
-            String errorMsg = String.format("Registration failed: %s (status: %s, code: %d)",
-                registrationResponse.getMessage(),
-                registrationResponse.getStatus(),
-                registrationResponse.getCode());
-            throw new RuntimeException(errorMsg);
+        // The resumability read, and it comes FIRST because the alternative — isSuccess() — would
+        // never see it: the EXISTED envelope is HTTP 200 with code 409, so isSuccess() is false
+        // and the generic throw below would report an already-done index as a failure. That is
+        // the whole of Open Item 13.
+        if (STATUS_EXISTED.equalsIgnoreCase(status)) {
+            log.debug("User {} already exists — index {} is already registered", username, index);
+            return RegistrationOutcome.ALREADY_EXISTED;
         }
 
-        var data = registrationResponse.getData().get(0);
-        log.debug("Registered user {} with sessionId={} (fingerprint={})",
-                username, data.getSessionId(), fingerprint);
-        return new RegistrationResult(data.getToken(), data.getSessionId(), fingerprint);
+        if (!registrationResponse.isSuccess() || registrationResponse.getError() != null) {
+            // Fail closed. The message carries status and code because those are what an operator
+            // compares against gwms-register-envelope.md when a brand answers a shape we have not
+            // seen; it deliberately carries no host, no token and no request body (A20.8), since
+            // it ends up in registrationError and therefore on GET /{id}/status.
+            throw new RuntimeException(String.format(
+                    "Registration failed for %s: %s (status: %s, code: %d)",
+                    username, registrationResponse.getMessage(), status,
+                    registrationResponse.getCode()));
+        }
+
+        // NOTE: isSuccess() is `status == "OK" || code == 200`, so a 200 carrying an unrecognised
+        // status is read as success. That is deliberately left as it is: isSuccess() is this
+        // codebase's definition of an accepted gwms envelope on every brand that works today, and
+        // tightening it to `status == "OK"` on the one path a 500-account create runs through is
+        // how a brand with different wording stops being able to create groups at all. The
+        // EXISTED arm above is the case that actually needed distinguishing.
+        var data = registrationResponse.getData();
+        if (data != null && !data.isEmpty()) {
+            log.debug("Registered user {} (sessionId={})", username, data.get(0).getSessionId());
+        } else {
+            log.debug("Registered user {} — envelope carried no data block", username);
+        }
+        return RegistrationOutcome.CREATED;
     }
 
     /**
      * Set or update the display name (fullname) for a user.
      *
-     * @param username     The username (required for B52 endpoint)
-     * @param sessionToken Retained for signature compatibility; no longer used (X-TOKEN is always used).
-     * @param displayName  The new display name to set
-     * @return true if successful, false if name is already taken
+     * <p><b>There is no session token here, and its absence is load-bearing.</b> This endpoint
+     * authenticates with the per-environment admin {@code X-TOKEN} and identifies the account by
+     * the {@code username} in the body — exactly like {@code register.aspx} and
+     * {@code deposit.aspx}. The parameter that used to sit here was documented as "retained for
+     * signature compatibility; no longer used" and was, literally, never read.
+     *
+     * <p>That is what makes the <b>resume path cost two gateway requests rather than three</b>
+     * (GATEWAY_REQUEST_BUDGET A30, correcting A17.3 / A28.3). The plan reasoned that an index
+     * which registered but was never named could not be finished from a re-register, because a
+     * re-register returns no {@code session_id} and {@code setDisplayName} needs one — so it
+     * budgeted {@code register + login + update-fullname}. The second half of that is false in
+     * this codebase: no token is needed, so the worker calls {@code update-fullname} directly and
+     * the login never happens. Do not add one back on the strength of the plan's arithmetic.
+     *
+     * @param username    the account to name; the gateway's only identifier for it
+     * @param displayName the new display name to set
+     * @param scope       who this request belongs to and how to learn it has been called off. It
+     *                    carries the {@code botGroupId} so a {@code DELETE} during registration
+     *                    can cancel a queued one (A28.6)
+     * @param maxWait     the batch's shared registration wait, passed down rather than re-read so
+     *                    a late attempt does not restart the clock (review F2)
+     * @return true if successful, false if the name is already taken
      */
-    public boolean setDisplayName(String username, String sessionToken, String displayName) {
-        return setDisplayName(username, sessionToken, displayName,
-                gatewayBudget.registrationMaxWait());
-    }
-
-    /**
-     * {@link #setDisplayName(String, String, String)} with an explicit registration wait
-     * (review F2).
-     */
-    public boolean setDisplayName(String username, String sessionToken, String displayName,
-                                  Duration maxWait) {
+    public boolean setDisplayName(String username, String displayName,
+                                  GatewayRequestScope scope, Duration maxWait) {
         checkInitialized();
         try {
             Object body = java.util.Map.of("username", username, "fullname", displayName);
@@ -618,15 +519,11 @@ public class ApiGatewayClient {
                     .timeout(GATEWAY_REQUEST_TIMEOUT)
                     .build();
 
-            // DEFAULT tier, registration scope, registration wait override (AD-3, AD-19). The
-            // identity available here is the full username rather than the prefix — this is
-            // called from the retry loop, one user at a time, and the username is what an
-            // operator greps when a bot ends up nameless (a nameless account stalls the ziczac
-            // round engine). The override matters more here than on the register call: an
-            // account that exists without a display name is the one state a resumed
-            // registration cannot repair cheaply (it costs register + login + update-fullname).
-            HttpResponse<String> response = send(RequestTier.DEFAULT,
-                    GatewayRequestScope.registration(username), httpRequest, maxWait);
+            // DEFAULT tier with the registration wait override (AD-3, AD-19), and the caller's
+            // scope — which carries the botGroupId, so this request is cancellable by the group
+            // that owns it (A28.6). It used to build its own group-less scope here, which meant
+            // a DELETE landing mid-registration could not reach a queued update-fullname at all.
+            HttpResponse<String> response = send(RequestTier.DEFAULT, scope, httpRequest, maxWait);
             String responseBody = response.body();
             log.debug("[UpdateFullname] response HTTP {} | body: {}", response.statusCode(), responseBody);
 
@@ -664,49 +561,87 @@ public class ApiGatewayClient {
      * stalls the round engine).
      */
     static boolean isDisplayNameTaken(String status) {
-        return "INVALID".equals(status) || "EXISTED".equals(status);
+        return "INVALID".equals(status) || STATUS_EXISTED.equals(status);
     }
 
     /**
-     * Set display name with automatic retry on name conflicts.
-     *
-     * @param username     The username (required for B52 endpoint)
-     * @param sessionToken The session token from authentication (used for standard envs)
-     * @param maxRetries   Maximum retry attempts
-     * @return The display name that was set, or null if all attempts failed
-     */
-    public String setDisplayNameWithRetry(String username, String sessionToken, int maxRetries) {
-        return setDisplayNameWithRetry(username, sessionToken, maxRetries,
-                gatewayBudget.registrationMaxWait());
-    }
-
-    /**
-     * {@link #setDisplayNameWithRetry(String, String, int)} against the batch's shared registration
+     * Set a display name, re-rolling on a name collision, against the batch's shared registration
      * deadline rather than a fresh wait per attempt (review F2).
+     * <p>
+     * The pool collides often enough to matter — ~43% on the observed 5k-name file at 100 bots —
+     * so the retry is the normal path, not an error path.
+     *
+     * @param username   the account to name
+     * @param maxRetries how many distinct names to try before giving up
+     * @param scope      the caller's cancellable, group-carrying scope (A28.6)
+     * @param maxWait    the batch's shared registration wait, propagated verbatim to every
+     *                   attempt
+     * @return the display name that was set, or {@code null} if every attempt collided
      */
-    public String setDisplayNameWithRetry(String username, String sessionToken, int maxRetries,
-                                         Duration maxWait) {
+    public String setDisplayNameWithRetry(String username, int maxRetries,
+                                          GatewayRequestScope scope, Duration maxWait) {
         if (!displayNameService.hasDisplayNames()) {
-            log.warn("No display names available, skipping display name assignment");
+            // DEBUG, not WARN: with the worker this fires once per account, and CLAUDE.md's tier
+            // rule puts anything whose rate is a function of account count below INFO outright.
+            // The group-level statement is RegistrationWorker's one completion line; the fleet-
+            // level one is the single startup WARN DisplayNameService already emits when the name
+            // file is missing.
+            log.debug("No display names available, skipping display name assignment for {}", username);
             return null;
         }
 
         for (int attempt = 0; attempt < maxRetries; attempt++) {
             String displayName = displayNameService.getRandomDisplayName();
             if (displayName == null) {
-                log.warn("Failed to get random display name on attempt {}", attempt + 1);
+                log.debug("Failed to get random display name on attempt {}", attempt + 1);
                 continue;
             }
 
-            if (setDisplayName(username, sessionToken, displayName, maxWait)) {
+            if (setDisplayName(username, displayName, scope, maxWait)) {
                 return displayName;
             }
 
             log.debug("Retrying with different name (attempt {}/{})", attempt + 1, maxRetries);
         }
 
-        log.error("Failed to set display name after {} attempts", maxRetries);
+        // DEBUG here too, and the caller is what reports it: RegistrationWorker emits one WARN
+        // naming the username, because a nameless account is worth an operator's attention (it
+        // stalls a ziczac round engine) but N of them are worth one line each at WARN, not an
+        // ERROR per account from inside a loop.
+        log.debug("Failed to set display name for {} after {} attempts", username, maxRetries);
         return null;
+    }
+
+    /**
+     * Whether this environment has a display-name pool at all. Read by
+     * {@code RegistrationWorker} so that a deployment without a name file skips the naming half
+     * of registration outright, rather than calling into it once per account and taking a log
+     * line per account for an answer that is constant for the JVM.
+     */
+    public boolean hasDisplayNames() {
+        return displayNameService.hasDisplayNames();
+    }
+
+    /**
+     * This environment's registration wait ({@code bot.gateway.budget.registration.max-wait}).
+     * <p>
+     * Exposed here rather than resolved from {@code GatewayBudgetRegistry} at the call site so
+     * the worker's wait is by construction the wait of the <em>same</em> budget its requests go
+     * through — a client built by a fixture carries {@link GatewayBudget#UNLIMITED} and would
+     * otherwise be paced by a budget that is not admitting it.
+     */
+    public Duration registrationMaxWait() {
+        return gatewayBudget.registrationMaxWait();
+    }
+
+    /**
+     * How long a self-paced caller must sleep between requests because this environment's budget
+     * is not enforcing — zero when it is (A2.3). See
+     * {@link GatewayBudget#observeModePacing()}; exposed here for the same reason as
+     * {@link #registrationMaxWait()}.
+     */
+    public Duration observeModePacing() {
+        return gatewayBudget.observeModePacing();
     }
 
     /**

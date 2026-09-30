@@ -258,6 +258,21 @@ public class BotGroupController {
         return ResponseEntity.ok(statusDTO(group, accepted));
     }
 
+    @PostMapping("/{id}/registration/retry")
+    @Operation(summary = "Resume a failed account registration",
+            description = "Clears REGISTRATION_FAILED back to REGISTRATION_PENDING and re-queues "
+                    + "the group. Registration resumes from registeredCount + 1 — nothing starts "
+                    + "over and no account is created twice. 200 means accepted, like /start: "
+                    + "poll GET /{id}/status for registeredCount climbing toward botCount. "
+                    + "400 if the group is not in REGISTRATION_FAILED, 404 for an unknown id.")
+    public ResponseEntity<BotGroupStatusDTO> retryRegistration(@PathVariable String id) {
+        // No manual-override flip (contrast /start): retrying a registration says nothing about
+        // whether the group should be running, so it must not park a SCHEDULED group as
+        // MANUAL_ON — the same reasoning that keeps /restart mode-neutral (TIMED_ACTIVATION AD-4).
+        BotGroup group = service.retryRegistration(id);
+        return ResponseEntity.ok(statusDTO(group, behaviorService.getActualStatus(id)));
+    }
+
     @PostMapping("/{id}/schedule-restart")
     @Operation(summary = "Schedule bot group restart", description = "Schedules a restart for the bot group")
     public ResponseEntity<Void> scheduleRestart(
@@ -295,16 +310,29 @@ public class BotGroupController {
      * something else.
      */
     private BotGroupStatusDTO statusDTO(BotGroup group, BotGroupStatus actualStatus) {
+        boolean registering = group.getRegistrationState() != null;
+        String startError = behaviorService.getLastStartError(group.getId());
         return BotGroupStatusDTO.builder()
                 .groupId(group.getId())
                 .groupName(group.getName())
-                .targetStatus(group.getTargetStatus())
+                // Derived through the same helper the entity→DTO mapper uses, so /status and
+                // GET /{id} cannot disagree about a registering group (A1: the two registration
+                // constants are produced at the DTO boundary and nowhere else).
+                .targetStatus(BotGroupMapper.renderedStatus(group))
                 .actualStatus(actualStatus)
                 .playingStatus(behaviorService.getPlayingStatus(group.getId()))
                 .botCount(group.getBotCount())
                 .botsUp(behaviorService.getStartBotsUp(group.getId()))
-                // registeredCount stays null until asynchronous registration lands (Phase 4).
-                .lastError(behaviorService.getLastStartError(group.getId()))
+                // Null for a group with no registration history at all (legacy, or
+                // existingGroup=true), so "absent" keeps meaning "this group was never
+                // asynchronously registered" rather than "zero accounts exist".
+                .registeredCount(registering || group.getRegisteredCount() > 0
+                        ? group.getRegisteredCount() : null)
+                .namedCount(registering || group.getNamedCount() > 0
+                        ? group.getNamedCount() : null)
+                // A start error wins a tie because it is necessarily the newer event: a group
+                // cannot be started until its registrationState has cleared.
+                .lastError(startError != null ? startError : group.getRegistrationError())
                 .build();
     }
 

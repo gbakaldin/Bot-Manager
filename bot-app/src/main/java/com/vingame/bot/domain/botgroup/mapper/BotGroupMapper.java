@@ -3,6 +3,8 @@ package com.vingame.bot.domain.botgroup.mapper;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.domain.botgroup.dto.BotGroupDTO;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
+import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.RegistrationState;
 import org.mapstruct.Mapper;
 import org.mapstruct.MappingTarget;
 
@@ -46,12 +48,53 @@ public interface BotGroupMapper {
                 .autoDepositEnabled(entity.isAutoDepositEnabled())
                 .strategyMix(entity.getStrategyMix())
                 .slotStrategyId(entity.getSlotStrategyId())
-                .targetStatus(entity.getTargetStatus())
+                // Derived, not copied (GATEWAY_REQUEST_BUDGET A1): a group whose accounts are
+                // still being created renders REGISTRATION_PENDING / REGISTRATION_FAILED here
+                // while the document's own targetStatus stays one of the original three. This is
+                // the ONLY place those two constants are produced, and producing them here rather
+                // than persisting them is what keeps a rollback safe.
+                .targetStatus(renderedStatus(entity))
+                .registeredCount(entity.getRegistrationState() == null && entity.getRegisteredCount() == 0
+                        ? null : entity.getRegisteredCount())
+                .namedCount(entity.getRegistrationState() == null && entity.getNamedCount() == 0
+                        ? null : entity.getNamedCount())
+                .registrationError(entity.getRegistrationError())
                 .scheduledRestartTime(entity.getScheduledRestartTime())
                 .lastStartedAt(entity.getLastStartedAt())
                 .lastStoppedAt(entity.getLastStoppedAt())
                 .lastFailureReason(entity.getLastFailureReason())
                 .build();
+    }
+
+    /**
+     * The lifecycle value a client sees, derived from the document
+     * (GATEWAY_REQUEST_BUDGET A1 / A3).
+     * <p>
+     * {@code registrationState} wins over {@code targetStatus} while it is set, because it is the
+     * more specific statement about the same group: a group that is still creating accounts
+     * cannot be started, whatever a stale {@code targetStatus} says, and an operator reading
+     * "STOPPED" on a group that is half-registered would draw the wrong conclusion twice over.
+     * On completion the worker clears {@code registrationState} and this falls back to
+     * {@code targetStatus} — {@code null} for a freshly registered group, byte-for-byte the state
+     * a synchronously registered group has had since day one.
+     * <p>
+     * <b>This is the whole of the "derived at the DTO boundary" rule.</b> The two registration
+     * constants exist only here and in {@code BotGroupStatusDTO}; nothing persists them, and
+     * {@code BotGroupStatusPersistenceGuardTest} fails the build if anything starts to.
+     */
+    static BotGroupStatus renderedStatus(BotGroup entity) {
+        String state = entity.getRegistrationState();
+        if (RegistrationState.isPending(state)) {
+            return BotGroupStatus.REGISTRATION_PENDING;
+        }
+        if (RegistrationState.isFailed(state)) {
+            return BotGroupStatus.REGISTRATION_FAILED;
+        }
+        // Any other non-null value is a document written by something this jar does not know
+        // about. Falling back to targetStatus is the fail-open choice on purpose: the alternative
+        // is a group that renders as nothing at all, and an unrecognised string here cannot be
+        // made meaningful by guessing.
+        return entity.getTargetStatus();
     }
 
     /**
@@ -107,6 +150,15 @@ public interface BotGroupMapper {
                 // history: lastFailureReason is rendered to operators, lastStoppedAt gates the
                 // recovery settle window, and neither has any legitimate client-supplied value.
                 // startLocked and stop() are the only writers.
+                //
+                // ...and neither are registeredCount / namedCount / registrationState /
+                // registrationError (GATEWAY_REQUEST_BUDGET A28.2). These have sharper teeth than
+                // the audit trail: registeredCount is the high-water mark RegistrationWorker
+                // resumes from, so a create body carrying registeredCount=500 would produce a
+                // group the worker considers finished and whose five hundred accounts do not
+                // exist — every bot then fails to authenticate at start, which reads as an auth
+                // outage. BotGroupService.save is the only writer of the initial values and the
+                // worker is the only writer thereafter.
                 .build();
     }
 
@@ -201,5 +253,12 @@ public interface BotGroupMapper {
         // constant no pre-feature jar can deserialise, which is exactly what A1's
         // in-memory-only rule exists to prevent. Do not reinstate it — a client that needs to
         // change a group's lifecycle calls /start or /stop.
+        //
+        // The four registration fields (registeredCount, namedCount, registrationState,
+        // registrationError) are system-managed in exactly the same way and are absent from both
+        // write paths for the reason spelled out in toEntity (A28.2). The one PATCH that *does*
+        // affect registration is `botCount`, which is a statement of intent and is mapped above:
+        // BotGroupService.update re-enqueues the group when the merged count exceeds
+        // registeredCount (A2.7). Lowering it never un-registers anything.
     }
 }

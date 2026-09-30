@@ -84,9 +84,6 @@ class ApiGatewayClientBudgetPassthroughTest {
                 new AuthProfile("/gwms/v1/bot/login.aspx", "/gwms/v1/bot/register.aspx",
                         "/gwms/v1/bot/update-fullname.aspx", "x-tok", ctx -> null),
                 budget);
-        // registrationParallelism is a @Value field, so a client built with `new` gets 0.
-        // Unused by these tests, set for the same reason ApiGatewayClientTierTest sets it.
-        ReflectionTestUtils.setField(client, "registrationParallelism", 2);
         // bot.ip is a @Value field too, and deposit() puts it in the request body — null would
         // NPE inside HttpRequest.Builder before the budget was ever consulted, which would make
         // the deposit assertion below pass for the wrong reason.

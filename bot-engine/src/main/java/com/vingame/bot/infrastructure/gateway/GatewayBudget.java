@@ -237,6 +237,34 @@ public interface GatewayBudget {
     Duration registrationMaxWait();
 
     /**
+     * How long a <b>self-paced</b> caller must sleep between consecutive requests because this
+     * budget is not pacing them — {@link Duration#ZERO} when it is (A2.3, A28.1).
+     * <p>
+     * There is exactly one such caller and there must not be a second: {@code RegistrationWorker}
+     * is a single serial loop at ~100-300 ms per call, which is ~200-600 requests in a 5-minute
+     * window <b>on its own</b>. In {@code enforce} the budget holds it under the DEFAULT ceiling
+     * like everything else; in {@code observe} nothing does, so the one component that would
+     * otherwise be unpaced paces itself at {@code window / default.ceiling} — 300 s / 500 =
+     * <b>600 ms</b>. That is not a second rate limiter and not a new knob: it is the same
+     * configured ceiling, applied by the component the mode leaves uncovered. The phase order
+     * (enforcement shipped in Phase 3) makes it a belt rather than the mechanism.
+     * <p>
+     * <b>Why this is on the interface at all.</b> The two numbers it is derived from — the window
+     * and the DEFAULT ceiling — are reachable through neither {@link #snapshot()} nor any other
+     * method here, and {@code settings()} exists only on {@link SlidingWindowGatewayBudget}. A
+     * downcast would be a {@code ClassCastException} on every fixture, which all carry
+     * {@link #UNLIMITED} (A28.1). Deriving it here also keeps the mode test in one place: the
+     * caller sleeps whatever it is told and has no opinion about {@code observe} versus
+     * {@code enforce}.
+     * <p>
+     * Deliberately <b>not</b> a default method. A default returning zero would mean a budget that
+     * forgot to implement it silently unpaces the one unpaced caller in the system, which is the
+     * exact failure this exists to prevent; an abstract method makes every implementation state
+     * its answer.
+     */
+    Duration observeModePacing();
+
+    /**
      * The configured maximum wait for {@code tier}, or {@code null} when that tier is configured
      * to wait <b>unbounded</b> (which only {@link RequestTier#ESSENTIAL} may be).
      * <p>

@@ -33,6 +33,19 @@ public class BotGroupHealthDTO {
     private List<BotHealthDTO> bots;
 
     /**
+     * Accounts known to exist for this group, or {@code null} when the group was never
+     * asynchronously registered (GATEWAY_REQUEST_BUDGET A1).
+     * <p>
+     * Here as well as on {@code /status} because this is the endpoint the public-facing UI polls,
+     * and a group in the middle of a 500-account create otherwise renders as
+     * {@code totalBots: 0, status: STOPPED} — indistinguishable from a group that failed to
+     * start. {@link #status} stays the <em>runtime</em> status, which for a registering group is
+     * {@code STOPPED} because there is no runtime and there should not be one; this field is what
+     * says why.
+     */
+    private Integer registeredCount;
+
+    /**
      * Group-level runtime statistics (BOTGROUP_GAME_MANAGEMENT Phase 3). Present
      * on every response; all fields null (N/A) when the group is not running.
      */

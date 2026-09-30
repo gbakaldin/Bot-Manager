@@ -49,7 +49,9 @@ import java.util.function.LongSupplier;
  *       got them wrong would make every login test pass for the wrong reason;</li>
  *   <li>{@code register.aspx} — {@code status:"OK"} with tokens, or {@code status:"EXISTED",
  *       code:409} at HTTP <b>200</b> once a username has been seen before. Both answers are
- *       200 on the real gateway, which is the fact Phase 4's resumability depends on;</li>
+ *       200 on the real gateway, which is the fact Phase 4's resumability depends on. A username
+ *       starting with {@link #REFUSED_USERNAME_PREFIX} is always refused with an {@code ERROR}
+ *       envelope, so a test can make one index fail without failing the fixture;</li>
  *   <li>{@code update-fullname.aspx} — {@code status:"OK"};</li>
  *   <li>{@code verifytoken.aspx} — {@code data[0].main_balance};</li>
  *   <li>{@code deposit.aspx} — {@code status:"OK"}.</li>
@@ -70,6 +72,16 @@ public final class StubGateway implements AutoCloseable {
 
     private final List<String> paths = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final Map<String, AtomicInteger> countsByPath = new ConcurrentHashMap<>();
+    /**
+     * The username prefix this stub always refuses, with an {@code ERROR} envelope at HTTP 200.
+     * <p>
+     * There has to be a way to make one index fail without making the whole fixture fail: "an
+     * index that costs an attempt" and "an index that does not" are different code paths in
+     * {@code RegistrationWorker}, and the difference between them is the difference between a
+     * group that stops on a real refusal and a group that stops on our own pacing.
+     */
+    public static final String REFUSED_USERNAME_PREFIX = "reject";
+
     /** Usernames already registered, so a re-register can answer {@code EXISTED} like the real one. */
     private final Map<String, Boolean> registered = new ConcurrentHashMap<>();
 
@@ -210,6 +222,14 @@ public final class StubGateway implements AutoCloseable {
      */
     private String registerResponse(String body) {
         String username = extract(body, "username");
+        if (username != null && username.startsWith(REFUSED_USERNAME_PREFIX)) {
+            // A genuine upstream refusal, at HTTP 200 like everything else gwms answers. Reserved
+            // by username rather than by a mode flag so one test can exercise a refusal and a
+            // success in the same fixture — which is what the worker's "this index costs an
+            // attempt, that one does not" logic needs to be tested against.
+            return "{\"status\":\"ERROR\",\"code\":400,"
+                    + "\"message\":\"Username is not allowed\"}";
+        }
         if (username != null && registered.putIfAbsent(username, Boolean.TRUE) != null) {
             return "{\"status\":\"EXISTED\",\"code\":409,\"message\":\"Tài khoản đã tồn tại\"}";
         }

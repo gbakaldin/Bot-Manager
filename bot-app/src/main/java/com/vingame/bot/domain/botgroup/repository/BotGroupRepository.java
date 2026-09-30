@@ -16,4 +16,20 @@ public interface BotGroupRepository extends MongoRepository<BotGroup, String> {
     List<BotGroup> findByTargetStatus(BotGroupStatus targetStatus);
 
     List<BotGroup> findByActivationMode(ActivationMode activationMode);
+
+    /**
+     * Every group whose accounts are still being created, or whose creation stopped
+     * (GATEWAY_REQUEST_BUDGET A6 Phase 4 item 1). {@code state} is one of
+     * {@link com.vingame.bot.domain.botgroup.model.RegistrationState}'s constants.
+     * <p>
+     * Driven by the <b>persisted</b> state rather than by an in-memory queue, for the reason
+     * {@code DeadGroupRecoveryScheduler} is: a group whose registration was interrupted by a JVM
+     * restart is absent from every in-memory structure, and that is exactly the case with the
+     * longest time-to-notice. The {@code ApplicationReadyEvent} re-enqueue and the worker's own
+     * sweep both read this.
+     * <p>
+     * A Mongo query on a {@code String} field, so an unknown value read back is just a string
+     * that matches neither call — no conversion, no boot hazard.
+     */
+    List<BotGroup> findByRegistrationState(String registrationState);
 }

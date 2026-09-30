@@ -128,6 +128,20 @@ public class ActivationScheduler {
 
     private void reconcileGroup(BotGroup group, Instant now) {
         String id = group.getId();
+
+        // A group whose accounts are still being created is not startable (A28.5), and this
+        // reconciler needs its own guard because it selects by activation MODE, not by status:
+        // startLocked's 400 would otherwise be thrown, caught and logged here once a minute, for
+        // the whole duration of a 500-account registration. DEBUG, because the rate is a function
+        // of how many scheduled groups are registering and the group-level statement is the
+        // worker's own completion line.
+        if (group.getRegistrationState() != null) {
+            log.debug("Activation reconcile: group {} is still registering ({}/{} accounts) → "
+                            + "skipping until it completes",
+                    id, group.getRegisteredCount(), group.getBotCount());
+            return;
+        }
+
         boolean running = behaviorService.isGroupRunning(id);
         boolean dead = group.getTargetStatus() == BotGroupStatus.DEAD
                 || behaviorService.getActualStatus(id) == BotGroupStatus.DEAD;

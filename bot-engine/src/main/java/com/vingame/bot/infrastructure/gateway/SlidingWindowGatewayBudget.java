@@ -123,7 +123,9 @@ import java.util.function.LongSupplier;
  * magnitude inside the 100-request gap between {@code hard-cap=900} and Cloudflare's 1,000, which
  * is what AD-5 means by "the only margin for traffic the JVM cannot see" — so the conclusion
  * survives. The reason matters because the wrong one invites the wrong fix: raising the semaphores
- * looks free under the old bound, and is not. <b>It is also one more reason not to raise the hard
+ * looks free under the old bound, and is not. ({@code user.registration.parallelism} no longer
+ * exists at all since Phase 4 — registration is one serial worker, not a fan-out — which removes
+ * one of the two semaphores this paragraph is about and changes none of its arithmetic.) <b>It is also one more reason not to raise the hard
  * cap.</b> The {@code gateway_budget_requests_total} counter and
  * {@code gateway_budget_window_requests} gauge must agree on that, or the dashboard lies about
  * the one number this feature exists to bound. That is also why {@code count()} has its own
@@ -1311,6 +1313,20 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
     @Override
     public Duration registrationMaxWait() {
         return settings.registrationMaxWait();
+    }
+
+    @Override
+    public Duration observeModePacing() {
+        if (settings.mode() == GatewayBudgetMode.ENFORCE) {
+            // The budget is doing the pacing. A caller that also slept would be paced twice and
+            // would blame this class for being slow.
+            return Duration.ZERO;
+        }
+        // window / default.ceiling — the DEFAULT tier's own share of the window, expressed as a
+        // period. 300 s / 500 = 600 ms with the shipped policy. Derived rather than configured on
+        // purpose: a separate property is a second number that can disagree with the ceiling it
+        // is supposed to be a restatement of.
+        return settings.window().dividedBy(settings.ceiling(RequestTier.DEFAULT));
     }
 
     /** The policy this budget was built with. */

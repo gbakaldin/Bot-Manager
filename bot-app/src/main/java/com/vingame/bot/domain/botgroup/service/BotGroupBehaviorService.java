@@ -26,6 +26,7 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.model.BotGroupFilter;
 import com.vingame.bot.domain.botgroup.model.BotGroupPlayingStatus;
 import com.vingame.bot.domain.botgroup.model.BotGroupStatus;
+import com.vingame.bot.domain.botgroup.model.RegistrationState;
 import com.vingame.bot.domain.botgroup.model.RecoveryEligibility;
 import com.vingame.bot.domain.botgroup.model.StartOrigin;
 import com.vingame.bot.domain.botgroup.sort.BotGroupSortRow;
@@ -644,9 +645,13 @@ public class BotGroupBehaviorService {
      * chain, the activation reconciler, auto-recovery — inherits the same guard rather than
      * discovering the misconfiguration halfway through a build.
      * <p>
-     * Phase 4 adds the registration guards here (a group whose accounts are still being created
-     * is a {@code 400}, naming the counts and the way out); they are not expressible until the
-     * {@code registrationState} document field exists.
+     * Phase 4 added the two registration guards below. They live <b>here</b>, beside the other
+     * two, rather than in {@code submitLifecycle} alone — that is the point of this method: the
+     * locked re-read inside {@code startLocked} is the only place where the decision and the
+     * {@code targetStatus=ACTIVE} persist that follows it are one atomic step (A28.5, the same
+     * reason {@code reassertStartupIntent} lives there). A check made only at the REST edge
+     * leaves the startup chain, the activation reconciler and auto-recovery free to start a
+     * group whose accounts do not exist yet.
      */
     private static void validateStartable(BotGroup group) {
         // Verify environment exists
@@ -663,6 +668,29 @@ public class BotGroupBehaviorService {
                     "BotGroup " + group.getName() + " has no gameId set. " +
                             "Please assign a game before starting the bot group."
             );
+        }
+
+        // Accounts still being created (GATEWAY_REQUEST_BUDGET A2). Starting here would try to
+        // authenticate usernames the gateway has never heard of — N failed logins, reported as an
+        // auth outage, while the real answer is "wait, or start with the accounts that exist".
+        // Both messages name the counts and the way out, because a 400 that only says "no" sends
+        // the operator to the wrong place.
+        if (RegistrationState.isPending(group.getRegistrationState())) {
+            throw new BadRequestException(String.format(
+                    "Bot group %s is still registering (%d/%d accounts). Wait for "
+                            + "REGISTRATION_PENDING to clear, or PATCH botCount down to %d to "
+                            + "start with the accounts that exist.",
+                    group.getName(), group.getRegisteredCount(), group.getBotCount(),
+                    group.getRegisteredCount()));
+        }
+        if (RegistrationState.isFailed(group.getRegistrationState())) {
+            throw new BadRequestException(String.format(
+                    "Bot group %s stopped registering at %d/%d accounts and will not resume on "
+                            + "its own. POST /api/v1/bot-group/%s/registration/retry to resume, "
+                            + "or PATCH botCount down to %d to start with the accounts that "
+                            + "exist.",
+                    group.getName(), group.getRegisteredCount(), group.getBotCount(),
+                    group.getId(), group.getRegisteredCount()));
         }
     }
 
@@ -2042,6 +2070,20 @@ public class BotGroupBehaviorService {
     }
 
     /**
+     * The {@code registeredCount} a health response should carry, or {@code null} when this group
+     * has no registration history at all — a legacy group, or one created with
+     * {@code existingGroup=true} (GATEWAY_REQUEST_BUDGET A1).
+     * <p>
+     * "Absent" has to keep meaning "never asynchronously registered" rather than "zero accounts
+     * exist", because those two are opposite situations: the first is a fully populated group from
+     * before the feature, the second is a create that has not started yet.
+     */
+    private static Integer renderedRegisteredCount(BotGroup group) {
+        return group.getRegistrationState() != null || group.getRegisteredCount() > 0
+                ? group.getRegisteredCount() : null;
+    }
+
+    /**
      * Get health details for a bot group including per-bot metrics.
      */
     public BotGroupHealthDTO getHealth(String id) {
@@ -2063,6 +2105,10 @@ public class BotGroupBehaviorService {
                     .connectedBots(0)
                     .disconnectedBots(0)
                     .bots(List.of())
+                    // A group whose accounts are still being created lands here, with no runtime
+                    // and none due: without this it renders identically to a group that failed to
+                    // start (GATEWAY_REQUEST_BUDGET A1).
+                    .registeredCount(renderedRegisteredCount(group))
                     .stats(computeStats(id))
                     .build();
         }
@@ -2113,6 +2159,7 @@ public class BotGroupBehaviorService {
                 .deadBots(dead)
                 .disconnectedBots(botDtos.size() - connected - reconnecting - dead)
                 .bots(botDtos)
+                .registeredCount(renderedRegisteredCount(group))
                 .stats(computeStats(id))
                 .coordination(buildCoordinationState(runtime.getCoordinator()))
                 .jackpotScale(buildJackpotScaleState(runtime.getJackpotScaler()))

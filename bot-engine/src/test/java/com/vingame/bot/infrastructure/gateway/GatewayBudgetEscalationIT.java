@@ -92,7 +92,6 @@ class GatewayBudgetEscalationIT {
                         "/gwms/v1/bot/login.aspx", "/gwms/v1/bot/register.aspx",
                         "/gwms/v1/bot/update-fullname.aspx", "x-tok", loginFactory()),
                 budget);
-        ReflectionTestUtils.setField(client, "registrationParallelism", 4);
         ReflectionTestUtils.setField(client, "botIp", "127.0.0.1");
     }
 

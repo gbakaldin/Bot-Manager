@@ -479,6 +479,31 @@ groups:
           summary: "Environment {{ $labels.environmentId }} is at {{ $value | humanizePercentage }} of its gateway request cap for the last 5 minutes (Cloudflare blocks at 1000)"
           description: "In observe mode nothing is being paced, so this is the run-up to a whole-brand auth outage: check what is driving it (a large group start, a reconnect storm, a bulk registration, or scripts/bulk-create-accounts.py running from this same host, which the app's budget cannot see) and stagger it. In enforce mode the cap is holding and this is expected during a large start — AD-18 puts a 3,000-bot group at ~50 minutes — so treat it as an FYI and look at GatewayBudgetSustainedQueue instead. gateway_budget_requests_total by tier says which class of request it is; the 5-minute fleet rollup line carries the same window per environment."
 
+      # GATEWAY_REQUEST_BUDGET A6 Phase 4 item 6 / A20.10, for registration. A group whose
+      # account creation stopped is precisely the thing that gets forgotten: it sits at, say,
+      # 63/500, nothing retries it, it cannot be started, and no other signal in the system
+      # mentions it. The person who pressed "create" has long since moved on.
+      #
+      # A GAUGE, not increase() over a counter, and that is the decision worth knowing. What
+      # needs answering is not "did an account fail at some point" — accounts fail and are
+      # retried — it is "is a group sitting half-registered RIGHT NOW with nothing that will
+      # move it". The gauge falls to zero the moment someone POSTs /registration/retry or
+      # PATCHes botCount down, which is exactly when this should resolve.
+      #
+      # for: 15m because a failing group is not an emergency: nothing is degrading, no bots are
+      # down, and the state is stable by construction (the worker has already given up on it).
+      # What it must not do is stay invisible.
+      - alert: RegistrationStalled
+        expr: registration_failed_groups > 0
+        for: 15m
+        labels:
+          job: bot-manager
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "{{ $value }} bot group(s) have a stalled account registration"
+          description: "A group stopped creating accounts after bot.registration.max-attempts-per-user consecutive gateway refusals of one account, and nothing will retry it — that is deliberate (a silent retry loop against a gateway that keeps saying no is how a brand gets Cloudflare-blocked). Find it with POST /api/v1/bot-group/{envId}/filter and look for targetStatus REGISTRATION_FAILED; registrationError on the document names the account and the upstream message. Then either POST /api/v1/bot-group/{id}/registration/retry to resume from registeredCount + 1, or PATCH botCount down to what registered and start the group with the accounts that exist. NOTE this is NOT a budget or Cloudflare signal: a budget timeout or an open circuit re-queues the group without spending an attempt, so it can never produce this alert — see GatewayBudgetSustainedQueue for that shape."
+
       # The companion F16 asks for: the denominator vanishing must not look like health.
       # `gateway_budget_window_requests` without a matching `gateway_budget_hard_cap` means
       # GatewayBudgetNearCap above is evaluating to nothing at all — an environment sending

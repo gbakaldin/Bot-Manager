@@ -316,6 +316,11 @@ class BotGroupBehaviorServiceReservationTest {
         }
 
         @Override
+        public Duration observeModePacing() {
+            return Duration.ZERO;
+        }
+
+        @Override
         public Duration maxWait(RequestTier tier) {
             return tier == RequestTier.ESSENTIAL ? null : Duration.ofMinutes(10);
         }

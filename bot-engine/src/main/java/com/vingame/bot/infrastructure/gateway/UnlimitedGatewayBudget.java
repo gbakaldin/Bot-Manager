@@ -90,6 +90,14 @@ final class UnlimitedGatewayBudget implements GatewayBudget {
         return Duration.ZERO;
     }
 
+    @Override
+    public Duration observeModePacing() {
+        // No policy, so no derived pacing. This is the fixture budget: a test that paced itself
+        // at 600 ms per account would take five minutes to register five hundred of them, and
+        // there is no window here for the pacing to protect.
+        return Duration.ZERO;
+    }
+
     private static final Reservation NO_RESERVATION = new Reservation() {
         @Override
         public void release() {

@@ -3,6 +3,7 @@ package com.vingame.bot.infrastructure.observability;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.core.BotStatus;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService;
+import com.vingame.bot.domain.botgroup.service.RegistrationWorker;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvInfo;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvKey;
 import com.vingame.bot.domain.botgroup.service.BotGroupBehaviorService.EnvStatusKey;
@@ -166,6 +167,17 @@ class AlertRuleMetricsTest {
         new GatewayBudgetRegistry(GatewayBudgetSettings.defaults(), registry)
                 .forEnvironment("env-uuid-1", "Staging", "116")
                 .count("ws-probe");
+
+        // --- the asynchronous-registration gauges (GATEWAY_REQUEST_BUDGET Phase 4), registered
+        // exactly as ObservabilityConfig.registrationGauges does: unlabelled fleet aggregates
+        // over the worker's cached counts. RegistrationStalled reads registration_failed_groups
+        // BARE, so it has to be in this exposition or the rule is unverifiable here — and a rule
+        // whose metric does not exist evaluates to an empty vector forever without saying so,
+        // which is the exact failure this test class exists to make impossible.
+        RegistrationWorker worker = mock(RegistrationWorker.class);
+        when(worker.getPendingGroupCount()).thenReturn(2);
+        when(worker.getFailedGroupCount()).thenReturn(1);
+        new ObservabilityConfig().registrationGauges(worker).bindTo(registry);
 
         // --- the log4j2 queue meters, registered exactly as AsyncQueueMetrics does at
         // startup, against the real LoggerContext this build runs on. LogQueueSaturated

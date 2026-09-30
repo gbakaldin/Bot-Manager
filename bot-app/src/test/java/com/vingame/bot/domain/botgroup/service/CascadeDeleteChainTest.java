@@ -1,6 +1,5 @@
 package com.vingame.bot.domain.botgroup.service;
 
-import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.domain.botgroup.mapper.BotGroupMapper;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
@@ -62,19 +61,20 @@ class CascadeDeleteChainTest {
         envRepo = mock(EnvironmentRepository.class);
         behaviorService = mock(BotGroupBehaviorService.class);
 
-        // BotGroupService.delete only uses behaviorService + repository, so every
-        // other collaborator can be an unused mock (the GameService here is a mock
-        // to avoid a construction cycle — the real GameService below points back at
-        // this same BotGroupService instance).
+        // BotGroupService.delete uses behaviorService + repository + the registration worker
+        // (whose cancel() is a no-op for a group that is not registering), so every other
+        // collaborator can be an unused mock — the GameService here is a mock to avoid a
+        // construction cycle, since the real GameService below points back at this same
+        // BotGroupService instance.
         botGroupService = new BotGroupService(
                 botGroupRepo,
                 mock(BotGroupMapper.class),
-                mock(EnvironmentClientRegistry.class),
                 mock(EnvironmentService.class),
                 mock(GameService.class),
                 mock(org.springframework.data.mongodb.core.MongoTemplate.class),
                 mock(BotGroupConfigValidationService.class),
-                behaviorService);
+                behaviorService,
+                mock(RegistrationWorker.class));
 
         gameService = new GameService(
                 gameRepo,

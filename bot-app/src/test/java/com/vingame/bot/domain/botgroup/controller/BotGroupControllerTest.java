@@ -1040,4 +1040,59 @@ class BotGroupControllerTest {
                             org.hamcrest.Matchers.containsString("Boom"))));
         }
     }
+
+    @Nested
+    @DisplayName("POST /{id}/registration/retry (GATEWAY_REQUEST_BUDGET A2.6)")
+    class RegistrationRetryEndpoint {
+
+        @Test
+        @DisplayName("200 + BotGroupStatusDTO carrying the progress to resume from")
+        void retryAnswersTheStatusDto() throws Exception {
+            String groupId = "123";
+            BotGroup resumed = BotGroup.builder()
+                    .id(groupId).name("Tai Xiu 500").botCount(500).registeredCount(63)
+                    .registrationState("PENDING")
+                    .build();
+            when(service.retryRegistration(groupId)).thenReturn(resumed);
+            when(behaviorService.getActualStatus(groupId)).thenReturn(BotGroupStatus.STOPPED);
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/registration/retry", groupId))
+                    .andExpect(status().isOk())
+                    // The derived status, so this endpoint and GET /{id} cannot disagree about a
+                    // group that is registering (A1: the two registration constants are produced
+                    // at the DTO boundary and nowhere else).
+                    .andExpect(jsonPath("$.targetStatus").value("REGISTRATION_PENDING"))
+                    .andExpect(jsonPath("$.registeredCount").value(63))
+                    .andExpect(jsonPath("$.botCount").value(500));
+        }
+
+        @Test
+        @DisplayName("the 400 from a group that is not FAILED is answered synchronously")
+        void retryOfAHealthyGroupIsABadRequest() throws Exception {
+            String groupId = "123";
+            when(service.retryRegistration(groupId))
+                    .thenThrow(new BadRequestException("Bot group 'G' is not in REGISTRATION_FAILED"));
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/registration/retry", groupId))
+                    .andExpect(status().isBadRequest());
+        }
+
+        @Test
+        @DisplayName("a retry never parks a SCHEDULED group as MANUAL_ON")
+        void retryIsActivationModeNeutral() throws Exception {
+            // Same reasoning that keeps /restart mode-neutral (TIMED_ACTIVATION AD-4): retrying a
+            // registration says nothing about whether the group should be running, and parking it
+            // MANUAL_ON would silently take it off its schedule.
+            String groupId = "123";
+            when(service.retryRegistration(groupId)).thenReturn(
+                    BotGroup.builder().id(groupId).name("S").botCount(10)
+                            .activationMode(ActivationMode.SCHEDULED)
+                            .registrationState("PENDING").build());
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/registration/retry", groupId))
+                    .andExpect(status().isOk());
+
+            verify(service, never()).setActivationMode(any(BotGroup.class), any(ActivationMode.class));
+        }
+    }
 }

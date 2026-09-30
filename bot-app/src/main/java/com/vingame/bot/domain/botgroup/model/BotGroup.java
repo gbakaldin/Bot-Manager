@@ -186,6 +186,61 @@ public class BotGroup {
     // Lifecycle management - target state (what admin wants)
     private BotGroupStatus targetStatus;
 
+    /**
+     * How many of this group's accounts are known to exist on the auth gateway
+     * (GATEWAY_REQUEST_BUDGET A2, asynchronous registration).
+     * <p>
+     * <b>A high-water mark, and it only means "indices 1..k are done" because the worker is
+     * serial and in-order</b> (A2.1). Usernames are {@code namePrefix + index}, so this one
+     * integer is the whole of the job's progress — there is no job collection and no id to
+     * correlate. A parallel worker would make the integer meaningless, which is the second
+     * reason {@code RegistrationWorker} stays single-threaded.
+     * <p>
+     * <b>System-managed.</b> Rendered by {@code BotGroupMapper.toDTO}, copied by neither write
+     * path, and {@code @JsonProperty(access = READ_ONLY)} on the DTO — because a client-writable
+     * high-water mark lets a request body make the worker skip a block of accounts (and never
+     * create them) or re-register one (and spend the window on accounts that exist).
+     * {@code BotGroupStatusPersistenceGuardTest} pins both halves by value.
+     * <p>
+     * It may legitimately <b>exceed</b> {@link #botCount}: PATCHing {@code botCount} down never
+     * un-registers anything, because this is a fact about accounts that exist rather than an
+     * intent (A2.7). Progress renders as {@code min(registeredCount, botCount)/botCount}.
+     */
+    private int registeredCount;
+
+    /**
+     * How many of this group's accounts have had a display name set — the same monotonic,
+     * in-order rule as {@link #registeredCount}, and never ahead of it (A17.3).
+     * <p>
+     * Two fields rather than one because "registered but not named" is a real resume state and a
+     * single counter cannot express it. A re-register returns <b>no tokens at all</b>
+     * ({@code docs/reviews/GATEWAY_REQUEST_BUDGET/gwms-register-envelope.md}), so an index that
+     * registered and then lost its display-name call cannot be finished from the register
+     * response — it has to go straight to {@code update-fullname}, and the worker can only know
+     * to do that if the two counts are separate. A nameless account is not cosmetic: on the RIK
+     * ziczac tables one stalls the round engine for every player in the room.
+     * <p>
+     * System-managed on exactly the same terms as {@link #registeredCount}.
+     */
+    private int namedCount;
+
+    /**
+     * {@code PENDING}, {@code FAILED}, or absent — see {@link RegistrationState}, whose javadoc
+     * explains why this is a {@code String} and must stay one.
+     * <p>
+     * This is the field the two derived {@code BotGroupStatus} values are rendered from at the
+     * DTO boundary. It is never mapped onto {@code targetStatus}, which would make the document
+     * unreadable by an older jar.
+     */
+    private String registrationState;
+
+    /**
+     * Why registration stopped, when {@link #registrationState} is {@code FAILED}. Operator-
+     * facing: it names the username the worker gave up on and the upstream message, which is
+     * what a {@code POST /{id}/registration/retry} decision is made on.
+     */
+    private String registrationError;
+
     // Scheduled operations
     private LocalDateTime scheduledRestartTime;
 
