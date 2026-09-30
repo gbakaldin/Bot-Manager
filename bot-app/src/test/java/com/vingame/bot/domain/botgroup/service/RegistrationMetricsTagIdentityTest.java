@@ -87,12 +87,14 @@ class RegistrationMetricsTagIdentityTest {
         when(client.registrationMaxWait()).thenReturn(Duration.ofMinutes(15));
         when(client.observeModePacing()).thenReturn(Duration.ZERO);
         when(client.hasDisplayNames()).thenReturn(false);
+        // A real MongoTemplate never returns null, and recordCompletion reads getMatchedCount()
+        // to decide whether the document was still complete when the pass ended (QA F-1).
         when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq(BotGroup.class)))
-                .thenReturn(null);
+                .thenReturn(com.mongodb.client.result.UpdateResult.acknowledged(1, 1L, null));
 
         worker = new RegistrationWorker(repository, mongoTemplate, clientRegistry,
                 mock(GatewayBudgetRegistry.class), environmentService, new BotMetrics(meterRegistry),
-                10, 3, 5, 30);
+                10, 3, 5, 30, 10, 60);
     }
 
     private void pending() {

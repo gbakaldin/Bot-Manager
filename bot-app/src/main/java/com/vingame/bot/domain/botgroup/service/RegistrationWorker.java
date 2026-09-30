@@ -84,18 +84,31 @@ import java.util.concurrent.TimeUnit;
  * <h2>What costs an attempt and what does not (A2.6)</h2>
  * <ul>
  *   <li><b>A {@link GatewayBudgetException} — a budget timeout, an open Cloudflare circuit, a
- *       cancelled scope — costs nothing.</b> The group is simply left {@code PENDING} and picked
- *       up again. Those say "not now"; they do not say "this account cannot be created", and a
- *       group that went {@code FAILED} because the fleet was busy would need a human for no
- *       reason.</li>
+ *       cancelled scope — costs no attempt, but it does cost the group its turn.</b> The group is
+ *       left {@code PENDING} and is passed over for
+ *       {@code bot.registration.deferral-backoff-seconds} so the next-oldest group gets the
+ *       thread (review B2). Those say "not now"; they do not say "this account cannot be
+ *       created", and a group that went {@code FAILED} because the fleet was busy would need a
+ *       human for no reason.</li>
  *   <li><b>A gateway refusal costs one attempt</b> against
  *       {@code bot.registration.max-attempts-per-user}. Spending it leaves the group
  *       {@code FAILED} with the reason on the document, one ERROR, and no silent retry —
  *       {@code POST /{id}/registration/retry} is the way back, and it resumes from
  *       {@code registeredCount + 1} rather than starting over.</li>
+ *   <li><b>A transport failure costs one <em>transport</em> attempt</b> against the larger
+ *       {@code bot.registration.max-transport-attempts-per-user} (review S3). "We could not ask"
+ *       is neither a yes nor a no, and a 60-second network blip must not permanently stop a
+ *       500-account create — but it still stops eventually, because a group that cannot reach its
+ *       gateway at all must not be invisible.</li>
  * </ul>
  * The worker never skips an index. Skipping would make {@code registeredCount} stop meaning
  * "1..k are done", which is the invariant the whole design rests on.
+ *
+ * <h2>The target is the document's, not this pass's</h2>
+ * {@code botCount} is re-read on every index, and the completion write is conditional on it
+ * (QA F-1). A pass can legitimately last hours, and A2.7 makes "raise {@code botCount} to ask for
+ * more accounts" a product feature, so a target captured once at the top of the loop was a target
+ * that could be silently out of date for the whole job.
  */
 @Slf4j
 @Component
@@ -131,8 +144,23 @@ public class RegistrationWorker {
 
     private final long tickSeconds;
     private final int maxAttemptsPerUser;
+    private final int maxTransportAttemptsPerUser;
     private final int displayNameRetries;
     private final Duration failureBackoff;
+
+    /**
+     * How long a group whose environment refused it on the budget is passed over for (review B2).
+     * <p>
+     * Floored at one tick, which is the whole point: selection is "oldest PENDING that is due",
+     * and a budget deferral deliberately spends no attempt (A2.6), so without a {@code notBefore}
+     * the same group is the oldest due group again ten seconds later, <em>forever</em>. One starved
+     * environment then held the single worker thread — for up to {@code registration.max-wait}
+     * per pass — and no group on any other environment registered a single account for the whole
+     * duration. That is the anti-starvation half of {@link DeadGroupRecoveryScheduler}'s idiom
+     * ("a permanently failing group cannot starve the others"), which is the one half this class
+     * copied without.
+     */
+    private final Duration deferralBackoff;
 
     /**
      * Groups called off while registering — a {@code DELETE} landing mid-job. Read by the scope
@@ -145,9 +173,26 @@ public class RegistrationWorker {
     /** Per-group attempt state for the index currently being worked. In memory, by design. */
     private final ConcurrentHashMap<String, Attempt> attempts = new ConcurrentHashMap<>();
 
-    /** Cached for the gauges, refreshed each tick, so a scrape never issues a Mongo query. */
+    /**
+     * Cached for the gauges, so a scrape never issues a Mongo query — three app instances at a
+     * 10 s scrape is the kind of gauge that quietly becomes a database load problem.
+     * <p>
+     * Refreshed at the top of every tick <b>and again inside a long pass</b> whenever the cache is
+     * older than one tick (review S5). A pass blocks the worker thread for the whole duration of
+     * one group's registration — hours for a 500-account group under {@code enforce} — and before
+     * the in-pass refresh both gauges reported the state at the start of it, so
+     * {@code RegistrationStalled} was blind to a group that failed while another was registering.
+     * <p>
+     * <b>What is still not covered, and is the trap CLAUDE.md names for {@code LogQueueSaturated}'s
+     * vanished appender:</b> if this worker's scheduled task dies ({@code tickQuietly} catches
+     * {@code Exception}, not {@code Throwable}) or its executor is shut down, both gauges keep
+     * reporting their last values indefinitely and a stalled registration is unalertable. The
+     * freshness stamp below is what a future heartbeat metric would publish; today it only bounds
+     * the in-pass staleness.
+     */
     private volatile int pendingGroups;
     private volatile int failedGroups;
+    private volatile Instant gaugesRefreshedAt;
 
     private ScheduledExecutorService worker;
 
@@ -160,7 +205,11 @@ public class RegistrationWorker {
                               @Value("${bot.registration.tick-seconds:10}") long tickSeconds,
                               @Value("${bot.registration.max-attempts-per-user:3}") int maxAttemptsPerUser,
                               @Value("${bot.registration.display-name-retries:5}") int displayNameRetries,
-                              @Value("${bot.registration.failure-backoff-seconds:30}") long failureBackoffSeconds) {
+                              @Value("${bot.registration.failure-backoff-seconds:30}") long failureBackoffSeconds,
+                              @Value("${bot.registration.max-transport-attempts-per-user:10}")
+                              int maxTransportAttemptsPerUser,
+                              @Value("${bot.registration.deferral-backoff-seconds:60}")
+                              long deferralBackoffSeconds) {
         this.repository = repository;
         this.mongoTemplate = mongoTemplate;
         this.clientRegistry = clientRegistry;
@@ -171,6 +220,12 @@ public class RegistrationWorker {
         this.maxAttemptsPerUser = Math.max(1, maxAttemptsPerUser);
         this.displayNameRetries = Math.max(1, displayNameRetries);
         this.failureBackoff = Duration.ofSeconds(Math.max(0, failureBackoffSeconds));
+        // At least as many as a gateway refusal gets, and by default more — see recordFailure.
+        this.maxTransportAttemptsPerUser =
+                Math.max(this.maxAttemptsPerUser, maxTransportAttemptsPerUser);
+        // At least one tick, so another group always gets a turn before this one is reconsidered.
+        this.deferralBackoff =
+                Duration.ofSeconds(Math.max(this.tickSeconds, deferralBackoffSeconds));
     }
 
     @PostConstruct
@@ -195,7 +250,10 @@ public class RegistrationWorker {
     }
 
     /**
-     * Announce, and immediately resume, any registration a previous JVM left unfinished (A2.2).
+     * <b>Announce</b> any registration a previous JVM left unfinished (A2.2). It does not resume
+     * it: the first tick does, up to {@code tick-seconds} later. The first line of this javadoc
+     * said "and immediately resume" until review T5, three paragraphs above the sentence that
+     * corrects it.
      * <p>
      * The resumption itself needs nothing from this method — selection reads the persisted state,
      * so the first tick would find these groups anyway. What it adds is the one line an operator
@@ -230,9 +288,16 @@ public class RegistrationWorker {
      * whatever attempt state it was carrying.
      * <p>
      * The id is used for the state reset and the log line only — the tick re-reads the persisted
-     * state either way, so this is promptness, not routing, and an enqueue that is lost costs at
-     * most {@code tick-seconds}. Running on the worker's own single thread is what keeps the
-     * "one group at a time" property true for a create that arrives mid-registration.
+     * state either way, so this is promptness, not routing.
+     * <p>
+     * <b>"An enqueue that is lost costs at most {@code tick-seconds}" is only true while the
+     * worker is idle</b> (review S7), which is the case it was written for — a fresh create on a
+     * quiet instance. While a 500-account group is being registered, a lost enqueue costs that job
+     * plus {@code tick-seconds}, and an enqueue that is <em>not</em> lost costs the same, because
+     * it queues behind the running task on the single thread. Both are acceptable and neither is
+     * load-bearing; the sentence matters because it is what the next reader will use to decide
+     * whether this path needs hardening. Running on the worker's own single thread is what keeps
+     * the "one group at a time" property true for a create that arrives mid-registration.
      */
     public void enqueue(String botGroupId) {
         cancelled.remove(botGroupId);
@@ -295,11 +360,16 @@ public class RegistrationWorker {
     void tick() {
         List<BotGroup> pending = repository.findByRegistrationState(RegistrationState.PENDING);
         pendingGroups = pending.size();
-        failedGroups = repository.findByRegistrationState(RegistrationState.FAILED).size();
+        failedGroups = (int) repository.countByRegistrationState(RegistrationState.FAILED);
+        gaugesRefreshedAt = Instant.now();
+        pruneCancelled(pending);
 
         Instant now = Instant.now();
         BotGroup next = pending.stream()
                 .filter(group -> !cancelled.contains(group.getId()))
+                // isDue now covers a budget DEFERRAL as well as a failure backoff (review B2), so
+                // a group whose environment cannot admit a DEFAULT request steps aside and the
+                // next-oldest group gets the thread.
                 .filter(group -> isDue(group.getId(), now))
                 // Oldest create first, so a 500-account group cannot be starved by a stream of
                 // small ones and the order is the same on every instance. createdAt is stamped by
@@ -352,12 +422,27 @@ public class RegistrationWorker {
             int registered = group.getRegisteredCount();
             int named = group.getNamedCount();
 
-            while (!isComplete(registered, named, target, names)) {
+            while (true) {
+                // The target is RE-READ, once per index (QA F-1). `target` used to be captured
+                // before the loop, from a document this pass may hold for hours, and
+                // recordCompletion then cleared registrationState against that stale value: a
+                // botCount raise landing mid-pass was ERASED — botCount 20, registeredCount 10,
+                // not PENDING, so no tick ever selected the group again, the extra accounts were
+                // never created, and the bots built on the missing indices failed to authenticate
+                // at start, presenting as an auth outage rather than as a create that lied. The
+                // window was the whole duration of a pass, which is exactly when A2.7's "raise
+                // botCount to register more" is used. One indexed read per account, against a
+                // gateway call of 100-300 ms plus pacing, and it honours a LOWERED count too.
+                target = currentTarget(id, target);
+                if (isComplete(registered, named, target, names)) {
+                    break;
+                }
                 if (cancelled.contains(id)) {
                     log.info("group {} ({}): registration cancelled at {}/{} accounts",
                             id, group.getName(), registered, target);
                     return;
                 }
+                refreshGaugesIfStale();
 
                 // The next index to work on. With a name pool that is the first index whose NAME
                 // has not landed, which may already be registered — that is the resume case the
@@ -410,9 +495,17 @@ public class RegistrationWorker {
                     // A2.6: "not now", not "this cannot be created". No attempt is consumed, the
                     // group stays PENDING, and the next tick picks it up from exactly here. This
                     // is the classification that used to produce a 502 about a healthy gateway.
+                    //
+                    // It does cost the group its TURN, though (review B2): without a notBefore
+                    // this group is the oldest due PENDING group again on the very next tick, so
+                    // one starved environment suspended account creation for every group in the
+                    // JVM — and under Phase 5 an open Cloudflare circuit ("may last a day or
+                    // more") would have done it for a day.
+                    recordDeferral(id, index);
                     log.debug("group {}: registration of {} deferred by the gateway budget ({}) — "
-                                    + "re-queued at {}/{}",
-                            id, username, e.getMessage(), registered, target);
+                                    + "re-queued at {}/{}, not before {}",
+                            id, username, e.getMessage(), registered, target,
+                            attempts.get(id) == null ? "now" : attempts.get(id).notBefore());
                     return;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -447,15 +540,42 @@ public class RegistrationWorker {
         return registered >= target && (!names || named >= target);
     }
 
+    /**
+     * Clear the registration state — <b>only if the document's own {@code botCount} is met</b>
+     * (QA F-1).
+     * <p>
+     * The condition is on the Mongo query, not on this pass's arithmetic, and that is the point:
+     * the loop's re-read of the target closes the hours-wide window, and this closes the
+     * microseconds-wide one left between the last read and this write. A raise that lands in
+     * between simply does not match, so the group stays {@code PENDING} and the next tick resumes
+     * it — the one outcome that must be impossible is clearing the state for a group that is not
+     * actually complete, because nothing selects a group that is not {@code PENDING}.
+     */
     private void recordCompletion(BotGroup group, int registered, int named, int target,
                                   boolean names) {
-        mongoTemplate.updateFirst(byId(group.getId()),
-                new Update().set("registrationState", null)
-                        .set("registrationError", null)
-                        .set("registeredCount", registered)
-                        .set("namedCount", named)
-                        .set("updatedAt", Instant.now()),
-                BotGroup.class);
+        // With a name pool an index is done only when both halves landed, so the met target is the
+        // smaller counter. Without one, namedCount stays 0 by design (see isComplete).
+        int done = names ? Math.min(registered, named) : registered;
+        long matched = mongoTemplate.updateFirst(
+                        Query.query(Criteria.where("_id").is(group.getId())
+                                .and("botCount").lte(done)),
+                        new Update().set("registrationState", null)
+                                .set("registrationError", null)
+                                .set("registeredCount", registered)
+                                .set("namedCount", named)
+                                .set("updatedAt", Instant.now()),
+                        BotGroup.class)
+                .getMatchedCount();
+
+        if (matched == 0) {
+            // Either botCount was raised in the last microsecond or the group was deleted. Both
+            // are handled by doing nothing: the document decides, and it still says PENDING.
+            log.debug("group {}: completion at {}/{} did not match the document (botCount raised, "
+                            + "or the group was deleted) — leaving it PENDING",
+                    group.getId(), done, target);
+            return;
+        }
+
         attempts.remove(group.getId());
         // Tier 1: one INFO line per group per registration, which is the whole of this feature's
         // INFO budget. Nothing per account reaches INFO by any path.
@@ -464,27 +584,50 @@ public class RegistrationWorker {
                 names ? " (" + named + " named)" : " (no display-name pool configured)");
     }
 
-    /** Charge one attempt to {@code index} and, if the budget for it is spent, stop the group. */
+    /**
+     * Charge one attempt to {@code index} and, if the budget for it is spent, stop the group.
+     *
+     * <p><b>A transport failure is charged against its own, larger budget</b> (review S3). The
+     * classification used to be binary — {@link GatewayBudgetException} deferred, everything else
+     * a refusal — so a DNS hiccup, a connection reset or three 10-second timeouts on the same
+     * index spent the whole {@code max-attempts-per-user=3} budget inside ~60 s and left a
+     * 500-account group {@code FAILED}, needing a human, with a socket message in
+     * {@code registrationError} as though the gateway had rejected the account. An
+     * {@code IOException} anywhere in the cause chain (which covers {@code HttpTimeoutException}
+     * and {@code HttpConnectTimeoutException}, and the {@code RuntimeException} the naming path
+     * wraps them in) says neither "yes" nor "no", so it gets
+     * {@code max-transport-attempts-per-user=10} — ~5 minutes of blip tolerance at the default
+     * backoff — and then still stops the group rather than retrying forever, because a group that
+     * cannot reach its gateway at all must not be invisible.
+     */
     private void recordFailure(BotGroup group, int index, String username, int target,
                                Exception failure) {
         String id = group.getId();
-        Attempt attempt = attempts.compute(id, (key, current) ->
-                current != null && current.index == index
-                        ? new Attempt(index, current.count + 1, Instant.now().plus(failureBackoff))
-                        : new Attempt(index, 1, Instant.now().plus(failureBackoff)));
+        boolean transport = isTransportFailure(failure);
+        Attempt attempt = attempts.compute(id, (key, current) -> {
+            Attempt base = current != null && current.index == index
+                    ? current : new Attempt(index, 0, 0, Instant.EPOCH);
+            return new Attempt(index,
+                    base.refusals() + (transport ? 0 : 1),
+                    base.transportFailures() + (transport ? 1 : 0),
+                    Instant.now().plus(failureBackoff));
+        });
 
         botMetrics.incRegistrationAccount(OUTCOME_FAILED);
 
-        if (attempt.count < maxAttemptsPerUser) {
-            log.warn("group {} ({}): registering {} failed (attempt {}/{}) — retrying in {}s: {}",
-                    id, group.getName(), username, attempt.count, maxAttemptsPerUser,
+        int spent = transport ? attempt.transportFailures() : attempt.refusals();
+        int budget = transport ? maxTransportAttemptsPerUser : maxAttemptsPerUser;
+        String kind = transport ? "transport attempt" : "attempt";
+
+        if (spent < budget) {
+            log.warn("group {} ({}): registering {} failed ({} {}/{}) — retrying in {}s: {}",
+                    id, group.getName(), username, kind, spent, budget,
                     failureBackoff.toSeconds(), failure.getMessage());
             return;
         }
 
-        String reason = String.format("Registration stopped at account %d of %d (%s) after %d "
-                        + "attempts: %s", index, target, username, attempt.count,
-                failure.getMessage());
+        String reason = String.format("Registration stopped at account %d of %d (%s) after %d %ss: "
+                        + "%s", index, target, username, spent, kind, failure.getMessage());
         mongoTemplate.updateFirst(byId(id),
                 new Update().set("registrationState", RegistrationState.FAILED)
                         .set("registrationError", reason)
@@ -495,10 +638,57 @@ public class RegistrationWorker {
         // The group will not move again without a human, so this is a hand-off and it is an
         // ERROR. It does NOT skip ahead to index+1: skipping would break the high-water mark's
         // "indices 1..k are done" meaning, which is what every resume in this class depends on.
+        //
+        // The second half of the advice WORKS as of review B4: PATCHing botCount down to a met
+        // target clears REGISTRATION_FAILED in BotGroupService.update, so the group is startable
+        // straight afterwards. It used to send the operator in a circle — update() could only ever
+        // SET pending and was gated off for a FAILED group, so the /start answered the same 400
+        // repeating the same advice.
         log.error("group {} ({}): {}. Nothing will retry it — POST "
-                        + "/api/v1/bot-group/{}/registration/retry to resume from account {}, or "
-                        + "PATCH botCount down to {} to use the accounts that exist.",
-                id, group.getName(), reason, id, index, index - 1);
+                        + "/api/v1/bot-group/{}/registration/retry to resume from account {}{}",
+                id, group.getName(), reason, id, index,
+                // "PATCH botCount down to 0" is not advice, and index 1 is where a bad prefix, a
+                // bad password or a brand-side rejection stops a group — i.e. the commonest
+                // failure of all. Only offer the second route when there is something to start
+                // with.
+                index > 1
+                        ? String.format(", or PATCH botCount down to %d to use the accounts that "
+                                + "exist.", index - 1)
+                        : ". No account was created at all, so there is nothing to start with: "
+                                + "check namePrefix, the password and the brand's username rules.");
+    }
+
+    /**
+     * Pass this group over until {@link #deferralBackoff} has elapsed, <b>without charging it an
+     * attempt</b> (review B2).
+     * <p>
+     * The counts are carried through unchanged: a deferral is not a failure, and a group that
+     * waited out a busy window must not arrive at its next real attempt with a spent budget.
+     */
+    private void recordDeferral(String id, int index) {
+        Instant notBefore = Instant.now().plus(deferralBackoff);
+        attempts.compute(id, (key, current) -> current != null && current.index == index
+                ? new Attempt(index, current.refusals(), current.transportFailures(), notBefore)
+                : new Attempt(index, 0, 0, notBefore));
+    }
+
+    /**
+     * Whether {@code failure} is a transport problem rather than a gateway answer.
+     * <p>
+     * The chain is walked because {@code ApiGatewayClient} wraps its own
+     * {@code IOException}/{@code HttpTimeoutException} in a {@code RuntimeException} on the naming
+     * path, so the top-level type says nothing.
+     */
+    private static boolean isTransportFailure(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof java.io.IOException) {
+                return true;
+            }
+            if (cause.getCause() == cause) {
+                return false;
+            }
+        }
+        return false;
     }
 
     private void persistProgress(String id, int registered, int named) {
@@ -522,7 +712,63 @@ public class RegistrationWorker {
 
     private boolean isDue(String id, Instant now) {
         Attempt attempt = attempts.get(id);
-        return attempt == null || !now.isBefore(attempt.notBefore);
+        return attempt == null || !now.isBefore(attempt.notBefore());
+    }
+
+    /**
+     * This group's registration target as the document says it is <em>right now</em>, or
+     * {@code fallback} if it cannot be read (QA F-1).
+     * <p>
+     * An unreadable document is <b>not</b> treated as a deleted one: cancellation has its own
+     * mechanism ({@code cancelled} plus {@code cancelScope}), and inferring "deleted" from a Mongo
+     * hiccup would abandon a registration for a group that is perfectly alive.
+     */
+    private int currentTarget(String id, int fallback) {
+        try {
+            return repository.findById(id).map(BotGroup::getBotCount).orElse(fallback);
+        } catch (RuntimeException e) {
+            log.debug("group {}: could not re-read the registration target ({}) — keeping {}",
+                    id, e.getMessage(), fallback);
+            return fallback;
+        }
+    }
+
+    /** Refresh the gauges mid-pass if they are older than a tick. See {@link #pendingGroups}. */
+    private void refreshGaugesIfStale() {
+        Instant at = gaugesRefreshedAt;
+        if (at != null && Instant.now().isBefore(at.plusSeconds(tickSeconds))) {
+            return;
+        }
+        try {
+            pendingGroups = (int) repository.countByRegistrationState(RegistrationState.PENDING);
+            failedGroups = (int) repository.countByRegistrationState(RegistrationState.FAILED);
+            gaugesRefreshedAt = Instant.now();
+        } catch (RuntimeException e) {
+            log.debug("Could not refresh the registration gauges mid-pass: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Drop cancelled ids whose group is no longer {@code PENDING} (review S6).
+     * <p>
+     * Group ids are UUIDs, so an id added by a {@code DELETE} was never removed and the set grew
+     * for the life of the JVM — tiny, but unbounded, and consulted from inside the budget's lock
+     * through the scope predicate.
+     * <p>
+     * <b>Why this cannot un-cancel a live job.</b> Everything that reads the flag — the account
+     * loop, and the scope predicate of a registration request parked inside the budget — runs on
+     * this same single worker thread, which is the thread executing this method. No loop is in
+     * progress while it runs. A group still listed as {@code PENDING} keeps its entry, so a
+     * {@code DELETE} whose own delete threw is no more and no less blocked than before.
+     */
+    private void pruneCancelled(List<BotGroup> pending) {
+        if (cancelled.isEmpty()) {
+            return;
+        }
+        Set<String> stillPending = pending.stream()
+                .map(BotGroup::getId)
+                .collect(java.util.stream.Collectors.toSet());
+        cancelled.retainAll(stillPending);
     }
 
     /**
@@ -571,11 +817,19 @@ public class RegistrationWorker {
     }
 
     /**
-     * How many consecutive times one index has been refused by the gateway, and when it may be
-     * tried again. In memory by design: a JVM restart resets the budget, which is the same
-     * decision {@code DeadGroupRecoveryScheduler} makes (AD-11) and for the same reason — the
-     * state describes an episode, not the group.
+     * How many consecutive times one index has been refused, how many times it failed in
+     * transport, and when the group may be looked at again.
+     * <p>
+     * In memory by design: a JVM restart resets the budget, which is the same decision
+     * {@code DeadGroupRecoveryScheduler} makes (AD-11) and for the same reason — the state
+     * describes an episode, not the group.
+     * <p>
+     * <b>Three fields, three different meanings, and they must not be merged.</b>
+     * {@code refusals} is a gateway <em>answer</em> and is capped at
+     * {@code max-attempts-per-user}; {@code transportFailures} is "we could not ask" and is capped
+     * at {@code max-transport-attempts-per-user} (review S3); {@code notBefore} is also written by
+     * a budget deferral, which charges <em>neither</em> count (review B2, A2.6).
      */
-    private record Attempt(int index, int count, Instant notBefore) {
+    private record Attempt(int index, int refusals, int transportFailures, Instant notBefore) {
     }
 }

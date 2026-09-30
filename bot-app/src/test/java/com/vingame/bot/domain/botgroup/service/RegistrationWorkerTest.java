@@ -58,10 +58,13 @@ class RegistrationWorkerTest {
 
     private static final String GROUP = "group-1";
     private static final String ENV = "env-1";
+    /** A second environment, so "one starved environment" can be told from "the worker stopped". */
+    private static final String OTHER_ENV = "env-2";
 
     private BotGroupRepository repository;
     private MongoTemplate mongoTemplate;
     private ApiGatewayClient client;
+    private ApiGatewayClient otherClient;
     private GatewayBudgetRegistry budgetRegistry;
     private BotMetrics metrics;
     private SimpleMeterRegistry meterRegistry;
@@ -79,27 +82,40 @@ class RegistrationWorkerTest {
         meterRegistry = new SimpleMeterRegistry();
         metrics = new BotMetrics(meterRegistry);
 
+        otherClient = mock(ApiGatewayClient.class);
+
         EnvironmentClients clients = mock(EnvironmentClients.class);
         when(clients.getApiGatewayClient()).thenReturn(client);
+        EnvironmentClients otherClients = mock(EnvironmentClients.class);
+        when(otherClients.getApiGatewayClient()).thenReturn(otherClient);
         EnvironmentClientRegistry clientRegistry = mock(EnvironmentClientRegistry.class);
         when(clientRegistry.getClients(ENV)).thenReturn(clients);
+        when(clientRegistry.getClients(OTHER_ENV)).thenReturn(otherClients);
 
         EnvironmentService environmentService = mock(EnvironmentService.class);
         when(environmentService.findById(ENV)).thenReturn(
                 Environment.builder().id(ENV).productCode(ProductCode.P_116).build());
+        when(environmentService.findById(OTHER_ENV)).thenReturn(
+                Environment.builder().id(OTHER_ENV).productCode(ProductCode.P_097).build());
 
-        when(client.registrationMaxWait()).thenReturn(Duration.ofMinutes(15));
-        when(client.observeModePacing()).thenReturn(Duration.ZERO);
-        when(client.hasDisplayNames()).thenReturn(false);
+        for (ApiGatewayClient each : List.of(client, otherClient)) {
+            when(each.registrationMaxWait()).thenReturn(Duration.ofMinutes(15));
+            when(each.observeModePacing()).thenReturn(Duration.ZERO);
+            when(each.hasDisplayNames()).thenReturn(false);
+        }
 
         when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq(BotGroup.class)))
                 .thenAnswer(inv -> {
                     updates.add(inv.getArgument(1));
-                    return null;
+                    // A real MongoTemplate never returns null, and recordCompletion reads
+                    // getMatchedCount() to decide whether the document was still complete
+                    // (QA F-1). "1 matched" is the normal case; the tests that care about the
+                    // other one stub it themselves.
+                    return com.mongodb.client.result.UpdateResult.acknowledged(1, 1L, null);
                 });
 
         worker = new RegistrationWorker(repository, mongoTemplate, clientRegistry, budgetRegistry,
-                environmentService, metrics, 10, 3, 5, 30);
+                environmentService, metrics, 10, 3, 5, 30, 10, 60);
     }
 
     private BotGroup group(int botCount, int registered, int named) {
@@ -425,8 +441,9 @@ class RegistrationWorkerTest {
     void gaugesReadThePersistedState() {
         when(repository.findByRegistrationState(RegistrationState.PENDING))
                 .thenReturn(List.of(group(1, 1, 0)));
-        when(repository.findByRegistrationState(RegistrationState.FAILED))
-                .thenReturn(List.of(group(1, 0, 0), group(1, 0, 0)));
+        // countBy, not findBy (review T7): the gauge only ever needed the number, and this query
+        // runs every tick-seconds for the life of the JVM.
+        when(repository.countByRegistrationState(RegistrationState.FAILED)).thenReturn(2L);
 
         worker.tick();
 
@@ -459,25 +476,151 @@ class RegistrationWorkerTest {
         assertThat(counter("success")).isEqualTo(1);
     }
 
-    /** Pretend the failure backoff has elapsed, so the next tick reconsiders the group. */
+    @Test
+    @DisplayName("a deferred group steps aside so another environment's group can register")
+    void aBudgetDeferralDoesNotStarveTheOtherGroups() throws Exception {
+        // Two groups. The older one is on the starved environment and will be refused by the
+        // budget; the younger one is on a healthy environment and must still get its accounts.
+        BotGroup starved = group(5, 0, 0);
+        BotGroup healthy = BotGroup.builder()
+                .id("group-2").name("H").environmentId(OTHER_ENV)
+                .namePrefix("other").password("pw")
+                .botCount(2).registeredCount(0).namedCount(0)
+                .registrationState(RegistrationState.PENDING)
+                .createdAt(Instant.now().plusSeconds(60))
+                .build();
+        pending(starved, healthy);
+
+        when(client.registerOne(eq("bot"), anyString(), anyInt(), any(), any()))
+                .thenThrow(new GatewayBudgetExhaustedException(RequestTier.DEFAULT, ENV, null));
+        when(otherClient.registerOne(eq("other"), anyString(), anyInt(), any(), any()))
+                .thenReturn(RegistrationOutcome.CREATED);
+
+        // Pass 1 picks the oldest group and is deferred by its environment's budget.
+        worker.tick();
+        verify(otherClient, never()).registerOne(anyString(), anyString(), anyInt(), any(), any());
+
+        // Pass 2 must NOT pick the same group again. Before review B2 it did, forever: a budget
+        // deferral deliberately spends no attempt, and isDue consulted only the attempt state, so
+        // the starved group was the oldest DUE group on every tick — for up to
+        // registration.max-wait per pass — and no group on any other environment registered a
+        // single account for the whole duration of the starvation. Under Phase 5 the same arm
+        // catches GatewayCircuitOpenException, whose own message says the block "may last a day
+        // or more".
+        worker.tick();
+
+        verify(otherClient, org.mockito.Mockito.times(2))
+                .registerOne(eq("other"), anyString(), anyInt(), any(), any());
+        assertThat(notBeforeOf(GROUP))
+                .as("the deferral is what makes the group skippable, and it is a notBefore rather "
+                        + "than a spent attempt")
+                .isNotNull()
+                .isAfter(Instant.now());
+    }
+
+    @Test
+    @DisplayName("a budget deferral still costs no attempt, only a turn")
+    void aBudgetDeferralSpendsNoAttempt() throws Exception {
+        pending(group(5, 0, 0));
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenThrow(new GatewayBudgetExhaustedException(RequestTier.DEFAULT, ENV, null));
+
+        // Six deferrals — twice max-attempts-per-user — each made due again by hand, which is what
+        // the deferral backoff elapsing looks like.
+        for (int i = 0; i < 6; i++) {
+            worker.tick();
+            setBackoffElapsed();
+        }
+
+        assertThat(lastValue("registrationState")).isEqualTo("<never set>");
+        assertThat(counter("failed")).isZero();
+    }
+
+    @Test
+    @DisplayName("a transport failure is not charged as a gateway refusal")
+    void aTransportFailureHasItsOwnBudget() throws Exception {
+        pending(group(5, 0, 0));
+        // What a 60-second network blip looks like from here: the wrapped IOException the naming
+        // path produces, and the bare one registerOne declares.
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenThrow(new RuntimeException("Failed to register",
+                        new java.net.http.HttpTimeoutException("request timed out")));
+
+        // Four attempts, one more than max-attempts-per-user=3. Before review S3 the group was
+        // FAILED after the third — a socket message in registrationError, a human needed, and a
+        // 500-account create stopped by a blip.
+        for (int i = 0; i < 4; i++) {
+            worker.tick();
+            setBackoffElapsed();
+        }
+
+        assertThat(lastValue("registrationState"))
+                .as("a transport failure says neither yes nor no, so it gets the larger "
+                        + "max-transport-attempts-per-user budget")
+                .isEqualTo("<never set>");
+
+        // It is bounded, though: a gateway that cannot be reached at all must not be invisible.
+        for (int i = 0; i < 8; i++) {
+            worker.tick();
+            setBackoffElapsed();
+        }
+        assertThat(lastValue("registrationState")).isEqualTo(RegistrationState.FAILED);
+        assertThat(lastValue("registrationError")).asString()
+                .contains("transport attempt")
+                .contains("account 1 of 5");
+    }
+
+    /**
+     * Pretend the backoff (or the budget deferral) has elapsed, so the next tick reconsiders the
+     * group.
+     * <p>
+     * Rebuilt from the record's own components rather than from a fixed constructor arity: the
+     * {@code Attempt} record gained a second counter in review S3 and a deferral writer in review
+     * B2, and a helper pinned to {@code (int, int, Instant)} silently stops working — it returns
+     * early on the {@code ReflectiveOperationException} and the test then passes for the wrong
+     * reason.
+     */
     private void setBackoffElapsed() {
+        setNotBefore(GROUP, Instant.now().minusSeconds(1));
+    }
+
+    private void setNotBefore(String groupId, Instant notBefore) {
         @SuppressWarnings("unchecked")
         java.util.Map<String, Object> attempts = (java.util.Map<String, Object>)
                 org.springframework.test.util.ReflectionTestUtils.getField(worker, "attempts");
-        Object attempt = attempts.get(GROUP);
+        Object attempt = attempts.get(groupId);
         if (attempt == null) {
             return;
         }
-        int index = (int) org.springframework.test.util.ReflectionTestUtils
-                .invokeGetterMethod(attempt, "index");
-        int count = (int) org.springframework.test.util.ReflectionTestUtils
-                .invokeGetterMethod(attempt, "count");
-        try {
-            var ctor = attempt.getClass().getDeclaredConstructor(int.class, int.class, Instant.class);
-            ctor.setAccessible(true);
-            attempts.put(GROUP, ctor.newInstance(index, count, Instant.now().minusSeconds(1)));
-        } catch (ReflectiveOperationException e) {
-            throw new IllegalStateException(e);
+        var components = attempt.getClass().getRecordComponents();
+        assertThat(components)
+                .as("Attempt is expected to stay a record — this helper rebuilds it component-wise")
+                .isNotNull();
+        Object[] args = new Object[components.length];
+        Class<?>[] types = new Class<?>[components.length];
+        for (int i = 0; i < components.length; i++) {
+            types[i] = components[i].getType();
+            args[i] = components[i].getType() == Instant.class
+                    ? notBefore
+                    : org.springframework.test.util.ReflectionTestUtils
+                            .invokeGetterMethod(attempt, components[i].getName());
         }
+        try {
+            var ctor = attempt.getClass().getDeclaredConstructor(types);
+            ctor.setAccessible(true);
+            attempts.put(groupId, ctor.newInstance(args));
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("could not rebuild Attempt", e);
+        }
+    }
+
+    /** The {@code notBefore} the worker is currently holding for {@code groupId}, or null. */
+    private Instant notBeforeOf(String groupId) {
+        @SuppressWarnings("unchecked")
+        java.util.Map<String, Object> attempts = (java.util.Map<String, Object>)
+                org.springframework.test.util.ReflectionTestUtils.getField(worker, "attempts");
+        Object attempt = attempts.get(groupId);
+        return attempt == null ? null : (Instant) org.springframework.test.util.ReflectionTestUtils
+                .invokeGetterMethod(attempt, "notBefore");
     }
 }

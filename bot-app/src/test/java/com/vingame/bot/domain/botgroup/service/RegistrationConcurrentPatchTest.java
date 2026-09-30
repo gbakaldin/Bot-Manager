@@ -46,21 +46,23 @@ import static org.mockito.Mockito.when;
  * {@code registeredCount} / {@code namedCount} / {@code updatedAt} and <b>nothing else</b>, so a
  * {@code botCount} the operator raised in the meantime survives the pass.
  *
- * <p><b>The second test pins a defect, deliberately, and it will fail when the defect is fixed.
- * Read this before "fixing" the test.</b> A30.5 documents the residual race as self-correcting on
- * the grounds that a re-registered index answers {@code EXISTED} at the cost of one request. That
- * is true of the counter, and it is not true of the <em>completion decision</em>.
- * {@code register(group)} captures {@code target = group.getBotCount()} once, from a document it
- * may hold for the entire duration of a 500-account job, and {@code recordCompletion} then
- * {@code $set}s {@code registrationState: null} when the loop reaches that stale target. A raise
- * that lands mid-pass is therefore <b>erased</b>: {@code botCount} is 20, {@code registeredCount}
- * is 10, and the group is no longer {@code PENDING}, so no tick ever selects it again. The ten
- * accounts are never created, the group reports complete, and the bots built on the missing
- * indices fail to authenticate at start — which presents as an auth outage, not as a create that
- * lied. It is recoverable only because an operator who notices can PATCH {@code botCount} again.
+ * <p><b>The second and third tests cover QA F-1, which was a real defect and is now fixed.</b>
+ * A30.5 documented the residual race as self-correcting on the grounds that a re-registered index
+ * answers {@code EXISTED} at the cost of one request. That was true of the counter and false of the
+ * <em>completion decision</em>: {@code register(group)} captured {@code target =
+ * group.getBotCount()} once, from a document it may hold for the entire duration of a 500-account
+ * job, and {@code recordCompletion} then {@code $set} {@code registrationState: null} when the loop
+ * reached that stale target. A raise landing mid-pass was <b>erased</b> — {@code botCount} 20,
+ * {@code registeredCount} 10, no longer {@code PENDING}, so no tick ever selected the group again;
+ * the extra accounts were never created, the group reported complete, and the bots built on the
+ * missing indices failed to authenticate at start, presenting as an auth outage rather than as a
+ * create that lied. The window was not a millisecond: it was the whole duration of a pass, which
+ * for a 500-account group under the budget is measured in hours — i.e. it contradicted A2.7's
+ * "raise botCount to ask for more accounts" exactly under load.
  *
- * <p>The window is not a millisecond: it is the whole duration of a registration pass, which for
- * a 500-account group under the budget is measured in hours. See {@code qa-phase4.md}.
+ * <p>Two changes, and both are asserted below: the loop <b>re-reads the target on every index</b>,
+ * and the completion write is <b>conditional on the document's own {@code botCount}</b> so the
+ * microseconds-wide remainder cannot clear the state of a group that is not complete.
  *
  * <p>No gateway is touched: {@link ApiGatewayClient} is a mock and no socket is opened.
  */
@@ -71,14 +73,17 @@ class RegistrationConcurrentPatchTest {
     private static final String ENV = "env-1";
 
     private BotGroupRepository repository;
+    private MongoTemplate mongoTemplate;
     private ApiGatewayClient client;
     private RegistrationWorker worker;
     private final List<Update> updates = new ArrayList<>();
+    /** Every {@code Query} the worker issued, positionally paired with {@link #updates}. */
+    private final List<Query> queries = new ArrayList<>();
 
     @BeforeEach
     void setUp() {
         repository = mock(BotGroupRepository.class);
-        MongoTemplate mongoTemplate = mock(MongoTemplate.class);
+        mongoTemplate = mock(MongoTemplate.class);
         client = mock(ApiGatewayClient.class);
 
         EnvironmentClients clients = mock(EnvironmentClients.class);
@@ -95,13 +100,16 @@ class RegistrationConcurrentPatchTest {
         when(client.hasDisplayNames()).thenReturn(false);
         when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq(BotGroup.class)))
                 .thenAnswer(invocation -> {
+                    queries.add(invocation.getArgument(0));
                     updates.add(invocation.getArgument(1));
-                    return null;
+                    // A real MongoTemplate never returns null, and recordCompletion reads
+                    // getMatchedCount() (QA F-1).
+                    return com.mongodb.client.result.UpdateResult.acknowledged(1, 1L, null);
                 });
 
         worker = new RegistrationWorker(repository, mongoTemplate, clientRegistry,
                 mock(GatewayBudgetRegistry.class), environmentService,
-                new BotMetrics(new SimpleMeterRegistry()), 10, 3, 5, 30);
+                new BotMetrics(new SimpleMeterRegistry()), 10, 3, 5, 30, 10, 60);
     }
 
     private void pending(int botCount) {
@@ -150,46 +158,107 @@ class RegistrationConcurrentPatchTest {
     }
 
     @Test
-    @DisplayName("DEFECT: a botCount raise that lands mid-pass is erased by the completion write")
-    void aMidPassBotCountRaiseIsErased() throws Exception {
+    @DisplayName("a botCount raise that lands mid-pass is picked up, not erased (QA F-1)")
+    void aMidPassBotCountRaiseIsHonoured() throws Exception {
         // The group the worker picked up asks for 2 accounts.
         pending(2);
+        // …and the operator PATCHes botCount to 4 while the pass is running. That is what the
+        // document says from the worker's next re-read onwards.
+        patchedTo(4);
 
-        // The operator PATCHes botCount to 4 after account 1 lands. The worker's `target` was
-        // captured before the loop and does not see it — which is the defect: the loop exits at 2.
         when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
                 .thenReturn(RegistrationOutcome.CREATED);
 
         worker.tick();
 
-        // A sentinel, because "$set registrationState -> null" and "never written" are opposite
-        // outcomes here and both read as a Java null.
-        Object finalState = "<never written>";
-        int finalRegistered = -1;
+        org.mockito.Mockito.verify(client, org.mockito.Mockito.times(4))
+                .registerOne(anyString(), anyString(), anyInt(), any(), any());
+        assertThat(lastInt("registeredCount")).isEqualTo(4);
+        assertThat(lastValue("registrationState"))
+                .as("complete at the NEW target, which is what A2.7 promises")
+                .isNull();
+    }
+
+    @Test
+    @DisplayName("the completion write asks Mongo to check botCount, and survives a no-match")
+    void theCompletionWriteIsConditionalOnTheDocumentsBotCount() throws Exception {
+        pending(2);
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenReturn(RegistrationOutcome.CREATED);
+        // Mongo's answer when `botCount <= done` no longer holds: nothing matched. That is the
+        // raise landing between the loop's last re-read and the completion write — the window the
+        // re-read cannot close.
+        completionMatchesNothing();
+
+        worker.tick();
+
+        // THE ASSERTION WITH TEETH is the query, because the query is the mechanism: the condition
+        // is evaluated by Mongo against the document, which is the only party that knows what
+        // botCount is at the instant of the write. Deleting `.and("botCount").lte(done)` fails
+        // here and nowhere else.
+        Query completion = queries.get(queries.size() - 1);
+        assertThat(completion.getQueryObject().toJson())
+                .as("the state may only be cleared for a document whose own botCount is met")
+                .contains("\"_id\": \"" + GROUP + "\"")
+                .contains("botCount")
+                .contains("$lte");
+
+        // And the no-match arm itself: the pass ends without claiming completion, and the per-index
+        // progress that DID land is untouched. The group stays PENDING in Mongo — by the document's
+        // own authority, not ours — so the next tick resumes it.
+        assertThat(lastValue("registrationState"))
+                .as("nothing was written, so nothing claims the group is complete")
+                .isEqualTo("<never set>");
+        assertThat(lastInt("registeredCount"))
+                .as("the per-index progress still landed — only the completion did not")
+                .isEqualTo(2);
+    }
+
+    /** The last value {@code field} was {@code $set} to, or a sentinel if it never was. */
+    private Object lastValue(String field) {
+        Object value = "<never set>";
         for (Update update : updates) {
             Object set = update.getUpdateObject().get("$set");
-            if (set instanceof org.bson.Document doc) {
-                if (doc.containsKey("registrationState")) {
-                    finalState = doc.get("registrationState");
-                }
-                if (doc.get("registeredCount") instanceof Integer i) {
-                    finalRegistered = i;
-                }
+            if (set instanceof org.bson.Document doc && doc.containsKey(field)) {
+                value = doc.get(field);
             }
         }
+        return value;
+    }
 
-        assertThat(finalRegistered).isEqualTo(2);
-        // THIS is the defect. The completion write clears registrationState unconditionally,
-        // against a target captured before the pass began. Once it is null the group is not
-        // PENDING, so no later tick selects it and the raise never registers anything — the
-        // group simply reports complete at the old count.
-        //
-        // A fix would re-read botCount inside the loop (or make the completion write conditional
-        // on `registeredCount >= botCount` in the query). When it lands, this assertion flips and
-        // this test is the place to record the new behaviour, not the place to delete.
-        assertThat(finalState)
-                .as("the completion write is unconditional and uses a stale target — see "
-                        + "docs/reviews/GATEWAY_REQUEST_BUDGET/qa-phase4.md")
-                .isNull();
+    private int lastInt(String field) {
+        Object value = lastValue(field);
+        return value instanceof Integer i ? i : -1;
+    }
+
+    /** What the document says its {@code botCount} is from now on — the concurrent PATCH. */
+    private void patchedTo(int botCount) {
+        when(repository.findById(GROUP)).thenReturn(java.util.Optional.of(BotGroup.builder()
+                .id(GROUP).name("G").environmentId(ENV)
+                .namePrefix("bot").password("pw")
+                .botCount(botCount)
+                .registrationState(RegistrationState.PENDING)
+                .createdAt(Instant.now())
+                .build()));
+    }
+
+    /** Make the conditional completion write match no document, as a mid-flight raise would. */
+    private void completionMatchesNothing() {
+        when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq(BotGroup.class)))
+                .thenAnswer(invocation -> {
+                    // The QUERY is always recorded — it is the assertion below — but a write that
+                    // matched nothing must not appear in the $set ledger, because nothing was
+                    // written.
+                    queries.add(invocation.getArgument(0));
+                    Update update = invocation.getArgument(1);
+                    Object set = update.getUpdateObject().get("$set");
+                    boolean completion = set instanceof org.bson.Document doc
+                            && doc.containsKey("registrationState");
+                    if (completion) {
+                        return com.mongodb.client.result.UpdateResult.acknowledged(0, 0L, null);
+                    }
+                    updates.add(update);
+                    return com.mongodb.client.result.UpdateResult.acknowledged(1, 1L, null);
+                });
     }
 }

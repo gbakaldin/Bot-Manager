@@ -179,6 +179,16 @@ class AlertRuleMetricsTest {
         when(worker.getFailedGroupCount()).thenReturn(1);
         new ObservabilityConfig().registrationGauges(worker).bindTo(registry);
 
+        // …and the per-account counter beside them, materialised the way RegistrationWorker does
+        // at the top of every pass: all three outcomes at zero under the GROUP MDC, then the one
+        // that happened. RegistrationNotProgressing reads it as a fleet-wide sum against the
+        // unlabelled gauge, so both have to be in this exposition or that rule is unverifiable
+        // here — and a rule over a metric that does not exist is an empty vector forever.
+        BotMdc.setGroupContext("group-uuid-1", "env-uuid-1", "116");
+        metrics.initRegistrationSeries("success", "exists", "failed");
+        metrics.incRegistrationAccount("success");
+        MDC.clear();
+
         // --- the log4j2 queue meters, registered exactly as AsyncQueueMetrics does at
         // startup, against the real LoggerContext this build runs on. LogQueueSaturated
         // reads them bare and renders {{ $labels.appender }}, so both the metric names

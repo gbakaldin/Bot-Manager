@@ -502,7 +502,36 @@ groups:
           audience: internal
         annotations:
           summary: "{{ $value }} bot group(s) have a stalled account registration"
-          description: "A group stopped creating accounts after bot.registration.max-attempts-per-user consecutive gateway refusals of one account, and nothing will retry it — that is deliberate (a silent retry loop against a gateway that keeps saying no is how a brand gets Cloudflare-blocked). Find it with POST /api/v1/bot-group/{envId}/filter and look for targetStatus REGISTRATION_FAILED; registrationError on the document names the account and the upstream message. Then either POST /api/v1/bot-group/{id}/registration/retry to resume from registeredCount + 1, or PATCH botCount down to what registered and start the group with the accounts that exist. NOTE this is NOT a budget or Cloudflare signal: a budget timeout or an open circuit re-queues the group without spending an attempt, so it can never produce this alert — see GatewayBudgetSustainedQueue for that shape."
+          description: "A group stopped creating accounts after bot.registration.max-attempts-per-user consecutive gateway refusals of one account, and nothing will retry it — that is deliberate (a silent retry loop against a gateway that keeps saying no is how a brand gets Cloudflare-blocked). Find it with POST /api/v1/bot-group/{envId}/filter and look for targetStatus REGISTRATION_FAILED; registrationError on the document names the account and the upstream message. Then either POST /api/v1/bot-group/{id}/registration/retry to resume from registeredCount + 1, or PATCH botCount down to exactly registeredCount, which clears REGISTRATION_FAILED and leaves the group startable with the accounts that exist (that is one PATCH, not a PATCH plus a retry — review B4 made the advice true). NOTE this is NOT a budget or Cloudflare signal: a budget timeout or an open circuit re-queues the group without spending an attempt, so it can never produce this alert — see GatewayBudgetSustainedQueue and RegistrationNotProgressing for those shapes."
+
+      # The other half of the registration surface, and the gap review B2 named: a group can sit
+      # PENDING forever without ever going FAILED. RegistrationStalled reads
+      # registration_failed_groups, and a group deferred by its environment's budget — or, from
+      # Phase 5, by an open Cloudflare circuit — is PENDING, not FAILED. Before B2 one starved
+      # environment suspended registration for every group in the JVM and the only symptom was
+      # "registeredCount is not moving", on a feature whose entire progress contract is that the
+      # operator polls exactly that number.
+      #
+      # The conjunction is what makes this precise rather than noisy: a 500-account group under
+      # enforce legitimately stays PENDING for hours, but it is INCREMENTING
+      # registration_accounts_total the whole time, so it cannot fire this. Zero accounts in 30
+      # minutes with at least one group pending means nothing anywhere is progressing.
+      #
+      # `and on()` because the two series have different label sets (the gauge is an unlabelled
+      # fleet aggregate, the counter carries the group MDC); `or vector(0)` because a sum over an
+      # absent counter is an empty vector, and an empty vector would make the whole expression
+      # empty — i.e. this rule would go silent exactly when no account has EVER been registered in
+      # this JVM's lifetime, which includes the case where the very first group is starved.
+      - alert: RegistrationNotProgressing
+        expr: registration_pending_groups > 0 and on() (sum(increase(registration_accounts_total[30m])) or vector(0)) == 0
+        for: 30m
+        labels:
+          job: bot-manager
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "{{ $value }} bot group(s) are pending registration and no account has been created for 30 minutes"
+          description: "Account creation has stopped without anything failing. The usual cause is that the environment cannot admit a DEFAULT request — a large group start holds an ESSENTIAL reservation of botCount x 3, which drives DEFAULT's effective ceiling to zero — in which case this resolves by itself when the start finishes; gateway_budget_queued_requests by tier says whether that is what is happening. From Phase 5 an open Cloudflare circuit looks the same and can last a day. The other possibility is that the registration worker itself is gone (its scheduled task died, or the JVM is shutting down), which is NOT distinguishable from here: both gauges are cached values refreshed by that same worker, so a dead worker freezes them at their last reading rather than clearing them. Check for the 'Registration worker started' line and one 'registration complete' line per group in logs/detail/detail.log."
 
       # The companion F16 asks for: the denominator vanishing must not look like health.
       # `gateway_budget_window_requests` without a matching `gateway_budget_hard_cap` means

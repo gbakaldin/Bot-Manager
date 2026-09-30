@@ -32,4 +32,13 @@ public interface BotGroupRepository extends MongoRepository<BotGroup, String> {
      * that matches neither call — no conversion, no boot hazard.
      */
     List<BotGroup> findByRegistrationState(String registrationState);
+
+    /**
+     * How many groups are in {@code registrationState}, without loading them (review T7).
+     * <p>
+     * The gauges behind {@code registration_pending_groups} / {@code registration_failed_groups}
+     * only ever needed a number, and this query runs every {@code bot.registration.tick-seconds}
+     * for the life of the JVM — and, since review S5, again inside a long pass.
+     */
+    long countByRegistrationState(String registrationState);
 }
