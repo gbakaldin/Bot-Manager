@@ -233,6 +233,62 @@ class SlidingWindowGatewayBudgetCircuitRefusalTest {
     }
 
     @Test
+    @DisplayName("an UNBOUNDED ESSENTIAL waiter queued before the block is refused when it opens, not parked")
+    void aQueuedEssentialWaiterIsRefusedWhenTheCircuitOpens() throws Exception {
+        // review-phase4-fixround, A16.2. The test above uses a bounded wait, so it passes whether
+        // the pass refuses the waiter or merely declines to admit it (the wait expires either way).
+        // This one uses ESSENTIAL's real policy — unbounded — and does NOT move the clock: if the
+        // pass only `break`s, nothing ever releases this thread (no stamp expiry is coming, and the
+        // circuit will not close inside the test), and the latch below times out.
+        for (int i = 0; i < 900; i++) {
+            budget.execute(RequestTier.ESSENTIAL, SCOPE, () -> "fill");
+        }
+        AtomicReference<Throwable> essential = new AtomicReference<>();
+        AtomicReference<Optional<String>> soft = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(2);
+        Thread.ofVirtual().name("queued-essential").start(() -> {
+            try {
+                budget.execute(RequestTier.ESSENTIAL, SCOPE, () -> "must not be sent");
+            } catch (Throwable t) {
+                essential.set(t);
+            } finally {
+                done.countDown();
+            }
+        });
+        Thread.ofVirtual().name("queued-soft").start(() -> {
+            try {
+                soft.set(budget.tryExecute(RequestTier.DEFAULT, SCOPE, () -> "must not be sent",
+                        Duration.ofMinutes(5)));
+            } catch (Throwable t) {
+                soft.set(Optional.of("threw " + t));
+            } finally {
+                done.countDown();
+            }
+        });
+        for (int i = 0; i < 400 && (budget.snapshot().queuedEssential() < 1
+                || budget.snapshot().queuedDefault() < 1); i++) {
+            Thread.sleep(5);
+        }
+        assertThat(budget.snapshot().queuedEssential()).isEqualTo(1);
+        assertThat(budget.snapshot().queuedDefault()).isEqualTo(1);
+
+        openCircuit(budget);
+
+        assertThat(done.await(5, TimeUnit.SECONDS))
+                .as("both queued callers must come back the moment the circuit opens")
+                .isTrue();
+        assertThat(essential.get()).isInstanceOf(GatewayCircuitOpenException.class);
+        assertThat(soft.get())
+                .as("a soft caller is told no the same way on both paths — empty, not a throw")
+                .isEmpty();
+        assertThat(budget.snapshot().queuedEssential()).isZero();
+        assertThat(budget.snapshot().queuedDefault()).isZero();
+        assertThat(counter(RequestTier.ESSENTIAL, SlidingWindowGatewayBudget.OUTCOME_CIRCUIT_OPEN))
+                .isEqualTo(1.0);
+        assertThat(budget.windowRequests()).as("nothing refused was stamped").isEqualTo(900);
+    }
+
+    @Test
     @DisplayName("observe mode refuses nothing, even with the circuit open")
     void observeModeNeverRefusesOnACircuit() throws Exception {
         // The mode is an environment variable and `observe` is the shipped default, so a box that

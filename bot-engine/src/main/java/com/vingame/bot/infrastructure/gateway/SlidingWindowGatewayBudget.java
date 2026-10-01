@@ -656,9 +656,16 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             Thread.currentThread().interrupt();
             throw e;
         } catch (ExecutionException e) {
-            // The only exceptional completion is cancellation (admitWaitersLocked / cancelScope).
+            // Two exceptional completions: cancellation (admitWaitersLocked / cancelScope) and an
+            // open circuit refusing the queued waiter (admitWaitersLocked, A16.2).
             dequeue(waiter);
             reportThrottleState();
+            if (soft && e.getCause() instanceof GatewayCircuitOpenException) {
+                // A soft caller is told "no" the same way on both paths: the arrival path returns
+                // false for an open circuit, so a waiter refused by one must too, or a drift read
+                // on a message-processor thread would see an exception the arrival path hides.
+                return false;
+            }
             if (e.getCause() instanceof RuntimeException runtime) {
                 throw runtime;
             }
@@ -809,7 +816,23 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                             new GatewayRequestCancelledException(environmentId, describe(head.scope))));
                     continue;
                 }
-                if (circuitOpen.get() || !hasRoomLocked(tier)) {
+                if (circuitOpen.get()) {
+                    // A16.2, and review-phase4-fixround: an open circuit REFUSES a queued waiter, it
+                    // does not merely decline to admit it. This used to `break`, which left every
+                    // waiter queued before the block was recognised parked — and an ESSENTIAL
+                    // waiter's wait is unbounded by design. Worse, with traffic stopped the stamps
+                    // expire, the window empties, scheduleWakeUpLocked has no stamp to arm a timer
+                    // on, and the only thing left that could release the waiter is the circuit
+                    // closing: possibly a day, holding a bot.creation.parallelism permit and, through
+                    // it, the group lock. Never stamped — it did not leave the JVM.
+                    queue.pollFirst();
+                    queued.get(tier).decrementAndGet();
+                    counter(tier, OUTCOME_CIRCUIT_OPEN).increment();
+                    GatewayCircuitOpenException refusal = circuitRefusalLocked(now);
+                    deferred.add(() -> head.admitted.completeExceptionally(refusal));
+                    continue;
+                }
+                if (!hasRoomLocked(tier)) {
                     break;
                 }
                 queue.pollFirst();
@@ -1098,7 +1121,8 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      * <p>
      * <b>The state machine.</b> {@code CLOSED → OPEN} on the first block under {@code enforce}:
      * the cf-ray is kept, the next probe is scheduled one {@code block-probe-interval} out, and an
-     * admission pass runs so nothing already queued is admitted into the wall. {@code OPEN} stays
+     * admission pass runs that <b>refuses</b> every waiter already queued — not merely declines to
+     * admit it: an ESSENTIAL waiter's wait is unbounded, and nothing else would ever release it. {@code OPEN} stays
      * open on every further block (requests that were in flight when it opened land here too —
      * they are counted, not re-announced). Only {@link #runCircuitProbe()} closes it.
      */
@@ -1123,8 +1147,8 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                 nextProbeAtNanos = now + settings.blockProbeInterval().toNanos();
                 scheduleProbeLocked(now);
                 opened = true;
-                // Walk the queues now, under the same lock that flipped the flag, so the decision
-                // about every queued waiter is taken against the open circuit.
+                // Walk the queues now, under the same lock that flipped the flag: the pass refuses
+                // every queued waiter with GatewayCircuitOpenException (A16.2).
                 admitWaitersLocked(now, deferred);
             }
             refusal = circuitRefusalLocked(now);
