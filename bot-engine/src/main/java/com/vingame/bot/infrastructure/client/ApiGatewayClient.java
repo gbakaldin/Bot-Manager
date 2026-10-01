@@ -804,10 +804,10 @@ public class ApiGatewayClient {
             log.debug("Retrying with different name (attempt {}/{})", attempt + 1, maxRetries);
         }
 
-        // DEBUG here too, and the caller is what reports it: RegistrationWorker emits one WARN
-        // naming the username, because a nameless account is worth an operator's attention (it
-        // stalls a ziczac round engine) but N of them are worth one line each at WARN, not an
-        // ERROR per account from inside a loop.
+        // DEBUG here too, and the caller is what reports it: RegistrationWorker charges the account
+        // an attempt (RIK review G1) — a nameless account stalls a ziczac round engine, so it is
+        // retried on the next pass and, if it stays nameless, stops the group as
+        // REGISTRATION_FAILED naming it, rather than being logged and counted as named.
         log.debug("Failed to set display name for {} after {} attempts", username, maxRetries);
         return null;
     }

@@ -502,20 +502,27 @@ public class RegistrationWorker {
                     if (names && named < index) {
                         String displayName = client.setDisplayNameWithRetry(
                                 username, displayNameRetries, scope, maxWait);
+                        if (displayName == null) {
+                            // RIK review G1. A name that ran out of re-rolls is NOT a named index.
+                            // This used to advance namedCount anyway (with one WARN), so namedCount
+                            // could never show a nameless account, /registration/retry — which
+                            // resumes from namedCount + 1 — could never revisit it, and the group
+                            // completed and was startable. One nameless account in a RIK ziczac
+                            // room stalls the round engine for every player in it, and at RIK's
+                            // ~43% collision rate a 100-bot group had a ~77% chance of one.
+                            //
+                            // Charged as an attempt instead (the catch below -> recordFailure): the
+                            // next pass retries this same index with fresh names — the register
+                            // half is skipped because registeredCount already covers it (A30) — and
+                            // after max-attempts-per-user the group goes REGISTRATION_FAILED with
+                            // registrationError naming the account. The group can no longer reach
+                            // COMPLETE with a nameless account in it.
+                            sleep(pacing);
+                            throw new DisplayNameExhaustedException(username, displayNameRetries);
+                        }
                         named = index;
                         persistProgress(id, registered, named);
-                        if (displayName == null) {
-                            // WARN and move on, which is the pre-existing behaviour and the right
-                            // one: the account exists and works, it is just anonymous. Not silent,
-                            // because a nameless account in a RIK ziczac room stalls the round
-                            // engine for every player in it, and this line is how an operator
-                            // finds the handful to name by hand.
-                            log.warn("Could not set a display name for {} after {} attempts — "
-                                            + "the account exists but is nameless",
-                                    username, displayNameRetries);
-                        } else {
-                            log.debug("Set display name '{}' for {}", displayName, username);
-                        }
+                        log.debug("Set display name '{}' for {}", displayName, username);
                         sleep(pacing);
                     }
 
@@ -895,6 +902,20 @@ public class RegistrationWorker {
      * {@code deferralSeq}, is the group's place in the queue after a deferral — it is what moves
      * a deferred group behind every group that was not (review-phase4-fixround B2).
      */
+    /**
+     * Every display name tried for one account collided (RIK review G1). A gateway answer — the
+     * pool ran dry against the brand's existing names — so it is charged as a refusal, never as a
+     * transport failure: it carries no {@code IOException}, and {@code isTransportFailure} only
+     * gives the larger budget to "we could not ask".
+     */
+    static final class DisplayNameExhaustedException extends RuntimeException {
+        DisplayNameExhaustedException(String username, int retries) {
+            super("account " + username + " is registered but nameless — every one of " + retries
+                    + " display names tried was already taken (a nameless account stalls a RIK "
+                    + "ziczac room); retry re-rolls names for it");
+        }
+    }
+
     private record Attempt(int index, int refusals, int transportFailures, Instant notBefore,
                            long deferralSeq) {
     }

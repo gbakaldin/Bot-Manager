@@ -426,6 +426,112 @@ class RegistrationWorkerTest {
         assertThat(lastInt("namedCount")).isEqualTo(2);
     }
 
+    // ------------------------------------------------------------ RIK review G1: name exhaustion
+
+    @Test
+    @DisplayName("a name that ran out of re-rolls does NOT advance namedCount, and the group is not complete")
+    void nameExhaustionDoesNotAdvanceNamedCount() throws Exception {
+        // RIK review G1. namedCount used to advance anyway, so a nameless account was invisible to
+        // the counter, to /registration/retry and to completion — and one nameless account in a
+        // RIK ziczac room stalls the round for everyone in it.
+        when(client.hasDisplayNames()).thenReturn(true);
+        when(client.setDisplayNameWithRetry(eq("bot1"), anyInt(), any(), any())).thenReturn(null);
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenReturn(RegistrationOutcome.CREATED);
+        pending(group(3, 0, 0));
+
+        worker.tick();
+
+        assertThat(lastInt("registeredCount")).as("the account itself exists").isEqualTo(1);
+        assertThat(lastInt("namedCount")).as("but it has no name, and the counter says so").isZero();
+        assertThat(lastValue("registrationState"))
+                .as("not complete — the pass stopped at the nameless index")
+                .isEqualTo("<never set>");
+        assertThat(counter("failed")).as("charged as an attempt, not silently skipped").isEqualTo(1);
+        verify(client, never()).registerOne(anyString(), anyString(), eq(2), any(), any());
+    }
+
+    @Test
+    @DisplayName("the next pass re-rolls names for the same account without re-registering it, and completes")
+    void aLaterPassNamesTheAccountAndCompletes() throws Exception {
+        when(client.hasDisplayNames()).thenReturn(true);
+        when(client.setDisplayNameWithRetry(anyString(), anyInt(), any(), any()))
+                .thenReturn(null)          // pass 1: bot1 exhausts
+                .thenReturn("Gấu Bự");     // pass 2 onwards: names land
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenReturn(RegistrationOutcome.CREATED);
+        pending(group(3, 0, 0));
+
+        worker.tick();
+        // What the document now holds: bot1 registered (persisted by the pass), nobody named.
+        pending(group(3, lastInt("registeredCount"), lastInt("namedCount")));
+        setBackoffElapsed();
+        worker.tick();
+
+        verify(client, org.mockito.Mockito.times(1))
+                .registerOne(anyString(), anyString(), eq(1), any(), any());
+        verify(client, org.mockito.Mockito.times(2))
+                .setDisplayNameWithRetry(eq("bot1"), anyInt(), any(), any());
+        assertThat(lastInt("namedCount")).isEqualTo(3);
+        assertThat(lastValue("registrationState")).as("complete only once every account is named").isNull();
+    }
+
+    @Test
+    @DisplayName("an account that stays nameless stops the group REGISTRATION_FAILED, naming it")
+    void repeatedNameExhaustionFailsTheGroup() throws Exception {
+        when(client.hasDisplayNames()).thenReturn(true);
+        when(client.setDisplayNameWithRetry(anyString(), anyInt(), any(), any())).thenReturn(null);
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenReturn(RegistrationOutcome.CREATED);
+        pending(group(3, 0, 0));
+
+        for (int i = 0; i < 3; i++) {
+            worker.tick();
+            setBackoffElapsed();
+        }
+
+        assertThat(lastValue("registrationState")).isEqualTo(RegistrationState.FAILED);
+        assertThat(lastValue("registrationError")).asString()
+                .contains("account 1 of 3")
+                .contains("bot1")
+                .contains("nameless")
+                .contains("3 attempts")
+                .doesNotContain("transport");
+        assertThat(lastInt("namedCount")).isZero();
+    }
+
+    @Test
+    @DisplayName("/registration/retry revisits the nameless account (resume from namedCount + 1)")
+    void retryRevisitsTheNamelessAccount() throws Exception {
+        when(client.hasDisplayNames()).thenReturn(true);
+        when(client.setDisplayNameWithRetry(anyString(), anyInt(), any(), any())).thenReturn(null);
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenReturn(RegistrationOutcome.CREATED);
+        pending(group(3, 0, 0));
+        for (int i = 0; i < 3; i++) {
+            worker.tick();
+            pending(group(3, lastInt("registeredCount"), lastInt("namedCount")));
+            setBackoffElapsed();
+        }
+        assertThat(lastValue("registrationState"))
+                .as("the nameless bot1 stopped the group, visibly")
+                .isEqualTo(RegistrationState.FAILED);
+
+        // POST /registration/retry: the state goes back to PENDING (as persisted: registered 1,
+        // named 0) and the group is enqueued, which clears the attempt state.
+        when(client.setDisplayNameWithRetry(anyString(), anyInt(), any(), any())).thenReturn("Name");
+        pending(group(3, lastInt("registeredCount"), lastInt("namedCount")));
+        worker.enqueue(GROUP);
+        worker.tick();
+
+        verify(client, org.mockito.Mockito.times(4))
+                .setDisplayNameWithRetry(eq("bot1"), anyInt(), any(), any());
+        verify(client, org.mockito.Mockito.times(1))
+                .registerOne(anyString(), anyString(), eq(1), any(), any());
+        assertThat(lastInt("namedCount")).isEqualTo(3);
+        assertThat(lastValue("registrationState")).isNull();
+    }
+
     @Test
     @DisplayName("with no display-name pool the group still completes, and namedCount stays 0")
     void completesWithoutANamePool() throws Exception {
