@@ -383,6 +383,22 @@ class AlertRuleMetricsTest {
     }
 
     @Test
+    @DisplayName("GatewayEdgeBlocked never advises a restart during a live block")
+    void edgeBlockedDoesNotAdviseRestartingIntoTheBlock() {
+        // review-phase5. A restart clears the in-memory circuit and auto-starts every ACTIVE group;
+        // during a live block their first logins go straight into it. The advice must be "only after
+        // the block is confirmed lifted", never "a restart closes it immediately".
+        Rule rule = rules().stream()
+                .filter(r -> "GatewayEdgeBlocked".equals(r.name()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("GatewayEdgeBlocked is not in alerts.yml"));
+        String description = String.valueOf(rule.annotations().get("description"));
+
+        assertThat(description).doesNotContain("closes it immediately");
+        assertThat(description).contains("Do NOT restart").contains("AFTER SA/back-office confirms");
+    }
+
+    @Test
     @DisplayName("MetaspaceGrowth is gated on JVM uptime, so it cannot fire on the boot ramp")
     void metaspaceGrowthCarriesItsUptimeGate() {
         // PLUGIN_HOT_RELOAD Amendment A3. Without the gate this rule is continuously true
