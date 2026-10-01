@@ -187,8 +187,14 @@ public class RegistrationWorker {
      * vanished appender:</b> if this worker's scheduled task dies ({@code tickQuietly} catches
      * {@code Exception}, not {@code Throwable}) or its executor is shut down, both gauges keep
      * reporting their last values indefinitely and a stalled registration is unalertable. The
-     * freshness stamp below is what a future heartbeat metric would publish; today it only bounds
-     * the in-pass staleness.
+     * freshness stamp below is what a future heartbeat metric would publish.
+     * <p>
+     * <b>The stamp does not bound the in-pass staleness either</b> (review-phase4-fixround, still
+     * open at Phase 5's review). The refresh runs once per <em>index</em>, and a single
+     * {@code registerOne} can park inside the budget for {@code registration.max-wait} (15 m) — so
+     * while a request is parked, both gauges are as stale as the park is long, not one tick.
+     * {@code RegistrationStalled}'s own {@code for: 15m} makes that mostly harmless; it is not
+     * zero.
      */
     private volatile int pendingGroups;
     private volatile int failedGroups;
