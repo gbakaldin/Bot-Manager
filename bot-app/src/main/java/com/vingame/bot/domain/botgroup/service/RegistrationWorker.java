@@ -210,7 +210,7 @@ public class RegistrationWorker {
                               BotMetrics botMetrics,
                               @Value("${bot.registration.tick-seconds:10}") long tickSeconds,
                               @Value("${bot.registration.max-attempts-per-user:3}") int maxAttemptsPerUser,
-                              @Value("${bot.registration.display-name-retries:5}") int displayNameRetries,
+                              @Value("${bot.registration.display-name-retries:15}") int displayNameRetries,
                               @Value("${bot.registration.failure-backoff-seconds:30}") long failureBackoffSeconds,
                               @Value("${bot.registration.max-transport-attempts-per-user:10}")
                               int maxTransportAttemptsPerUser,

@@ -533,6 +533,31 @@ class RegistrationWorkerTest {
     }
 
     @Test
+    @DisplayName("display-name-retries ships at 15, and the @Value fallback agrees with the properties file")
+    void theReRollCapIsFifteenEverywhere() throws Exception {
+        // RIK review G1. At ~43% collisions per try, 5 re-rolls exhaust on ~1.5% of accounts (a
+        // 100-bot RIK group ~77% likely to hit one, each now costing a whole extra pass); 15 on ~3
+        // in a million. Two copies of the number — the shipped property and the @Value fallback —
+        // and a drift between them is how a box without the property runs a different policy.
+        java.util.Properties shipped = new java.util.Properties();
+        try (var in = RegistrationWorker.class.getResourceAsStream("/application.properties")) {
+            shipped.load(new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+        }
+        assertThat(shipped.getProperty("bot.registration.display-name-retries")).isEqualTo("15");
+
+        String fallback = null;
+        for (var ctor : RegistrationWorker.class.getConstructors()) {
+            for (var param : ctor.getParameters()) {
+                var value = param.getAnnotation(org.springframework.beans.factory.annotation.Value.class);
+                if (value != null && value.value().startsWith("${bot.registration.display-name-retries:")) {
+                    fallback = value.value();
+                }
+            }
+        }
+        assertThat(fallback).isEqualTo("${bot.registration.display-name-retries:15}");
+    }
+
+    @Test
     @DisplayName("with no display-name pool the group still completes, and namedCount stays 0")
     void completesWithoutANamePool() throws Exception {
         pending(group(2, 0, 0));
