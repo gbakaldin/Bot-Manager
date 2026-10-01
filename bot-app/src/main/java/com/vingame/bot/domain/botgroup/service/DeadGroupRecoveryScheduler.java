@@ -11,7 +11,6 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import com.vingame.bot.infrastructure.gateway.GatewayBudget;
 import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
-import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
@@ -27,6 +26,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -128,8 +128,19 @@ public class DeadGroupRecoveryScheduler {
      */
     static final String OUTCOME_CIRCUIT_OPEN = "circuit_open";
 
-    /** One increment per candidate per tick skipped for {@link #OUTCOME_CIRCUIT_OPEN}. */
-    static final String GROUP_RECOVERY_SKIPPED_TOTAL = "group_recovery_skipped_total";
+    /**
+     * One increment per candidate per tick skipped for {@link #OUTCOME_CIRCUIT_OPEN} — <b>from the
+     * second skip of a group on</b>. Pre-registered at zero first, under the group MDC
+     * ({@code botGroupId}/{@code environmentId}/{@code product}), like every {@code group_recovery_*}
+     * series (CLAUDE.md, review-phase5). Registering and incrementing in the same tick would be the
+     * lazy shape with extra steps: the first scraped sample would still be 1. So a group's first
+     * skip makes the series visible at 0 and the run is counted from the next tick: a run of N
+     * skips reads N-1, and {@code increase()} never reads 0 for a run of two or more.
+     */
+    static final String GROUP_RECOVERY_SKIPPED_TOTAL = BotMetrics.GROUP_RECOVERY_SKIPPED_TOTAL;
+
+    /** Groups whose skip series has been materialised at zero. Pruned to the live candidates. */
+    private final Set<String> skipSeriesMaterialised = ConcurrentHashMap.newKeySet();
 
     /**
      * The placeholder every recovery meter tag carries when the real value cannot be
@@ -170,7 +181,6 @@ public class DeadGroupRecoveryScheduler {
     private final BotMetrics botMetrics;
     /** Read-only: whether an environment's gateway circuit is open (never creates a budget). */
     private final GatewayBudgetRegistry gatewayBudgetRegistry;
-    private final MeterRegistry meterRegistry;
 
     /** AD-6 master switch. False ⇒ every tick returns before reading anything. */
     private final boolean enabled;
@@ -196,7 +206,6 @@ public class DeadGroupRecoveryScheduler {
                                       EnvironmentProbeScheduler probeScheduler,
                                       BotMetrics botMetrics,
                                       GatewayBudgetRegistry gatewayBudgetRegistry,
-                                      MeterRegistry meterRegistry,
                                       @Value("${bot.recovery.enabled:false}") boolean enabled,
                                       @Value("${bot.activation.zone:Asia/Ho_Chi_Minh}") String zone,
                                       @Value("${bot.recovery.tick-seconds:60}") long tickSeconds,
@@ -211,7 +220,6 @@ public class DeadGroupRecoveryScheduler {
         this.probeScheduler = probeScheduler;
         this.botMetrics = botMetrics;
         this.gatewayBudgetRegistry = gatewayBudgetRegistry;
-        this.meterRegistry = meterRegistry;
         this.enabled = enabled;
         this.zone = ZoneId.of(zone);
         this.tickSeconds = tickSeconds;
@@ -286,6 +294,7 @@ public class DeadGroupRecoveryScheduler {
             candidateIds.add(group.getId());
         }
         expireStates(candidateIds, now);
+        skipSeriesMaterialised.retainAll(candidateIds);
 
         List<Due> due = new ArrayList<>();
         for (BotGroup group : candidates) {
@@ -380,10 +389,18 @@ public class DeadGroupRecoveryScheduler {
             // block page as healthy (AD-2: anything < 500), so during a block — possibly a day —
             // this line was the only thing between the reconciler and a recovery attempt every
             // backoff step. Costs no budget, like every other skip here (AD-8).
-            meterRegistry.counter(GROUP_RECOVERY_SKIPPED_TOTAL,
-                    "environmentId", tagValue(group.getEnvironmentId()),
-                    "product", tagValue(circuitProduct(group.getEnvironmentId())),
-                    "outcome", OUTCOME_CIRCUIT_OPEN).increment();
+            Map<String, String> outer = BotMdc.snapshot();
+            BotMdc.setGroupContext(group.getId(), tagValue(group.getEnvironmentId()),
+                    tagValue(circuitProduct(group.getEnvironmentId())));
+            try {
+                if (skipSeriesMaterialised.add(group.getId())) {
+                    botMetrics.initGroupRecoverySkipSeries(OUTCOME_CIRCUIT_OPEN);
+                } else {
+                    botMetrics.incGroupRecoverySkipped(OUTCOME_CIRCUIT_OPEN);
+                }
+            } finally {
+                BotMdc.restore(outer);
+            }
             log.debug("Recovery: group {} skipped — env {} gateway circuit is open (Cloudflare edge block)",
                     group.getId(), group.getEnvironmentId());
             return null;

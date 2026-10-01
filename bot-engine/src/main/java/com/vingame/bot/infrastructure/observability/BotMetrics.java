@@ -95,6 +95,8 @@ public class BotMetrics {
     // leaves them alone. Their rate is a function of incidents, never of fleet size.
     public static final String GROUP_RECOVERY_ATTEMPTS_TOTAL = "group_recovery_attempts_total";
     public static final String GROUP_RECOVERY_EXHAUSTED_TOTAL = "group_recovery_exhausted_total";
+    /** Recovery candidates passed over without an attempt, by bounded {@code outcome} (GATEWAY_REQUEST_BUDGET A29.2). */
+    public static final String GROUP_RECOVERY_SKIPPED_TOTAL = "group_recovery_skipped_total";
 
     /**
      * GATEWAY_REQUEST_BUDGET A6 Phase 4 item 6 — one increment per <b>account</b>
@@ -520,6 +522,31 @@ public class BotMetrics {
         Counter.builder(GROUP_RECOVERY_EXHAUSTED_TOTAL)
                 .tags(tags)
                 .register(registry);
+    }
+
+    /**
+     * Materialise {@code group_recovery_skipped_total{outcome}} at zero for the group whose MDC is
+     * currently set — {@link #initGroupRecoverySeries(String...)}'s rule, for the one
+     * {@code group_recovery_*} series that is not reached through an attempt (review-phase5, QA
+     * phase 5 finding 5). Same tags, from the same group MDC, as {@link #incGroupRecoverySkipped}.
+     */
+    public void initGroupRecoverySkipSeries(String... outcomes) {
+        Tags tags = mdcTags();
+        for (String outcome : outcomes) {
+            Counter.builder(GROUP_RECOVERY_SKIPPED_TOTAL)
+                    .tag("outcome", outcome)
+                    .tags(tags)
+                    .register(registry);
+        }
+    }
+
+    /** Count one recovery candidate skipped for {@code outcome}, under the group's MDC. */
+    public void incGroupRecoverySkipped(String outcome) {
+        Counter.builder(GROUP_RECOVERY_SKIPPED_TOTAL)
+                .tag("outcome", outcome)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
     }
 
     /**
