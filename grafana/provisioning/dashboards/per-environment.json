@@ -1011,6 +1011,71 @@
           "legendFormat": "{{tier}} p95"
         }
       ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Gateway circuit (Cloudflare edge block) and edge blocks by request kind",
+      "description": "GATEWAY_REQUEST_BUDGET AD-13 (Phase 5). 'circuit open' is 1 while a Cloudflare edge block holds this environment's gateway circuit open: under mode=enforce nothing is sent to the gateway except one anonymous clearance probe per hour, and no bot on the brand can log in, re-auth, deposit or reconnect. GatewayEdgeBlocked fires on it. The bars are block pages seen per 5 minutes, by request kind (login, register, update-fullname, verifytoken, deposit, ws-upgrade, circuit-probe) — counted in BOTH modes, so under observe (where the circuit never opens) this is the only panel that shows a block. A block may last a day and may need manual clearing; the cf-ray for the SA ticket is on the ERROR line in Loki.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never"
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "gateway_circuit_open{environmentId=\"$environmentId\"}",
+          "legendFormat": "circuit open"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (endpoint) (increase(gateway_edge_blocks_total{environmentId=\"$environmentId\"}[5m]))",
+          "legendFormat": "edge blocks {{endpoint}} /5m"
+        }
+      ]
     }
   ]
 }

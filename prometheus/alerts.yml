@@ -594,6 +594,49 @@ groups:
           summary: "Environment {{ $labels.environmentId }} has had ESSENTIAL gateway requests queued continuously for ~30 minutes ({{ $value }} still waiting)"
           description: "Bots that are trying to come up are being paced. min_over_time > 0 means the queue never emptied once in the window. FIRST correlate with the group's 'start admitted — declared demand N requests, env window W/900, estimated M min' INFO line: a start of more than ~1,800 bots is EXPECTED to hold this queue for its whole build (AD-18: ~50 minutes for 3,000 bots), and that is the budget working. It is a problem when no such start is in flight, or when the queue outlives the estimate. Then check gateway_budget_window_requests against gateway_budget_ceiling (who is consuming the window), gateway_budget_reserved (a leaked declared demand from a build whose teardown did not run), and GET /api/v1/bot-group/{id}/status for botsUp and lastError. A reconnect storm on a sick group is the other usual cause: bot_reconnects_total by group."
 
+      # GATEWAY_REQUEST_BUDGET AD-13 / A16.4 (Phase 5). The circuit opened: this host met
+      # Cloudflare's HTML 403 block page on one of the brand's gateways and the app has stopped
+      # sending to it, apart from one anonymous clearance probe per block-probe-interval (60m).
+      # Bare, so the gauge's own {environmentId, product} are the alert's labels — product is what
+      # routes it to the brand's room.
+      #
+      # audience: product, critical. From this moment NO bot on the brand can log in, re-auth,
+      # deposit or reconnect, and the user's answer on a block's lifetime is "possibly ~24 hours,
+      # possibly until someone clears it manually" (A16) — there is no automatic recovery to wait
+      # for. for: 1m is enough: the gauge only goes to 1 on a detected block page, never on noise.
+      #
+      # ONLY UNDER mode=enforce. In observe (prod until Phase 6) nothing ever opens, so this rule
+      # cannot fire there; the observe-mode signal is the throttled WARN "Cloudflare edge block on
+      # …, mode=observe" in Loki and gateway_edge_blocks_total.
+      #
+      # No Alertmanager route needed — with no matching child it falls through to viptalk, and the
+      # root repeat_interval (4h) re-notifies ~6 times across a 24 h block, which is the right
+      # cadence for something a human has to clear (A16.4: do not add a shorter repeat).
+      - alert: GatewayEdgeBlocked
+        expr: gateway_circuit_open == 1
+        for: 1m
+        labels:
+          job: bot-manager
+          severity: critical
+          audience: product
+        annotations:
+          summary: "Cloudflare is blocking this host on env {{ $labels.environmentId }} (product {{ $labels.product }}) — the gateway circuit is open"
+          description: "Bots on this brand cannot log in, re-auth, deposit or reconnect: bot-manager detected Cloudflare's 403 block page and stopped sending to this gateway. There is no automatic recovery inside ~24 h — the block may need manual clearing. Raise an SA/back-office ticket quoting the cf-ray from the 'Cloudflare edge block on …, cf-ray …' ERROR line in Loki. The circuit closes by itself within an hour of the block being lifted (one anonymous clearance probe per hour); docker compose restart bot-manager closes it immediately. Before restarting, find what drove the window (gateway_budget_requests_total by tier, a large start, a reconnect storm, or scripts/bulk-create-accounts.py run from this host) or it will happen again."
+
+      # A16.4's second rule: the same fact, still true two hours later. The only signal that
+      # separates a rate-limit blip from a block that is not going away (a rule change, or a block
+      # that needs a human on the Cloudflare side) and therefore needs escalating, not waiting out.
+      - alert: GatewayEdgeBlockUncleared
+        expr: gateway_circuit_open == 1
+        for: 2h
+        labels:
+          job: bot-manager
+          severity: critical
+          audience: product
+        annotations:
+          summary: "Cloudflare block on env {{ $labels.environmentId }} (product {{ $labels.product }}) has not cleared for 2 hours"
+          description: "Two hourly clearance probes have been refused, or none has been answered. This is not a blip: escalate the SA/back-office ticket with the cf-ray from the ERROR line and the 'Cloudflare edge block still in force' WARN lines. The brand's bots remain unable to log in, re-auth, deposit or reconnect until it is lifted."
+
   - name: bot-manager-jvm
     rules:
       # The thread-leak sawtooth (resolved by the ws-parser 3.0.5 bump) showed as
