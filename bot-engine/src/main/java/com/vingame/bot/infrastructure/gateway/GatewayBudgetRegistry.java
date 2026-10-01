@@ -132,8 +132,13 @@ public class GatewayBudgetRegistry {
      * diagnosis instead of a day of a brand's uptime.
      * <p>
      * <b>Switching to a host key is a small change on purpose.</b> It is {@link #budgetKey}'s
-     * body plus giving {@link #find} and {@link #snapshotOrEmpty} the same host — and those two
-     * are read-only consumers with one caller each. The seam exists because the *rule* is
+     * body plus giving the four read-side consumers the same host: {@link #find},
+     * {@link #snapshotOrEmpty}, {@link #isCircuitOpen} and {@link #bindWebSocketProbe} (the last
+     * two added in Phase 5 — QA phase 5 finding 4 — and, like the first two, keyed by
+     * {@code budgets.get(environmentId)} today because the key IS the environment id). They are
+     * read-only consumers with few callers each, but a key change that misses one of them makes it
+     * silently answer "no budget": an open circuit reading as closed to the recovery reconciler, or
+     * a WS probe that never binds. The seam exists because the *rule* is
      * per-host, so the day someone stands up two environments on one gateway deliberately, the
      * answer is a key change rather than a rework.
      *
