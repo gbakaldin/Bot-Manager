@@ -394,4 +394,72 @@ class SlidingWindowGatewayBudgetAdmissionTest {
             uncounted.shutdown();
         }
     }
+
+    @Test
+    @DisplayName("a pass that throws after admitting a waiter still releases that waiter (d760f6d S1)")
+    void aPassThatThrowsStillReleasesTheWaitersItAdmitted() throws Exception {
+        // review-phase4-fixround: S1 had no test. The pass admits an ESSENTIAL waiter (dequeued,
+        // stamped, completion deferred) and THEN throws on the PRIORITIZED head's predicate. With
+        // a returned list the completion was lost on the throw and the ESSENTIAL waiter — unbounded
+        // by design — parked for the life of the JVM. With the caller-owned list it runs from the
+        // unlocking finally.
+        fill(RequestTier.ESSENTIAL, 900);
+
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        GatewayRequestScope throwsFromSecondCall = GatewayRequestScope.forBot("group-p", "bot-p", () -> {
+            if (calls.incrementAndGet() >= 2) {
+                throw new IllegalStateException("predicate broke inside the pass");
+            }
+            return false;
+        });
+        CountDownLatch prioritizedDone = new CountDownLatch(1);
+        Thread.ofVirtual().start(() -> {
+            try {
+                // Bounded, so this thread finishes on its own: after the throw this head wedges
+                // every later pass (QA G-3), which is the documented contract, not under test here.
+                budget.execute(RequestTier.PRIORITIZED, throwsFromSecondCall, () -> "p", Duration.ofSeconds(2));
+            } catch (Exception ignored) {
+                // timeout, expected
+            } finally {
+                prioritizedDone.countDown();
+            }
+        });
+        CountDownLatch essentialDone = new CountDownLatch(1);
+        List<Object> essentialResult = new CopyOnWriteArrayList<>();
+        Thread.ofVirtual().start(() -> {
+            try {
+                essentialResult.add(budget.execute(RequestTier.ESSENTIAL, scope("group-e"), () -> "sent"));
+            } catch (Exception e) {
+                essentialResult.add(e);
+            } finally {
+                essentialDone.countDown();
+            }
+        });
+        for (int i = 0; i < 400 && (budget.snapshot().queuedEssential() < 1
+                || budget.snapshot().queuedPrioritized() < 1); i++) {
+            Thread.sleep(5);
+        }
+        assertThat(budget.snapshot().queuedPrioritized()).isEqualTo(1);
+        assertThat(budget.snapshot().queuedEssential()).isEqualTo(1);
+
+        // The whole window expires; the pass admits E first (strict priority), then throws on P.
+        clock.set(WINDOW.toNanos() + 1);
+        assertThatThrownBy(() -> budget.admitWaiters()).isInstanceOf(IllegalStateException.class);
+
+        assertThat(essentialDone.await(5, TimeUnit.SECONDS))
+                .as("the waiter the pass admitted before it threw must not be stranded")
+                .isTrue();
+        assertThat(essentialResult).containsExactly("sent");
+        assertThat(prioritizedDone.await(10, TimeUnit.SECONDS)).isTrue();
+    }
+
+    @Test
+    @DisplayName("UNLIMITED has no wait policy: maxWait is null, never ZERO (d760f6d S4)")
+    void unlimitedMaxWaitIsNull() {
+        // ZERO from a caller means "now or never" (review F5); answering it here gave it a third
+        // meaning. review-phase4-fixround: nothing asserted it.
+        for (RequestTier tier : RequestTier.values()) {
+            assertThat(GatewayBudget.UNLIMITED.maxWait(tier)).as("%s", tier).isNull();
+        }
+    }
 }
