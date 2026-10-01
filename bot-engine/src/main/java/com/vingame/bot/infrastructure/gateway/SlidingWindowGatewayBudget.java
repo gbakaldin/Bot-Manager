@@ -5,6 +5,7 @@ import com.vingame.bot.common.exception.GatewayCircuitOpenException;
 import com.vingame.bot.common.exception.GatewayRequestCancelledException;
 import com.vingame.bot.common.gateway.GatewayRequestScope;
 import com.vingame.bot.common.gateway.RequestTier;
+import com.vingame.bot.common.logging.BotMdc;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -596,7 +597,7 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                 }
                 throw new GatewayBudgetExhaustedException(tier, environmentId, retryAfterLocked(now));
             } else {
-                waiter = new Waiter(tier, scope, startedWaiting);
+                waiter = new Waiter(tier, scope, startedWaiting, BotMdc.snapshot());
                 queues.get(tier).addLast(waiter);
                 queued.get(tier).incrementAndGet();
                 scheduleWakeUpLocked(now);
@@ -606,7 +607,7 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             runAfterUnlock(deferredHere);
         }
         if (admittedImmediately) {
-            recordAdmitted(tier, scope, 0L);
+            recordAdmitted(tier, scope, 0L, null);
             return true;
         }
         reportThrottleState();
@@ -822,7 +823,7 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                     // BOT_LOG_LEVEL=DEBUG, K log lines each re-acquiring this very lock through
                     // windowRequests(). Waking a bot is the urgent half; counting it is not.
                     head.admitted.complete(null);
-                    recordAdmitted(tier, head.scope, waited);
+                    recordAdmitted(tier, head.scope, waited, head.mdc);
                 });
             }
         }
@@ -934,32 +935,45 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         } finally {
             lock.unlock();
         }
-        recordAdmitted(tier, scope, waitedNanos);
+        recordAdmitted(tier, scope, waitedNanos, null);
     }
 
     /**
      * The metrics and the DEBUG line for one admitted request.
      * <p>
-     * The DEBUG line carries no identity of its own, and <b>on the waiter path it therefore carries
-     * the wrong one or none at all</b> (A27.1). On the arrival path it runs on the bot's own thread,
-     * whose MDC the bot populated ({@code botGroupId}, {@code botId}, {@code environmentId},
-     * {@code product}, …). An admitted <em>waiter</em>'s {@code recordAdmitted} runs inside
-     * {@code runAfterUnlock}, i.e. on whichever thread ran the admission pass — this budget's own
+     * <b>The DEBUG line carries the identity of the thread that asked, on both paths</b> (A27.1).
+     * On the arrival path that is the current thread, whose MDC the bot populated
+     * ({@code botGroupId}, {@code botId}, {@code environmentId}, {@code product}, …) — {@code mdc}
+     * is {@code null} there. An admitted <em>waiter</em>'s line runs inside {@code runAfterUnlock},
+     * i.e. on whichever thread ran the admission pass: this budget's own
      * {@code gateway-budget-<env>} scheduler thread (no MDC), the probe scheduler's, or
-     * <em>another group's</em> start thread inside {@code reserve}/{@code release}. The identity is
-     * still in the message text ({@code scope.describe()}) and the line is track-2 DEBUG, so
-     * nothing operator-facing is wrong; the claim was. The known fix is for {@code Waiter} to
-     * capture {@code MDC.getCopyOfContextMap()} at enqueue and for this method to run under it via
-     * {@code BotMdc.snapshot()}/{@code restore()} — never {@code clear()} (A20.9) — recommended for
-     * Phase 5 rather than required by any AD.
+     * <em>another group's</em> start thread inside {@code reserve}/{@code release}. Logged as-is it
+     * was untagged or tagged with a different group, so a scoped-DEBUG drill-in on one group
+     * either missed its own admissions or showed someone else's. The waiter therefore captures its
+     * caller's MDC at enqueue and the line runs under it, restoring the running thread's own
+     * context afterwards — {@code snapshot}/{@code restore}, never {@code clear()} (A20.9), because
+     * that thread may be in the middle of its own group's start.
+     *
+     * @param mdc the enqueuing thread's bot MDC, or {@code null} to log under the current thread's
      */
-    private void recordAdmitted(RequestTier tier, GatewayRequestScope scope, long waitedNanos) {
+    private void recordAdmitted(RequestTier tier, GatewayRequestScope scope, long waitedNanos,
+                                Map<String, String> mdc) {
         waitTimers.get(tier).record(waitedNanos, TimeUnit.NANOSECONDS);
         counter(tier, OUTCOME_ADMITTED).increment();
         if (log.isDebugEnabled()) {
-            log.debug("gateway budget: admitted {} request for {} — window {}/{}, waited {}ms",
-                    tier, describe(scope), windowRequests(), settings.hardCap(),
-                    TimeUnit.NANOSECONDS.toMillis(waitedNanos));
+            Map<String, String> running = mdc == null ? null : BotMdc.snapshot();
+            if (mdc != null) {
+                BotMdc.restore(mdc);
+            }
+            try {
+                log.debug("gateway budget: admitted {} request for {} — window {}/{}, waited {}ms",
+                        tier, describe(scope), windowRequests(), settings.hardCap(),
+                        TimeUnit.NANOSECONDS.toMillis(waitedNanos));
+            } finally {
+                if (mdc != null) {
+                    BotMdc.restore(running);
+                }
+            }
         }
     }
 
@@ -1550,12 +1564,16 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         private final RequestTier tier;
         private final GatewayRequestScope scope;
         private final long enqueuedNanos;
+        /** The enqueuing thread's bot MDC, for the admission's DEBUG line (A27.1). */
+        private final Map<String, String> mdc;
         private final CompletableFuture<Void> admitted = new CompletableFuture<>();
 
-        private Waiter(RequestTier tier, GatewayRequestScope scope, long enqueuedNanos) {
+        private Waiter(RequestTier tier, GatewayRequestScope scope, long enqueuedNanos,
+                       Map<String, String> mdc) {
             this.tier = tier;
             this.scope = scope;
             this.enqueuedNanos = enqueuedNanos;
+            this.mdc = mdc;
         }
     }
 
