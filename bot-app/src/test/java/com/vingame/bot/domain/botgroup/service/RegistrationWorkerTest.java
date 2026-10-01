@@ -76,6 +76,13 @@ class RegistrationWorkerTest {
     @BeforeEach
     void setUp() {
         repository = mock(BotGroupRepository.class);
+        // The worker re-reads its target per index and treats a MISSING document as deleted
+        // (review-phase4-fixround), so the fixture's repository answers findById the way Mongo
+        // would: with whatever this test has made PENDING.
+        when(repository.findById(anyString())).thenAnswer(inv -> repository
+                .findByRegistrationState(RegistrationState.PENDING).stream()
+                .filter(g -> g.getId().equals(inv.getArgument(0)))
+                .findFirst());
         mongoTemplate = mock(MongoTemplate.class);
         client = mock(ApiGatewayClient.class);
         budgetRegistry = mock(GatewayBudgetRegistry.class);
@@ -593,6 +600,30 @@ class RegistrationWorkerTest {
                 setNotBefore(id, Instant.now().minusSeconds(1));
             }
         }
+    }
+
+    @Test
+    @DisplayName("a group whose document disappears mid-pass stops registering, like a cancel")
+    void aDeletedDocumentStopsTheLoop() throws Exception {
+        // review-phase4-fixround. findById returning EMPTY is Mongo saying the document is gone — a
+        // delete by some path other than BotGroupService.delete, which cancels first. It used to be
+        // read as "keep the old target", so accounts kept being created for a group nobody could
+        // see until the loop ran out.
+        pending(group(5, 0, 0));
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenAnswer(inv -> {
+                    // The first account lands; then the document is deleted out from under the pass.
+                    org.mockito.Mockito.doReturn(java.util.Optional.empty()).when(repository).findById(GROUP);
+                    return RegistrationOutcome.CREATED;
+                });
+
+        worker.tick();
+
+        verify(client, org.mockito.Mockito.times(1))
+                .registerOne(anyString(), anyString(), anyInt(), any(), any());
+        assertThat(lastValue("registrationState"))
+                .as("no completion claimed for a group that no longer exists")
+                .isEqualTo("<never set>");
     }
 
     @Test

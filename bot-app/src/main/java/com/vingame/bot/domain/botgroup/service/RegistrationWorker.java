@@ -444,6 +444,16 @@ public class RegistrationWorker {
                 // botCount to register more" is used. One indexed read per account, against a
                 // gateway call of 100-300 ms plus pacing, and it honours a LOWERED count too.
                 target = currentTarget(id, target);
+                if (target == DELETED) {
+                    // The document is gone, by a path that did not go through
+                    // BotGroupService.delete (which cancels first): a manual Mongo delete, a future
+                    // bulk delete. Treated as a cancel — creating accounts for a group nobody can
+                    // see would be gateway requests for nothing. The completion write would have
+                    // matched nothing anyway.
+                    log.debug("group {}: document deleted mid-registration at {} accounts — stopping",
+                            id, registered);
+                    return;
+                }
                 if (isComplete(registered, named, target, names)) {
                     break;
                 }
@@ -724,6 +734,9 @@ public class RegistrationWorker {
         return false;
     }
 
+    /** {@link #currentTarget}'s answer for a document that no longer exists. */
+    private static final int DELETED = -1;
+
     /** How far {@link #isTransportFailure} walks a cause chain. */
     private static final int MAX_CAUSE_DEPTH = 16;
 
@@ -752,16 +765,19 @@ public class RegistrationWorker {
     }
 
     /**
-     * This group's registration target as the document says it is <em>right now</em>, or
-     * {@code fallback} if it cannot be read (QA F-1).
+     * This group's registration target as the document says it is <em>right now</em>,
+     * {@link #DELETED} if the document no longer exists, or {@code fallback} if it cannot be read
+     * (QA F-1).
      * <p>
-     * An unreadable document is <b>not</b> treated as a deleted one: cancellation has its own
-     * mechanism ({@code cancelled} plus {@code cancelScope}), and inferring "deleted" from a Mongo
-     * hiccup would abandon a registration for a group that is perfectly alive.
+     * An <b>unreadable</b> document is not treated as a deleted one: inferring "deleted" from a
+     * Mongo hiccup would abandon a registration for a group that is perfectly alive. An
+     * <b>absent</b> one is (review-phase4-fixround): {@code findById} returning empty is Mongo
+     * saying the document is gone, which is a different answer from an exception, and the old
+     * {@code orElse(fallback)} kept registering accounts for it until the loop ran out.
      */
     private int currentTarget(String id, int fallback) {
         try {
-            return repository.findById(id).map(BotGroup::getBotCount).orElse(fallback);
+            return repository.findById(id).map(BotGroup::getBotCount).orElse(DELETED);
         } catch (RuntimeException e) {
             log.debug("group {}: could not re-read the registration target ({}) — keeping {}",
                     id, e.getMessage(), fallback);

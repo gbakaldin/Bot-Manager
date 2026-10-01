@@ -71,6 +71,13 @@ class RegistrationMetricsTagIdentityTest {
     @BeforeEach
     void setUp() {
         repository = mock(BotGroupRepository.class);
+        // The worker re-reads its target per index and treats a MISSING document as deleted
+        // (review-phase4-fixround), so the fixture's repository answers findById the way Mongo
+        // would: with whatever this test has made PENDING.
+        when(repository.findById(anyString())).thenAnswer(inv -> repository
+                .findByRegistrationState(RegistrationState.PENDING).stream()
+                .filter(g -> g.getId().equals(inv.getArgument(0)))
+                .findFirst());
         MongoTemplate mongoTemplate = mock(MongoTemplate.class);
         client = mock(ApiGatewayClient.class);
         meterRegistry = new SimpleMeterRegistry();
