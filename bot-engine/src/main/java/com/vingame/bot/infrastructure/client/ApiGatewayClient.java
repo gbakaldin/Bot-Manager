@@ -32,10 +32,13 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.concurrent.Callable;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
 /**
@@ -102,9 +105,45 @@ public class ApiGatewayClient {
      */
     static final Duration GATEWAY_REQUEST_TIMEOUT = Duration.ofSeconds(10);
 
+    /**
+     * The most requests this client keeps in flight at once (GATEWAY_REQUEST_BUDGET A33, the
+     * staging-release anomaly A1).
+     * <p>
+     * <b>Why a bound exists at all.</b> {@link #httpClient} is the JDK's default client, which
+     * negotiates HTTP/2 with the gateway, and there is one per environment — so every gateway
+     * request of every bot on the environment is a <em>stream</em> on <b>one</b> TCP connection.
+     * The server caps concurrent streams per connection ({@code SETTINGS_MAX_CONCURRENT_STREAMS}),
+     * and JDK 21's client does not queue or open a second connection at that cap: it fails the
+     * request immediately with {@code IOException("too many concurrent streams")}, thrown from
+     * {@code jdk.internal.net.http.Http2Connection.reserveStream0} via
+     * {@code Http2ClientImpl.getConnectionFor}. Nothing reaches the gateway. Phase 5 moved the
+     * login onto this client (the library's {@code AuthClient} had a connection of its own), so
+     * a group's burst of first balance reads now shares the connection with the next group's
+     * logins, and on staging 4-8 bots per 100-bot RIK group lost their login or their first
+     * balance read to it on every fleet start.
+     * <p>
+     * <b>Why 32.</b> Well below 100, the floor RFC 9113 §6.5.2 recommends for the server's
+     * setting (the gateway's actual value is not known to us; it was never measured, because
+     * measuring it means talking to the gateway). The margin also absorbs any lag in the JDK releasing a
+     * stream's reservation slightly after {@code send} has returned. The bound costs no
+     * throughput that matters: at a few hundred ms per round trip, 32 streams is 60-150 requests
+     * a second, against a budget that admits 900 per five minutes. It is a constant, not a
+     * property, on purpose: a {@code @Value}-sized semaphore is {@code Semaphore(0)} in every
+     * client the container did not build, and that hangs instead of failing (QA's G1).
+     * <p>
+     * The permit is taken <b>inside</b> the budget-admitted call ({@link #httpCall}), never before
+     * admission: a request holding a permit while it queued in the budget would let a DEFAULT
+     * read starve an ESSENTIAL one of streams. {@code ApiGatewayClientStreamLimitTest} reproduces
+     * the failure against a loopback HTTP/2 server and pins this value below the RFC floor.
+     */
+    static final int MAX_IN_FLIGHT_REQUESTS = 32;
+
     private final DisplayNameService displayNameService;
     private final BotMetrics metrics;
     private final HttpClient httpClient;
+
+    /** {@link #MAX_IN_FLIGHT_REQUESTS} permits, one per request on the wire. Fair: FIFO. */
+    private final Semaphore inFlight = new Semaphore(MAX_IN_FLIGHT_REQUESTS, true);
 
     @Value("${bot.ip}")
     private String botIp;
@@ -296,7 +335,36 @@ public class ApiGatewayClient {
      * stays stamped either way — it reached the edge.
      */
     private Callable<HttpResponse<String>> httpCall(HttpRequest request) {
-        return () -> classified(request, httpClient.send(request, HttpResponse.BodyHandlers.ofString()));
+        return () -> {
+            acquireStream();
+            try {
+                return classified(request, httpClient.send(request, HttpResponse.BodyHandlers.ofString()));
+            } finally {
+                inFlight.release();
+            }
+        };
+    }
+
+    /**
+     * Wait for one of the {@link #MAX_IN_FLIGHT_REQUESTS} stream permits (A33).
+     * <p>
+     * The wait is bounded by {@link #GATEWAY_REQUEST_TIMEOUT}, on top of the request's own
+     * timeout, which is left exactly as it was. Every permit is held by a request that is itself
+     * bounded by that timeout, so a wait this long means the gateway has stopped answering 32
+     * requests in a row. It surfaces as an {@link HttpTimeoutException} — an {@code IOException},
+     * so every caller already treats it as the transport failure it is: the login's IOException
+     * arm, the registration worker's transport attempt (review S3), the balance read's
+     * "Failed to fetch balance". It is not an edge block: only a response is ever classified.
+     * <p>
+     * The request was admitted, and therefore stamped, before this wait; a timed-out wait leaves
+     * it stamped and unsent. That over-counts the window, which is the safe direction, and is not
+     * a re-send — nothing here sends anything twice.
+     */
+    private void acquireStream() throws InterruptedException, HttpTimeoutException {
+        if (!inFlight.tryAcquire(GATEWAY_REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
+            throw new HttpTimeoutException("no free gateway stream within " + GATEWAY_REQUEST_TIMEOUT
+                    + ": " + MAX_IN_FLIGHT_REQUESTS + " requests already in flight on this environment");
+        }
     }
 
     private HttpResponse<String> classified(HttpRequest request, HttpResponse<String> response) {
