@@ -488,4 +488,40 @@ class EnvironmentProbeSchedulerTest {
         // every tick would publish a fleet's worth of window gauges that nothing ever moves.
         assertThat(gatewayBudgetRegistry.size()).isZero();
     }
+
+    @Test
+    @DisplayName("an open gateway circuit suppresses the probe: nothing sent, nothing stamped, unhealthy")
+    void anOpenCircuitSuppressesTheProbe() {
+        // GATEWAY_REQUEST_BUDGET A15.4 / A29.2. During a Cloudflare block the probe's stamps buy no
+        // information and are counted against the window the block came from; worse, the answer it
+        // would get is a well-formed 403 that AD-2 used to call healthy.
+        when(repository.findByTargetStatus(BotGroupStatus.DEAD))
+                .thenReturn(List.of(deadGroup("g1", "env-1")));
+        when(behaviorService.listDeadRuntimeGroupIds()).thenReturn(List.of());
+        when(environmentService.findById("env-1")).thenReturn(environment("env-1", URL));
+        // A live sibling would ordinarily short-circuit to healthy; a socket opened before the block
+        // is not evidence that a new connection would be admitted, so the circuit wins.
+        org.mockito.Mockito.lenient().when(behaviorService.countOpenWsByEnvForActiveRuntimes())
+                .thenReturn(Map.of(new EnvKey("env-1", "116"), 3));
+        GatewayBudgetRegistry enforcing = new GatewayBudgetRegistry(
+                com.vingame.bot.infrastructure.gateway.GatewayBudgetSettings.defaults()
+                        .withMode(com.vingame.bot.infrastructure.gateway.GatewayBudgetMode.ENFORCE),
+                new SimpleMeterRegistry());
+        var budget = enforcing.forEnvironment("env-1", "TIP staging env-1", "116");
+        try {
+            budget.reportEdgeBlock(com.vingame.bot.infrastructure.gateway.GatewayEndpoint.LOGIN, "ray");
+        } catch (com.vingame.bot.common.exception.GatewayCircuitOpenException expected) {
+            // enforce refuses the detecting request
+        }
+        EnvironmentProbeScheduler suppressed = new EnvironmentProbeScheduler(repository, behaviorService,
+                environmentService, probe, registry, enforcing, "Asia/Ho_Chi_Minh", 60L, 2);
+
+        suppressed.probeAll();
+        suppressed.probeAll();
+
+        verify(probe, never()).probe(any(), any());
+        assertThat(counter("env-1", EnvironmentProbeScheduler.OUTCOME_CIRCUIT_OPEN)).isEqualTo(2d);
+        assertThat(suppressed.isHealthy("env-1")).isFalse();
+        assertThat(budget.snapshot().windowRequests()).as("a probe not sent is not stamped").isZero();
+    }
 }

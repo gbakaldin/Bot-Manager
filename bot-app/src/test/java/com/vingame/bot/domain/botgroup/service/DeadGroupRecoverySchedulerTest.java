@@ -9,6 +9,11 @@ import com.vingame.bot.domain.botgroup.repository.BotGroupRepository;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.environment.model.Environment;
 import com.vingame.bot.domain.environment.service.EnvironmentService;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetMode;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetSettings;
+import com.vingame.bot.infrastructure.gateway.GatewayEndpoint;
+import com.vingame.bot.infrastructure.gateway.SlidingWindowGatewayBudget;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.probe.EnvironmentProbeScheduler;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -86,6 +91,8 @@ class DeadGroupRecoverySchedulerTest {
 
     private SimpleMeterRegistry registry;
     private BotMetrics botMetrics;
+    /** A real registry, enforcing: the circuit is opened by reporting a block, as in production. */
+    private GatewayBudgetRegistry gatewayBudgetRegistry;
 
     private CapturingAppender appender;
     private LoggerContext ctx;
@@ -109,6 +116,8 @@ class DeadGroupRecoverySchedulerTest {
     void setUp() {
         registry = new SimpleMeterRegistry();
         botMetrics = new BotMetrics(registry);
+        gatewayBudgetRegistry = new GatewayBudgetRegistry(
+                GatewayBudgetSettings.defaults().withMode(GatewayBudgetMode.ENFORCE), registry);
 
         appender = new CapturingAppender();
         appender.start();
@@ -138,8 +147,8 @@ class DeadGroupRecoverySchedulerTest {
         // Do NOT call @PostConstruct start() — that would spin a real reconciler
         // thread. reconcileAll(now) is driven directly.
         return new DeadGroupRecoveryScheduler(repository, behaviorService, environmentService,
-                probeScheduler, botMetrics, enabled, ZONE, 60L, 30, maxAttempts, backoff,
-                maxPerTick, 10);
+                probeScheduler, botMetrics, gatewayBudgetRegistry, registry, enabled, ZONE, 60L,
+                30, maxAttempts, backoff, maxPerTick, 10);
     }
 
     private static BotGroup deadGroup(String id) {
@@ -342,6 +351,66 @@ class DeadGroupRecoverySchedulerTest {
         scheduler.reconcileAll(T0.plusSeconds(600));
 
         assertThat(lines(Level.INFO)).anyMatch(l -> l.contains("auto-recovery attempt 1/6"));
+    }
+
+    /* ---------------- an open gateway circuit (GATEWAY_REQUEST_BUDGET AD-13, A29.2) ---------------- */
+
+    private void openCircuitOn(String environmentId, String product) {
+        var budget = gatewayBudgetRegistry.forEnvironment(environmentId, "TIP staging", product);
+        try {
+            budget.reportEdgeBlock(GatewayEndpoint.LOGIN, "a3c7e4004acc850e-HKG");
+        } catch (com.vingame.bot.common.exception.GatewayCircuitOpenException expected) {
+            // enforce: the detecting request is refused
+        }
+        assertThat(gatewayBudgetRegistry.isCircuitOpen(environmentId)).isTrue();
+    }
+
+    @Test
+    @DisplayName("an open circuit skips the candidate even when the probe reads healthy, and charges nothing")
+    void anOpenCircuitIsNeverAttempted() {
+        persistedDead(deadGroup("g1"));
+        // The probe reading healthy during a block is exactly the pre-Phase-5 hazard: a Cloudflare
+        // 403 page is < 500, so AD-2 called it healthy. The circuit check must win regardless.
+        envIsHealthy();
+        openCircuitOn("env-1", "116");
+        DeadGroupRecoveryScheduler scheduler = scheduler(true, 6, 1, 0);
+
+        for (int i = 0; i < 10; i++) {
+            scheduler.reconcileAll(T0.plusSeconds(i * 60L));
+        }
+
+        verify(behaviorService, never()).startForRecovery(anyString());
+        assertThat(registry.find(BotMetrics.GROUP_RECOVERY_ATTEMPTS_TOTAL).counters())
+                .as("no attempt happened, so none is counted and none is charged to the budget")
+                .isEmpty();
+        assertThat(registry.get(DeadGroupRecoveryScheduler.GROUP_RECOVERY_SKIPPED_TOTAL)
+                .tags("environmentId", "env-1", "product", "116",
+                        "outcome", DeadGroupRecoveryScheduler.OUTCOME_CIRCUIT_OPEN)
+                .counter().count())
+                .isEqualTo(10.0);
+        assertThat(lines(Level.INFO)).as("a skip is a DEBUG fact; the circuit's own ERROR is the signal")
+                .isEmpty();
+    }
+
+    @Test
+    @DisplayName("an open circuit on one environment does not hold back a group on another")
+    void anOpenCircuitIsPerEnvironment() {
+        BotGroup blocked = deadGroup("g1", "env-1");
+        BotGroup elsewhere = deadGroup("g2", "env-2");
+        persistedDead(blocked, elsewhere);
+        envIsHealthy();
+        lenient().when(probeScheduler.isHealthy("env-2")).thenReturn(true);
+        lenient().when(probeScheduler.healthyStreak("env-2")).thenReturn(2);
+        lenient().when(environmentService.findById("env-2")).thenReturn(Environment.builder()
+                .id("env-2").name("BOM staging").productCode(ProductCode.P_097).build());
+        when(behaviorService.startForRecovery("g2")).thenAnswer(startsClearingMdc(true));
+        when(behaviorService.getRunningBotCountForGroup("g2")).thenReturn(20);
+        openCircuitOn("env-1", "116");
+
+        scheduler(true, 6, 1, 0).reconcileAll(T0);
+
+        verify(behaviorService, never()).startForRecovery("g1");
+        verify(behaviorService).startForRecovery("g2");
     }
 
     /* ---------------- one per tick, earliest-due first (AD-9) ---------------- */

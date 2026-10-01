@@ -1,5 +1,6 @@
 package com.vingame.bot.infrastructure.probe;
 
+import com.vingame.bot.infrastructure.gateway.CloudflareBlockDetector;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -44,6 +45,16 @@ import java.util.concurrent.TimeoutException;
  * An environment that would only ever return 101 to an <em>authenticated</em>
  * upgrade would otherwise be permanently ineligible for recovery with no visible
  * reason.
+ *
+ * <p><b>Except a Cloudflare edge block, which is a well-formed 403 and is not health</b>
+ * (GATEWAY_REQUEST_BUDGET A15.4, A29.2). The WS hosts sit behind the same Cloudflare rule as the
+ * API hosts, so when this host is blocked the edge answers the probe's upgrade with its HTML 403
+ * page — "a server is parsing our request", by AD-2's letter, and exactly the wrong conclusion:
+ * the origin is unreachable <em>to us</em> for possibly a day, and reading it as healthy would
+ * authorise recovery attempts into the wall. {@link Outcome#EDGE_BLOCK} is unhealthy. The
+ * circuit breaker is the primary guard (the scheduler does not probe at all while an
+ * environment's circuit is open, and recovery skips it); this is the guard for the case the
+ * circuit cannot cover — {@code mode=observe}, where nothing ever opens.
  */
 @Slf4j
 @Component
@@ -111,6 +122,11 @@ public class EnvironmentWsProbe {
         HTTP_4XX,
         /** A completed HTTP response with status {@code >= 500} — the outage shape. */
         HTTP_5XX,
+        /**
+         * The Cloudflare edge refused the upgrade with its block page ({@code CloudflareBlockDetector}).
+         * A completed 403, and <b>unhealthy</b>: the edge is refusing this host, not serving it.
+         */
+        EDGE_BLOCK,
         TIMEOUT,
         TLS_ERROR,
         CONNECT_ERROR,
@@ -226,6 +242,13 @@ public class EnvironmentWsProbe {
                         "handshake failed with no response");
             }
             int status = handshake.getResponse().statusCode();
+            CloudflareBlockDetector.Verdict verdict = CloudflareBlockDetector.classifyHandshakeFailure(handshake);
+            if (verdict.edgeBlock()) {
+                // Checked BEFORE the < 500 rule, which would otherwise call it healthy (A15.4).
+                return new ProbeResult(Outcome.EDGE_BLOCK, latencyMillis,
+                        "Cloudflare edge block, HTTP " + status + ", cf-ray "
+                                + (verdict.cfRay() == null ? "-" : verdict.cfRay()));
+            }
             Outcome outcome = status < 500 ? Outcome.HTTP_4XX : Outcome.HTTP_5XX;
             return new ProbeResult(outcome, latencyMillis, "HTTP " + status);
         }

@@ -59,6 +59,26 @@ class EnvironmentWsProbeClassificationTest {
     }
 
     @Test
+    @DisplayName("a Cloudflare 403 block page → EDGE_BLOCK and UNhealthy (GATEWAY_REQUEST_BUDGET A15.4)")
+    void aCloudflareBlockIsNotHealth() {
+        // The one 4xx that is not "a server parsed our request": the edge is refusing THIS host, for
+        // possibly a day, and reading it as healthy authorised recovery attempts into the wall.
+        HttpResponse<?> response = mock(HttpResponse.class);
+        when(response.statusCode()).thenReturn(403);
+        when(response.headers()).thenReturn(java.net.http.HttpHeaders.of(Map.of(
+                "server", java.util.List.of("cloudflare"),
+                "cf-ray", java.util.List.of("a3c7e4004acc850e-HKG"),
+                "content-type", java.util.List.of("text/html; charset=UTF-8")), (a, b) -> true));
+
+        ProbeResult r = probe.classify(new WebSocketHandshakeException(response), 9);
+
+        assertThat(r.outcome()).isEqualTo(Outcome.EDGE_BLOCK);
+        assertThat(r.healthy()).isFalse();
+        assertThat(r.detail()).contains("a3c7e4004acc850e-HKG");
+        assertThat(Outcome.EDGE_BLOCK.tag()).isEqualTo("edge_block");
+    }
+
+    @Test
     @DisplayName("any status < 500 counts as healthy")
     void statusUnderFiveHundredIsHealthy() {
         assertThat(probe.classify(handshake(200), 1).healthy()).isTrue();
@@ -115,7 +135,7 @@ class EnvironmentWsProbeClassificationTest {
         assertThat(new ProbeResult(Outcome.OPEN, 1, "ok").healthy()).isTrue();
         assertThat(new ProbeResult(Outcome.HTTP_4XX, 1, "ok").healthy()).isTrue();
         for (Outcome o : new Outcome[]{Outcome.HTTP_5XX, Outcome.TIMEOUT,
-                Outcome.TLS_ERROR, Outcome.CONNECT_ERROR, Outcome.ERROR}) {
+                Outcome.TLS_ERROR, Outcome.CONNECT_ERROR, Outcome.ERROR, Outcome.EDGE_BLOCK}) {
             assertThat(new ProbeResult(o, 1, "x").healthy()).as(o.name()).isFalse();
         }
     }

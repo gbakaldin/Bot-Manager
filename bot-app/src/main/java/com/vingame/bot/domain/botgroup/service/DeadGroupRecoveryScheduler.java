@@ -9,6 +9,9 @@ import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.probe.EnvironmentProbeScheduler;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import com.vingame.bot.infrastructure.gateway.GatewayBudget;
+import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
@@ -117,6 +120,18 @@ public class DeadGroupRecoveryScheduler {
     static final String OUTCOME_ERROR = "error";
 
     /**
+     * A candidate skipped because its environment's gateway circuit is open — a Cloudflare edge
+     * block (GATEWAY_REQUEST_BUDGET AD-13, A15.4). Counted on its own meter,
+     * {@link #GROUP_RECOVERY_SKIPPED_TOTAL}, never on {@code group_recovery_attempts_total}: no
+     * attempt happened and none was charged, and an attempts counter that also counted skips
+     * would make {@code EnvironmentGroupRecoveryFlapping}'s arithmetic about something else.
+     */
+    static final String OUTCOME_CIRCUIT_OPEN = "circuit_open";
+
+    /** One increment per candidate per tick skipped for {@link #OUTCOME_CIRCUIT_OPEN}. */
+    static final String GROUP_RECOVERY_SKIPPED_TOTAL = "group_recovery_skipped_total";
+
+    /**
      * The placeholder every recovery meter tag carries when the real value cannot be
      * resolved, so that the tag <b>key</b> set of {@code group_recovery_*} is the same
      * three names on every series, always.
@@ -153,6 +168,9 @@ public class DeadGroupRecoveryScheduler {
     private final EnvironmentService environmentService;
     private final EnvironmentProbeScheduler probeScheduler;
     private final BotMetrics botMetrics;
+    /** Read-only: whether an environment's gateway circuit is open (never creates a budget). */
+    private final GatewayBudgetRegistry gatewayBudgetRegistry;
+    private final MeterRegistry meterRegistry;
 
     /** AD-6 master switch. False ⇒ every tick returns before reading anything. */
     private final boolean enabled;
@@ -177,6 +195,8 @@ public class DeadGroupRecoveryScheduler {
                                       EnvironmentService environmentService,
                                       EnvironmentProbeScheduler probeScheduler,
                                       BotMetrics botMetrics,
+                                      GatewayBudgetRegistry gatewayBudgetRegistry,
+                                      MeterRegistry meterRegistry,
                                       @Value("${bot.recovery.enabled:false}") boolean enabled,
                                       @Value("${bot.activation.zone:Asia/Ho_Chi_Minh}") String zone,
                                       @Value("${bot.recovery.tick-seconds:60}") long tickSeconds,
@@ -190,6 +210,8 @@ public class DeadGroupRecoveryScheduler {
         this.environmentService = environmentService;
         this.probeScheduler = probeScheduler;
         this.botMetrics = botMetrics;
+        this.gatewayBudgetRegistry = gatewayBudgetRegistry;
+        this.meterRegistry = meterRegistry;
         this.enabled = enabled;
         this.zone = ZoneId.of(zone);
         this.tickSeconds = tickSeconds;
@@ -349,6 +371,23 @@ public class DeadGroupRecoveryScheduler {
             log.debug("Recovery: group {} has no environment — not a candidate", group.getId());
             return null;
         }
+        if (gatewayBudgetRegistry.isCircuitOpen(group.getEnvironmentId())) {
+            // GATEWAY_REQUEST_BUDGET AD-13 / A15.4 / A29.2. The edge is refusing this host, so a
+            // recovery attempt could only re-authenticate into a wall: every login would be refused
+            // inside the JVM and the attempt would be charged for a start that could not happen.
+            // This check is NOT an optimisation layered on the probe gate below, and it must stay
+            // ahead of it and unconditional: the anonymous WS probe used to read a Cloudflare 403
+            // block page as healthy (AD-2: anything < 500), so during a block — possibly a day —
+            // this line was the only thing between the reconciler and a recovery attempt every
+            // backoff step. Costs no budget, like every other skip here (AD-8).
+            meterRegistry.counter(GROUP_RECOVERY_SKIPPED_TOTAL,
+                    "environmentId", tagValue(group.getEnvironmentId()),
+                    "product", tagValue(circuitProduct(group.getEnvironmentId())),
+                    "outcome", OUTCOME_CIRCUIT_OPEN).increment();
+            log.debug("Recovery: group {} skipped — env {} gateway circuit is open (Cloudflare edge block)",
+                    group.getId(), group.getEnvironmentId());
+            return null;
+        }
         if (!probeScheduler.isHealthy(group.getEnvironmentId())) {
             // No positive evidence the origin is back. Costs no budget (AD-8).
             log.debug("Recovery: group {} skipped — env {} is not probe-healthy",
@@ -361,6 +400,16 @@ public class DeadGroupRecoveryScheduler {
             return null;
         }
         return new Due(group, nextDue, deadSince(group));
+    }
+
+    /**
+     * The product of an environment whose budget exists — read from the budget's own snapshot, so
+     * a skip taken every tick for a day costs no Mongo read (an open circuit implies the budget
+     * exists).
+     */
+    private String circuitProduct(String environmentId) {
+        GatewayBudget budget = gatewayBudgetRegistry.find(environmentId);
+        return budget == null ? null : budget.snapshot().productCode();
     }
 
     /**

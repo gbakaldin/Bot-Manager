@@ -11,7 +11,9 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
 import com.vingame.bot.infrastructure.client.GameMsClient;
+import com.vingame.bot.infrastructure.gateway.CloudflareBlockDetector;
 import com.vingame.bot.infrastructure.gateway.GatewayBudget;
+import com.vingame.bot.infrastructure.gateway.GatewayEndpoint;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator;
 import com.vingame.bot.infrastructure.observability.ScopedDebugEscalator;
@@ -1187,9 +1189,28 @@ public abstract class Bot {
      * interrupting an upgrade in flight does not abort it, it corrupts it. The budget
      * therefore refuses admission to a cancelled scope and this call is simply never
      * reached (AD-8).
+     * <p>
+     * <b>A failed upgrade is classified for a Cloudflare edge block</b> (AD-13's second entry
+     * point, Phase 5). The WS hosts sit behind the same rule as the API hosts (A15), so an edge
+     * that refuses the upgrade with its 403 page is the same brand-wide block a login would meet —
+     * and the handshake exception carries that response's status and headers. Under
+     * {@code enforce} {@code reportEdgeBlock} opens the circuit and throws
+     * {@code GatewayCircuitOpenException} in place of the handshake failure, which every caller
+     * already treats as a non-terminal budget outcome (AD-9); under {@code observe} it returns and
+     * the original failure propagates exactly as before.
      */
     private void connectUnderBudget(RequestTier tier, VingameWebSocketClient target) {
-        gatewayBudget.runWsUpgrade(tier, scope(), target::connect);
+        gatewayBudget.runWsUpgrade(tier, scope(), () -> {
+            try {
+                target.connect();
+            } catch (RuntimeException e) {
+                CloudflareBlockDetector.Verdict verdict = CloudflareBlockDetector.classifyHandshakeFailure(e);
+                if (verdict.edgeBlock()) {
+                    gatewayBudget.reportEdgeBlock(GatewayEndpoint.WS_UPGRADE, verdict.cfRay());
+                }
+                throw e;
+            }
+        });
     }
 
     /**

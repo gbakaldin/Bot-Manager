@@ -52,6 +52,9 @@ import java.util.concurrent.TimeUnit;
  *       {@code outcome="live_sibling"}. ACTIVE is the whole point — a DEAD runtime's
  *       surviving bots are the dying group's own sockets, not a sibling's, and the
  *       gate exists to require independent evidence.</li>
+ *   <li><b>An open gateway circuit suppresses the probe</b> (GATEWAY_REQUEST_BUDGET A15.4,
+ *       A29.2): while a Cloudflare edge block holds an environment's circuit open the target is
+ *       unhealthy under {@code outcome="circuit_open"} and nothing is sent or stamped.</li>
  *   <li><b>Health is a streak</b> (AD-12): {@link #isHealthy(String)} is true only
  *       after {@code bot.recovery.probe.healthy-streak} consecutive healthy results,
  *       so one 200 from a flapping origin is not evidence.</li>
@@ -79,6 +82,12 @@ public class EnvironmentProbeScheduler {
 
     /** Outcome tag for AD-10's short-circuit — healthy, with no network call made. */
     static final String OUTCOME_LIVE_SIBLING = "live_sibling";
+
+    /**
+     * Outcome tag for a probe <b>not sent</b> because an environment on the target has an open
+     * gateway circuit (GATEWAY_REQUEST_BUDGET A15.4, A29.2) — unhealthy, no network call, no stamp.
+     */
+    static final String OUTCOME_CIRCUIT_OPEN = "circuit_open";
 
     private final BotGroupRepository botGroupRepository;
     private final BotGroupBehaviorService behaviorService;
@@ -247,16 +256,24 @@ public class EnvironmentProbeScheduler {
      */
     private List<MultiGauge.Row<?>> probeTarget(Target target,
                                                 Map<BotGroupBehaviorService.EnvKey, Integer> openWsByEnv) {
-        boolean liveSibling = hasLiveSibling(target, openWsByEnv);
+        // Suppressed while the edge is blocking this host (A15.4, A29.2). The probe's stamps buy no
+        // information then — the circuit's own clearance probe is what notices the block lifting —
+        // and since A15 they are counted against the very window the block was caused by. And the
+        // answer it would get, a well-formed Cloudflare 403, is one this class used to read as
+        // healthy. Checked BEFORE the live-sibling short-circuit: a sibling whose socket is still
+        // open from before the block is not evidence that a NEW connection would be admitted.
+        boolean circuitOpen = anyCircuitOpen(target);
+        boolean liveSibling = !circuitOpen && hasLiveSibling(target, openWsByEnv);
+        boolean probed = !circuitOpen && !liveSibling;
 
-        EnvironmentWsProbe.ProbeResult result = liveSibling
-                ? null
-                : probe.probe(target.url, target.headers);
+        EnvironmentWsProbe.ProbeResult result = probed ? probe.probe(target.url, target.headers) : null;
 
-        boolean healthy = liveSibling || result.healthy();
-        String outcome = liveSibling ? OUTCOME_LIVE_SIBLING : result.outcome().tag();
-        long latencyMillis = liveSibling ? 0L : result.latencyMillis();
-        String detail = liveSibling ? "live sibling holds an open socket" : result.detail();
+        boolean healthy = liveSibling || (probed && result.healthy());
+        String outcome = circuitOpen ? OUTCOME_CIRCUIT_OPEN
+                : liveSibling ? OUTCOME_LIVE_SIBLING : result.outcome().tag();
+        long latencyMillis = probed ? result.latencyMillis() : 0L;
+        String detail = circuitOpen ? "gateway circuit open (Cloudflare edge block) — not probed"
+                : liveSibling ? "live sibling holds an open socket" : result.detail();
 
         ProbeState previous = states.get(target.url);
         int streak = healthy ? (previous == null ? 0 : previous.consecutiveHealthy()) + 1 : 0;
@@ -276,8 +293,9 @@ public class EnvironmentProbeScheduler {
             // that is the right one. Over-counting is the safe direction: it makes the window
             // read fuller than it is, never emptier.
             //
-            // A live-sibling short-circuit sends nothing and is therefore not counted.
-            if (!liveSibling) {
+            // A live-sibling short-circuit sends nothing and is therefore not counted; neither does
+            // a probe suppressed by an open circuit.
+            if (probed) {
                 // countWsUpgrade, not count: the probe IS a WebSocket upgrade, so whether it
                 // costs the edge a request is the same question `count-ws-upgrades` answers for
                 // the three connect() sites (A5.3 / reviewer F2). With `count` here, answering
@@ -330,6 +348,16 @@ public class EnvironmentProbeScheduler {
         } finally {
             BotMdc.clear();
         }
+    }
+
+    /** Whether any environment on this target has its gateway circuit open — read, never created. */
+    private boolean anyCircuitOpen(Target target) {
+        for (String envId : target.envs.keySet()) {
+            if (gatewayBudgetRegistry.isCircuitOpen(envId)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
