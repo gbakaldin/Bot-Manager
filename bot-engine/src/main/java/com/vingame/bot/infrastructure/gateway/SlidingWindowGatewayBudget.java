@@ -204,6 +204,13 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      */
     private static final long WAKE_UP_SLACK_NANOS = Duration.ofMillis(1).toNanos();
 
+    /**
+     * How long a waiter that lost the timeout race waits for its remover's outcome (see
+     * {@code await}). The outcome is normally microseconds away; this only bounds the case where it
+     * never comes. Package-private and non-final purely so a test need not wait five seconds.
+     */
+    long lostRemovalWaitNanos = Duration.ofSeconds(5).toNanos();
+
     private final String environmentId;
     private final String environmentName;
     private final String productCode;
@@ -665,12 +672,31 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                 // (AD-8). Every remover puts this waiter's completion in its deferred list, which
                 // runs right after it unlocks, so the outcome is about to exist: wait for it and
                 // honour it. Admitted is still "true" — the stamp is taken and the request goes out.
+                //
+                // BOUNDED (re-review): the remover's completion runs from runAfterUnlock, which
+                // isolates RuntimeExceptions only — an Error thrown by an earlier action in the same
+                // pass skips it, and an unbounded get() would then park this thread for ever. If the
+                // outcome has not landed within lostRemovalWaitNanos, the request is treated as NOT
+                // sent: a refusal is the fail-safe reading, because sending is the one thing that
+                // cannot be taken back (and, for a lost admission, the stamp it already took merely
+                // makes the window read one request fuller than it is).
                 try {
-                    waiter.admitted.get();
+                    waiter.admitted.get(lostRemovalWaitNanos, TimeUnit.NANOSECONDS);
                     return true;
                 } catch (ExecutionException removed) {
                     reportThrottleState();
                     return refusedOutcome(removed, soft);
+                } catch (TimeoutException lost) {
+                    log.error("env {} ({}): a queued {} request was removed from its queue but its "
+                                    + "outcome never arrived — treated as not sent. This is a bug in "
+                                    + "the budget's own bookkeeping (a deferred action failed with an "
+                                    + "Error), not a gateway answer.",
+                            environmentId, environmentName, waiter.tier);
+                    reportThrottleState();
+                    if (soft) {
+                        return false;
+                    }
+                    throw new GatewayBudgetExhaustedException(waiter.tier, environmentId, retryAfter());
                 }
             }
             counter(waiter.tier, OUTCOME_TIMEOUT).increment();

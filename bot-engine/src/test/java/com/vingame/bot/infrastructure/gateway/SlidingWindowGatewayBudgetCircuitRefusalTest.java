@@ -354,6 +354,53 @@ class SlidingWindowGatewayBudgetCircuitRefusalTest {
         assertThat(budget.windowRequests()).isEqualTo(500);
     }
 
+    @Test
+    @DisplayName("a waiter removed from its queue whose outcome never arrives is not parked for ever, and not sent")
+    void aLostRemovalOutcomeIsBoundedAndNotSent() throws Exception {
+        // Re-review: runAfterUnlock isolates RuntimeExceptions only, so an Error in an earlier
+        // deferred action can leave a removed waiter's future never completed. Simulated exactly: the
+        // waiter is taken out of its queue under the lock and its future is never touched.
+        fill500Default();
+        budget.lostRemovalWaitNanos = Duration.ofMillis(200).toNanos();
+        AtomicBoolean sent = new AtomicBoolean();
+        AtomicReference<Throwable> outcome = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(1);
+        Thread.ofVirtual().name("orphaned-waiter").start(() -> {
+            try {
+                budget.execute(RequestTier.DEFAULT, SCOPE, () -> {
+                    sent.set(true);
+                    return "sent";
+                }, Duration.ofMillis(300));
+            } catch (Throwable t) {
+                outcome.set(t);
+            } finally {
+                done.countDown();
+            }
+        });
+        for (int i = 0; i < 400 && budget.snapshot().queuedDefault() < 1; i++) {
+            Thread.sleep(5);
+        }
+        assertThat(budget.snapshot().queuedDefault()).isEqualTo(1);
+
+        java.util.concurrent.locks.ReentrantLock lock =
+                (java.util.concurrent.locks.ReentrantLock) ReflectionTestUtils.getField(budget, "lock");
+        @SuppressWarnings("unchecked")
+        java.util.Map<RequestTier, java.util.ArrayDeque<Object>> queues =
+                (java.util.Map<RequestTier, java.util.ArrayDeque<Object>>) ReflectionTestUtils.getField(budget, "queues");
+        lock.lock();
+        try {
+            assertThat(queues.get(RequestTier.DEFAULT).pollFirst()).isNotNull();
+        } finally {
+            lock.unlock();
+        }
+
+        assertThat(done.await(5, TimeUnit.SECONDS))
+                .as("the orphaned waiter must come back, not park on a future nobody will complete")
+                .isTrue();
+        assertThat(sent).as("an unknown outcome is read as NOT sent").isFalse();
+        assertThat(outcome.get()).isInstanceOf(com.vingame.bot.common.exception.GatewayBudgetExhaustedException.class);
+    }
+
     private void fill500Default() throws Exception {
         for (int i = 0; i < 500; i++) {
             budget.execute(RequestTier.DEFAULT, SCOPE, () -> "fill");
