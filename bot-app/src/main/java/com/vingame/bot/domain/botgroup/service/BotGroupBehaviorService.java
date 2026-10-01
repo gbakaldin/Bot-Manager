@@ -1098,7 +1098,12 @@ public class BotGroupBehaviorService {
             groupLifecycleAggregator.expectInitialized(id, group.getName(), group.getBotCount());
 
             // Create bots in parallel with controlled concurrency
-            List<Bot> bots = createBotsInParallel(group, environment, game, strategyAssignment);
+            // The first open-circuit refusal the build met, if any — what lastError must name when
+            // every bot was refused by a Cloudflare edge block (A16.2, A32.3 S1).
+            java.util.concurrent.atomic.AtomicReference<com.vingame.bot.common.exception.GatewayCircuitOpenException>
+                    circuitRefusal = new java.util.concurrent.atomic.AtomicReference<>();
+            List<Bot> bots = createBotsInParallel(group, environment, game, strategyAssignment,
+                    circuitRefusal);
 
             // A /stop landed during the build (AD-8/AD-16). Return without persisting anything:
             // `started` stays false, so the finally block below tears the half-built runtime down
@@ -1174,7 +1179,17 @@ public class BotGroupBehaviorService {
                     BotMdc.restore(outerMdc);
                 }
                 group.setTargetStatus(BotGroupStatus.DEAD);
-                String zeroBotReason = "Started 0/" + group.getBotCount() + " bots — all bot creations failed";
+                // A16.2 / A32.3 S1: a start refused by an open circuit says so. Without this,
+                // /status read "all bot creations failed" — the auth-outage shape this feature
+                // exists to stop being misdiagnosed. The exception's message is ours and
+                // client-safe (environment and cf-ray only). Deliberately here and not as a
+                // fail-fast before the build: this branch persists DEAD, which keeps the
+                // ActivationScheduler from re-deciding START every minute for the life of the
+                // block and makes the group a recovery candidate once the circuit closes.
+                com.vingame.bot.common.exception.GatewayCircuitOpenException refused = circuitRefusal.get();
+                String zeroBotReason = refused != null
+                        ? "Started 0/" + group.getBotCount() + " bots — " + refused.getMessage()
+                        : "Started 0/" + group.getBotCount() + " bots — all bot creations failed";
                 group.setLastFailureReason(zeroBotReason);
                 // R10: this branch returns NORMALLY, so submitLifecycle's finally calls
                 // finish(id, null) and /status would answer "DEAD, botsUp: 0, lastError: null" —
@@ -1292,7 +1307,9 @@ public class BotGroupBehaviorService {
      * @return List of created and initialized bots
      */
     private List<Bot> createBotsInParallel(BotGroup group, Environment environment, Game game,
-                                           Map<String, String> strategyAssignment) {
+                                           Map<String, String> strategyAssignment,
+                                           java.util.concurrent.atomic.AtomicReference<
+                                                   com.vingame.bot.common.exception.GatewayCircuitOpenException> circuitRefusal) {
         int botCount = group.getBotCount();
         Semaphore semaphore = new Semaphore(botCreationParallelism);
         // The group's product, for the MDC that tags bot_creation_failures_total below.
@@ -1363,6 +1380,7 @@ public class BotGroupBehaviorService {
         List<Bot> bots = new ArrayList<>(botCount);
         List<Throwable> errors = new ArrayList<>();
         int skipped = 0;
+        int circuitRefused = 0;
 
         // The result-collection loop runs on the caller thread of start(), NOT on
         // the per-bot virtual thread (where MDC was set inside the supplyAsync
@@ -1395,6 +1413,15 @@ public class BotGroupBehaviorService {
                         // its own label — because a cancelled build's shape is worth seeing.
                         log.debug("Bot {}/{} of group {} was cancelled while queued at the gateway "
                                         + "budget", i + 1, botCount, group.getId());
+                    } else if (cause instanceof com.vingame.bot.common.exception.GatewayCircuitOpenException refusal) {
+                        // Every bot of a start during a block lands here, refused inside the JVM.
+                        // One ERROR with a stack trace per bot was N identical traces into Loki for
+                        // one brand-level fact that the circuit's own ERROR already reported; the
+                        // group-level line after the loop says it once (CLAUDE.md tiers).
+                        circuitRefusal.compareAndSet(null, refusal);
+                        circuitRefused++;
+                        log.debug("Bot {}/{} of group {} refused by an open gateway circuit: {}",
+                                i + 1, botCount, group.getId(), refusal.getMessage());
                     } else {
                         log.error("Failed to create bot {}/{} for group {} (env {}): {}",
                                 i + 1, botCount, group.getId(), group.getEnvironmentId(),
@@ -1417,6 +1444,13 @@ public class BotGroupBehaviorService {
         if (!errors.isEmpty()) {
             log.warn("Created {}/{} bots successfully ({} failures) for group {}",
                     bots.size(), botCount, errors.size(), group.getId());
+        }
+        if (circuitRefused > 0) {
+            com.vingame.bot.common.exception.GatewayCircuitOpenException refusal = circuitRefusal.get();
+            log.warn("Bot group {}: {}/{} bots refused by an open gateway circuit — Cloudflare edge "
+                            + "block on env {} (cf-ray {})", group.getId(), circuitRefused, botCount,
+                    group.getEnvironmentId(),
+                    refusal == null || refusal.getCfRay() == null ? "-" : refusal.getCfRay());
         }
         if (skipped > 0) {
             log.info("Bot group {}: {}/{} bots were not built — the start was cancelled",

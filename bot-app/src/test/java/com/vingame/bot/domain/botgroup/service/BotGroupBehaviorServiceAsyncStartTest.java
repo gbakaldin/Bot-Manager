@@ -511,6 +511,44 @@ class BotGroupBehaviorServiceAsyncStartTest {
                 .isEqualTo("env-1");
     }
 
+    @Test
+    @DisplayName("a start refused by an open circuit names the edge block in lastError, with one group-level line")
+    void aStartRefusedByAnOpenCircuitSaysSo() {
+        // A16.2 / A32.3 S1. Every login is refused inside the JVM; /status used to read "all bot
+        // creations failed", which is the auth-outage shape this feature exists to stop being
+        // misdiagnosed. And the refusal used to be one ERROR with a stack trace per bot.
+        BotGroup group = group(3);
+        when(botGroupService.findById("g-1")).thenReturn(group);
+        when(environmentService.findById("env-1")).thenReturn(environment());
+        when(gameService.findById("game-1")).thenReturn(game());
+        when(botFactory.createBot(anyString(), any(BotConfiguration.class)))
+                .thenThrow(new com.vingame.bot.common.exception.GatewayCircuitOpenException(
+                        "env-1", "a3c7e4004acc850e-HKG", java.time.Duration.ofMinutes(60)));
+
+        List<LogEvent> events = captureWithMdc(() -> {
+            service.startAsync("g-1", StartOrigin.REST, () -> { });
+            awaitNoStartInFlight();
+        });
+
+        assertThat(service.getActualStatus("g-1"))
+                .as("DEAD, not left un-started: ActivationScheduler must not re-decide START every minute")
+                .isEqualTo(BotGroupStatus.DEAD);
+        assertThat(service.getLastStartError("g-1"))
+                .startsWith("Started 0/3 bots — Gateway edge block")
+                .contains("a3c7e4004acc850e-HKG")
+                .doesNotContain("all bot creations failed");
+        assertThat(events.stream()
+                .filter(e -> e.getLevel() == Level.ERROR)
+                .filter(e -> e.getMessage().getFormattedMessage().startsWith("Failed to create bot")))
+                .as("no per-bot ERROR for a brand-level fact")
+                .isEmpty();
+        assertThat(events.stream()
+                .filter(e -> e.getLevel() == Level.WARN)
+                .map(e -> e.getMessage().getFormattedMessage())
+                .filter(m -> m.contains("3/3 bots refused by an open gateway circuit")))
+                .hasSize(1);
+    }
+
     /** Capture {@link BotGroupBehaviorService}'s events, MDC included, while {@code action} runs. */
     private static List<LogEvent> captureWithMdc(Runnable action) {
         List<LogEvent> events = new CopyOnWriteArrayList<>();
