@@ -517,13 +517,20 @@ groups:
       # registration_accounts_total the whole time, so it cannot fire this. Zero accounts in 30
       # minutes with at least one group pending means nothing anywhere is progressing.
       #
+      # `outcome!="failed"` (review-phase4-fixround): a FAILED attempt is not progress. The counter
+      # increments `failed` on every refused or transport attempt, so without the matcher any group
+      # retrying anywhere in the JVM satisfied the increase() side and masked a starved group — for
+      # ~5 minutes per failing index under the 10-attempt transport budget, longer when a flaky
+      # gateway advances an index now and then and resets the count. Only `success` and `exists`
+      # say an account came into being.
+      #
       # `and on()` because the two series have different label sets (the gauge is an unlabelled
       # fleet aggregate, the counter carries the group MDC); `or vector(0)` because a sum over an
       # absent counter is an empty vector, and an empty vector would make the whole expression
       # empty — i.e. this rule would go silent exactly when no account has EVER been registered in
       # this JVM's lifetime, which includes the case where the very first group is starved.
       - alert: RegistrationNotProgressing
-        expr: registration_pending_groups > 0 and on() (sum(increase(registration_accounts_total[30m])) or vector(0)) == 0
+        expr: registration_pending_groups > 0 and on() (sum(increase(registration_accounts_total{outcome!="failed"}[30m])) or vector(0)) == 0
         for: 30m
         labels:
           job: bot-manager

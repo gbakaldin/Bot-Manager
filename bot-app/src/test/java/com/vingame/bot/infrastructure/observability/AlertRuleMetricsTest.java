@@ -187,6 +187,9 @@ class AlertRuleMetricsTest {
         BotMdc.setGroupContext("group-uuid-1", "env-uuid-1", "116");
         metrics.initRegistrationSeries("success", "exists", "failed");
         metrics.incRegistrationAccount("success");
+        // A FAILED attempt too, so the exposition carries the series RegistrationNotProgressing
+        // must exclude (review-phase4-fixround) — see registrationNotProgressingIgnoresFailures.
+        metrics.incRegistrationAccount("failed");
         MDC.clear();
 
         // --- the log4j2 queue meters, registered exactly as AsyncQueueMetrics does at
@@ -334,6 +337,26 @@ class AlertRuleMetricsTest {
                         + "application produces — such a rule evaluates to an empty vector "
                         + "forever and never reports that it is doing so")
                 .isEmpty();
+    }
+
+    @Test
+    @DisplayName("RegistrationNotProgressing counts created accounts only — a failed attempt is not progress")
+    void registrationNotProgressingIgnoresFailures() {
+        // review-phase4-fixround. registration_accounts_total{outcome="failed"} increments on every
+        // refused or transport attempt, so a rule over the unfiltered counter is satisfied by any
+        // group retrying anywhere in the JVM and never fires for the starved group it is about.
+        // Nothing here evaluates PromQL, so the property is pinned on the expression, against an
+        // exposition that really carries both kinds of series.
+        Rule rule = rules().stream()
+                .filter(r -> "RegistrationNotProgressing".equals(r.name()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("RegistrationNotProgressing is not in alerts.yml"));
+
+        assertThat(rule.expr())
+                .contains("registration_accounts_total{outcome!=\"failed\"}");
+        assertThat(scrapedLabelValues("registration_accounts_total", "outcome"))
+                .as("the exposition has a failed series to exclude and a success series to keep")
+                .contains("failed", "success");
     }
 
     @Test
