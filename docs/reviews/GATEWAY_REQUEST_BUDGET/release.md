@@ -336,3 +336,132 @@ jar cannot read (A1: `STARTING` is never persisted).
 (V2c on its second attempt, V2e on its 404 half, V1b substituted, V3f partial), **3 N/A or vacuous**
 (V3c, V3d, V4g), **2 not run by design** (V3b, V3e) and **4 skipped per A32.5** (V1a, V1e, V6a, V6b).
 **0 FAIL.** Anomaly A1 is the open item to fix before prod.
+
+---
+
+# Redeploy 2026-10-01 (A1 fix)
+
+Mode: **bot**. Target: **Bot-1 (staging)**, `s009-bot-general-stag-01`, `/home/sgame/bot-java`
+Branch: `feature/gateway-request-budget`, **commit `8653571`** (code tip `31419c6` + A33 docs), built from a clean detached worktree
+Image: `vingame-bot:latest` = **`sha256:34d836ae5fc72db7b66738672417cdfe0212c8434d408119efb5c074fe5c3cad`** (linux/amd64, built 2026-10-01T12:13Z)
+Rollback tag: **`vingame-bot:rollback-20261001b` = `b5da0f81efaa`** (this morning's image). `vingame-bot:rollback-20261001` = `f284ca5390c3` is kept.
+Single bot-manager restart: **2026-10-01T12:16:41Z** (container started 12:16:43Z, `RestartCount=0`). Last check at 12:28:45Z.
+
+**Verdict: PASS.** `too many concurrent streams` did not appear (0 lines, against 72 this morning). Zic Zac and Coins are both
+100/100 connected, with all 200 bots betting and rounds settling. There were no login failures, no edge blocks, no circuit
+opens and no stream-wait timeouts. The 114 window peaked at 692/900. The only firing alert was the expected `BotManagerRestarted`.
+
+## Authorisation
+
+The pipeline coordinator relayed the user's approval of this redeploy, and the permission system cleared each step. Only Bot-1 was touched.
+
+## Build
+
+- Detached worktree at `8653571`, empty `git status`. The dirty main tree was not used.
+- `mvn clean install` (JDK 21.0.2): **PASS**, 2 min 14 s. Tests: bot-api 148, bot-strategies 126, bot-messages 308,
+  bot-engine 695, bot-app 1,456, so **2,733 tests and 0 failures/errors**. This matches A33's count. `Bot-1.0.jar` is 61,885,618 B.
+- `docker build --no-cache --platform linux/amd64` with `DOCKER_CONFIG=<scratch>` holding `{"auths":{}}`: **PASS** (`34d836ae5fc7`). There was no hang.
+- `docker save`: **PASS**. `bot.tar` is 396,201,472 B, md5 `4d571c751b8cf3b98461277c287c516c`.
+
+## Pre-flight diff against the box
+
+| File | Box vs `8653571` / working tree | Action |
+|---|---|---|
+| `grafana/provisioning/dashboards/bots.json` | differs (`b7cf59a0…` → `09583104…`) | shipped |
+| `deploy.sh` (working-tree copy) | **identical** (`9fe2dea8…`) | no-op |
+| `prometheus/alerts.yml` | **identical** (`d71f4115…`) | not shipped, **Prometheus not restarted** |
+| `docker-compose.yml`, `logging/log4j2.properties`, `alertmanager/alertmanager.yml`, other dashboards | identical | not shipped |
+| `secrets.env` | untouched. Holds `GATEWAY_BUDGET_MODE=enforce`, and `.env` was already in sync with it (diff empty) | none |
+
+## Ship
+
+- Remote backup `grafana/provisioning/dashboards/bots.json.bak-20261001T1214Z`.
+- `sftp put bot.tar`: **PASS**. The remote md5 matches the local one.
+- `sftp put bots.json` (as `.new`, then `mv` into place): **PASS**. Remote md5 is `09583104…`. Grafana bind-mounts the directory and
+  re-scans every 30 s (`updateIntervalSeconds: 30`), so it needs no restart. Its log shows no provisioning errors after 12:15. I
+  did not inspect the dashboard visually, because the API needs auth.
+
+## Deploy
+
+I deliberately did **not** use `docker compose down` / `./deploy.sh`. `deploy.sh` kills every `bot-*` container,
+which would also have restarted Prometheus, Grafana and Loki. Since `.env` was already current, I used a bot-manager-only recreate:
+- `docker tag b5da0f81efaa vingame-bot:rollback-20261001b`: PASS
+- `docker load -i bot.tar`: PASS. `latest` → `34d836ae5fc7`, and the old image keeps its rollback tag.
+- `docker compose up -d bot-manager` (12:16:41Z): PASS. Only bot-manager was recreated, and the other 9 containers stayed `Up 2 hours`.
+
+## Smoke
+
+| Check | Result |
+|---|---|
+| `bot-java-bot-manager-1 Up 33 seconds (healthy)`, image `34d836ae…`, `RestartCount=0` | **PASS** |
+| `Started Starter in 4.276 seconds` (12:16:49) | **PASS** |
+| `Bot Manager startup: 9 bot groups queued for daisy-chained start` (12:16:49) | **PASS** |
+| (non-blocking) `startup complete. 9 bot groups running (9 started by this chain)` at 12:16:54 | present |
+| `MessageTypesRegistry initialized: BETTING_MINI 6 products [...], TAI_XIU 3 products [114, 116, 119]` | present |
+| Prometheus `Healthy`, Grafana `"database":"ok"` (11.4.0), Loki `ready`, Alertmanager `OK`; mongo, evidence-shim and viptalk-shim healthy | **PASS** (none restarted) |
+
+## Verification (brief item 5)
+
+### 1. Stream error gone. **PASS**
+`grep -c "too many concurrent streams" logs/console.log logs/detail/detail.log` at 12:17 and again at 12:28:45 gave
+`console.log:0`, `detail.log:0`. Both live files start before the restart (`console.log` rolled at 12:00), so together they
+cover everything since 12:16:41. This morning there were 72 lines, starting 09:54.
+
+### 2. Stream-permit metrics. **PASS (with a caveat)**
+- `gateway_client_inflight_requests{environmentId}` is present for all 4 environments with traffic (114 `394301f4`, 116 `ad4e7948`,
+  119 `d005157f`, 119-Club `8ca14218`). `max_over_time(...[15m])` = **0** on every one, which is ≤ 32.
+  *Caveat:* it is a scrape-time gauge (15 s), and the startup burst lasted about 6 s, so the reading is "no in-flight request was observed
+  at a scrape". It does not prove the peak stayed ≤ 32. The proof of that is the zero below plus the zero errors above.
+- `gateway_client_stream_wait_timeouts_total` is present for all 4 environments and **0**.
+
+### 3. Zic Zac / Coins health. **PASS**
+`GET /api/v1/bot-group/{id}/health` at 12:27:29:
+
+| Group | status | total | connected | reconnecting | dead | per-bot status | bots with bets > 0 |
+|---|---|---|---|---|---|---|---|
+| Zic Zac `1804a704…` | ACTIVE | 100 | **100** | 0 | 0 | 100 × `CONNECTION_AUTHENTICATED` | **100** (100 bets each) |
+| Coins `90064a8d…` | ACTIVE | 100 | **100** | 0 | 0 | 100 × `CONNECTION_AUTHENTICATED` | **100** (90-95 each) |
+
+No bot is in `AUTHENTICATING_CONNECTION`, and no connected bot has zero bets. This morning the figures were 100 connected / 95 playing (Zic Zac) and 96/100 (Coins).
+Rounds settle (`logs/detail/detail.log`): Zic Zac had **54** `session … ended` lines after the restart, e.g. `session 2035531 ended | total staked:
+44880000 | total win: 270000 | bettors: 100 | confirmed staked: 360000`. Coins had **50**, e.g. `session 3835631 ended | total staked:
+1544000 | total win: 30860 | bettors: 100 | confirmed staked: 31000`. `bettors: 100` in both groups.
+
+### 4. `bot_reconnects_total{reason="session-setup"}`: **0** (series absent; no `session-setup` line in either log track)
+No bot needed the new hand-off. Other reasons since the restart:
+- `ws-disconnect` 24: Coins 12, Slot 120/116 5, Zic Zac 4, Tai Xiu KM/119 2, Slot 201/114 1. Every bot of these groups
+  recovered, as the health table shows.
+- `watchdog` 12, all on **119 Xoc Dia `c93c82a5`**. This is pre-existing: there are 131 watchdog lines for this group across today's logs,
+  most of them from the previous JVM. It is unrelated to this change.
+
+### 5. Brand-level gateway checks. **PASS**
+- `sum by (product,outcome) (bot_login_total)`: success **114 = 224**, **116 = 20**, **119 = 42** (30 at start plus 12 Xoc Dia watchdog
+  re-logins). **097: no ACTIVE group on staging** (the only 097 groups are this morning's STOPPED test artefacts), so there is no series.
+  **`outcome="failure"`: no series on any brand = 0.** This morning 114 had 4 failures.
+- `bot_creation_failures_total`: no series = 0.
+- `sum(gateway_edge_blocks_total)` = **0**. `sum(gateway_circuit_opened_total)` = **0**.
+- `max by (environmentId) (max_over_time(gateway_budget_window_requests[30m]))`: **114 = 692** (this morning 723),
+  116 = 65, 119 `d005157f` = 60, 119-Club `8ca14218` = 32, 097 `3cda38f9…68` / `…70` = 5 each. All are ≤ 900.
+  The 30 m range includes about 11 minutes of the previous JVM's tail, and the 12 m range (after the restart only) gives the same figures.
+- Alerts: exactly one firing, **`BotManagerRestarted`** (active 12:17:09, routed to `viptalk`). It is expected for a deploy and clears
+  after 15 m. Nothing else is firing.
+
+### 6. 119 Bau Cua groups still STOPPED. **PASS**
+`b44f8b3d-860f-4d84-8379-57774c87af88` "119 Bau Cua 50-bot probe": `targetStatus STOPPED / actualStatus STOPPED`.
+`97314241-54ec-4ae2-b9f3-34232f52067e` "119 Bau Cua probe": `STOPPED / STOPPED`.
+
+## Rollback criteria
+
+None was met. bot-manager started first time, no brand had any auth failure, there was no edge block, and the stream error is at 0.
+
+Rollback, if needed later. This is a bot-manager-only recreate, so do not restart within 5 min of the last startup, because it would add a
+second ~700-request burst on 114:
+```bash
+ssh Bot-1 'cd /home/sgame/bot-java && docker tag vingame-bot:rollback-20261001b vingame-bot:latest && docker compose up -d bot-manager'
+```
+Optionally restore `grafana/provisioning/dashboards/bots.json.bak-20261001T1214Z`.
+
+## Redeploy verdict
+
+**PASS.** Smoke PASS. Verification: 6 of 6 checks passed. Check 2 has the scrape-granularity caveat on the in-flight gauge.
+A1 is resolved on staging for this start.
