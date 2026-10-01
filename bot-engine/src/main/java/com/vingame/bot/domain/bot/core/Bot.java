@@ -1206,7 +1206,15 @@ public abstract class Bot {
             } catch (RuntimeException e) {
                 CloudflareBlockDetector.Verdict verdict = CloudflareBlockDetector.classifyHandshakeFailure(e);
                 if (verdict.edgeBlock()) {
-                    gatewayBudget.reportEdgeBlock(GatewayEndpoint.WS_UPGRADE, verdict.cfRay());
+                    try {
+                        gatewayBudget.reportEdgeBlock(GatewayEndpoint.WS_UPGRADE, verdict.cfRay());
+                    } catch (RuntimeException refusal) {
+                        // Under enforce the circuit refusal REPLACES the handshake failure; keep
+                        // the evidence (status, headers) attached rather than dropping it from the
+                        // stack trace (review-phase5).
+                        refusal.addSuppressed(e);
+                        throw refusal;
+                    }
                 }
                 throw e;
             }

@@ -92,13 +92,18 @@ class BotWsEdgeBlockTest {
         SlidingWindowGatewayBudget budget = new SlidingWindowGatewayBudget("env-1", "Staging", "116",
                 GatewayBudgetSettings.defaults().withMode(GatewayBudgetMode.ENFORCE), meters, System::nanoTime);
         try {
-            doThrow(handshake(HttpResponseStatus.FORBIDDEN, true)).when(wsClient).connect();
+            WebSocketClientHandshakeException refused = handshake(HttpResponseStatus.FORBIDDEN, true);
+            doThrow(refused).when(wsClient).connect();
 
             assertThatThrownBy(() -> bot(budget).initialize())
                     .as("AD-9: a GatewayBudgetException is non-terminal for a bot and classifies as "
                             + "\"budget\" at creation — a raw handshake error would not")
-                    .isInstanceOfSatisfying(GatewayCircuitOpenException.class,
-                            e -> assertThat(e.getCfRay()).isEqualTo(CapturedBlockPage.CF_RAY));
+                    .isInstanceOfSatisfying(GatewayCircuitOpenException.class, e -> {
+                        assertThat(e.getCfRay()).isEqualTo(CapturedBlockPage.CF_RAY);
+                        assertThat(e.getSuppressed())
+                                .as("the edge's handshake response stays attached as evidence (review-phase5)")
+                                .containsExactly(refused);
+                    });
             assertThat(budget.snapshot().circuitOpen()).isTrue();
             assertThat(meters.get(SlidingWindowGatewayBudget.EDGE_BLOCKS_TOTAL)
                     .tags("endpoint", "ws-upgrade").counter().count()).isEqualTo(1.0);
