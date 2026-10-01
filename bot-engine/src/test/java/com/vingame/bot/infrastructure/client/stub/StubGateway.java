@@ -2,6 +2,7 @@ package com.vingame.bot.infrastructure.client.stub;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import com.vingame.bot.infrastructure.gateway.CapturedBlockPage;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -57,12 +58,18 @@ import java.util.function.LongSupplier;
  *   <li>{@code deposit.aspx} — {@code status:"OK"}.</li>
  * </ul>
  * <p>
- * <b>No block mode.</b> AD-22 also specifies a Cloudflare-block mode (the captured 403 page,
- * headers included) and a Netty WebSocket endpoint. Both belong to the phase that has something
- * to test with them — Phase 5's {@code CloudflareBlockDetector} and the circuit breaker — and
- * adding them here would be untested scaffolding in a phase that is explicitly told not to
- * build the detector. The seam is {@link #handle}: a mode flag consulted there is the whole
- * change.
+ * <b>Block mode</b> (Phase 5, AD-22). {@link #block()} — or {@code POST /__stub/block} from a shell,
+ * which is how the manual V4d check drives {@link StubGatewayMain} — makes every gateway path answer
+ * with the Cloudflare page this host really received on 2026-09-17, status and headers included
+ * ({@code CapturedBlockPage}); {@link #unblock()} / {@code POST /__stub/unblock} restores normal
+ * answers. A blocked request is still recorded and still stamped: the edge counts what arrives,
+ * whatever it answers. The {@code /__stub/} control paths are neither.
+ * <p>
+ * <b>Every request is recorded</b> — method, path, query, headers, body — so the in-repo login can
+ * be proven byte-identical to what the library's {@code AuthClient} sent (AD-12), by recording both
+ * against this stub in the same test. The Netty WebSocket endpoint AD-22 also describes is still not
+ * built: nothing tests through it, and the WS half of block detection is covered by classifying a
+ * handshake exception directly.
  */
 public final class StubGateway implements AutoCloseable {
 
@@ -85,18 +92,43 @@ public final class StubGateway implements AutoCloseable {
     /** Usernames already registered, so a re-register can answer {@code EXISTED} like the real one. */
     private final Map<String, Boolean> registered = new ConcurrentHashMap<>();
 
+    /** Every gateway request received, in arrival order. Control paths are not recorded. */
+    private final List<RecordedRequest> requests = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /** Whether every gateway path currently answers with the captured Cloudflare block page. */
+    private volatile boolean blocked;
+
+    /** When non-null, the login path answers this body instead of a token envelope. */
+    private volatile String loginResponseOverride;
+
+    /** One request as the stub received it. Header names are as {@code HttpServer} normalised them. */
+    public record RecordedRequest(String method, String path, String query,
+                                  Map<String, List<String>> headers, String body) {
+
+        /** The first value of a header, case-insensitively; {@code null} if absent. */
+        public String header(String name) {
+            for (Map.Entry<String, List<String>> e : headers.entrySet()) {
+                if (e.getKey().equalsIgnoreCase(name) && !e.getValue().isEmpty()) {
+                    return e.getValue().get(0);
+                }
+            }
+            return null;
+        }
+    }
+
     private final AtomicLong tokenSeq = new AtomicLong();
     private final HttpServer server;
     private final Duration window;
     private final LongSupplier nanos;
     private volatile long balance = 1_000_000_000L;
 
-    private StubGateway(Duration window, LongSupplier nanos) throws IOException {
+    private StubGateway(Duration window, LongSupplier nanos, int port) throws IOException {
         this.window = window;
         this.nanos = nanos;
-        // Loopback, explicitly, and an ephemeral port so parallel test classes cannot collide.
+        // Loopback, explicitly, and (for tests) an ephemeral port so parallel test classes cannot
+        // collide. Only StubGatewayMain asks for a fixed one.
         this.server = HttpServer.create(
-                new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
+                new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 0);
         this.server.createContext("/", this::handle);
         // Virtual threads: the escalation IT drives hundreds of concurrent requests, and a fixed
         // pool would make the stub the bottleneck being measured instead of the budget.
@@ -107,7 +139,15 @@ public final class StubGateway implements AutoCloseable {
 
     /** Start a stub with the real 5-minute window and the real clock. */
     public static StubGateway start() throws IOException {
-        return new StubGateway(Duration.ofMinutes(5), System::nanoTime);
+        return new StubGateway(Duration.ofMinutes(5), System::nanoTime, 0);
+    }
+
+    /**
+     * Start a stub on a fixed loopback port, real window and real clock — for {@link StubGatewayMain},
+     * where a locally running app's {@code Environment} has to be pointed at a known URL.
+     */
+    public static StubGateway startOnPort(int port) throws IOException {
+        return new StubGateway(Duration.ofMinutes(5), System::nanoTime, port);
     }
 
     /**
@@ -115,7 +155,7 @@ public final class StubGateway implements AutoCloseable {
      * without waiting five real minutes.
      */
     public static StubGateway start(Duration window, LongSupplier nanos) throws IOException {
-        return new StubGateway(window, nanos);
+        return new StubGateway(window, nanos, 0);
     }
 
     /** The base URL to hand {@code ApiGatewayClient.init}. Always a loopback address. */
@@ -161,6 +201,33 @@ public final class StubGateway implements AutoCloseable {
         return paths.size();
     }
 
+    /** Every gateway request this stub has received, in order. */
+    public List<RecordedRequest> requests() {
+        return List.copyOf(requests);
+    }
+
+    /** Answer every gateway path with the captured Cloudflare block page from now on. */
+    public void block() {
+        blocked = true;
+    }
+
+    /** Answer normally again. */
+    public void unblock() {
+        blocked = false;
+    }
+
+    public boolean isBlocked() {
+        return blocked;
+    }
+
+    /**
+     * Make the login path answer {@code body} (HTTP 200, JSON content type) instead of a token
+     * envelope — the gateway's own refusal shapes. {@code null} restores the token envelope.
+     */
+    public void setLoginResponse(String body) {
+        this.loginResponseOverride = body;
+    }
+
     /** The balance {@code verifytoken.aspx} reports. */
     public void setBalance(long balance) {
         this.balance = balance;
@@ -173,6 +240,9 @@ public final class StubGateway implements AutoCloseable {
         paths.clear();
         countsByPath.clear();
         registered.clear();
+        requests.clear();
+        blocked = false;
+        loginResponseOverride = null;
     }
 
     @Override
@@ -184,6 +254,10 @@ public final class StubGateway implements AutoCloseable {
 
     private void handle(HttpExchange exchange) throws IOException {
         String path = exchange.getRequestURI().getPath();
+        if (path.startsWith("/__stub/")) {
+            handleControl(exchange, path);
+            return;
+        }
         // Stamp FIRST, before any branching: what this class measures is arrivals, and a stamp
         // taken after a response is written would be a stamp taken at completion. That is the
         // exact distinction the budget itself is careful about, and the witness must match it.
@@ -194,6 +268,12 @@ public final class StubGateway implements AutoCloseable {
         countsByPath.computeIfAbsent(path, p -> new AtomicInteger()).incrementAndGet();
 
         String body = readBody(exchange);
+        requests.add(new RecordedRequest(exchange.getRequestMethod(), path,
+                exchange.getRequestURI().getRawQuery(), copyHeaders(exchange), body));
+        if (blocked) {
+            respondBlocked(exchange);
+            return;
+        }
         String response;
         if (path.contains("verifytoken")) {
             response = "{\"status\":\"OK\",\"code\":200,\"data\":[{\"main_balance\":" + balance
@@ -207,7 +287,8 @@ public final class StubGateway implements AutoCloseable {
         } else {
             // Everything else is the login path, whose name comes from the brand's AuthProfile
             // (/gwms/v1/bot/login.aspx, /user/login.aspx, …) so it cannot be matched by fragment.
-            response = loginResponse();
+            String override = loginResponseOverride;
+            response = override != null ? override : loginResponse();
         }
         respond(exchange, 200, response);
     }
@@ -257,6 +338,42 @@ public final class StubGateway implements AutoCloseable {
                 + "\"token\":\"18-agency-" + n + "\","
                 + "\"token2\":\"jwt-" + n + "\","
                 + "\"main_balance\":" + balance + "}],\"message\":\"OK\"}";
+    }
+
+    /** {@code POST /__stub/block} and {@code /__stub/unblock}: the shell switch for V4d. */
+    private void handleControl(HttpExchange exchange, String path) throws IOException {
+        readBody(exchange);
+        switch (path) {
+            case "/__stub/block" -> block();
+            case "/__stub/unblock" -> unblock();
+            default -> {
+                respond(exchange, 404, "{\"error\":\"unknown stub control " + path + "\"}");
+                return;
+            }
+        }
+        respond(exchange, 200, "{\"blocked\":" + blocked + "}");
+    }
+
+    /** The captured page, with its own status and headers — not a JSON envelope. */
+    private static void respondBlocked(HttpExchange exchange) throws IOException {
+        CapturedBlockPage page = CapturedBlockPage.load();
+        byte[] bytes = page.body().getBytes(StandardCharsets.UTF_8);
+        page.headers().forEach((name, value) -> {
+            // The JDK server owns framing and the date; everything else is replayed verbatim.
+            if (!name.equalsIgnoreCase("content-length") && !name.equalsIgnoreCase("date")) {
+                exchange.getResponseHeaders().add(name, value);
+            }
+        });
+        exchange.sendResponseHeaders(page.status(), bytes.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(bytes);
+        }
+    }
+
+    private static Map<String, List<String>> copyHeaders(HttpExchange exchange) {
+        Map<String, List<String>> copy = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        exchange.getRequestHeaders().forEach((name, values) -> copy.put(name, List.copyOf(values)));
+        return java.util.Collections.unmodifiableMap(copy);
     }
 
     /** Crude single-field JSON read. Enough for a stub, and it keeps Jackson out of test scope. */

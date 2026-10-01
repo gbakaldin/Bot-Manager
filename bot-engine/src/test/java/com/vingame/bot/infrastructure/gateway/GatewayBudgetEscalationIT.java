@@ -337,8 +337,8 @@ class GatewayBudgetEscalationIT {
     @Test
     @DisplayName("a real login goes through the funnel, is counted, and parses the stub's tokens")
     void aLoginIsCountedAndParsed() {
-        // The login is the one request that does not go through our own HttpClient — it goes
-        // through the library, wrapped by BoundedLogin. So it needs its own end-to-end check that
+        // The login went through the library's own HttpClient until Phase 5 moved it in-repo
+        // (AD-12). It is an ordinary funnel request now, and this keeps the end-to-end check that
         // it is (a) counted by the budget and (b) actually received by the gateway.
         var tokens = client.authenticate(BotCredentials.builder()
                         .username("authtestws1").password("123123a").fingerprint("fp").build(),
@@ -352,8 +352,7 @@ class GatewayBudgetEscalationIT {
         assertThat(tokens.getJwtToken()).startsWith("jwt-");
         assertThat(gateway.countFor("login")).isEqualTo(1);
         assertThat(budget.windowRequests())
-                .as("counted, even though the request left through the library's HttpClient "
-                        + "rather than ours")
+                .as("counted — once, through the same funnel as every other request")
                 .isEqualTo(1);
     }
 }

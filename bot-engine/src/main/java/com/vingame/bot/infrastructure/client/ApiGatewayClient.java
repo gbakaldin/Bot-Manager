@@ -13,10 +13,13 @@ import com.vingame.bot.infrastructure.client.dto.RegistrationOutcome;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResponse;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
 import com.vingame.bot.config.bot.BotCredentials;
-import com.vingame.websocketparser.auth.AuthClient;
+import com.vingame.bot.infrastructure.gateway.CloudflareBlockDetector;
+import com.vingame.bot.infrastructure.gateway.GatewayEndpoint;
 import com.vingame.websocketparser.auth.AuthContext;
 import com.vingame.websocketparser.auth.LoginRequest;
 import com.vingame.websocketparser.auth.TokensProvider;
+import com.vingame.websocketparser.exception.MessageParsingException;
+import com.vingame.websocketparser.exception.WebSocketParserException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Scope;
@@ -85,13 +88,17 @@ public class ApiGatewayClient {
     static final String STATUS_EXISTED = "EXISTED";
 
     /**
-     * The house bound on one gateway round trip, on every request this class makes.
+     * The house bound on one gateway round trip, on every request this class makes — all five,
+     * the login included.
      * <p>
      * It used to be four copies of {@code Duration.ofSeconds(10)} and one request with no
-     * timeout at all — the login, which goes through the library (GATEWAY_REQUEST_BUDGET A19).
-     * {@link BoundedLogin} now applies the same number to that one too, so "every gateway call
-     * is bounded at ten seconds" is a property of this class rather than of four of its five
-     * call sites.
+     * timeout at all: the login, which went through the library's {@code AuthClient} with no
+     * request timeout and no connect timeout (GATEWAY_REQUEST_BUDGET A19), so a stalled TCP
+     * connection parked a build thread — and with it a semaphore permit and the group lock — for
+     * the life of the JVM. Phase 3 bounded it from the outside ({@code BoundedLogin}: a virtual
+     * thread, a 10 s wait, {@code shutdownNow()} through a subclass). Phase 5 moved the login
+     * in-repo (AD-12), so it is now a plain {@code .timeout(...)} on the request like the other
+     * four, and the wrapper is gone (A29.3).
      */
     static final Duration GATEWAY_REQUEST_TIMEOUT = Duration.ofSeconds(10);
 
@@ -215,12 +222,11 @@ public class ApiGatewayClient {
      * environment's budget here and nowhere else.
      * <p>
      * This is the only {@code httpClient.send(} call site in the class and
-     * {@code GatewayCallSiteGuardTest} keeps it that way. It is <b>also where response
-     * classification will go in Phase 5</b> (A29), so a Cloudflare block page becomes "edge block,
-     * cf-ray …" instead of {@code Unexpected character ('<')} — the exact message that was
-     * misdiagnosed for an hour on 2026-09-17. It classifies nothing today: this method is
-     * {@code underBudget(tier, scope, httpCall(request))} and that sentence named Phase 4 until
-     * review T4, i.e. it claimed a feature of a phase a reader had just been told was complete.
+     * {@code GatewayCallSiteGuardTest} keeps it that way. Every response is classified for a
+     * Cloudflare edge block <b>before anything parses it</b> — in {@link #httpCall}, which all three
+     * funnel entry points share (A29.4, Implementation Note 11) — so a block page becomes "edge
+     * block, cf-ray …" and an open circuit instead of {@code Unexpected character ('<')}, the exact
+     * message that was misdiagnosed for an hour on 2026-09-17.
      * <p>
      * The caller's checked exceptions are rethrown unwrapped: the funnel must not change the
      * exception a caller already handles.
@@ -275,25 +281,76 @@ public class ApiGatewayClient {
     }
 
     /**
-     * The one and only place this class hands a request to the JDK client.
+     * The one and only place this class hands a request to the JDK client — and therefore the one
+     * place every gateway answer is first seen (A29.4).
      * <p>
      * Factored out so the three funnel entry points above share it: a second literal
      * {@code httpClient.send(} would be an uncounted, unpaced escape from the budget, and
      * {@code GatewayCallSiteGuardTest} fails the build on one.
+     * <p>
+     * <b>Classify before parse.</b> The response is handed to {@link CloudflareBlockDetector} the
+     * moment it exists, inside the admitted call. On an edge block the budget is told
+     * ({@link GatewayBudget#reportEdgeBlock}): under {@code enforce} that opens the circuit and
+     * throws {@code GatewayCircuitOpenException}, so no caller ever parses an HTML page; under
+     * {@code observe} it returns and the caller proceeds exactly as before Phase 5. The request
+     * stays stamped either way — it reached the edge.
      */
     private Callable<HttpResponse<String>> httpCall(HttpRequest request) {
-        return () -> httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        return () -> classified(request, httpClient.send(request, HttpResponse.BodyHandlers.ofString()));
+    }
+
+    private HttpResponse<String> classified(HttpRequest request, HttpResponse<String> response) {
+        CloudflareBlockDetector.Verdict verdict = CloudflareBlockDetector.classify(response);
+        if (verdict.edgeBlock()) {
+            gatewayBudget.reportEdgeBlock(endpointOf(request), verdict.cfRay());
+        }
+        return response;
     }
 
     /**
-     * The funnel's non-HTTP twin: run {@code call} under the budget and unwrap its checked
-     * exceptions.
+     * Which of the request kinds this is, for the bounded {@code endpoint} label — matched on the
+     * configured paths rather than passed down, so the funnel's signatures stay as they are. Never
+     * returns a URL: a {@code verifytoken} URL carries a bot's session token in its query.
+     */
+    private GatewayEndpoint endpointOf(HttpRequest request) {
+        String path = request.uri().getPath();
+        if (path == null) {
+            return GatewayEndpoint.LOGIN;
+        }
+        if (path.endsWith(VERIFY_TOKEN_ENDPOINT)) {
+            return GatewayEndpoint.VERIFY_TOKEN;
+        }
+        if (path.endsWith(BOT_DEPOSIT_ENDPOINT)) {
+            return GatewayEndpoint.DEPOSIT;
+        }
+        if (registrationPath != null && path.endsWith(registrationPath)) {
+            return GatewayEndpoint.REGISTER;
+        }
+        if (updateFullnamePath != null && path.endsWith(updateFullnamePath)) {
+            return GatewayEndpoint.UPDATE_FULLNAME;
+        }
+        return GatewayEndpoint.LOGIN;
+    }
+
+    /**
+     * A response body rendered for a WARN line: the body itself, unless it is a Cloudflare block
+     * page — five kilobytes of HTML that would otherwise land on track 1 once per bot per request
+     * for as long as a block lasts. The verdict and the cf-ray are what an operator needs.
+     */
+    private static String bodyForLog(HttpResponse<String> response) {
+        CloudflareBlockDetector.Verdict verdict = CloudflareBlockDetector.classify(response);
+        if (verdict.edgeBlock()) {
+            return "<Cloudflare edge block page, cf-ray " + verdict.cfRay() + ">";
+        }
+        return response.body();
+    }
+
+    /**
+     * Run {@code call} under the budget and unwrap its checked exceptions — {@link #send}'s body.
      * <p>
-     * Used for the login, which still goes through the library's {@code AuthClient} until
-     * Phase 4 moves it in-repo (AD-12) — the library parses the body as JSON before anything
-     * else, so neither the status code nor the {@code server} / {@code cf-ray} headers
-     * survive, which is why block detection on the most exposed request has to wait for that
-     * move. It costs the edge a request either way, so it is counted from Phase 1.
+     * It used to be the funnel's non-HTTP twin as well, for the login while that still went through
+     * the library's {@code AuthClient}. The login is an ordinary funnel request since Phase 5
+     * (AD-12), so every call through here is an {@link #httpCall}.
      */
     private <T> T underBudget(RequestTier tier, GatewayRequestScope scope, Callable<T> call)
             throws IOException, InterruptedException {
@@ -335,29 +392,23 @@ public class ApiGatewayClient {
         );
 
         try {
-            String requestBody = mapper.writeValueAsString(loginRequestFactory.apply(ctx));
-            log.debug("[Login] POST {} | X-TOKEN: {} | body: {}",
-                    apiGateway + loginPath, masked(xToken), withoutSecrets(requestBody));
-        } catch (Exception e) {
-            log.warn("[Login] Could not serialize login request for logging: {}", e.getMessage());
-        }
-
-        try {
-            TokensProvider tokens = underBudget(tier, scope,
-                    () -> BoundedLogin.login(ctx, loginRequestFactory, credentials.getUsername()));
+            HttpRequest request = loginRequest(ctx);
+            HttpResponse<String> response = send(tier, scope, request);
+            TokensProvider tokens = parseLoginResponse(credentials.getUsername(), response);
             log.debug("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
                     masked(tokens.getAgencyToken()), masked(tokens.getAuthToken()),
                     masked(tokens.getJwtToken()));
             metrics.incLogin(true);
             return tokens;
         } catch (IOException | InterruptedException e) {
-            // Reachable since GATEWAY_REQUEST_BUDGET A19: BoundedLogin throws
-            // HttpTimeoutException (an IOException) when the gateway does not answer within
-            // ten seconds, which the library could not do — it has no request timeout and no
-            // connect timeout, so this arm used to be dead and the wait used to be infinite.
-            // A timeout IS a login failure: the request left the JVM and the gateway did not
-            // answer, so incLogin(false) is correct here and is exactly what must NOT happen
-            // on the budget arm below.
+            // Every transport failure lands here since the login moved in-repo (AD-12): the
+            // request's .timeout(GATEWAY_REQUEST_TIMEOUT) surfaces as HttpTimeoutException, a
+            // refused or reset connection as its own IOException. Under the library these were
+            // wrapped as WebSocketParserException and took the RuntimeException arm instead —
+            // and the timeout did not exist at all (A19). Either way the request left the JVM
+            // and the gateway did not answer, so incLogin(false) is correct here and is exactly
+            // what must NOT happen on the budget arm below. The contract callers see is
+            // unchanged: an UpstreamLoginException, i.e. a RuntimeException.
             metrics.incLogin(false);
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
@@ -378,21 +429,113 @@ public class ApiGatewayClient {
             //
             // And deliberately NO metrics.incLogin(false): nothing was sent, so there was no
             // login to fail. The budget's own gateway_budget_requests_total{outcome} carries it.
+            // The same holds for an edge block detected on THIS login (Phase 5): it is reported as
+            // GatewayCircuitOpenException, counted in gateway_edge_blocks_total{endpoint="login"},
+            // and is a brand-wide fact rather than a failure of this account.
             throw e;
         } catch (RuntimeException e) {
             // Counter increment must not change error semantics — BotFactory relies on
             // the exception propagating up so the bot creation pipeline records the failure.
             metrics.incLogin(false);
-            // Wrap the library's bare RuntimeException ("No data in response" etc.)
-            // in a typed UpstreamLoginException so callers and the REST advice
-            // can distinguish login failures from generic runtime errors. The
-            // library's message (currently misleading) is preserved verbatim
-            // until the websocket-parser library learns to surface the upstream
-            // envelope. See API_ERROR_FORWARDING AD-7.
+            // An envelope the gateway answered but that carries no tokens, or a body that is not
+            // JSON. Wrapped in a typed UpstreamLoginException so callers and the REST advice can
+            // distinguish login failures from generic runtime errors. Since AD-12 the message
+            // carries the upstream envelope's status/code/message, which is what
+            // API_ERROR_FORWARDING AD-7 could only call "best effort" while the library owned it.
             throw new UpstreamLoginException(
                     "Login failed for user '" + credentials.getUsername() + "': " + e.getMessage(),
                     e);
         }
+    }
+
+    /**
+     * The login request, built <b>exactly</b> as the library's {@code AuthClient.authenticate} built
+     * it (AD-12): {@code POST apiGateway + loginPath}; {@code Cache-Control: no-cache},
+     * {@code Content-Type: application/json}, {@code User-Agent: PostmanRuntime/7.15.2}, and
+     * {@code X-TOKEN} when the context carries one; the body is the brand's
+     * {@code loginRequestFactory} applied to the context, serialised with this class's mapper —
+     * which serialises identically to the library's {@code ObjectMapperProvider.getDefault()} (they
+     * differ only in deserialisation leniency, and inclusion is {@code ALWAYS} in both). The one
+     * addition is {@link #GATEWAY_REQUEST_TIMEOUT}, which is not on the wire.
+     * <p>
+     * "Exactly" is a claim with a test: {@code ApiGatewayClientLoginTest} records what the library
+     * sends and what this sends against the same loopback stub, for every {@code LoginRequest}
+     * implementation, and compares method, path, headers and body bytes.
+     * <p>
+     * The library rebuilt the context {@code withFingerprint(fingerprint)} from its own field before
+     * applying the factory (Implementation Note 12); that is the identity on the context built in
+     * {@link #authenticate}, so the factory sees the same values.
+     */
+    HttpRequest loginRequest(AuthContext ctx) throws IOException {
+        String requestBody = mapper.writeValueAsString(loginRequestFactory.apply(ctx));
+        log.debug("[Login] POST {} | X-TOKEN: {} | body: {}",
+                ctx.apiGateway() + ctx.loginPath(), masked(ctx.xToken()), withoutSecrets(requestBody));
+
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+                .uri(URI.create(ctx.apiGateway() + ctx.loginPath()))
+                .header("Cache-Control", "no-cache")
+                .header("Content-Type", "application/json")
+                .header("User-Agent", USER_AGENT);
+        if (ctx.xToken() != null) {
+            builder.header(SESSION_TOKEN_HEADER, ctx.xToken());
+        }
+        return builder
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .timeout(GATEWAY_REQUEST_TIMEOUT)
+                .build();
+    }
+
+    /**
+     * Read {@code data[0].token} (agency), {@code session_id} (auth) and {@code token2} (JWT) exactly
+     * as the library did, failing with the library's own exception types so the cause a caller
+     * might inspect is unchanged.
+     * <p>
+     * What changed is the message: it now carries the HTTP status and the envelope's
+     * {@code status}/{@code code}/{@code message} — the gateway's actual reason — and never the raw
+     * body. The library put the body in {@code MessageParsingException}'s payload and a Jackson
+     * excerpt of it in its message; a refusal reason belongs in a log, a credential-bearing body
+     * does not.
+     */
+    private static TokensProvider parseLoginResponse(String username, HttpResponse<String> response) {
+        JsonNode root;
+        try {
+            root = mapper.readTree(response.body());
+        } catch (com.fasterxml.jackson.core.JacksonException e) {
+            // Not an IOException on purpose: the gateway (or something in front of it) DID answer,
+            // so this must not read as a transport failure. A Cloudflare page never reaches here
+            // under enforce — httpCall already turned it into an open circuit.
+            throw new WebSocketParserException("User " + username + ": login response was not JSON (HTTP "
+                    + response.statusCode() + ")", e);
+        }
+        if (root == null || !root.has("data") || !root.get("data").isArray() || root.get("data").isEmpty()) {
+            throw new MessageParsingException("User " + username
+                    + ": Data array is missing or empty in auth response" + envelope(response, root), null);
+        }
+        JsonNode first = root.get("data").get(0);
+        if (!first.has("token")) {
+            throw new MessageParsingException("User " + username
+                    + ": Agency token (field 'token') is missing in auth response" + envelope(response, root), null);
+        }
+        if (!first.has("session_id")) {
+            throw new MessageParsingException("User " + username
+                    + ": Auth token (field 'session_id') is missing in auth response" + envelope(response, root), null);
+        }
+        String jwt = first.has("token2") ? first.get("token2").asText() : null;
+        return TokensProvider.of(first.get("token").asText(), first.get("session_id").asText(), jwt);
+    }
+
+    /** {@code " (HTTP 200, status: INVALID, code: 400, message: …)"} — the gateway's own words. */
+    private static String envelope(HttpResponse<String> response, JsonNode root) {
+        StringBuilder out = new StringBuilder(" (HTTP ").append(response.statusCode());
+        if (root != null && root.isObject()) {
+            for (String field : new String[]{"status", "code", "message"}) {
+                JsonNode value = root.get(field);
+                if (value != null && !value.isNull()) {
+                    out.append(", ").append(field).append(": ").append(value.asText());
+                }
+            }
+        }
+        return out.append(')').toString();
     }
 
     /**
@@ -749,7 +892,7 @@ public class ApiGatewayClient {
                 log.debug("[BotDeposit] response HTTP {} | body: {}", response.statusCode(), responseBody);
             } else {
                 log.warn("[BotDeposit] non-200 response for user {} — status: {} | body: {}",
-                        username, response.statusCode(), responseBody);
+                        username, response.statusCode(), bodyForLog(response));
             }
             return success;
         } catch (IOException | InterruptedException e) {

@@ -43,6 +43,7 @@ class GatewayCallSiteGuardTest {
             "bot-engine/src/main/java/com/vingame/bot/domain/bot/core/Bot.java";
     private static final String ENVIRONMENT_CLIENT_REGISTRY =
             "bot-app/src/main/java/com/vingame/bot/config/client/EnvironmentClientRegistry.java";
+    /** Deleted in Phase 5 (A29.3); asserted absent so it cannot quietly come back. */
     private static final String BOUNDED_LOGIN =
             "bot-engine/src/main/java/com/vingame/bot/infrastructure/client/BoundedLogin.java";
 
@@ -136,35 +137,37 @@ class GatewayCallSiteGuardTest {
     }
 
     @Test
-    @DisplayName("the library login is entered from exactly one place, and that place bounds it")
+    @DisplayName("the login is an ordinary funnel request: no library client, and every request is bounded")
     void oneLibraryLoginEntryPoint() {
         List<String> client = codeLines(repoRoot().resolve(API_GATEWAY_CLIENT));
-        List<String> bounded = codeLines(repoRoot().resolve(BOUNDED_LOGIN));
 
-        // AD-12: the login still goes through the library until Phase 5 moves it in-repo,
-        // because AuthClient parses the body as JSON before anything else — so a Cloudflare
-        // block page becomes a JsonParseException and neither the status code nor the cf-ray
-        // survives. What changed in Phase 3 (A19/A20.1) is that it is no longer entered
-        // directly: AuthClient builds its request with no timeout on an HttpClient with no
-        // connect timeout, so a stalled TCP connection parked a bot-creation thread — and with
-        // it a semaphore permit and the group lock — for the life of the JVM. That is
-        // FOLLOWUPS P13, and it is the wait that had to be bounded BEFORE an ESSENTIAL tier
-        // whose max-wait is 0 by design was layered on top of it.
-        assertThat(occurrences(client, "new AuthClient("))
-                .as("ApiGatewayClient must not construct the library client directly — an "
-                        + "unbounded login is what A20.1 exists to remove")
+        // AD-12 / A29.3. Until Phase 5 the login went through the library's AuthClient, which
+        // parsed the body as JSON before anything else — so a Cloudflare block page became a
+        // JsonParseException and neither the status nor the cf-ray survived — and which had no
+        // request timeout and no connect timeout, so a stalled TCP connection parked a build
+        // thread (a semaphore permit, the group lock) for the life of the JVM. Phase 3 bounded it
+        // from outside with BoundedLogin; Phase 5 moved the request in-repo, where it goes through
+        // send() like the other four and is classified by httpCall before it is parsed.
+        assertThat(occurrences(client, "AuthClient"))
+                .as("ApiGatewayClient must not use the library's AuthClient at all any more — the "
+                        + "login is built here (loginRequest) and sent through the funnel")
                 .isZero();
-        assertThat(occurrences(client, "BoundedLogin.login("))
-                .as("exactly one login entry point; Phase 5 replaces its body, not its arity")
-                .isEqualTo(1);
+        assertThat(Files.exists(repoRoot().resolve(BOUNDED_LOGIN)))
+                .as("BoundedLogin was the stopgap for a login this class did not own; with the login "
+                        + "in-repo it has nothing left to bound")
+                .isFalse();
 
-        // And the one place that does construct it must be the one that can give up. The
-        // subclass exists solely to reach AuthClient's protected HttpClient getter so the
-        // exchange can be shut down when the wait expires; without the abort the bound would
-        // only move the leak from the caller to a thread nobody can see.
-        assertThat(bounded).anyMatch(line -> line.contains("extends AuthClient"));
-        assertThat(bounded).anyMatch(line -> line.contains("LOGIN_TIMEOUT"));
-        assertThat(bounded).anyMatch(line -> line.contains("shutdownNow()"));
+        // Every request this class builds carries the house timeout — the login included, which is
+        // the one that used to have none (A19). Counted against the number of requests built, so a
+        // sixth request without a timeout fails here rather than parking a thread on staging.
+        long built = occurrences(client, "HttpRequest.newBuilder()");
+        assertThat(built).as("anti-vacuity: the scan sees the five request builders").isGreaterThanOrEqualTo(5);
+        assertThat(occurrences(client, ".timeout(GATEWAY_REQUEST_TIMEOUT)"))
+                .as("one .timeout(GATEWAY_REQUEST_TIMEOUT) per HttpRequest built")
+                .isEqualTo(built);
+
+        // And the classifier sits in the one place every response passes (A29.4).
+        assertThat(client).anyMatch(line -> line.contains("classified(request, httpClient.send("));
     }
 
     @Test
@@ -214,13 +217,10 @@ class GatewayCallSiteGuardTest {
         //    an open circuit refuses.
         List<String> allowed = List.of(
                 "ApiGatewayClient.java", "EnvironmentWsProbe.java", "GatewayBudgetRegistry.java",
-                "HttpPrometheusQueryClient.java", "VipTalkClient.java", "GameMsClient.java",
-                //  - BoundedLogin: the ONE place that constructs the library's AuthClient, which
-                //    builds its own HttpClient internally. It is on this list for the
-                //    `new AuthClient(` needle below, not for the JDK ones — it builds no JDK client
-                //    itself — and it is allowed because it is the class that bounds and releases
-                //    the one it inherits (review F6, F8).
-                "BoundedLogin.java");
+                "HttpPrometheusQueryClient.java", "VipTalkClient.java", "GameMsClient.java");
+        // BoundedLogin used to be on this list, as the one class allowed to construct the library's
+        // AuthClient. It was deleted in Phase 5 when the login moved in-repo (A29.3), so
+        // `new AuthClient(` is now allowed NOWHERE in production code — AD-21's rule as written.
         for (String module : List.of("bot-api", "bot-engine", "bot-messages", "bot-strategies", "bot-app")) {
             Path main = root.resolve(module).resolve("src/main/java");
             if (!Files.isDirectory(main)) {

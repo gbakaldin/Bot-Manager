@@ -60,9 +60,9 @@ class ApiGatewayClientTierTest {
         BotCredentials credentials = BotCredentials.builder()
                 .username("authtestws1").password("pw").fingerprint("fp").build();
 
-        // The library's AuthClient call is wrapped by the funnel's non-HTTP twin until Phase 4
-        // moves login in-repo. The sentinel therefore surfaces as UpstreamLoginException, which
-        // is what BotFactory's failure classification already keys off.
+        // The sentinel is an unchecked exception that is not a GatewayBudgetException, so it takes
+        // authenticate's RuntimeException arm and surfaces as UpstreamLoginException — the same
+        // shape every non-budget login failure has, in-repo login (AD-12) or not.
         assertThatThrownBy(() ->
                 client.authenticate(credentials, RequestTier.PRIORITIZED, BOT_SCOPE))
                 .isInstanceOf(com.vingame.bot.common.exception.UpstreamLoginException.class)
