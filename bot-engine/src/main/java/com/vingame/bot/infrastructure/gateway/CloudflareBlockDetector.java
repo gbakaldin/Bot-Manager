@@ -46,6 +46,12 @@ import java.util.function.Function;
  * or interstitial page would be missed on the WS path only — the HTTP path has no such limit, and
  * the next login or balance read on the brand would still open the circuit.
  * <p>
+ * <b>The WS path's other limit</b> (review-phase5 fix-round re-review): because it accepts
+ * {@code text/html} alone, an <em>origin's</em> own HTML 403 to an anonymous upgrade, transiting the
+ * edge, is indistinguishable from the block page there — so a WS-opened circuit whose WS clearance
+ * probe keeps receiving such a page stays open until a restart (or until the origin stops
+ * answering that way), even after the real block has lifted.
+ * <p>
  * <b>Two entry points, one rule.</b> {@link #classify(HttpResponse)} for the HTTP funnel, and
  * {@link #classifyHandshakeFailure(Throwable)} for a WebSocket upgrade, whose failure carries the
  * edge's response <em>headers</em> but not its body (Netty's handshaker keeps status and headers
