@@ -236,9 +236,14 @@ public class RegistrationWorker {
         worker = Executors.newSingleThreadScheduledExecutor(
                 Thread.ofVirtual().name("registration-worker").factory());
         worker.scheduleWithFixedDelay(this::tickQuietly, tickSeconds, tickSeconds, TimeUnit.SECONDS);
+        // The EFFECTIVE values, after the constructor's floors — those two in particular decide how
+        // a box behaves under a starved environment (deferral) and a flaky gateway (transport), and
+        // either can differ from what was configured (review-phase4-fixround).
         log.info("Registration worker started (tick={}s, max-attempts-per-user={}, "
-                        + "display-name-retries={}, failure-backoff={}s)",
-                tickSeconds, maxAttemptsPerUser, displayNameRetries, failureBackoff.toSeconds());
+                        + "max-transport-attempts-per-user={}, display-name-retries={}, "
+                        + "failure-backoff={}s, deferral-backoff={}s)",
+                tickSeconds, maxAttemptsPerUser, maxTransportAttemptsPerUser, displayNameRetries,
+                failureBackoff.toSeconds(), deferralBackoff.toSeconds());
     }
 
     @PreDestroy

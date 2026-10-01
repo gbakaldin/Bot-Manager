@@ -627,6 +627,41 @@ class RegistrationWorkerTest {
     }
 
     @Test
+    @DisplayName("the startup line prints the effective transport budget and deferral backoff, after their floors")
+    void theStartupLineCarriesTheEffectiveSettings() {
+        // review-phase4-fixround. Configured below their floors: transport 1 (floored to
+        // max-attempts-per-user=3) and deferral 0 s (floored to one 10 s tick).
+        RegistrationWorker floored = new RegistrationWorker(repository, mongoTemplate,
+                mock(EnvironmentClientRegistry.class), budgetRegistry,
+                mock(EnvironmentService.class), metrics, 10, 3, 5, 30, 1, 0);
+        List<String> lines = new java.util.concurrent.CopyOnWriteArrayList<>();
+        var appender = new org.apache.logging.log4j.core.appender.AbstractAppender("rw-start-capture", null,
+                org.apache.logging.log4j.core.layout.PatternLayout.createDefaultLayout(), true, null) {
+            @Override
+            public void append(org.apache.logging.log4j.core.LogEvent event) {
+                lines.add(event.getMessage().getFormattedMessage());
+            }
+        };
+        appender.start();
+        var ctx = (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
+        var config = ctx.getConfiguration().getLoggerConfig(RegistrationWorker.class.getName());
+        config.addAppender(appender, org.apache.logging.log4j.Level.INFO, null);
+        ctx.updateLoggers();
+        try {
+            floored.start();
+        } finally {
+            floored.shutdown();
+            config.removeAppender("rw-start-capture");
+            ctx.updateLoggers();
+            appender.stop();
+        }
+
+        assertThat(lines).anyMatch(line -> line.startsWith("Registration worker started")
+                && line.contains("max-transport-attempts-per-user=3")
+                && line.contains("deferral-backoff=10s"));
+    }
+
+    @Test
     @DisplayName("a budget deferral still costs no attempt, only a turn")
     void aBudgetDeferralSpendsNoAttempt() throws Exception {
         pending(group(5, 0, 0));
