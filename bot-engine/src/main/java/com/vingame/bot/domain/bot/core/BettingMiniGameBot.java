@@ -7,6 +7,7 @@ import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.bot.coordination.ReservationOutcome;
 import com.vingame.bot.domain.bot.message.request.GameRequest;
+import com.vingame.bot.domain.bot.message.request.GameRequestFactory;
 import com.vingame.bot.domain.bot.message.request.Request;
 import com.vingame.bot.domain.bot.strategy.BetContext;
 import com.vingame.bot.domain.bot.strategy.BetDecision;
@@ -35,10 +36,12 @@ import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.observability.BettingSessionStrategy;
 import com.vingame.bot.infrastructure.observability.SessionAggregationStrategy;
 import com.vingame.websocketparser.ObjectMapperProvider;
+import com.vingame.websocketparser.VingameWebSocketClient;
 import com.vingame.websocketparser.message.request.ActionRequestMessage;
 import com.vingame.websocketparser.message.response.ActionResponseMessage;
 import com.vingame.websocketparser.scenario.PipelineContext;
 import com.vingame.websocketparser.scenario.Scenario;
+import com.vingame.websocketparser.scenario.processors.SentMessageContext;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -49,8 +52,10 @@ import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static com.vingame.websocketparser.message.properties.MessageType.RECEIVED;
@@ -68,6 +73,13 @@ public class BettingMiniGameBot extends Bot {
     // non-zero floor so the early window is not dead (some early bettors are
     // realistic). Held as a class constant, not a per-group field (AD-R3).
     private static final double RAMP_P_MIN = 0.15;
+
+    // RIK_114_BETTING_MINI AD-33: the per-bet commit CODE (offset + 3022 on stock =
+    // 13022). Print-filter only — this integer is added to OutputPrinter's cmd list in
+    // onStart so a TRACE window shows our outbound commit AND whatever the server
+    // answers to it; nothing deserializes this CODE (AD-7 stands: no inbound model).
+    // The frame itself is built by GameRequest.commit, not from this constant.
+    private static final int COMMIT_CODE = 3022;
 
     // Game configuration
     @Setter
@@ -131,6 +143,22 @@ public class BettingMiniGameBot extends Bot {
     // See BETTING_STRATEGIES.md Implementation Note 1.
     private final AtomicReference<Optional<BetDecision>> pendingDecision =
             new AtomicReference<>(Optional.empty());
+
+    // RIK_114_BETTING_MINI AD-32: the commit frame parked by the bet supplier and popped
+    // by afterBetSent (the sendAsync onSent callback) immediately after client.send(bet)
+    // returns, on the same thread. Optional.empty() for every product but 114 stock,
+    // so the callback is a no-op there. Written and consumed inside one runnable on one
+    // thread — the only external clear is beforeReconnect, for symmetry with
+    // pendingDecision; there is deliberately no onEndGame clear (it cannot survive to
+    // a round boundary, and a clear there would suggest it can).
+    private final AtomicReference<Optional<ActionRequestMessage>> pendingCommit =
+            new AtomicReference<>(Optional.empty());
+
+    // Latched by afterBetSent the first time a commit fails to serialize. That failure is
+    // a deterministic property of the class and the mapper, so it recurs on EVERY bet at
+    // the 1 s bet interval: one WARN per bot is the signal, the rest is DEBUG (CLAUDE.md
+    // tiering rule — nothing at WARN+ whose rate is a function of bot count or bet rate).
+    private final AtomicBoolean commitFailureWarned = new AtomicBoolean(false);
 
     // Visible for testing — allows deterministic randomness in unit tests by
     // injecting a mocked or seeded Random. Preserves the legacy test seam used
@@ -253,8 +281,27 @@ public class BettingMiniGameBot extends Bot {
      * per outbound). A fixed-CMD subclass overrides this to emit bare literal CMDs
      * (e.g. {@code TaiXiuRequest}, AD-12). Returns the {@link GameRequest} contract
      * so either request shape plugs into the inherited scenario unchanged.
+     * <p>
+     * RIK_114_BETTING_MINI AD-20: a provider may additionally implement
+     * {@link GameRequestFactory} to supply a game-specific outbound shape — P_114's
+     * {@code stockPlugin} stakes on {@code v}, not {@code b}, and no other product's
+     * frame changes. The capability is optional and tested with {@code instanceof}, the
+     * same pattern the inbound EndGame markers use, so <b>the fallback below is the
+     * pre-existing behaviour for every provider that does not implement it</b> — which
+     * today is all of them but {@code RikGameMessageTypes}. That provider re-applies the
+     * game dimension itself (AD-21): it hands back the shared {@link Request} for every
+     * 114 game except {@code stockPlugin}, so {@code taixiuMd5Plugin}, which settles
+     * through {@link Request} today, is untouched.
+     * <p>
+     * {@code messageTypes} is injected by {@code BotFactory} before
+     * {@code initializeSubclass()} runs, the same ordering {@code TaiXiuGameBot} already
+     * relies on; a {@code null} here (test fixtures that bypass the factory) simply
+     * fails the {@code instanceof} and takes the fallback.
      */
     protected GameRequest buildRequest(Game game) {
+        if (messageTypes instanceof GameRequestFactory factory) {
+            return factory.requestFor(game, configuration.getZoneName(), offset);
+        }
         return new Request(
             game.getPluginName(),
             configuration.getZoneName(),
@@ -620,6 +667,7 @@ public class BettingMiniGameBot extends Bot {
         // a transient WS disconnect. RandomBehaviorStrategy's per-round counter
         // re-syncs on the next StartGame via the sessionId-change branch.
         pendingDecision.set(Optional.empty());
+        pendingCommit.set(Optional.empty());
     }
 
     @Override
@@ -798,7 +846,64 @@ public class BettingMiniGameBot extends Bot {
             }
             log.trace("Bot {}: sending bet option={}, amount={}, sid={}",
                     getUserName(), optionId, amount, currentSid);
+            // RIK_114_BETTING_MINI AD-32: park the per-bet commit (if this game has one)
+            // for afterBetSent to pop once the bet has actually left. Empty for every
+            // product but 114 stock.
+            pendingCommit.set(request.commit(currentSid));
             return request.bet(amount, optionId, currentSid);
+        };
+    }
+
+    /**
+     * RIK_114_BETTING_MINI AD-31/AD-32: the bet stage's {@code onSent} callback. Pops the
+     * commit frame {@link #bet()} parked and sends it — on the <b>same</b> thread,
+     * immediately after {@code client.send(bet)} has returned, into the same ordered
+     * Netty channel — so bet-before-commit is structural, the legacy stock bot's two
+     * consecutive {@code socket.send} calls transliterated. A second {@code sendAsync}
+     * stage would own its own scheduler thread and make that order a race (AD-31).
+     * <p>
+     * {@code channel} is the client the <b>bet</b> left on: {@link #botBehaviorScenario()}
+     * captures {@code Bot.client} once and hands the same reference to the pipeline
+     * context (which {@code SendAsync} sends the bet through) and to this callback. It is
+     * deliberately not the mutable {@code Bot.client} field — {@code tryReconnectWs} and
+     * {@code restart} reassign that field, and a bet runnable already past its
+     * {@code isActive} check when the swap lands would otherwise put its bet on the old
+     * socket and its {@code 13022} on the fresh one (stale sid, possibly before the AUTH
+     * ack). Bound to the captured client, a post-close commit is dropped by the same
+     * closed client that dropped its bet.
+     * <p>
+     * For every product but 114 stock the parked value is {@link Optional#empty()} and
+     * this returns immediately: no frame, no log line.
+     * <p>
+     * <b>Must never throw.</b> This runs inside the {@code scheduleAtFixedRate} runnable
+     * that is the bot's bet loop; an exception escaping it cancels that task for the
+     * life of the connection and the bot silently stops betting. {@code client.send}
+     * swallows its own exceptions internally, so the {@code catch} guards only
+     * {@code serialize} — unreachable on a two-field body, and deterministic if it ever
+     * is reached, so it fires on every bet: the first failure is WARNed <b>once per
+     * bot</b> with the throwable, every later one is DEBUG. Nothing is logged on
+     * success — the {@code OutputPrinter} scenario already prints the SENT frame, with
+     * the {@code sId} it actually carries, at TRACE (AD-33).
+     * <p>
+     * Package-private as a test seam, like {@link #setRandom(Random)}.
+     */
+    Consumer<SentMessageContext> afterBetSent(ObjectMapper mapper, VingameWebSocketClient channel) {
+        return ctx -> {
+            Optional<ActionRequestMessage> commit = pendingCommit.getAndSet(Optional.empty());
+            if (commit.isEmpty()) {
+                return;
+            }
+            try {
+                channel.send(commit.get().serialize(mapper));
+            } catch (RuntimeException e) {
+                // An escaping exception cancels the fixed-rate bet task for the life of
+                // the connection (ScheduledExecutorService semantics) — never let one out.
+                if (commitFailureWarned.compareAndSet(false, true)) {
+                    log.warn("Bot {}: commit frame not sent (further failures at DEBUG)", getUserName(), e);
+                } else {
+                    log.debug("Bot {}: commit frame not sent: {}", getUserName(), e.toString());
+                }
+            }
         };
     }
 
@@ -900,9 +1005,14 @@ public class BettingMiniGameBot extends Bot {
     }
 
     private PipelineContext buildContext(String tag, ObjectMapper mapper) {
+        return buildContext(tag, mapper, client);
+    }
+
+    /** {@code channel} explicit so the bet stage and its commit callback share one reference (AD-31). */
+    private PipelineContext buildContext(String tag, ObjectMapper mapper, VingameWebSocketClient channel) {
         return PipelineContext.buildContext()
                 .timeoutMillis(configuration.getTimeoutMillis())
-                .client(client)
+                .client(channel)
                 .objectMapper(mapper)
                 .tag(tag)
                 .build();
@@ -911,6 +1021,12 @@ public class BettingMiniGameBot extends Bot {
     @Override
     protected Scenario botBehaviorScenario() {
         Game game = configuration.getGame();
+
+        // RIK_114 AD-31: capture the client ONCE. The pipeline context sends the bet through
+        // this reference and afterBetSent sends the commit through the same one, so the two
+        // frames share a channel by construction even if Bot.client is reassigned by a
+        // reconnect while a bet runnable is in flight.
+        VingameWebSocketClient channel = client;
 
         ObjectMapper mapper = new ObjectMapper();
         mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
@@ -922,11 +1038,13 @@ public class BettingMiniGameBot extends Bot {
         Class<? extends EndGameMessage> endGameClass = endGameType();
 
         // onMessage handlers run on the per-client netty-ws-message-processor-ws-<userName>
-        // pool; sendAsync's supplier + condition run on a scenario-owned pool-N-thread-1.
-        // None of these threads carry MDC by default — wrap each callback so its
-        // log lines (and the OutputPrinter-emitted lines that share the pool) carry
-        // the bot's identity.
-        var stage = pipeline(buildContext("[Betting Mini][" + configuration.getGame().getName() + "]", mapper))
+        // pool. Each sendAsync STAGE owns its own single-thread scheduler
+        // (ws-send-async-*, one per SendAsync instance — not one per pipeline, RIK_114
+        // AD-31); this pipeline has exactly one such stage, and its condition, supplier
+        // and onSent callback run on that one thread, in that order. None of these
+        // threads carry MDC by default — wrap each callback so its log lines (and the
+        // OutputPrinter-emitted lines that share the pool) carry the bot's identity.
+        var stage = pipeline(buildContext("[Betting Mini][" + configuration.getGame().getName() + "]", mapper, channel))
                 .waitFor(1_000L)
                 .send(request::subscribe)
                 .waitForMessage(cmd(subscribeCmd()).and(typeOf(RECEIVED)))
@@ -955,6 +1073,9 @@ public class BettingMiniGameBot extends Bot {
                         .mode(INFINITE)
                         .condition(mdcSupplier(betCondition()))
                         .interval(resolveIntervalBetweenBets(), MILLISECONDS)
+                        // RIK_114 AD-31: the per-bet commit rides the SAME stage, after
+                        // client.send(bet) returns — never a second sendAsync stage.
+                        .onSent(mdcConsumer(afterBetSent(mapper, channel)))
                         .build())
                 .onMessage(endGameClass, mdcConsumer(this::onEndGame))
                 .compile();
@@ -969,11 +1090,17 @@ public class BettingMiniGameBot extends Bot {
             throw e;
         }
 
+        // RIK_114 AD-33: offset + COMMIT_CODE is a print-filter entry only, so a TRACE
+        // window shows the outbound 13022 commit and any reply to it. On every other
+        // product no such CMD exists and the entry matches nothing. TaiXiuGameBot does
+        // not override onStart and never reads offset (it is 0 there), so it inherits
+        // a harmless 0 + 3022 entry.
         List<Integer> cmdList = List.of(
             subscribeCmd(),
             updateBetCmd(),
             startGameCmd(),
-            endGameCmd()
+            endGameCmd(),
+            offset + COMMIT_CODE
         );
         // Pass the bot's MDC snapshot so the "User <name>: ..." log lines emitted
         // from the netty-ws-message-processor-ws-<userName> pool carry botGroupId,

@@ -169,7 +169,7 @@ class MessageTypesRegistryTest {
     @DisplayName("The scan registers exactly the declared product set")
     void scanRegistersExactlyThePreviousSwitchArms() {
         assertThat(registry.registeredBettingMiniProducts())
-                .containsExactlyInAnyOrder("097", "098", "116", "118", "119");
+                .containsExactlyInAnyOrder("097", "098", "114", "116", "118", "119");
         assertThat(registry.registeredTaiXiuProducts())
                 .containsExactlyInAnyOrder("114", "116", "119");
     }

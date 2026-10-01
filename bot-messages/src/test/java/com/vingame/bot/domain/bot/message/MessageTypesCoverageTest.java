@@ -60,7 +60,6 @@ class MessageTypesCoverageTest {
             "066",  // P_066 KCLUB
             "103",  // P_103 HIT
             "105",  // P_105 IWIN
-            "114",  // P_114 RIK   — has a TAI_XIU provider, not a betting-mini one
             "222"); // P_222 BKK WIN
 
     /** Products with no {@code TAI_XIU} provider — the resolver's other throw arm. */

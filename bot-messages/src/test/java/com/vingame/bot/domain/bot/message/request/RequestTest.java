@@ -118,9 +118,17 @@ class RequestTest {
          * scoped to the 114 Tai Xiu bet body only. Every betting-mini product's bet
          * must serialize with NO {@code a} key — the shared {@link Bet.BetData} stays
          * byte-for-byte unchanged.
+         * <p>
+         * <b>RIK_114_BETTING_MINI AD-25 widens this to the freeze it now has to be.</b>
+         * Six products bet through {@link Request}/{@link Bet} and settle — P_114's own
+         * {@code taixiuMd5Plugin} among them, with 32 server-confirmed bets in the very
+         * window {@code stockPlugin} placed none. So the RIK stock body's two extra keys
+         * ({@code v} and {@code iAc}) must never leak into the shared shape: that body
+         * is {@code RikStockBet}, reached only through {@code RikStockRequest}, and this
+         * body stays exactly {@code {cmd, aid, b, eid, sid}}.
          */
         @Test
-        @DisplayName("betting-mini bet serializes with NO 'a' key (a is 114-only)")
+        @DisplayName("betting-mini bet is FROZEN at {cmd, aid, b, eid, sid} — no 'a', no 'v', no 'iAc'")
         void bettingMiniBetHasNoAutoBetFlag() throws Exception {
             Request request = new Request("MiniGame3", "ZoneA", 2000);
 
@@ -129,11 +137,33 @@ class RequestTest {
             String json = new com.fasterxml.jackson.databind.ObjectMapper()
                     .writeValueAsString(getBody(bet));
             assertThat(json).doesNotContain("\"a\"");
+            // AD-25: the 114 stock body's keys must not appear here, in any casing.
+            assertThat(json).doesNotContain("\"v\"");
+            assertThat(json).doesNotContain("\"iAc\"");
+            assertThat(json).doesNotContain("\"iac\"");
             // Exactly the shared shape: cmd, aid, b, eid, sid (no extras).
             com.fasterxml.jackson.databind.JsonNode node =
                     new com.fasterxml.jackson.databind.ObjectMapper().readTree(json);
             assertThat(node.fieldNames()).toIterable()
                     .containsExactlyInAnyOrder("cmd", "aid", "b", "eid", "sid");
+        }
+
+        /**
+         * RIK_114_BETTING_MINI AD-28: the per-bet commit is a {@code default} on
+         * {@link GameRequest} returning empty, and the shared {@link Request} must
+         * <b>inherit</b> it — not override it. Pinned rather than merely un-edited,
+         * because a well-meaning "let's commit everywhere" override would compile and
+         * ship a {@code 13022}-shaped frame on six products that settle without one.
+         */
+        @Test
+        @DisplayName("commit(sid) is ABSENT on the shared Request — inherits the empty default (AD-28)")
+        void commitIsAbsentOnTheSharedRequest() throws Exception {
+            Request request = new Request("BauCua", "MiniGame", 2000);
+
+            assertThat(request.commit(123L)).isEmpty();
+            // And it is the inherited default, not a re-declared method returning empty.
+            assertThat(Request.class.getMethod("commit", long.class).getDeclaringClass())
+                    .isEqualTo(GameRequest.class);
         }
     }
 

@@ -126,6 +126,36 @@ class TaiXiuRequestTest {
         }
     }
 
+    /**
+     * RIK_114_BETTING_MINI AD-28: {@link TaiXiuRequest} inherits the empty
+     * {@code GameRequest.commit} default for BOTH constructor shapes and is not edited.
+     * Pinned, not merely un-edited — see {@code RequestTest.commitIsAbsentOnTheSharedRequest}.
+     */
+    @Nested
+    @DisplayName("commit (AD-28)")
+    class CommitTests {
+
+        @Test
+        @DisplayName("P_116 shape (emitAutoBetFlag=false): commit(sid) is empty")
+        void p116HasNoCommit() {
+            assertThat(request.commit(2670572L)).isEmpty();
+        }
+
+        @Test
+        @DisplayName("P_114 jackpot shape (emitAutoBetFlag=true): commit(sid) is empty")
+        void p114JackpotHasNoCommit() {
+            TaiXiuRequest shifted = new TaiXiuRequest("taixiuJackpotPlugin", "MiniGame", 1105, 1100, true);
+            assertThat(shifted.commit(2670572L)).isEmpty();
+        }
+
+        @Test
+        @DisplayName("it is the inherited default, not a re-declared override")
+        void commitIsInherited() throws Exception {
+            assertThat(TaiXiuRequest.class.getMethod("commit", long.class).getDeclaringClass())
+                    .isEqualTo(GameRequest.class);
+        }
+    }
+
     private static Body getBody(ActionRequestMessage msg) throws Exception {
         Field f = ActionRequestMessage.class.getDeclaredField("body");
         f.setAccessible(true);
