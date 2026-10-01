@@ -2916,3 +2916,42 @@ here rather than ratified.
 
 Test count at `cfb33fb`, clean detached worktree: **2,512 / 0 failures** (bot-api 148,
 bot-strategies 126, bot-messages 167, bot-engine 634, bot-app 1,437).
+
+## Amendment — 2026-10-01 (staging release finding A1; A33)
+
+### A33 — HTTP/2 stream limit and the connected-but-idle bot (`ec77d9a..31419c6`)
+
+Found by the staging release (`docs/reviews/GATEWAY_REQUEST_BUDGET/release.md`, A1); reviewed in
+`review-a1.md` (APPROVE after two rounds). Recorded by the main session; no compliance pass.
+
+- **Root cause, confirmed.** JDK 21.0.2 `Http2Connection.reserveStream0` throws
+  `IOException("too many concurrent streams")` at the server's `SETTINGS_MAX_CONCURRENT_STREAMS`; it
+  neither queues nor opens a second connection. Phase 5 (AD-12) moved login onto the one
+  per-environment HTTP/2 client, which the library's per-login `AuthClient` client had kept apart, so a
+  group's logins and first balance reads burst past the limit (~100 on the gateway, inferred, not
+  measured). **AD-12 missed this.**
+- **Fix: a fair `Semaphore(32)` per `ApiGatewayClient`**, taken in `httpCall` *after* budget
+  admission (so it cannot invert tier priority). Deadline-bound callers share their `maxWait` with the
+  permit wait (session-path worst case 166.5 s < 180 s watchdog); the AD-10 drift read takes a permit
+  with a zero-wait fair `tryAcquire` *before* admission and defers unstamped if none is free. Kept
+  HTTP/2: HTTP/1.1 would open one TLS connection per concurrent request. 32 is a constant on purpose
+  (a `@Value` would be `Semaphore(0)` in fixtures).
+- **A permit timeout is `StreamWaitTimeoutException`** (an `HttpTimeoutException`, so every caller's
+  transport arm is unchanged). It is excluded from `bot_login_total{failure}` /
+  `bot_verify_token_total{failure}`, so it cannot fire `EnvironmentAuthDown`; counted in
+  `gateway_client_stream_wait_timeouts_total`, with `gateway_client_inflight_requests` beside it.
+  **Nothing alerts on either** — if the real limit were below 32, the symptom is that counter climbing
+  with in-flight pinned at 32. `performReauth` treats it as retryable (not DEAD);
+  `bot_creation_failures_total{reason}` gains `local`. Still counted as a failure: the per-bot
+  "Failed to create bot" ERROR and `bot_auto_deposit_total{failure}`.
+- **Connected-but-idle bot.** A first balance read that threw left the bot with an open socket, no
+  scenario, no watchdog and status `AUTHENTICATING_CONNECTION`, invisible to `monitorHealth`. Now:
+  up to 3 ESSENTIAL reads on the start path (1 PRIORITIZED read inside the reconnect loop), then
+  `onStartFailed` → `triggerFullReconnect("session-setup …")`, bounded by `MAX_RECONNECT_CYCLES`.
+  A **budget-cancelled** start (`/stop`, DELETE, activation STOP) is never handed off. `Bot.start()`
+  wraps a hand-off in `SessionSetupHandedOffException`; one log line per outcome (DEBUG cancelled /
+  in-loop, one WARN on hand-off, ERROR only when final). `bot_reconnects_total{reason}` gains
+  `session-setup`.
+
+Test count at `31419c6`, clean detached worktree: **2,733 / 0 failures** (bot-api 148, bot-strategies
+126, bot-messages 308, bot-engine 695, bot-app 1,456).
