@@ -231,12 +231,30 @@ class RegistrationWorkerTest {
         assertThat(counter("failed")).isZero();
     }
 
-    @Test
+    /**
+     * The two budget refusals the worker can meet: our own window (Phase 3) and an open Cloudflare
+     * circuit (Phase 5, A31.8). The second is the one that matters most — a block may last a day —
+     * and it reaches the worker through the same {@code GatewayBudgetException} arm, so it must cost
+     * the same nothing.
+     */
+    static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> budgetRefusals() {
+        return java.util.stream.Stream.of(
+                org.junit.jupiter.params.provider.Arguments.of("window exhausted",
+                        new GatewayBudgetExhaustedException(RequestTier.DEFAULT, ENV, null)),
+                org.junit.jupiter.params.provider.Arguments.of("circuit open (Cloudflare edge block)",
+                        new com.vingame.bot.common.exception.GatewayCircuitOpenException(
+                                ENV, "a3c7e4004acc850e-HKG", Duration.ofMinutes(60))));
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest(name = "{0}")
+    @org.junit.jupiter.params.provider.MethodSource("budgetRefusals")
     @DisplayName("a budget refusal re-queues the group and consumes no attempt")
-    void aBudgetRefusalCostsNothing() throws Exception {
+    void aBudgetRefusalCostsNothing(String kind,
+                                    com.vingame.bot.common.exception.GatewayBudgetException refusal)
+            throws Exception {
         pending(group(5, 0, 0));
         when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
-                .thenThrow(new GatewayBudgetExhaustedException(RequestTier.DEFAULT, ENV, null));
+                .thenThrow(refusal);
 
         // Three passes. Under max-attempts-per-user=3 a failure classification would have marked
         // the group FAILED by now.
@@ -254,6 +272,8 @@ class RegistrationWorkerTest {
                         + "conflation is what produced a 502 about a healthy gateway")
                 .isZero();
         assertThat(counter("success")).isZero();
+        verify(client, org.mockito.Mockito.atLeastOnce())
+                .registerOne(anyString(), anyString(), anyInt(), any(), any());
     }
 
     @Test
