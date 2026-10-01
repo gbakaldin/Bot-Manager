@@ -539,6 +539,63 @@ class RegistrationWorkerTest {
     }
 
     @Test
+    @DisplayName("two or more starved groups cannot take turns ahead of a younger healthy group")
+    void severalStarvedGroupsDoNotStarveAHealthyOne() throws Exception {
+        // review-phase4-fixround B2. The test above has ONE starved group, and passes with or
+        // without this defect. In production a starved pass holds the worker for registration.max-
+        // wait (15 m), so by the time it ends every OTHER group's 60 s deferral has long expired.
+        // Simulated here by expiring every deferral except the one the pass just wrote. Before the
+        // fix, A and B — both older than H — took the thread in turn forever and H never ran.
+        BotGroup starvedA = group(5, 0, 0);
+        BotGroup starvedB = BotGroup.builder()
+                .id("group-b").name("B").environmentId(ENV)
+                .namePrefix("bot").password("pw")
+                .botCount(5).registeredCount(0).namedCount(0)
+                .registrationState(RegistrationState.PENDING)
+                .createdAt(Instant.now().plusSeconds(30))
+                .build();
+        BotGroup healthy = BotGroup.builder()
+                .id("group-2").name("H").environmentId(OTHER_ENV)
+                .namePrefix("other").password("pw")
+                .botCount(2).registeredCount(0).namedCount(0)
+                .registrationState(RegistrationState.PENDING)
+                .createdAt(Instant.now().plusSeconds(60))
+                .build();
+        pending(starvedA, starvedB, healthy);
+        when(client.registerOne(eq("bot"), anyString(), anyInt(), any(), any()))
+                .thenThrow(new com.vingame.bot.common.exception.GatewayCircuitOpenException(
+                        ENV, "a3c7e4004acc850e-HKG", Duration.ofMinutes(60)));
+        when(otherClient.registerOne(eq("other"), anyString(), anyInt(), any(), any()))
+                .thenReturn(RegistrationOutcome.CREATED);
+
+        for (int pass = 0; pass < 8; pass++) {
+            worker.tick();
+            expireAllDeferralsButTheLatest(GROUP, "group-b");
+        }
+
+        verify(otherClient, org.mockito.Mockito.atLeastOnce())
+                .registerOne(eq("other"), anyString(), anyInt(), any(), any());
+    }
+
+    /** What a 15-minute starved pass does to every other group's 60 s deferral: expires it. */
+    private void expireAllDeferralsButTheLatest(String... groupIds) {
+        String latest = null;
+        Instant latestAt = null;
+        for (String id : groupIds) {
+            Instant at = notBeforeOf(id);
+            if (at != null && (latestAt == null || at.isAfter(latestAt))) {
+                latest = id;
+                latestAt = at;
+            }
+        }
+        for (String id : groupIds) {
+            if (!id.equals(latest)) {
+                setNotBefore(id, Instant.now().minusSeconds(1));
+            }
+        }
+    }
+
+    @Test
     @DisplayName("a budget deferral still costs no attempt, only a turn")
     void aBudgetDeferralSpendsNoAttempt() throws Exception {
         pending(group(5, 0, 0));

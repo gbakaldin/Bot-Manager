@@ -371,11 +371,21 @@ public class RegistrationWorker {
                 // a group whose environment cannot admit a DEFAULT request steps aside and the
                 // next-oldest group gets the thread.
                 .filter(group -> isDue(group.getId(), now))
-                // Oldest create first, so a 500-account group cannot be starved by a stream of
-                // small ones and the order is the same on every instance. createdAt is stamped by
-                // BotGroupService.save on the persist that made the group PENDING, so it is never
-                // null here; the id is the tie-break purely for determinism.
-                .min(Comparator.comparing((BotGroup g) -> g.getCreatedAt(),
+                // A deferral costs the group its PLACE, not just a fixed delay
+                // (review-phase4-fixround B2). Never-deferred groups first; among deferred ones the
+                // least recently deferred first, i.e. round-robin. The delay alone was not enough:
+                // a starved pass holds this thread for registration.max-wait (15 m), so a group's
+                // 60 s deferral has always expired by the time the next starved pass ends, and with
+                // two or more starved groups older than a healthy one they took turns forever and
+                // the healthy group never ran. With an open Cloudflare circuit a pass takes
+                // milliseconds, and six starved groups were enough to close the same cycle.
+                .min(Comparator.comparingLong((BotGroup g) -> deferralSeq(g.getId()))
+                        // Then oldest create first, so a 500-account group cannot be starved by a
+                        // stream of small ones and the order is the same on every instance.
+                        // createdAt is stamped by BotGroupService.save on the persist that made the
+                        // group PENDING, so it is never null here; the id is the tie-break purely
+                        // for determinism.
+                        .thenComparing((BotGroup g) -> g.getCreatedAt(),
                                 Comparator.nullsLast(Comparator.naturalOrder()))
                         .thenComparing(BotGroup::getId))
                 .orElse(null);
@@ -606,11 +616,12 @@ public class RegistrationWorker {
         boolean transport = isTransportFailure(failure);
         Attempt attempt = attempts.compute(id, (key, current) -> {
             Attempt base = current != null && current.index == index
-                    ? current : new Attempt(index, 0, 0, Instant.EPOCH);
+                    ? current : new Attempt(index, 0, 0, Instant.EPOCH, NEVER_DEFERRED);
             return new Attempt(index,
                     base.refusals() + (transport ? 0 : 1),
                     base.transportFailures() + (transport ? 1 : 0),
-                    Instant.now().plus(failureBackoff));
+                    Instant.now().plus(failureBackoff),
+                    base.deferralSeq());
         });
 
         botMetrics.incRegistrationAccount(OUTCOME_FAILED);
@@ -667,9 +678,16 @@ public class RegistrationWorker {
      */
     private void recordDeferral(String id, int index) {
         Instant notBefore = Instant.now().plus(deferralBackoff);
+        long seq = deferralSequence.incrementAndGet();
         attempts.compute(id, (key, current) -> current != null && current.index == index
-                ? new Attempt(index, current.refusals(), current.transportFailures(), notBefore)
-                : new Attempt(index, 0, 0, notBefore));
+                ? new Attempt(index, current.refusals(), current.transportFailures(), notBefore, seq)
+                : new Attempt(index, 0, 0, notBefore, seq));
+    }
+
+    /** When this group was last deferred, as a position in {@link #deferralSequence}; 0 = never. */
+    private long deferralSeq(String id) {
+        Attempt attempt = attempts.get(id);
+        return attempt == null ? NEVER_DEFERRED : attempt.deferralSeq();
     }
 
     /**
@@ -828,8 +846,22 @@ public class RegistrationWorker {
      * {@code refusals} is a gateway <em>answer</em> and is capped at
      * {@code max-attempts-per-user}; {@code transportFailures} is "we could not ask" and is capped
      * at {@code max-transport-attempts-per-user} (review S3); {@code notBefore} is also written by
-     * a budget deferral, which charges <em>neither</em> count (review B2, A2.6).
+     * a budget deferral, which charges <em>neither</em> count (review B2, A2.6). A fourth,
+     * {@code deferralSeq}, is the group's place in the queue after a deferral — it is what moves
+     * a deferred group behind every group that was not (review-phase4-fixround B2).
      */
-    private record Attempt(int index, int refusals, int transportFailures, Instant notBefore) {
+    private record Attempt(int index, int refusals, int transportFailures, Instant notBefore,
+                           long deferralSeq) {
     }
+
+    /** {@link Attempt#deferralSeq()} of a group that has not been deferred since it last progressed. */
+    private static final long NEVER_DEFERRED = 0L;
+
+    /**
+     * Orders deferrals, so selection can put the least recently deferred group first. A sequence
+     * rather than a timestamp: the order is the whole point, and two deferrals in the same
+     * millisecond (an open circuit refuses instantly) must still be ordered.
+     */
+    private final java.util.concurrent.atomic.AtomicLong deferralSequence =
+            new java.util.concurrent.atomic.AtomicLong();
 }
