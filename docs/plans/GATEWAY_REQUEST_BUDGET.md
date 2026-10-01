@@ -2650,3 +2650,269 @@ no and a ~60 s blip must not permanently `FAIL` a 500-account create, review S3)
   `ApiGatewayClient` is truncated to the house ten characters, and `[Login]`'s response line — which
   dumped all three bot tokens in full — with it. The request bodies keep their envelope (it is what
   a brand's register failure is compared against) with the password removed.
+
+## Amendment — 2026-10-01 (pre-release compliance on Phases 3-fix, 4 and 5; A32)
+
+### A32 — A30 ratified, Phase 5's fourteen divergences, two send-backs, and the release sequence corrected
+
+Compliance pass over `4bad37a..5b862bf` (the Phase 3 fix round `5e46af5`, Phase 4 with its fix
+round, and Phase 5 `26d770e..5b862bf` including the scoped `review-phase4-fixround.md` fixes).
+Verdict and evidence: `docs/reviews/GATEWAY_REQUEST_BUDGET/compliance-phase3-5.md`. **This
+amendment is the authority over A8, A24 and A30 where they collide**, and over the body's
+`## Verification` text everywhere below.
+
+**1. A30 is technically sound and is ratified here — but it was not a legitimate amendment when
+it was written.** A30 was authored by the Phase 4 dev session (`636a2b5`), i.e. by the agent the
+plan was measuring, which `AGENTIC_WORKFLOW.md` reserves for Architect-2. The claim itself was
+re-verified independently:
+
+- `setDisplayName`'s `sessionToken` was never read — and not only on this branch: **`main`
+  (`8a5ee1a`, the deployed lineage) already sends `update-fullname.aspx` with only the admin
+  `X-TOKEN` and the `username` in the body.** That is the evidence that matters. The loopback test
+  (`resumingDoesNotLogIn`) proves *our code* does not log in; it cannot prove *gwms* accepts the
+  call without a session. Production does: every account named on prod since before this feature
+  (the 500 `liengbot*` accounts, the RIK hand-naming) was named by exactly this request.
+- **The arithmetic in A30 §1 is still one off.** The worker persists `registeredCount` before it
+  names (`RegistrationWorker`, `if (registered < index)` guards the register call), so the ordinary
+  resume costs **one** request (`update-fullname`); **two** only when the JVM died between the
+  register request leaving and `registeredCount` persisting (the re-register answers `EXISTED`).
+  Never three. Both cases add the usual display-name re-rolls on a pool collision (up to
+  `display-name-retries`, ~43% collision rate on the 5k file), which A17.3 never priced either.
+
+Process, going forward: Dev records divergences in its commit messages and handoff; amendments
+that change what a phase is measured against are written by compliance.
+
+**2. Phase 5's fourteen divergences — all accepted.**
+
+| # | Divergence | Ruling |
+|---|---|---|
+| 1 | Phase 3's circuit-open `break` left queued waiters parked; they are now refused | A16.2 implemented faithfully; AD-13's "admits nothing" and A29.1's "`break`" are superseded — **an open circuit refuses queued waiters** (`b8644ec`) |
+| 2 | A29.2's "not conditional on `bot.recovery.enabled`" holds vacuously | Correct reading. `evaluateCandidate` runs only when recovery is on, so nothing can be "made conditional" there; the unconditional half is the probe suppression in `EnvironmentProbeScheduler`, which runs whatever the flag says |
+| 3 | A27.2 / A27.3 were already done before Phase 5 | Verified: the `GatewayBudgetSustainedQueue` annotation was rewritten (A27.2's second option) and the "inert until Phase 3" comment is gone. A27.1 landed in `1f0cb2b` |
+| 4 | `endpoint` label has seven values | Correct: AD-3's six request kinds plus `circuit-probe`. Implementation Note 14's "six paths" is superseded |
+| 5 | An unanswered clearance probe keeps the circuit open | Correct. AD-13 says "any **response** that is not `EDGE_BLOCK`"; a timeout or a refused connection is not a response |
+| 6 | No separate `HALF_OPEN` state | Behaviourally identical: while the one probe is in flight everything is still refused, which is all "half open" could mean once A16.2 forbade parking |
+| 7 | Under `observe` a block is counted + one throttled WARN; the caller's outcome is unchanged | AD-23 and the original Phase 4 item 2, verbatim |
+| 8 | Recovery's skip uses a new `group_recovery_skipped_total{outcome="circuit_open"}` | Accepted. AD-13 named the outcome, not the meter; counting skips on `group_recovery_attempts_total` would change `EnvironmentGroupRecoveryFlapping`'s meaning. Tests live in `DeadGroupRecoverySchedulerTest`, not a separate `…CircuitTest` |
+| 9 | `EnvironmentWsProbe` classifies a Cloudflare 403 as `EDGE_BLOCK`, unhealthy | Beyond A29.2's letter, inside A15.4's intent, and the only guard that works under `observe` (where no circuit ever opens). **It is an exception to DEAD_GROUP_AUTO_RECOVERY AD-2** ("any completed response < 500 is healthy"); CLAUDE.md's recovery section states AD-2 without it — a Phase 6 documentation item |
+| 10 | V4d's expected ERROR text is stale | Corrected in item 5 below |
+| 11 | The probe URL is bound on every `forEnvironment` call, not at budget creation | Correct: the WS probe scheduler can create a budget before any client does, and it has no `apiGateway` to offer |
+| 12 | The fixture's egress IP is redacted to TEST-NET (`203.0.113.10`) | Verified: the fixture is byte-identical to `cf-block-raw.txt` apart from that address; the classifier never reads it |
+| 13 | Login errors carry the HTTP status and envelope `status`/`code`/`message`, never the body | AD-12's own promise. Messages carry no host or port (A20.8 holds) |
+| 14 | Prod has no block alert until Phase 6 | **A plan oversight, not drift** — see item 3, S2 |
+
+**Three more divergences no amendment recorded**, from earlier rounds in this range, all accepted:
+
+- **AD-10's pre-deposit refresh is bounded by `min(prioritized.max-wait, watchdog / 4)`**, not by
+  the tier's max-wait (`5e46af5`, review F1). The tier's 10 m against the 180 s watchdog turned a
+  healthy bot into a reconnect on the ws-parser message thread. `BotSessionBudgetWaitTest` pins the
+  inequality, not the constant.
+- **`essential.ceiling=850` lowers the effective cap to 850; it does not reserve 50 for the tiers
+  below.** A9's table and Open Item 5 describe it as headroom for PRIORITIZED — false, because
+  PRIORITIZED's own 750 ceiling makes 750..900 unreachable to it. `application.properties` carries
+  the correct description; the lever for PRIORITIZED starvation during a large start is the
+  `botCount × 3` reservation. A9's "documented one-line escape" text is withdrawn.
+- **AD-22's Netty WebSocket endpoint on `StubGateway` was never built.** Accepted, not sent back:
+  its only consumer was V4d's "the second group completes", which A16.2 already made false (a
+  start into an open circuit ends `0/N`), and every WS-side behaviour is covered by classifying a
+  handshake exception directly (`BotWsEdgeBlockTest`, `EnvironmentWsProbeClassificationTest`). The
+  consequence is that **no bot can reach ACTIVE against the stub**; V5d below is rewritten to need
+  only HTTP.
+
+**3. Two items went back to Dev before the deployment — both RESOLVED in the fix round ending
+`66c5d38` (S1 `2af6719`, S2 `9189f5c`; re-checked, see item 7).**
+
+- **S1 — a start refused by an open circuit must say so in `lastError` (A16.2, drift).** A16.2
+  lists "a group start during a block ends `0/N` with a `lastError` that names the edge block" as a
+  wanted consequence. Today every bot's login is refused in-JVM, `classifyCreationFailure` tags
+  `"budget"` (correct), and the zero-bot branch of `startLocked` writes the generic
+  `Started 0/N bots — all bot creations failed`. `GET /{id}/status` therefore reads exactly like an
+  auth outage — the misdiagnosis shape this feature exists to end. Required: when the build's
+  failures are `GatewayCircuitOpenException`, `lastError` carries that exception's message (it is
+  ours, client-safe, and names environment and cf-ray only). Prefer doing it in the zero-bot
+  branch over failing fast before the build: a fail-fast leaves the group not running and not DEAD,
+  so `ActivationScheduler` re-decides `START` every minute for the life of the block, one async
+  failure ERROR per group per minute. Test: a start with every login refused by an open circuit ends
+  with `lastError` containing `Gateway edge block`.
+  *Resolved:* the zero-bot branch writes `Started 0/N bots — <GatewayCircuitOpenException message>`
+  (environment and cf-ray only), still persisting DEAD; per-bot refusals drop to DEBUG with one
+  group-level WARN `Bot group <id>: n/N bots refused by an open gateway circuit — Cloudflare edge
+  block on env <env> (cf-ray <ray>)`. Pinned in `BotGroupBehaviorServiceAsyncStartTest`.
+- **S2 — an alert that can fire under `observe` (plan oversight, item 14).** AD-20 specifies
+  `GatewayEdgeBlocked` as `gateway_circuit_open == 1`, and a circuit only opens under `enforce`. A7
+  keeps prod in `observe` for at least the ≥ 7-day staging soak — prod, which is **unpaced** in
+  observe and is where the one real block happened. Required: one more rule in
+  `prometheus/alerts.yml`, e.g. `GatewayEdgeBlockObserved` on
+  `sum by (environmentId, product) (increase(gateway_edge_blocks_total{endpoint!="circuit-probe"}[5m])) > 0`,
+  `critical`, `audience: product`, `for: 1m`, with A16.4's annotation (consequence, cf-ray from the
+  WARN, raise the ticket, **and the hint to stop the traffic** — nothing stops it in observe), and
+  scoped so it does not double-page with `GatewayEdgeBlocked` under enforce (e.g. `and on
+  (environmentId) gateway_circuit_open == 0`). The counters are already pre-registered at zero, so
+  `increase()` fires on the first block. `AlertRulesAudienceTest` / `AlertRuleMetricsTest` extended.
+  If the user prefers to ship without it, record the waiver in `release.md`.
+  *Resolved:* `GatewayEdgeBlockObserved`, exactly the expression above, `critical` /
+  `audience: product` / `for: 1m`, annotation leading with "stop the traffic". Pinned in
+  `AlertRuleMetricsTest` (dropping the `gateway_circuit_open == 0` scoping fails it).
+
+**4. Release shape (A7) — unchanged, with these preconditions made explicit.**
+
+1. Build the artifact from a **clean detached worktree at the tip**, never from the working tree:
+   ~61 uncommitted RIK/Aviator entries ride in the tree, including the display-name `EXISTED`
+   handling the committed `isDisplayNameTaken` now overlaps (handoff, open item 2).
+2. V3g on the laptop before anything ships (command per A24.2 — re-run at `5b862bf`: 4 tests,
+   0 failures, 37 s).
+3. **Staging first, then prod, never together.** V5c (in-repo login per brand) is AD-12's
+   regression gate: no brand may reach prod on the in-repo login until it has passed on staging.
+4. **Prometheus must be restarted, not signalled.** `alerts.yml` is a single-file bind mount; a
+   deploy that replaces the file gives it a new inode, the container keeps the old one, and a
+   SIGHUP reloads the old rules. `docker compose restart prometheus` re-resolves the mount (Bot-1's
+   bot redeploy restarts it anyway; confirm the same on Prod-Bot). The compose file has no
+   `--web.enable-lifecycle`, so there is no HTTP reload either.
+
+**5. Verification corrections** (the release runs these, in this order, on the single deploy).
+
+- **Naming.** A8 reused `V4a-V4g` for registration while the body's block-detection steps also
+  carry `V4a-V4d`, and `V5b/V5c` were kept for Phase 6. Renamed: the body's block-detection steps
+  are **V5a-V5d**; the body's `V5b` / `V5c` are **V6a** / **V6b** (Phase 6). `V4a-V4g` mean A8's
+  registration steps only.
+- **V1a, V1e — prod only.** Staging runs `enforce` from this deploy (A7), so V1a's
+  `mode=observe` grep cannot match there and V1e's "observe never parks" is not a property of
+  enforce. On staging, V3a replaces V1a and V1e is skipped. On prod (observe) both run as written.
+- **V2j** — the 2-bot group must be created with `"existingGroup": true`. Since Phase 4 a normal
+  create registers asynchronously against `127.0.0.1:1`, fails, and `/start` answers 400
+  `still registering` instead of exercising `lastError`.
+- **V3b** — both `/start` calls expect **`200`** (A3), not `202`.
+- **V4e** — the boot line is `Registration worker: <n> bot groups resuming account registration`;
+  it carries a count, not the group id. Grep
+  `"Registration worker: .* bot groups resuming account registration"` → one line, and identify the
+  group from `GET /{id}/status` (`targetStatus: "REGISTRATION_PENDING"`, `registeredCount` rising).
+- **V5a** (was body V4a) — additionally expect rules `GatewayEdgeBlockUncleared`,
+  `RegistrationNotProgressing` and **`GatewayEdgeBlockObserved`** in
+  `curl -s http://<bot-1>:9090/api/v1/rules | grep -oE '"name":"GatewayEdge[A-Za-z]+"'` (three
+  names), none of them in `/api/v1/alerts`; and seven
+  `gateway_edge_blocks_total{endpoint=…}` series per environment with a budget, all `0`.
+- **V5b** (was body V4b) — unchanged.
+- **V5c** (was body V4c) — unchanged; it is the staging-before-prod gate in item 4.3. Use groups
+  whose accounts already exist (`existingGroup=true` or completed registration).
+- **V5d** (was body V4d) — **rewritten.** The stub has no WebSocket endpoint and A16.2 refuses
+  rather than parks, so the original sequence cannot complete. Laptop + `StubGatewayMain` only;
+  run the local app with `--bot.gateway.budget.mode=enforce --bot.gateway.budget.block-probe-interval=2m`
+  (observe never opens a circuit, and 60 m is impractical on a laptop). One `Environment` whose
+  `apiGateway` is the stub URL.
+  1. Create a 2-bot group with `existingGroup: true`; `POST /__stub/block`; `POST /{id}/start`.
+     Expect exactly **one** `ERROR … Cloudflare edge block on login, cf-ray a3c7e4004acc850e-HKG —
+     circuit open: nothing is sent to this gateway except one clearance probe every PT2M`; the stub
+     records **at most 2** `login.aspx` requests (those already in flight); one WARN
+     `Bot group <id>: n/2 bots refused by an open gateway circuit` and **no** per-bot
+     `Failed to create bot` ERROR; `/status` shows `targetStatus: "DEAD"`, `botsUp: 0`, and
+     `lastError` starting `Started 0/2 bots — Gateway edge block on environment <env> (cf-ray
+     a3c7e4004acc850e-HKG)`.
+  2. Create a 20-bot group (normal create). Expect `REGISTRATION_PENDING` and `registeredCount: 0`
+     holding, **no** `register.aspx` reaching the stub, no `registrationError` — a deferral, not a
+     failure (A31.4).
+  3. Over the next two intervals the stub's per-minute line shows only `verifytoken.aspx`
+     increments, one per interval, and the app logs `Cloudflare edge block still in force` each time.
+  4. `POST /__stub/unblock`. Within one interval: `INFO … Cloudflare edge block cleared — clearance
+     probe answered HTTP 200; circuit closed after …`; the 20-bot group's `registeredCount` then
+     climbs to 20 and the group completes.
+  Record the stub's `max=` from its per-minute line in `release.md`.
+  This sequence opens the circuit on the **login** (an HTTP request), so the clearance probe is
+  the API `verifytoken.aspx?token=probe`. A **WS-opened** circuit (ERROR names `ws-upgrade`) is
+  cleared by an anonymous upgrade against `webSocketMiniUrl` instead (item 7a) and is **not**
+  reproducible on the stub — its block mode refuses every path, so the login is always refused
+  first. It is covered by `GatewayCircuitBreakerTest` / `GatewayWsClearanceProbeTest` /
+  `BotWsEdgeBlockLoopbackTest` only; if one is ever seen live, expect `circuit-probe` stamps on
+  the WS host (via `countWsUpgrade`), the cleared line reading `answered HTTP 101`, and **no**
+  `verifytoken.aspx?token=probe` while it is open.
+- **V6a / V6b** (were V5b / V5c) — Phase 6, unchanged; V6b's "V3a + V4a" means V3a + **V5a**.
+
+**6. Phase 6 inherits**, in addition to A6: CLAUDE.md must state DEAD_GROUP_AUTO_RECOVERY AD-2's
+new exception (a Cloudflare block page is `EDGE_BLOCK`, unhealthy), the `observe`-mode alerting
+story (S2), and that a start into an open circuit persists `DEAD`, so with `bot.recovery.enabled`
+the group becomes a recovery candidate again once the clearance probe has closed the circuit.
+
+**7. The fix round (`82bdbc2..66c5d38`, 14 commits on QA's tip) — S1 and S2 re-checked and
+resolved; six new divergences, all accepted.** Verified in a clean worktree at `66c5d38`: the 18
+affected test classes plus V3g, **142 tests, 0 failures**.
+
+- **(a) A WS-opened circuit is cleared by probing the WS host, not the API host** (`a7fe207`).
+  *AD-13 oversight, amended.* AD-13 assumed one clearance target per environment. Cloudflare
+  counts per (egress IP × zone), and on 119 the API and WS hosts are different zones
+  (`apigw-w79.sgame.us` vs `s009-ws-proxy-119.stgame.win`); A15 established the same *rule*, not a
+  shared *block*. So an API probe could close a WS-opened circuit while the WS host still refused
+  us. The budget now remembers the opening endpoint; `GatewayBudgetRegistry.bindWebSocketProbe`
+  (bound from `EnvironmentClientRegistry` beside `forEnvironment`) issues an anonymous JDK upgrade
+  against `webSocketMiniUrl` — no headers, no token, aborted on 101 — stamped through
+  `countWsUpgrade("circuit-probe")` (A5.3: it is an upgrade). An HTTP-opened circuit keeps the API
+  probe; a WS-opened one with no WS probe bound falls back to the API probe rather than staying
+  open for ever. The converse case (each host blocked independently) is self-correcting: the next
+  request to the other host reopens the circuit.
+- **(b) `group_recovery_skipped_total` is pre-registered at zero under the group MDC, and a run of
+  N skips reads N−1** (`b1fa8be`). Accepted: it is the `initGroupRecoverySeries` pattern CLAUDE.md
+  mandates, and registering-and-incrementing in one tick would be scraped at 1 and lost to
+  `increase()` anyway. No alert reads this counter today; a future one must expect the N−1.
+  **Superseded by A32.8(b):** the series is now pre-registered at group death, so N skips read N.
+- **(c) Only circuit refusals are demoted** — DEBUG per bot plus one group WARN (`2af6719`). Every
+  other per-bot creation failure keeps its per-bot ERROR. Accepted: the demotion is justified by
+  the circuit's own ERROR already reporting the brand-level fact; nothing else has such a line.
+- **(d) A brand login-request factory that throws (or fails to serialise) is not a login
+  failure** (`5ab283b`). The request is built before `authenticate`'s try; the failure is still an
+  `UpstreamLoginException` ("could not build the login request"), tagged `auth` by
+  `classifyCreationFailure`, and moves no `bot_login_total` series. Accepted: same principle as
+  A4 — that counter feeds `EnvironmentLoginFailing` and must count gateway refusals, not our bugs.
+- **(e) A drift balance read that itself detects the block answers empty** (`e9e11c8`). AD-10
+  verbatim — the deferrable read runs on the ws-parser message thread and must never throw a
+  budget outcome; the circuit is still opened and the block counted.
+- **(f) On the HTTP path a block requires Cloudflare's page in the body** (`0db5ef7`). *AD-13
+  oversight, amended:* Cloudflare stamps `server: cloudflare` and `cf-ray` on every proxied
+  response, so AD-13's second conjunct is always true for a gwms answer and its third (`text/html`
+  **or** markers) admitted IIS's own HTML 403s (e.g. 403.6 IP rejected) — one such request would
+  have opened the circuit for a whole brand. Body markers are now required when a body exists:
+  `cf-error-details`, `Sorry, you have been blocked` or `Attention Required! | Cloudflare`. Only a
+  bodiless response (the WS path; Netty keeps status and headers) accepts `text/html` alone.
+  **Two known misses, accepted and recorded:** a Cloudflare *challenge* page ("Just a moment…")
+  carries none of the markers and is not classified — it surfaces as a non-JSON login failure; and
+  on the WS path an edge page larger than ws-parser's 8 KB `HttpObjectAggregator` is not
+  classified (the captured page is 5,019 bytes). Both fail open toward today's behaviour, never
+  toward a false brand-wide circuit.
+
+Also in the round, no plan impact: the timeout-instant race in `await` (`8771bd6`, a waiter
+refused or cancelled at its timeout instant was sent anyway — fixed, pinned); scoped DEBUG now sees
+the waiter's MDC (`ef9d836`); the handshake failure is kept as `suppressed` on the WS refusal
+(`60b4c00`); the gauge-staleness javadoc corrected (`7576d78`).
+
+**A16.5 corrected** (`c1505d8`): "`docker compose restart bot-manager` closes it now" is true of the
+circuit and wrong as advice — a restart clears the in-memory circuit and auto-starts every ACTIVE
+group straight into a live block. `GatewayEdgeBlocked` now says: do not restart while the block is
+live; restart only after SA/back-office confirms it is lifted. A16.5's "no manual-close endpoint"
+stands.
+
+
+### A32.8 — the re-review follow-ups (`66c5d38..cfb33fb`), recorded by the main session
+
+Four commits after the compliance re-check; no compliance pass ran over them, so they are recorded
+here rather than ratified.
+
+- **(a) The WS clearance probe keeps `cancel(true)`** (`f5b8583`). The re-review asked to drop it on
+  the premise that it only cancels a dependent future. Measured on JDK 21.0.2 against a loopback
+  socket that never answers: `cancel(true)` on `buildAsync`'s future closes the pending exchange at
+  the timeout; without it (and without the builder timeout) the connection stays open. What was
+  actually missing was the interrupt path, which now aborts too (`abortWhenItLands`). The builder's
+  `.connectTimeout` is an independent second safeguard, so removing `cancel` *or* the abort callback
+  alone fails no test — only both together do. No test covers the interrupt path.
+- **(b) `group_recovery_skipped_total` is pre-registered at group death** (`f49c7f9`) — in
+  `handleBotGroupDeath`, `startLocked`'s zero-bot DEAD branch, and per candidate on every reconcile
+  tick (covers groups persisted DEAD by an earlier JVM). N skips read N; `skipSeriesMaterialised` is
+  deleted. Residual gap: an earlier-JVM DEAD group whose circuit opens within this JVM's first
+  recovery tick registers and counts in the same tick. Tag-mismatch risk, untested: an environment
+  with no `productCode` takes the runtime's product from the game, but the skip increment tags
+  `"unknown"`, so the pre-registered and incremented series can differ on `product`.
+- **(c) A waiter that lost the timeout race waits at most 5 s** (`3727a20`,
+  `lostRemovalWaitNanos`) for its outcome; if none arrives it is treated as not sent (soft → `false`,
+  hard → `GatewayBudgetExhaustedException`) with one ERROR naming it a bookkeeping bug.
+- **(d)** `CloudflareBlockDetector` javadoc (`cfb33fb`): the bodiless WS path accepts `text/html`
+  alone, so an origin's own HTML 403 to the anonymous WS probe would hold a WS-opened circuit until
+  restart.
+
+Test count at `cfb33fb`, clean detached worktree: **2,512 / 0 failures** (bot-api 148,
+bot-strategies 126, bot-messages 167, bot-engine 634, bot-app 1,437).
