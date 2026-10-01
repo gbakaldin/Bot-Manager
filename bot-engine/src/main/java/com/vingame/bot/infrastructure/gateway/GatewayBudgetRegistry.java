@@ -213,6 +213,11 @@ public class GatewayBudgetRegistry {
      * reported as an {@code IOException}, which keeps the circuit open.
      */
     public void bindWebSocketProbe(String environmentId, String webSocketUrl) {
+        bindWebSocketProbe(environmentId, webSocketUrl, PROBE_TIMEOUT);
+    }
+
+    /** {@link #bindWebSocketProbe(String, String)} with an explicit bound — the test seam. */
+    void bindWebSocketProbe(String environmentId, String webSocketUrl, java.time.Duration timeout) {
         SlidingWindowGatewayBudget budget = environmentId == null ? null : budgets.get(environmentId);
         if (budget == null || webSocketUrl == null || webSocketUrl.isBlank()) {
             return;
@@ -227,10 +232,10 @@ public class GatewayBudgetRegistry {
         budget.bindWsCircuitProbe(() -> {
             java.util.concurrent.CompletableFuture<java.net.http.WebSocket> handshake = probeClient()
                     .newWebSocketBuilder()
-                    .connectTimeout(PROBE_TIMEOUT)
+                    .connectTimeout(timeout)
                     .buildAsync(uri, new java.net.http.WebSocket.Listener() { });
             try {
-                java.net.http.WebSocket socket = handshake.get(PROBE_TIMEOUT.toMillis(),
+                java.net.http.WebSocket socket = handshake.get(timeout.toMillis(),
                         java.util.concurrent.TimeUnit.MILLISECONDS);
                 socket.abort();
                 return new CircuitProbe.Answer(101, CloudflareBlockDetector.Verdict.NOT_A_BLOCK);
@@ -243,13 +248,38 @@ public class GatewayBudgetRegistry {
                 }
                 throw new java.io.IOException("WS clearance probe got no answer: " + cause, cause);
             } catch (java.util.concurrent.TimeoutException e) {
-                handshake.cancel(true);
-                handshake.whenComplete((ws, error) -> {
-                    if (ws != null) {
-                        ws.abort();
-                    }
-                });
+                abortWhenItLands(handshake);
                 throw new java.io.IOException("WS clearance probe timed out", e);
+            } catch (InterruptedException e) {
+                abortWhenItLands(handshake);
+                Thread.currentThread().interrupt();
+                throw e;
+            }
+        });
+    }
+
+    /**
+     * Abandon a handshake we stopped waiting for, on the timeout <b>and</b> the interrupt path, so
+     * that no socket outlives the probe.
+     * <p>
+     * <b>Both halves are needed, and {@code cancel(true)} is the one that matters most</b> —
+     * measured on JDK 21.0.2, not assumed (review-phase5 fix-round re-review suggested dropping it):
+     * cancelling the future {@code buildAsync} returns <em>does</em> tear the pending exchange down
+     * (a loopback server sees the client hang up at the timeout). It is one of two layers: the
+     * builder's {@code connectTimeout}, set to the same bound, also aborts an unanswered upgrade on
+     * its own. {@code GatewayWsClearanceProbeTest} fails only when both are removed — with neither,
+     * a host that accepts the TCP connection and never answers holds the half-open handshake
+     * indefinitely. So dropping the cancel is safe only while the builder timeout stays, and is
+     * not done: the two are independent defences of the same property. The
+     * abort-on-completion callback covers the remaining race: an upgrade that completed in the
+     * instant before the cancel (the cancel then returns {@code false} and the callback sees the
+     * WebSocket) is aborted rather than left open with a no-op listener.
+     */
+    private static void abortWhenItLands(java.util.concurrent.CompletableFuture<java.net.http.WebSocket> handshake) {
+        handshake.cancel(true);
+        handshake.whenComplete((ws, error) -> {
+            if (ws != null) {
+                ws.abort();
             }
         });
     }

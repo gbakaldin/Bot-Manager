@@ -95,4 +95,111 @@ class GatewayWsClearanceProbeTest {
 
         assertThat(result.verdict().edgeBlock()).isFalse();
     }
+
+    @Test
+    @DisplayName("an upgrade that completes AFTER the probe gave up is aborted, not leaked")
+    void aLateUpgradeIsAborted() throws Exception {
+        // Re-review of the fix round: handshake.cancel(true) only cancelled the dependent future, so
+        // the abort-on-completion callback saw no WebSocket and a late 101 stayed open for ever. A raw
+        // loopback socket answers a valid 101 one second after the probe's 300 ms bound, then waits
+        // to see the client hang up.
+        java.util.concurrent.CompletableFuture<Boolean> clientClosed = new java.util.concurrent.CompletableFuture<>();
+        try (java.net.ServerSocket late = new java.net.ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            Thread.ofVirtual().start(() -> {
+                try (java.net.Socket socket = late.accept()) {
+                    java.io.BufferedReader in = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1));
+                    String key = null;
+                    for (String line = in.readLine(); line != null && !line.isEmpty(); line = in.readLine()) {
+                        if (line.toLowerCase(java.util.Locale.ROOT).startsWith("sec-websocket-key:")) {
+                            key = line.substring(line.indexOf(':') + 1).trim();
+                        }
+                    }
+                    Thread.sleep(1_000);
+                    String accept = java.util.Base64.getEncoder().encodeToString(
+                            java.security.MessageDigest.getInstance("SHA-1").digest(
+                                    (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").getBytes(StandardCharsets.ISO_8859_1)));
+                    OutputStream out = socket.getOutputStream();
+                    out.write(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                            + "Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n")
+                            .getBytes(StandardCharsets.ISO_8859_1));
+                    out.flush();
+                    socket.setSoTimeout(8_000);
+                    clientClosed.complete(socket.getInputStream().read() < 0);
+                } catch (java.net.SocketTimeoutException e) {
+                    clientClosed.complete(false);
+                } catch (IOException e) {
+                    clientClosed.complete(true); // a reset is a hang-up too
+                } catch (Exception e) {
+                    clientClosed.completeExceptionally(e);
+                }
+            });
+
+            GatewayBudgetRegistry registry = new GatewayBudgetRegistry(
+                    GatewayBudgetSettings.defaults().withMode(GatewayBudgetMode.ENFORCE), new SimpleMeterRegistry());
+            SlidingWindowGatewayBudget lateBudget =
+                    (SlidingWindowGatewayBudget) registry.forEnvironment("env-late", "Staging", "119", null);
+            try {
+                registry.bindWebSocketProbe("env-late", "ws://127.0.0.1:" + late.getLocalPort() + "/websocket",
+                        java.time.Duration.ofMillis(300));
+                CircuitProbe probe = (CircuitProbe) org.springframework.test.util.ReflectionTestUtils
+                        .getField(lateBudget, "wsCircuitProbe");
+
+                org.assertj.core.api.Assertions.assertThatThrownBy(probe::probe)
+                        .isInstanceOf(IOException.class)
+                        .hasMessageContaining("timed out");
+
+                assertThat(clientClosed.get(15, TimeUnit.SECONDS))
+                        .as("the late 101 must be aborted by the probe, not left open with a no-op listener")
+                        .isTrue();
+            } finally {
+                lateBudget.shutdown();
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("a WS host that accepts and never answers the upgrade is hung up on at the timeout")
+    void aSilentUpgradeIsHungUpOnAtTheTimeout() throws Exception {
+        // The direction the re-review's suggested fix (drop cancel(true)) would have broken. On JDK 21
+        // cancelling buildAsync's future tears the pending exchange down; without it the half-open
+        // upgrade is held indefinitely (connectTimeout bounds the connect, not the upgrade).
+        java.util.concurrent.CompletableFuture<Boolean> clientClosed = new java.util.concurrent.CompletableFuture<>();
+        try (java.net.ServerSocket silent = new java.net.ServerSocket(0, 1, InetAddress.getLoopbackAddress())) {
+            Thread.ofVirtual().start(() -> {
+                try (java.net.Socket socket = silent.accept()) {
+                    java.io.BufferedReader in = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(socket.getInputStream(), StandardCharsets.ISO_8859_1));
+                    for (String line = in.readLine(); line != null && !line.isEmpty(); line = in.readLine()) {
+                        // consume the upgrade request, answer nothing
+                    }
+                    socket.setSoTimeout(5_000);
+                    clientClosed.complete(socket.getInputStream().read() < 0);
+                } catch (java.net.SocketTimeoutException e) {
+                    clientClosed.complete(false);
+                } catch (IOException e) {
+                    clientClosed.complete(true);
+                }
+            });
+
+            GatewayBudgetRegistry registry = new GatewayBudgetRegistry(
+                    GatewayBudgetSettings.defaults().withMode(GatewayBudgetMode.ENFORCE), new SimpleMeterRegistry());
+            SlidingWindowGatewayBudget silentBudget =
+                    (SlidingWindowGatewayBudget) registry.forEnvironment("env-silent", "Staging", "119", null);
+            try {
+                registry.bindWebSocketProbe("env-silent", "ws://127.0.0.1:" + silent.getLocalPort() + "/websocket",
+                        java.time.Duration.ofMillis(300));
+                CircuitProbe probe = (CircuitProbe) org.springframework.test.util.ReflectionTestUtils
+                        .getField(silentBudget, "wsCircuitProbe");
+
+                org.assertj.core.api.Assertions.assertThatThrownBy(probe::probe).isInstanceOf(IOException.class);
+
+                assertThat(clientClosed.get(15, TimeUnit.SECONDS))
+                        .as("the pending upgrade must not outlive the probe")
+                        .isTrue();
+            } finally {
+                silentBudget.shutdown();
+            }
+        }
+    }
 }
