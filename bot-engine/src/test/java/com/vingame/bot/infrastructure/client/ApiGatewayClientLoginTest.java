@@ -223,6 +223,30 @@ class ApiGatewayClientLoginTest {
         assertThat(logins("failure")).isEqualTo(1.0);
     }
 
+    /** A body Jackson cannot serialise: its one property throws. */
+    public static final class UnserialisableLoginRequest implements LoginRequest {
+        public String getUsername() {
+            throw new IllegalStateException("cannot render");
+        }
+    }
+
+    @Test
+    @DisplayName("a login body that cannot be serialised is never sent and is not a login failure (review-phase5)")
+    void anUnserialisableBodyIsNotALoginFailure() {
+        Brand tip = brands().findFirst().orElseThrow();
+        Brand broken = new Brand("broken", tip.loginPath(), tip.appId(), X_TOKEN,
+                ctx -> new UnserialisableLoginRequest());
+
+        assertThatThrownBy(() -> client(broken, broken.factory(), GatewayBudget.UNLIMITED)
+                .authenticate(CREDENTIALS, RequestTier.ESSENTIAL, SCOPE))
+                .isInstanceOf(UpstreamLoginException.class)
+                .hasMessageContaining("could not build the login request");
+        assertThat(stub.totalReceived()).as("nothing left the JVM").isZero();
+        assertThat(logins("failure"))
+                .as("bot_login_total{failure} feeds EnvironmentLoginFailing; our own bug is not a refusal")
+                .isZero();
+    }
+
     @Test
     @DisplayName("a block page on login under enforce opens the circuit and is not a login failure")
     void aBlockedLoginOpensTheCircuit() {

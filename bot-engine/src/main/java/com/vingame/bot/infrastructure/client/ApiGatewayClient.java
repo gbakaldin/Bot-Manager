@@ -391,8 +391,19 @@ public class ApiGatewayClient {
             xToken
         );
 
+        // Built BEFORE the try (review-phase5): a body that cannot be serialised (or a brand factory
+        // that throws) is a request that was never sent, and the try's IOException / RuntimeException
+        // arms both count bot_login_total{outcome="failure"} — the input to EnvironmentLoginFailing,
+        // which must count gateway refusals, not our own bugs. Same exception type for the caller.
+        HttpRequest request;
         try {
-            HttpRequest request = loginRequest(ctx);
+            request = loginRequest(ctx);
+        } catch (IOException | RuntimeException e) {
+            throw new UpstreamLoginException("Login failed for user '" + credentials.getUsername()
+                    + "': could not build the login request: " + e.getMessage(), e);
+        }
+
+        try {
             HttpResponse<String> response = send(tier, scope, request);
             TokensProvider tokens = parseLoginResponse(credentials.getUsername(), response);
             log.debug("[Login] response: agencyToken={} | authToken={} | jwtToken={}",
