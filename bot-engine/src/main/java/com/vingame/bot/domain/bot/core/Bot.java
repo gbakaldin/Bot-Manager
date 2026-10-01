@@ -53,6 +53,27 @@ public abstract class Bot {
     // change to BotGroupBehaviorService.monitorHealth.
     private static final int MAX_RECONNECT_CYCLES = 10;
 
+    /**
+     * How many times the <b>first</b> balance read is tried before the start is given up
+     * (GATEWAY_REQUEST_BUDGET A33, staging anomaly A1). Each try is an ordinary ESSENTIAL
+     * request through the budget — stamped, never re-sent behind its back.
+     * <p>
+     * The first read is the one request a bot cannot start without: {@code onStart} reads the
+     * balance before it installs its scenario, so a single failed read used to leave a bot with
+     * an open, authenticated socket and nothing listening on it — counted connected by
+     * {@code /health}, invisible to {@code monitorHealth}, and never watched by the watchdog,
+     * which is armed by the scenario it never got. A1's transport failure was local and lasted
+     * milliseconds; a few seconds of patience absorbs anything of that shape.
+     */
+    static final int INITIAL_BALANCE_READ_ATTEMPTS = 3;
+    /** Pause before the n-th retry of the first read is {@code n} times this. */
+    static final long INITIAL_BALANCE_RETRY_DELAY_MS = 1_000L;
+    /**
+     * The reconnect reason a failed start hands over with — normalised to its own bounded value
+     * of {@code bot_reconnects_total{reason}}, see {@link #normalizeReconnectReason}.
+     */
+    static final String SESSION_SETUP_REASON = "session-setup";
+
     // Shared environment clients (set via builder-style setters)
     protected ApiGatewayClient apiGatewayClient;
     protected GameMsClient gameMsClient;
@@ -657,13 +678,7 @@ public abstract class Bot {
                 // its scenario and becomes a silent zombie, so it waits for the window rather
                 // than giving up — ESSENTIAL's wait is unbounded and cancellable, and the
                 // window drains by construction.
-                recordFetchedBalance(apiGatewayClient.getBalance(
-                    getClient().getAuthToken(),
-                    credentials.getFingerprint(),
-                    userName,
-                    RequestTier.ESSENTIAL,
-                    scope()
-                ));
+                recordFetchedBalance(readInitialBalance());
                 balanceReadDeferred = false;
                 log.debug("checkBalance() fetched: {}", lastFetchedBalance);
                 expectedCurrentBalance.set(lastFetchedBalance);
@@ -839,6 +854,47 @@ public abstract class Bot {
     }
 
     /**
+     * The first balance read, tried up to {@link #INITIAL_BALANCE_READ_ATTEMPTS} times
+     * (GATEWAY_REQUEST_BUDGET A33).
+     * <p>
+     * Every attempt is a fresh {@link RequestTier#ESSENTIAL} {@code getBalance}, i.e. admitted and
+     * stamped by the budget like any other request; nothing is re-sent around it. A
+     * {@link GatewayBudgetException} is <b>not</b> retried here: it means the JVM declined to send
+     * (a cancelled scope, an open circuit), which is the budget's decision to make and AD-9's to
+     * handle, and retrying in place would only ask the same question again. Neither is a stopped
+     * bot. Whatever is left after the last attempt propagates, and {@link #start()} hands the bot
+     * to the reconnect loop.
+     */
+    private long readInitialBalance() {
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= INITIAL_BALANCE_READ_ATTEMPTS; attempt++) {
+            try {
+                return apiGatewayClient.getBalance(
+                    getClient().getAuthToken(),
+                    credentials.getFingerprint(),
+                    userName,
+                    RequestTier.ESSENTIAL,
+                    scope()
+                );
+            } catch (GatewayBudgetException e) {
+                throw e;
+            } catch (RuntimeException e) {
+                last = e;
+                if (attempt == INITIAL_BALANCE_READ_ATTEMPTS || stopped
+                        || Thread.currentThread().isInterrupted()) {
+                    break;
+                }
+                // DEBUG: per bot. The failure that survives every attempt is reported by the
+                // caller (and by the reconnect it triggers, at WARN).
+                log.debug("Bot {}: first balance read failed (attempt {}/{}): {} — retrying",
+                        userName, attempt, INITIAL_BALANCE_READ_ATTEMPTS, e.getMessage());
+                sleep(INITIAL_BALANCE_RETRY_DELAY_MS * attempt);
+            }
+        }
+        throw last;
+    }
+
+    /**
      * If a DEAD window is currently open, credit its elapsed seconds to
      * {@code bot_dead_seconds_total} and clear the stamp. Idempotent — calling
      * twice without a new DEAD entry is a no-op.
@@ -927,11 +983,16 @@ public abstract class Bot {
     /**
      * Normalize the free-form reconnect reason string to a small bounded enum-like value
      * used as the {@code reason} tag on {@code bot_reconnects_total}. Cardinality budget
-     * (Architecture Decision 7): {@code watchdog | ws-disconnect | reauth-cycle}.
+     * (Architecture Decision 7): {@code watchdog | ws-disconnect | reauth-cycle}, plus
+     * {@code session-setup} (GATEWAY_REQUEST_BUDGET A33).
      */
     private static String normalizeReconnectReason(String raw) {
         if (raw == null) return "ws-disconnect";
         if (raw.startsWith("watchdog")) return "watchdog";
+        // GATEWAY_REQUEST_BUDGET A33: a start that could not set up its first session. Its own
+        // value rather than "ws-disconnect", because the socket was fine — what failed was the
+        // gateway read in front of the scenario. Still a bounded set: four values.
+        if (raw.startsWith(SESSION_SETUP_REASON)) return SESSION_SETUP_REASON;
         return "ws-disconnect";
     }
 
@@ -1373,8 +1434,44 @@ public abstract class Bot {
     public final void start() {
         log.debug("Bot starting. Client: {} | Thread: {}",
                  System.identityHashCode(client), Thread.currentThread().getName());
-        onStart();
+        try {
+            onStart();
+        } catch (RuntimeException e) {
+            onStartFailed(e);
+            throw e;
+        }
         transitionStatus(BotStatus.STARTED);
+    }
+
+    /**
+     * A start whose {@link #onStart()} threw — in practice, a first balance read that failed every
+     * attempt (GATEWAY_REQUEST_BUDGET A33, staging anomaly A1).
+     * <p>
+     * <b>Such a bot must not stay "connected".</b> {@code onStart} installs the bot's scenario
+     * only after its first session is set up, so a throw leaves an open, authenticated socket
+     * with nothing on it: {@link #isConnected()} is true, the status is whatever the socket last
+     * reported ({@code AUTHENTICATING_CONNECTION} on staging), and the watchdog that would notice
+     * the silence is armed by the very scenario that was never installed. {@code monitorHealth}
+     * counts DEAD and RECONNECTING; it saw neither, and five Zic Zac bots sat like that for good.
+     * <p>
+     * So the bot is handed to the existing full-reconnect path: RECONNECTING (which health and
+     * the rollup see), a PRIORITIZED re-login, a fresh socket, and {@code start()} again — the
+     * same recovery a watchdog expiry gets, capped by {@link #MAX_RECONNECT_CYCLES} and ending in
+     * DEAD if it never succeeds. Not straight to DEAD: A1's failure was transient, and DEAD is
+     * terminal for a bot.
+     * <p>
+     * <b>Not from inside a reconnect loop.</b> {@code tryReconnectWs} and the periodic-logout
+     * {@code restart} also call {@link #start()}; in the loop, the throw is that attempt's failure
+     * and the loop owns the next step. {@code triggerFullReconnect}'s own guard (the
+     * {@code reconnecting} CAS, and {@code stopped}/DEAD) already makes this a no-op there; the
+     * explicit check says so. The exception is rethrown either way, so callers see exactly the
+     * failure they saw before.
+     */
+    private void onStartFailed(RuntimeException e) {
+        if (stopped || reconnecting.get()) {
+            return;
+        }
+        triggerFullReconnect(SESSION_SETUP_REASON + " failed: " + e.getMessage());
     }
 
     protected abstract void onStart();

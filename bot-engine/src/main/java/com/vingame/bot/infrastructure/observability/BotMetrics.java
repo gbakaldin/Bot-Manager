@@ -173,7 +173,9 @@ public class BotMetrics {
     /**
      * Increment the per-bot reconnect counter.
      *
-     * @param reason normalized reason: {@code watchdog|ws-disconnect|reauth-cycle}
+     * @param reason normalized reason: {@code watchdog|ws-disconnect|reauth-cycle|session-setup}
+     *               ({@code session-setup}: a start whose first balance read failed every
+     *               attempt was handed to the reconnect loop, GATEWAY_REQUEST_BUDGET A33)
      */
     public void incBotReconnect(String reason) {
         Counter.builder(BOT_RECONNECTS_TOTAL)
