@@ -183,7 +183,7 @@ class GatewayBudgetRegistryTest {
         registry.forEnvironment("env-1", "Staging", "116");
         registry.forEnvironment("env-2", "Prod", "097");
 
-        // 44 meters per environment, and the arithmetic is worth writing down because two of
+        // 53 meters per environment, and the arithmetic is worth writing down because two of
         // the terms are not obvious:
         //   1  window gauge
         //  +1  hard-cap gauge               (exported so GatewayBudgetNearCap is a RATIO against
@@ -202,8 +202,12 @@ class GatewayBudgetRegistryTest {
         //      gateway_budget_wait_seconds_bucket{le=...} in the Prometheus exposition. They are
         //      wanted (that is what makes a p95-by-tier panel possible), and they are counted
         //      here so that raising or removing an SLO bucket is a deliberate edit.
+        //  +1  circuit-open gauge           (Phase 5, AD-13 — what GatewayEdgeBlocked reads)
+        //  +1  circuit-opened counter
+        //  +7  edge-block counters          (one per GatewayEndpoint: the six request kinds plus
+        //      circuit-probe — pre-registered at zero for the same increase() reason as above)
         // Asserted as a total so a duplicate registration for one environment is visible.
-        assertThat(meters.getMeters()).hasSize(2 * 44);
+        assertThat(meters.getMeters()).hasSize(2 * 53);
 
         for (String name : List.of(
                 SlidingWindowGatewayBudget.WINDOW_REQUESTS,
@@ -212,7 +216,10 @@ class GatewayBudgetRegistryTest {
                 SlidingWindowGatewayBudget.RESERVED,
                 SlidingWindowGatewayBudget.CEILING,
                 SlidingWindowGatewayBudget.REQUESTS_TOTAL,
-                SlidingWindowGatewayBudget.WAIT_TIMER)) {
+                SlidingWindowGatewayBudget.WAIT_TIMER,
+                SlidingWindowGatewayBudget.CIRCUIT_OPEN,
+                SlidingWindowGatewayBudget.CIRCUIT_OPENED_TOTAL,
+                SlidingWindowGatewayBudget.EDGE_BLOCKS_TOTAL)) {
             List<Meter> named = meters.getMeters().stream()
                     .filter(m -> m.getId().getName().equals(name))
                     .toList();
@@ -369,5 +376,29 @@ class GatewayBudgetRegistryTest {
         assertThat(budget.windowRequests())
                 .as("the budget is reading the registry's clock, not System.nanoTime()")
                 .isZero();
+    }
+
+    @Test
+    @DisplayName("isCircuitOpen answers without creating a budget, and follows the circuit")
+    void isCircuitOpenReadsWithoutCreating() {
+        GatewayBudgetRegistry enforcing = new GatewayBudgetRegistry(
+                GatewayBudgetSettings.defaults().withMode(GatewayBudgetMode.ENFORCE), meters);
+
+        assertThat(enforcing.isCircuitOpen("never-seen")).isFalse();
+        assertThat(enforcing.isCircuitOpen(null)).isFalse();
+        assertThat(enforcing.size())
+                .as("a read by the recovery reconciler or the WS probe must not conjure a budget "
+                        + "and its fifty-odd series")
+                .isZero();
+
+        GatewayBudget budget = enforcing.forEnvironment("env-9", "Staging", "119", "http://127.0.0.1:1");
+        assertThat(enforcing.isCircuitOpen("env-9")).isFalse();
+        try {
+            budget.reportEdgeBlock(GatewayEndpoint.LOGIN, "ray");
+        } catch (com.vingame.bot.common.exception.GatewayCircuitOpenException expected) {
+            // the detecting request is refused; that is the enforce contract
+        }
+        assertThat(enforcing.isCircuitOpen("env-9")).isTrue();
+        ((SlidingWindowGatewayBudget) budget).shutdown();
     }
 }

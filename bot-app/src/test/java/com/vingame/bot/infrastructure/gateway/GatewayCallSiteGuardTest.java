@@ -208,8 +208,12 @@ class GatewayCallSiteGuardTest {
         //    no live callers at all — the only reference to it is the constructor call in
         //    EnvironmentClientRegistry (plan Open Item 12: dead code, to be filed as a follow-up).
         //    If it is ever revived against a gwms host it must be routed through the budget.
+        //  - GatewayBudgetRegistry: the circuit breaker's anonymous clearance probe (AD-13), one
+        //    GET per block-probe-interval per OPEN circuit, stamped through count("circuit-probe").
+        //    AD-21 names it; it cannot go through the funnel, because the funnel is exactly what
+        //    an open circuit refuses.
         List<String> allowed = List.of(
-                "ApiGatewayClient.java", "EnvironmentWsProbe.java",
+                "ApiGatewayClient.java", "EnvironmentWsProbe.java", "GatewayBudgetRegistry.java",
                 "HttpPrometheusQueryClient.java", "VipTalkClient.java", "GameMsClient.java",
                 //  - BoundedLogin: the ONE place that constructs the library's AuthClient, which
                 //    builds its own HttpClient internally. It is on this list for the

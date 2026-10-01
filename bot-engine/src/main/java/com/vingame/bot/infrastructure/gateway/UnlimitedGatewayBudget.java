@@ -58,6 +58,12 @@ final class UnlimitedGatewayBudget implements GatewayBudget {
     }
 
     @Override
+    public void reportEdgeBlock(GatewayEndpoint endpoint, String cfRay) {
+        // No circuit here: this is the fixture budget, it has no environment to protect, and the
+        // caller proceeds exactly as an observe-mode budget would let it.
+    }
+
+    @Override
     public Reservation reserve(RequestTier tier, int permits, GatewayRequestScope scope) {
         return NO_RESERVATION;
     }

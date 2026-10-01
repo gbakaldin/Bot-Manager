@@ -85,10 +85,10 @@ import java.util.function.LongSupplier;
  * guarantees it, so {@code essential.max-wait=0} is legal for ESSENTIAL alone. An open circuit
  * guarantees nothing — the observed block outlived an hour and the user's answer on its lifetime
  * is "possibly ~24 hours, possibly until someone clears it manually" — so an open circuit
- * <b>refuses every tier</b> rather than parking any of them. The state machine that opens it is
- * Phase 5's; the refusal path is here so the two are not designed apart, and so that
- * {@code FOLLOWUPS.md} P13 (a build that parks forever keeps its group's attempt open for the
- * life of the JVM) has one fewer way to happen.
+ * <b>refuses every tier</b> rather than parking any of them — so that {@code FOLLOWUPS.md} P13 (a
+ * build that parks forever keeps its group's attempt open for the life of the JVM) has one fewer
+ * way to happen. The state machine that opens and closes it is {@link #reportEdgeBlock} and
+ * {@link #runCircuitProbe()} (Phase 5).
  * <p>
  * <b>Stamp on admission, not on completion.</b> A request that was admitted and then failed
  * still cost the edge a request; a request that timed out or was cancelled while queued cost it
@@ -165,6 +165,20 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      */
     public static final String HARD_CAP = "gateway_budget_hard_cap";
 
+    /**
+     * {@code 1} while this environment's circuit is open — a Cloudflare edge block was detected
+     * and nothing but one clearance probe per interval leaves the JVM for this gateway (AD-13).
+     * {@code GatewayEdgeBlocked} reads it.
+     */
+    public static final String CIRCUIT_OPEN = "gateway_circuit_open";
+    /** How many times the circuit has opened (closed → open transitions only). */
+    public static final String CIRCUIT_OPENED_TOTAL = "gateway_circuit_opened_total";
+    /**
+     * Every edge block seen, by {@link GatewayEndpoint} — in <b>both</b> modes, because detection
+     * is a fact about the edge whatever this JVM decides to do about it.
+     */
+    public static final String EDGE_BLOCKS_TOTAL = "gateway_edge_blocks_total";
+
     /** Bounded {@code outcome} label values of {@link #REQUESTS_TOTAL}. */
     public static final String OUTCOME_ADMITTED = "admitted";
     public static final String OUTCOME_TIMEOUT = "timeout";
@@ -219,12 +233,45 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
     private final Map<RequestTier, AtomicLong> throttleReportedAt = new EnumMap<>(RequestTier.class);
 
     /**
-     * Circuit state. Always closed until Phase 5 installs the Cloudflare detector; the
-     * <em>consequences</em> of it being open are implemented here (every tier refused, nothing
-     * parked, {@code outcome="circuit_open"} counted) so that phase adds a trigger rather than
-     * a policy.
+     * Circuit state (AD-13): {@code true} from the first {@link #reportEdgeBlock} under
+     * {@code enforce} until a clearance probe is answered by something that is not a block. Read
+     * without the lock by the gauge and the snapshot; written only under {@link #lock}.
+     * <p>
+     * There is no separate HALF_OPEN value on purpose: while the one probe is in flight the
+     * circuit still refuses everything, which is what "half open" has to mean here — the probe
+     * is the only request allowed through, and it is not a bot's.
      */
     private final AtomicBoolean circuitOpen = new AtomicBoolean(false);
+
+    /** Guarded by {@link #lock}: the cf-ray that opened (or last re-confirmed) the circuit. */
+    private String circuitCfRay;
+    /** Guarded by {@link #lock}: when the circuit opened, for the "closed after …" line. */
+    private long circuitOpenedAtNanos;
+    /** Guarded by {@link #lock}: when the next clearance probe is due. */
+    private long nextProbeAtNanos;
+    /** Guarded by {@link #lock}: a probe is in flight, so a second must not start. */
+    private boolean probeInFlight;
+    /** Guarded by {@link #lock}: the pending probe timer. */
+    private ScheduledFuture<?> probeTimer;
+
+    /**
+     * The anonymous clearance request, bound by {@link GatewayBudgetRegistry} once it knows this
+     * environment's {@code apiGateway}. {@code null} until then — an open circuit with no probe
+     * simply stays open and says so, because "we could not ask" is not "it cleared".
+     */
+    private volatile CircuitProbe circuitProbe;
+
+    private Counter circuitOpenedCounter;
+    private final Map<GatewayEndpoint, Counter> edgeBlockCounters = new EnumMap<>(GatewayEndpoint.class);
+
+    /**
+     * Observe-mode WARN throttle (AD-23: "detection still logs the WARN it would have acted on").
+     * During a block <em>every</em> request is a block, so an unthrottled WARN would be a per-bot,
+     * per-request line at tier 1 — exactly the shape CLAUDE.md forbids. One line per environment
+     * per {@link #THROTTLE_LOG_REARM}, carrying how many were folded into it.
+     */
+    private final AtomicLong observedBlockWarnedAt = new AtomicLong(Long.MIN_VALUE);
+    private final AtomicInteger observedBlocksSinceWarn = new AtomicInteger();
 
     /**
      * One single-threaded scheduler per budget, for wake-ups at the earliest stamp expiry.
@@ -285,6 +332,21 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                 .description("Configured hard cap: no tier is admitted past this many requests per window")
                 .tags(tags)
                 .register(registry);
+
+        Gauge.builder(CIRCUIT_OPEN, circuitOpen, open -> open.get() ? 1 : 0)
+                .description("1 while a Cloudflare edge block holds this environment's circuit open")
+                .tags(tags)
+                .register(registry);
+        circuitOpenedCounter = Counter.builder(CIRCUIT_OPENED_TOTAL)
+                .description("Times this environment's gateway circuit opened on a Cloudflare edge block")
+                .tags(tags)
+                .register(registry);
+        for (GatewayEndpoint endpoint : GatewayEndpoint.values()) {
+            edgeBlockCounters.put(endpoint, Counter.builder(EDGE_BLOCKS_TOTAL)
+                    .description("Responses classified as a Cloudflare edge block, by request kind")
+                    .tags(tags.and("endpoint", endpoint.tag()))
+                    .register(registry));
+        }
 
         for (RequestTier tier : RequestTier.values()) {
             Tags tierTags = tags.and("tier", tier.name());
@@ -511,7 +573,7 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                 if (soft) {
                     return false;
                 }
-                throw new GatewayCircuitOpenException(environmentId, null, settings.blockProbeInterval());
+                throw circuitRefusalLocked(now);
             }
             if (scope != null && scope.isCancelled()) {
                 // Always thrown, even for a soft caller: "called off" must not be mistaken for
@@ -607,8 +669,26 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
     private void refuseIfCircuitOpen(RequestTier tier) {
         if (settings.mode() == GatewayBudgetMode.ENFORCE && circuitOpen.get()) {
             counter(tier, OUTCOME_CIRCUIT_OPEN).increment();
-            throw new GatewayCircuitOpenException(environmentId, null, settings.blockProbeInterval());
+            GatewayCircuitOpenException refusal;
+            lock.lock();
+            try {
+                refusal = circuitRefusalLocked(nanos.getAsLong());
+            } finally {
+                lock.unlock();
+            }
+            throw refusal;
         }
+    }
+
+    /**
+     * The refusal an open circuit answers with: the cf-ray that opened it (the SA ticket's one
+     * value) and the time until the next clearance probe — which is <b>not</b> a deadline by which
+     * the block clears (A16.3; the exception's message says so). Caller holds {@link #lock}.
+     */
+    private GatewayCircuitOpenException circuitRefusalLocked(long now) {
+        long untilProbe = nextProbeAtNanos - now;
+        return new GatewayCircuitOpenException(environmentId, circuitCfRay,
+                untilProbe <= 0 ? Duration.ZERO : Duration.ofNanos(untilProbe));
     }
 
     /** Refuse a request whose scope has been called off, without stamping anything. */
@@ -997,6 +1077,243 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         return remaining <= 0 ? Duration.ZERO : Duration.ofNanos(remaining);
     }
 
+    // ------------------------------------------------------------------ the circuit (AD-13)
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * <b>The state machine.</b> {@code CLOSED → OPEN} on the first block under {@code enforce}:
+     * the cf-ray is kept, the next probe is scheduled one {@code block-probe-interval} out, and an
+     * admission pass runs so nothing already queued is admitted into the wall. {@code OPEN} stays
+     * open on every further block (requests that were in flight when it opened land here too —
+     * they are counted, not re-announced). Only {@link #runCircuitProbe()} closes it.
+     */
+    @Override
+    public void reportEdgeBlock(GatewayEndpoint endpoint, String cfRay) {
+        edgeBlockCounters.get(endpoint).increment();
+        if (settings.mode() != GatewayBudgetMode.ENFORCE) {
+            warnObservedBlock(endpoint, cfRay);
+            return;
+        }
+
+        boolean opened = false;
+        GatewayCircuitOpenException refusal;
+        List<Runnable> deferred = new ArrayList<>();
+        lock.lock();
+        try {
+            long now = nanos.getAsLong();
+            if (!circuitOpen.get()) {
+                circuitOpen.set(true);
+                circuitCfRay = cfRay;
+                circuitOpenedAtNanos = now;
+                nextProbeAtNanos = now + settings.blockProbeInterval().toNanos();
+                scheduleProbeLocked(now);
+                opened = true;
+                // Walk the queues now, under the same lock that flipped the flag, so the decision
+                // about every queued waiter is taken against the open circuit.
+                admitWaitersLocked(now, deferred);
+            }
+            refusal = circuitRefusalLocked(now);
+        } finally {
+            lock.unlock();
+            runAfterUnlock(deferred);
+        }
+
+        if (opened) {
+            circuitOpenedCounter.increment();
+            // ERROR, once per open — tier-1 admissible because its rate is a function of incidents,
+            // not of fleet size. It has to stand alone in Grafana: it names the brand-level
+            // consequence and the action, because the circuit will not close by itself inside the
+            // ~24 h the user expects a block to last (A16).
+            log.error("env {} ({}): Cloudflare edge block on {}, cf-ray {} — circuit open: nothing is "
+                            + "sent to this gateway except one clearance probe every {} (next in {}). Bots "
+                            + "on this brand cannot log in, re-auth, deposit or reconnect. There is no "
+                            + "automatic recovery to wait for — the block may outlive a day; raise an "
+                            + "SA/back-office ticket quoting the cf-ray.",
+                    environmentId, environmentName, endpoint.tag(), cfRay == null ? "-" : cfRay,
+                    settings.blockProbeInterval(), settings.blockProbeInterval());
+        }
+        reportThrottleState();
+        throw refusal;
+    }
+
+    /**
+     * The observe-mode half of AD-23: say what enforce would have done, at most once per
+     * environment per {@link #THROTTLE_LOG_REARM}, and change nothing else.
+     */
+    private void warnObservedBlock(GatewayEndpoint endpoint, String cfRay) {
+        int folded = observedBlocksSinceWarn.incrementAndGet();
+        long now = nanos.getAsLong();
+        long last = observedBlockWarnedAt.get();
+        if (last != Long.MIN_VALUE && now - last < THROTTLE_LOG_REARM.toNanos()) {
+            return;
+        }
+        if (!observedBlockWarnedAt.compareAndSet(last, now)) {
+            return;
+        }
+        observedBlocksSinceWarn.addAndGet(-folded);
+        log.warn("env {} ({}): Cloudflare edge block on {}, cf-ray {} — mode=observe, so no circuit "
+                        + "opens and traffic continues into the block; under enforce this would have "
+                        + "refused every request to this gateway ({} block(s) in this line, "
+                        + "gateway_edge_blocks_total has them all)",
+                environmentId, environmentName, endpoint.tag(), cfRay == null ? "-" : cfRay, folded);
+    }
+
+    /**
+     * Bind the clearance probe for this environment's gateway. Idempotent; the latest binding
+     * wins, so an environment whose {@code apiGateway} is edited and whose clients are rebuilt
+     * probes the new host.
+     */
+    public void bindCircuitProbe(CircuitProbe probe) {
+        this.circuitProbe = probe;
+    }
+
+    /**
+     * Schedule the next clearance probe at {@link #nextProbeAtNanos}. Caller holds {@link #lock}.
+     * On the budget's own single-threaded scheduler (AD-13), which is free to block for the
+     * probe's ten seconds: while the circuit is open there are no waiters for it to wake.
+     */
+    private void scheduleProbeLocked(long now) {
+        if (probeTimer != null) {
+            probeTimer.cancel(false);
+        }
+        long delay = Math.max(0L, nextProbeAtNanos - now);
+        try {
+            probeTimer = scheduler.schedule(this::probeQuietly, delay, TimeUnit.NANOSECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            log.debug("gateway budget: clearance probe not scheduled for env {} — scheduler is shut down",
+                    environmentId);
+        }
+    }
+
+    /** The scheduler's entry point — a one-shot task nobody calls {@code get()} on (see F4). */
+    private void probeQuietly() {
+        try {
+            runCircuitProbe();
+        } catch (RuntimeException e) {
+            log.error("env {} ({}): the Cloudflare clearance probe failed unexpectedly; the circuit "
+                    + "stays open until the next one", environmentId, environmentName, e);
+            lock.lock();
+            try {
+                probeInFlight = false;
+                if (circuitOpen.get()) {
+                    long now = nanos.getAsLong();
+                    nextProbeAtNanos = now + settings.blockProbeInterval().toNanos();
+                    scheduleProbeLocked(now);
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+    }
+
+    /**
+     * Issue the one clearance probe if it is due, and close or re-arm the circuit on its answer
+     * (AD-13 as amended by A16.1). Package-private so tests drive it on a manual clock, the way they
+     * drive {@link #admitWaiters()}.
+     * <ul>
+     *   <li>Not open, or a probe already in flight: nothing.</li>
+     *   <li>Not yet due on this budget's clock: re-arm for the remainder.</li>
+     *   <li>Answered and <b>not</b> a block — any status, the gateway's own JSON error included:
+     *       <b>closed</b>, one INFO line, gauge to 0, and an admission pass.</li>
+     *   <li>Answered with a block: stays open for another interval, one WARN line,
+     *       {@code gateway_edge_blocks_total{endpoint="circuit-probe"}}.</li>
+     *   <li>No answer at all (connect failure, timeout) or no probe bound: stays open. Not hearing
+     *       from the edge is not evidence it stopped refusing us.</li>
+     * </ul>
+     * The probe is stamped with {@code count("circuit-probe")} — unconditionally, because it is an
+     * HTTP GET and not an upgrade (A5.3, A29.5).
+     */
+    void runCircuitProbe() {
+        CircuitProbe probe = circuitProbe;
+        lock.lock();
+        try {
+            if (!circuitOpen.get() || probeInFlight) {
+                return;
+            }
+            long now = nanos.getAsLong();
+            if (now - nextProbeAtNanos < 0) {
+                scheduleProbeLocked(now);
+                return;
+            }
+            if (probe == null) {
+                nextProbeAtNanos = now + settings.blockProbeInterval().toNanos();
+                scheduleProbeLocked(now);
+            } else {
+                probeInFlight = true;
+            }
+        } finally {
+            lock.unlock();
+        }
+        if (probe == null) {
+            log.warn("env {} ({}): Cloudflare edge block — no clearance probe is bound for this "
+                            + "environment (its apiGateway was never seen), so the circuit stays open; "
+                            + "restarting bot-manager is the way to close it",
+                    environmentId, environmentName);
+            return;
+        }
+
+        count("circuit-probe");
+        CircuitProbe.Answer answer = null;
+        String failure = null;
+        try {
+            answer = probe.probe();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            failure = "interrupted";
+        } catch (Exception e) {
+            failure = e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage());
+        }
+
+        boolean closed = false;
+        Duration openFor = Duration.ZERO;
+        String rayForLog;
+        List<Runnable> deferred = new ArrayList<>();
+        lock.lock();
+        try {
+            probeInFlight = false;
+            long now = nanos.getAsLong();
+            if (answer != null && !answer.verdict().edgeBlock()) {
+                circuitOpen.set(false);
+                closed = true;
+                openFor = Duration.ofNanos(Math.max(0L, now - circuitOpenedAtNanos));
+                circuitCfRay = null;
+                if (probeTimer != null) {
+                    probeTimer.cancel(false);
+                    probeTimer = null;
+                }
+                admitWaitersLocked(now, deferred);
+            } else {
+                if (answer != null && answer.verdict().cfRay() != null) {
+                    circuitCfRay = answer.verdict().cfRay();
+                }
+                nextProbeAtNanos = now + settings.blockProbeInterval().toNanos();
+                scheduleProbeLocked(now);
+            }
+            rayForLog = circuitCfRay;
+        } finally {
+            lock.unlock();
+            runAfterUnlock(deferred);
+        }
+
+        if (closed) {
+            log.info("env {} ({}): Cloudflare edge block cleared — clearance probe answered HTTP {}; "
+                            + "circuit closed after {}",
+                    environmentId, environmentName, answer.status(), openFor);
+            reportThrottleState();
+        } else if (answer != null) {
+            edgeBlockCounters.get(GatewayEndpoint.CIRCUIT_PROBE).increment();
+            log.warn("env {} ({}): Cloudflare edge block still in force — clearance probe refused "
+                            + "(HTTP {}, cf-ray {}); next probe in {}",
+                    environmentId, environmentName, answer.status(),
+                    rayForLog == null ? "-" : rayForLog, settings.blockProbeInterval());
+        } else {
+            log.warn("env {} ({}): Cloudflare clearance probe got no answer ({}); the circuit stays "
+                            + "open, next probe in {}",
+                    environmentId, environmentName, failure, settings.blockProbeInterval());
+        }
+    }
+
     // ------------------------------------------------------------------ declared demand
 
     @Override
@@ -1374,6 +1691,9 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         try {
             if (wakeUp != null) {
                 wakeUp.cancel(false);
+            }
+            if (probeTimer != null) {
+                probeTimer.cancel(false);
             }
         } finally {
             lock.unlock();

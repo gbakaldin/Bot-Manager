@@ -188,6 +188,19 @@ public class RecordingGatewayBudget implements GatewayBudget {
         counted.add(reason);
     }
 
+    /** Every {@link #reportEdgeBlock} call, as {@code endpoint|cfRay}. */
+    private final List<String> edgeBlocks = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /** Records the block and returns normally — i.e. behaves like an observe-mode budget. */
+    @Override
+    public void reportEdgeBlock(GatewayEndpoint endpoint, String cfRay) {
+        edgeBlocks.add(endpoint.tag() + "|" + cfRay);
+    }
+
+    public List<String> edgeBlocks() {
+        return List.copyOf(edgeBlocks);
+    }
+
     /** Only the probe stamps that went through the WS-aware twin (A5.3). */
     public List<String> countedWsUpgrades() {
         return List.copyOf(countedWsUpgrades);

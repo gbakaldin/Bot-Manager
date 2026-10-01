@@ -39,8 +39,8 @@ import java.util.concurrent.Callable;
  * manually"), so an <b>open circuit refuses every tier</b> rather than parking any of them.
  * Parking on a block is parking a bot thread for a day, and a start that parks forever inside
  * the budget is exactly how {@code FOLLOWUPS.md} P13's attempt stays open for the life of the
- * JVM. The circuit itself lands in Phase 5; the refusal path is here from Phase 3 so the two
- * cannot be designed apart.
+ * JVM. The refusal path shipped in Phase 3; Phase 5 supplies the trigger,
+ * {@link #reportEdgeBlock}.
  * <p>
  * <b>Where the wait will happen matters.</b> {@link #execute} parks the <em>caller's</em>
  * thread. Group-start callers and reconnect loops are virtual threads, where parking is the
@@ -181,6 +181,33 @@ public interface GatewayBudget {
      * HTTP GET and keeps the unconditional form.
      */
     void countWsUpgrade(String reason);
+
+    /**
+     * Report that a request this budget admitted was answered by a <b>Cloudflare edge block</b>
+     * ({@link CloudflareBlockDetector}) — the trigger of AD-13's circuit breaker.
+     * <p>
+     * Called from inside the admitted call, after the response exists and <b>before</b> anything
+     * parses it, by the two places a gateway answer is first seen: {@code ApiGatewayClient}'s
+     * {@code httpCall} (every HTTP request, the login included) and {@code Bot}'s WebSocket upgrade.
+     * The request was really sent and stays stamped; what changes is everything after it.
+     * <ul>
+     *   <li><b>{@code enforce}</b>: the circuit opens if it was closed (one ERROR line, gauge to 1,
+     *       every queued request refused), and this method <b>throws</b>
+     *       {@code GatewayCircuitOpenException} — the detecting request fails as a budget outcome,
+     *       which AD-9 makes non-terminal for the bot, rather than as a parse error about an HTML
+     *       page. While open, every tier is refused (A16.2) and one clearance probe is issued per
+     *       {@code block-probe-interval}; only an answered probe closes it.</li>
+     *   <li><b>{@code observe}</b>: the block is counted and a throttled WARN says what enforce would
+     *       have done; this method <b>returns normally</b>, so the caller proceeds exactly as it
+     *       did before Phase 5. Observe never opens a circuit (AD-23).</li>
+     * </ul>
+     * Abstract on purpose, like {@link #observeModePacing()}: a budget that silently ignored a
+     * block would be the one implementation where a brand-wide outage keeps being fed.
+     *
+     * @param endpoint which kind of request met the block — a bounded label, never a URL
+     * @param cfRay    the block page's {@code cf-ray}, or {@code null} if it sent none
+     */
+    void reportEdgeBlock(GatewayEndpoint endpoint, String cfRay);
 
     /**
      * Declare demand up front (AD-7): {@code permits} requests of {@code tier} are about to

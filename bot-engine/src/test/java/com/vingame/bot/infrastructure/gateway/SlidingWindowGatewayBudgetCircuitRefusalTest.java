@@ -37,11 +37,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * or {@code DELETE} behind it, for up to a day. That is {@code FOLLOWUPS.md} P13 at fleet scale.
  * <p>
  * Phase 3 implemented the refusal deliberately ahead of the detector that triggers it, "so the two
- * are not designed apart". But {@code circuitOpen} is a private {@link AtomicBoolean} that nothing
- * yet writes, so <b>every branch guarding it shipped with no test reaching it</b>: the whole of
- * A16.2 rested on reading the source. The flag is flipped here through reflection, which is the
- * only seam available and is worth using — the alternative is that Phase 5 inherits four untested
- * branches and discovers on staging whether ESSENTIAL parks on a block.
+ * are not designed apart", and this file reached it through reflection because nothing yet wrote
+ * the flag. Phase 5 supplied the trigger, so the circuit is now opened the way production opens it
+ * — {@link SlidingWindowGatewayBudget#reportEdgeBlock} — except in the observe-mode test, where
+ * the whole point is that the trigger opens nothing and the flag is forced to prove that the
+ * refusal path is gated on the mode as well. The state machine around it (probes, closing) is
+ * {@code GatewayCircuitBreakerTest}.
  * <p>
  * Nothing here sleeps and nothing here can reach a socket: the calls are lambdas returning
  * constants, and the {@link Timeout} is the assertion of last resort — <b>if a tier ever parks on
@@ -74,12 +75,19 @@ class SlidingWindowGatewayBudgetCircuitRefusalTest {
         return new SlidingWindowGatewayBudget("env-1", "Staging", "116", settings, registry, clock::get);
     }
 
-    /**
-     * Flip the circuit the way Phase 5's {@code reportEdgeBlock} will. Reflection is the only
-     * seam: the field is private and nothing writes it yet, which is precisely why these branches
-     * were unreached.
-     */
+    /** Open the circuit the way production does: a detected edge block under enforce. */
     private static void openCircuit(SlidingWindowGatewayBudget budget) {
+        assertThatThrownBy(() -> budget.reportEdgeBlock(GatewayEndpoint.LOGIN, "test-ray-HKG"))
+                .as("under enforce the detecting request is itself refused")
+                .isInstanceOf(GatewayCircuitOpenException.class);
+        assertThat(budget.snapshot().circuitOpen()).isTrue();
+    }
+
+    /**
+     * Force the flag. Only for observe mode, where {@link #openCircuit} by design opens nothing —
+     * the test there is that even a forced flag refuses nothing.
+     */
+    private static void forceCircuitFlag(SlidingWindowGatewayBudget budget) {
         AtomicBoolean flag = (AtomicBoolean) ReflectionTestUtils.getField(budget, "circuitOpen");
         assertThat(flag).as("the circuit flag is where the refusal path reads it").isNotNull();
         flag.set(true);
@@ -234,7 +242,7 @@ class SlidingWindowGatewayBudgetCircuitRefusalTest {
         // request must still go out.
         SlidingWindowGatewayBudget observing = enforcing(GatewayBudgetSettings.defaults(), new SimpleMeterRegistry());
         try {
-            openCircuit(observing);
+            forceCircuitFlag(observing);
             assertThat(observing.execute(RequestTier.ESSENTIAL, SCOPE, () -> "sent")).isEqualTo("sent");
             observing.run(RequestTier.DEFAULT, SCOPE, () -> { });
             observing.runWsUpgrade(RequestTier.PRIORITIZED, SCOPE, () -> { });

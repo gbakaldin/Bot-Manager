@@ -6,6 +6,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -37,7 +40,15 @@ import java.util.function.LongSupplier;
 @Component
 public class GatewayBudgetRegistry {
 
+    /** The clearance probe's request (AD-13). Anonymous: the token is literally {@code probe}. */
+    static final String CLEARANCE_PROBE_PATH = "/gwms/v1/verifytoken.aspx?token=probe&fg=probe";
+    /** The house bound on one gateway round trip — {@code ApiGatewayClient}'s, repeated. */
+    private static final java.time.Duration PROBE_TIMEOUT = java.time.Duration.ofSeconds(10);
+    private static final String PROBE_USER_AGENT = "PostmanRuntime/7.15.2";
+
     private final ConcurrentHashMap<String, SlidingWindowGatewayBudget> budgets = new ConcurrentHashMap<>();
+    /** Built on first use by {@link #probeClient()}. */
+    private volatile HttpClient probeClient;
     /** Gateway host -> the environment ids that send to it. See {@code recordGatewayHost}. */
     private final ConcurrentHashMap<String, Set<String>> environmentsByGatewayHost = new ConcurrentHashMap<>();
     /** Hosts already warned about, so the WARN is once per host per JVM and not once per call. */
@@ -133,12 +144,88 @@ public class GatewayBudgetRegistry {
     public GatewayBudget forEnvironment(String environmentId, String environmentName,
                                         String productCode, String apiGatewayUrl) {
         recordGatewayHost(environmentId, apiGatewayUrl);
-        return budgets.computeIfAbsent(budgetKey(environmentId, apiGatewayUrl), key -> {
+        SlidingWindowGatewayBudget budget = budgets.computeIfAbsent(budgetKey(environmentId, apiGatewayUrl), key -> {
             log.debug("Creating gateway request budget for environment {} ({}, product {})",
                     environmentId, environmentName, productCode);
             return new SlidingWindowGatewayBudget(
                     environmentId, environmentName, productCode, settings, meterRegistry, nanos);
         });
+        // Bound on every call that knows the gateway, not only at creation: the WS probe scheduler
+        // can create an environment's budget first (it has no apiGateway to offer), and an
+        // environment whose apiGateway is edited gets its clients rebuilt through here.
+        CircuitProbe probe = clearanceProbe(apiGatewayUrl);
+        if (probe != null) {
+            budget.bindCircuitProbe(probe);
+        }
+        return budget;
+    }
+
+    /**
+     * The anonymous clearance request for one gateway (AD-13):
+     * {@code GET <apiGateway>/gwms/v1/verifytoken.aspx?token=probe&fg=probe}, classified by
+     * {@link CloudflareBlockDetector}. No account, no token, no body; the gateway's own JSON error
+     * for an unknown token is the expected "cleared" answer.
+     * <p>
+     * <b>This registry owns the probe's {@link HttpClient}</b> — AD-21 names it as one of the three
+     * classes allowed to — and builds it lazily, on the first probe: a JDK client owns a
+     * {@code SelectorManager} platform thread, and an instance that never sees a block should not
+     * pay for one, nor should every test that builds a registry.
+     *
+     * @return {@code null} when there is no usable URL, in which case nothing is bound
+     */
+    private CircuitProbe clearanceProbe(String apiGatewayUrl) {
+        if (apiGatewayUrl == null || apiGatewayUrl.isBlank()) {
+            return null;
+        }
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(apiGatewayUrl.trim() + CLEARANCE_PROBE_PATH);
+        } catch (IllegalArgumentException e) {
+            log.debug("No clearance probe for gateway '{}': {}", apiGatewayUrl, e.getMessage());
+            return null;
+        }
+        return () -> {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(uri)
+                    .header("Cache-Control", "no-cache")
+                    .header("User-Agent", PROBE_USER_AGENT)
+                    .GET()
+                    .timeout(PROBE_TIMEOUT)
+                    .build();
+            HttpResponse<String> response = probeClient().send(request, HttpResponse.BodyHandlers.ofString());
+            return new CircuitProbe.Answer(response.statusCode(), CloudflareBlockDetector.classify(response));
+        };
+    }
+
+    private HttpClient probeClient() {
+        HttpClient client = probeClient;
+        if (client == null) {
+            synchronized (this) {
+                client = probeClient;
+                if (client == null) {
+                    client = HttpClient.newBuilder()
+                            .connectTimeout(PROBE_TIMEOUT)
+                            .followRedirects(HttpClient.Redirect.NEVER)
+                            .build();
+                    probeClient = client;
+                }
+            }
+        }
+        return client;
+    }
+
+    /**
+     * Whether {@code environmentId}'s circuit is open, <b>without creating a budget</b> — read by
+     * the recovery reconciler and the environment WS probe, both of which must stand down while
+     * the edge is refusing this host (A15.4, A29.2). An environment with no budget has sent
+     * nothing, so it cannot have been blocked.
+     */
+    public boolean isCircuitOpen(String environmentId) {
+        if (environmentId == null) {
+            return false;
+        }
+        GatewayBudget budget = budgets.get(environmentId);
+        return budget != null && budget.snapshot().circuitOpen();
     }
 
     /**

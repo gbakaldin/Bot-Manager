@@ -296,6 +296,11 @@ class BotGroupBehaviorServiceReservationTest {
         }
 
         @Override
+        public void reportEdgeBlock(com.vingame.bot.infrastructure.gateway.GatewayEndpoint endpoint,
+                                    String cfRay) {
+        }
+
+        @Override
         public void cancelScope(String botGroupId) {
         }
 
