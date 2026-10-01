@@ -630,6 +630,28 @@ groups:
           summary: "Cloudflare is blocking this host on env {{ $labels.environmentId }} (product {{ $labels.product }}) — the gateway circuit is open"
           description: "Bots on this brand cannot log in, re-auth, deposit or reconnect: bot-manager detected Cloudflare's 403 block page and stopped sending to this gateway. There is no automatic recovery inside ~24 h — the block may need manual clearing. Raise an SA/back-office ticket quoting the cf-ray from the 'Cloudflare edge block on …, cf-ray …' ERROR line in Loki. The circuit closes by itself within an hour of the block being lifted (one anonymous clearance probe per hour); docker compose restart bot-manager closes it immediately. Before restarting, find what drove the window (gateway_budget_requests_total by tier, a large start, a reconnect storm, or scripts/bulk-create-accounts.py run from this host) or it will happen again."
 
+      # A32.3 S2. GatewayEdgeBlocked reads the circuit, and a circuit only opens under enforce — so
+      # on a box in mode=observe (prod until Phase 6, unpaced, and where the one real block
+      # happened) a block was visible only as a throttled WARN. This reads the edge-block counter,
+      # which counts in BOTH modes and is pre-registered at zero per endpoint, so increase() fires
+      # on the first block page.
+      #
+      # `endpoint!="circuit-probe"`: the clearance probe is the one request expected to meet a
+      # standing block, hourly, under enforce only; it is not news. `and on (environmentId)
+      # gateway_circuit_open == 0`: under enforce the first block opens the circuit in the same
+      # instant, so GatewayEdgeBlocked owns that page and this one stays quiet — no double page.
+      # Same audience and severity as GatewayEdgeBlocked: the brand's bots are being refused.
+      - alert: GatewayEdgeBlockObserved
+        expr: (sum by (environmentId, product) (increase(gateway_edge_blocks_total{endpoint!="circuit-probe"}[5m])) > 0) and on (environmentId) gateway_circuit_open == 0
+        for: 1m
+        labels:
+          job: bot-manager
+          severity: critical
+          audience: product
+        annotations:
+          summary: "Cloudflare is returning its block page to this host on env {{ $labels.environmentId }} (product {{ $labels.product }}) — no circuit is open, traffic is still going out"
+          description: "bot-manager has seen Cloudflare's 403 block page and, because this box runs mode=observe (or the circuit has not opened), it is still sending every request into the block — which is what keeps a block alive. Bots on this brand cannot log in, re-auth, deposit or reconnect, and there is no automatic recovery inside ~24 h. STOP THE TRAFFIC to this brand first: stop its groups (POST /api/v1/bot-group/{id}/stop) or switch the box to GATEWAY_BUDGET_MODE=enforce so the circuit refuses it; stop any scripts/bulk-create-accounts.py run from this host. Then raise an SA/back-office ticket quoting the cf-ray from the 'Cloudflare edge block on …, mode=observe' WARN line in Loki. gateway_edge_blocks_total by endpoint says which requests met it."
+
       # A16.4's second rule: the same fact, still true two hours later. The only signal that
       # separates a rate-limit blip from a block that is not going away (a rule change, or a block
       # that needs a human on the Cloudflare side) and therefore needs escalating, not waiting out.

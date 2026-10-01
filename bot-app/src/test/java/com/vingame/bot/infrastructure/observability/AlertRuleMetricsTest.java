@@ -360,6 +360,29 @@ class AlertRuleMetricsTest {
     }
 
     @Test
+    @DisplayName("an edge block pages under observe too, and does not double-page with GatewayEdgeBlocked")
+    void anObservedEdgeBlockIsAlertedWithoutDoublePaging() {
+        // A32.3 S2. GatewayEdgeBlocked reads gateway_circuit_open, which only moves under enforce;
+        // prod runs observe until Phase 6. This pins the companion rule's three load-bearing parts.
+        Rule rule = rules().stream()
+                .filter(r -> "GatewayEdgeBlockObserved".equals(r.name()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("GatewayEdgeBlockObserved is not in alerts.yml — "
+                        + "an observe-mode box would have no block alert at all"));
+
+        assertThat(rule.expr())
+                .as("reads the counter that counts in both modes, minus the hourly clearance probe")
+                .contains("increase(gateway_edge_blocks_total{endpoint!=\"circuit-probe\"}")
+                .as("scoped to a closed circuit, so GatewayEdgeBlocked owns the enforce page")
+                .contains("and on (environmentId) gateway_circuit_open == 0");
+        assertThat(rule.labels()).containsEntry("severity", "critical").containsEntry("audience", "product");
+        assertThat(scrapedLabelValues("gateway_edge_blocks_total", "endpoint"))
+                .as("pre-registered at zero, so increase() fires on the FIRST block page")
+                .contains("login", "verifytoken", "ws-upgrade", "circuit-probe");
+        assertThat(isExposed("gateway_circuit_open")).isTrue();
+    }
+
+    @Test
     @DisplayName("MetaspaceGrowth is gated on JVM uptime, so it cannot fire on the boot ramp")
     void metaspaceGrowthCarriesItsUptimeGate() {
         // PLUGIN_HOT_RELOAD Amendment A3. Without the gate this rule is continuously true
