@@ -125,4 +125,56 @@ class SlidingWindowGatewayBudgetWaiterMdcTest {
                 .as("restored, not cleared — the admitting thread may be in its own group's start")
                 .isEqualTo("group-other");
     }
+
+    @Test
+    @DisplayName("under SCOPED debug (logger at INFO, only the waiter's group armed) the line is still emitted")
+    void theWaitersLineSurvivesScopedDebug() throws Exception {
+        // review-phase5. ScopedDebugFilter decides from the CALLING thread's MDC. The level check used
+        // to run before the waiter's MDC was put on, i.e. under the admitting thread's context — here
+        // another group's, which is not armed — so the line was filtered out entirely.
+        loggerConfig.setLevel(Level.INFO);
+        com.vingame.bot.common.logging.ScopedDebugRegistry scopes = new com.vingame.bot.common.logging.ScopedDebugRegistry();
+        scopes.enable("group-waiter", Duration.ofMinutes(5));
+        com.vingame.bot.common.logging.ScopedDebugFilter filter = new com.vingame.bot.common.logging.ScopedDebugFilter(scopes);
+        filter.start();
+        ctx.getConfiguration().addFilter(filter);
+        ctx.updateLoggers();
+        try {
+            GatewayRequestScope scope = GatewayRequestScope.forBot("group-waiter", "bot-w", () -> false);
+            for (int i = 0; i < 900; i++) {
+                budget.execute(RequestTier.ESSENTIAL, scope, () -> "fill");
+            }
+            CountDownLatch done = new CountDownLatch(1);
+            Thread.ofVirtual().start(() -> {
+                BotMdc.setGroupContext("group-waiter", "env-1", "116");
+                try {
+                    budget.execute(RequestTier.ESSENTIAL, scope, () -> "queued", Duration.ofSeconds(20));
+                } catch (Exception e) {
+                    throw new AssertionError(e);
+                } finally {
+                    MDC.clear();
+                    done.countDown();
+                }
+            });
+            for (int i = 0; i < 400 && budget.snapshot().queuedEssential() < 1; i++) {
+                Thread.sleep(5);
+            }
+            events.clear();
+
+            BotMdc.setGroupContext("group-other", "env-1", "116");
+            clock.set(Duration.ofMinutes(5).toNanos() + 1);
+            budget.admitWaiters();
+
+            assertThat(done.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(events.stream()
+                    .filter(e -> e.getLoggerName().equals(LOGGER))
+                    .filter(e -> e.getMessage().getFormattedMessage().contains("admitted ESSENTIAL request"))
+                    .map(e -> e.getContextData().<String>getValue(BotMdc.BOT_GROUP_ID)))
+                    .as("the scoped group's admission line reaches the appender, tagged with that group")
+                    .containsExactly("group-waiter");
+        } finally {
+            ctx.getConfiguration().removeFilter(filter);
+            ctx.updateLoggers();
+        }
+    }
 }

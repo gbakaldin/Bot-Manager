@@ -1022,19 +1022,25 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
                                 Map<String, String> mdc) {
         waitTimers.get(tier).record(waitedNanos, TimeUnit.NANOSECONDS);
         counter(tier, OUTCOME_ADMITTED).increment();
-        if (log.isDebugEnabled()) {
-            Map<String, String> running = mdc == null ? null : BotMdc.snapshot();
-            if (mdc != null) {
-                BotMdc.restore(mdc);
-            }
-            try {
+        // The waiter's MDC goes on BEFORE the level check, not after (review-phase5). Scoped
+        // per-group DEBUG (ScopedDebugFilter) decides from the calling thread's context, so with the
+        // logger at INFO and the waiter's group scoped to DEBUG, a check made under the admitting
+        // thread's context — the scheduler's (none), or another group's — answered false and the
+        // line was never emitted: the fix only worked under global DEBUG, i.e. not in the case its
+        // own javadoc names. The swap costs two small map copies per admitted waiter.
+        Map<String, String> running = mdc == null ? null : BotMdc.snapshot();
+        if (mdc != null) {
+            BotMdc.restore(mdc);
+        }
+        try {
+            if (log.isDebugEnabled()) {
                 log.debug("gateway budget: admitted {} request for {} — window {}/{}, waited {}ms",
                         tier, describe(scope), windowRequests(), settings.hardCap(),
                         TimeUnit.NANOSECONDS.toMillis(waitedNanos));
-            } finally {
-                if (mdc != null) {
-                    BotMdc.restore(running);
-                }
+            }
+        } finally {
+            if (mdc != null) {
+                BotMdc.restore(running);
             }
         }
     }
