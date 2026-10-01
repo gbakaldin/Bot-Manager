@@ -647,6 +647,68 @@ class RegistrationWorkerTest {
                 .contains("account 1 of 5");
     }
 
+    @Test
+    @DisplayName("a response that is not JSON is a refusal with the 3-attempt budget, not a transport failure")
+    void aNonJsonAnswerIsNotATransportFailure() throws Exception {
+        // review-phase4-fixround S3. Jackson's parse exceptions ARE IOExceptions, so an HTML page
+        // from the edge or an origin used to be charged as "we could not ask": ten retries against
+        // something refusing us, and an error that pointed the operator at the network. Both shapes
+        // the client produces: the bare parse failure registerOne declares, and the RuntimeException
+        // the naming path wraps it in.
+        pending(group(5, 0, 0));
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenThrow(new com.fasterxml.jackson.core.JsonParseException(null,
+                        "Unexpected character ('<' (code 60)): expected a valid value"));
+
+        for (int i = 0; i < 3; i++) {
+            worker.tick();
+            setBackoffElapsed();
+        }
+
+        assertThat(lastValue("registrationState"))
+                .as("max-attempts-per-user=3: the gateway answered, so the answer's budget applies")
+                .isEqualTo(RegistrationState.FAILED);
+        assertThat(lastValue("registrationError")).asString()
+                .contains("3 attempts")
+                .doesNotContain("transport");
+    }
+
+    @Test
+    @DisplayName("a wrapped non-JSON answer is classified the same way")
+    void aWrappedNonJsonAnswerIsNotATransportFailure() throws Exception {
+        pending(group(5, 0, 0));
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenThrow(new RuntimeException("Failed to set display name: x",
+                        new com.fasterxml.jackson.core.JsonParseException(null, "Unexpected character ('<')")));
+
+        for (int i = 0; i < 3; i++) {
+            worker.tick();
+            setBackoffElapsed();
+        }
+
+        assertThat(lastValue("registrationState")).isEqualTo(RegistrationState.FAILED);
+    }
+
+    @Test
+    // SEPARATE_THREAD: a regression here is a busy loop, which an interrupt cannot stop, so the
+    // default same-thread timeout would hang the build instead of failing it (measured).
+    @org.junit.jupiter.api.Timeout(value = 10, unit = java.util.concurrent.TimeUnit.SECONDS,
+            threadMode = org.junit.jupiter.api.Timeout.ThreadMode.SEPARATE_THREAD)
+    @DisplayName("a cause cycle does not hang the registration thread")
+    void aCauseCycleTerminates() throws Exception {
+        // review-phase4-fixround: getCause() returns null only for a SELF-cause, so A -> B -> A
+        // (possible through initCause) used to spin the JVM's only registration thread forever.
+        RuntimeException a = new RuntimeException("a");
+        RuntimeException b = new RuntimeException("b", a);
+        a.initCause(b);
+        pending(group(5, 0, 0));
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any())).thenThrow(a);
+
+        worker.tick();
+
+        assertThat(notBeforeOf(GROUP)).as("classified and backed off, i.e. it returned").isNotNull();
+    }
+
     /**
      * Pretend the backoff (or the budget deferral) has elapsed, so the next tick reconsiders the
      * group.

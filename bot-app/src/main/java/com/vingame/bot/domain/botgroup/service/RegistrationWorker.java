@@ -696,18 +696,36 @@ public class RegistrationWorker {
      * The chain is walked because {@code ApiGatewayClient} wraps its own
      * {@code IOException}/{@code HttpTimeoutException} in a {@code RuntimeException} on the naming
      * path, so the top-level type says nothing.
+     * <p>
+     * <b>A body that is not JSON is an answer, not a transport failure</b>
+     * (review-phase4-fixround S3). Jackson's parse exceptions extend {@code IOException}, so an
+     * HTML 502 page, an allow-list 401 page or a Cloudflare challenge page — the gateway, or the
+     * edge in front of it, <em>did</em> answer — used to read as "we could not ask": ten retries
+     * instead of three against something refusing us, and a {@code registrationError} that sent
+     * the operator to the network. Checked per cause, ahead of the {@code IOException} test, for
+     * exactly that subclass relationship. (Under {@code enforce} a Cloudflare block page never gets
+     * this far: {@code ApiGatewayClient.httpCall} turns it into an open circuit, which defers.)
+     * <p>
+     * Bounded and cycle-safe: {@code getCause()} returns {@code null} only for a self-cause, so a
+     * two-element cycle built with {@code initCause} used to spin the JVM's only registration
+     * thread forever.
      */
     private static boolean isTransportFailure(Throwable failure) {
-        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+        Set<Throwable> seen = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        for (Throwable cause = failure; cause != null && seen.size() < MAX_CAUSE_DEPTH && seen.add(cause);
+             cause = cause.getCause()) {
+            if (cause instanceof com.fasterxml.jackson.core.JacksonException) {
+                return false;
+            }
             if (cause instanceof java.io.IOException) {
                 return true;
-            }
-            if (cause.getCause() == cause) {
-                return false;
             }
         }
         return false;
     }
+
+    /** How far {@link #isTransportFailure} walks a cause chain. */
+    private static final int MAX_CAUSE_DEPTH = 16;
 
     private void persistProgress(String id, int registered, int named) {
         // A targeted $set rather than repository.save(group), deliberately: the worker holds a
