@@ -289,6 +289,78 @@ class SlidingWindowGatewayBudgetCircuitRefusalTest {
     }
 
     @Test
+    @DisplayName("a waiter refused by the circuit at its own timeout instant is NOT sent (review-phase5 bug)")
+    void aWaiterRefusedAtItsTimeoutInstantIsNotSent() throws Exception {
+        // The race: the waiter's bounded get() times out, and before it can take the lock in
+        // dequeue(), reportEdgeBlock's pass takes it and refuses (removes) the waiter. dequeue()
+        // then answers false, which used to be read as "admitted" — so the request went out,
+        // unstamped, into the block. The scope predicate is consulted by that pass UNDER the lock,
+        // which is the seam that holds the lock open across the timeout.
+        fill500Default();
+        java.util.concurrent.atomic.AtomicBoolean armed = new java.util.concurrent.atomic.AtomicBoolean();
+        CountDownLatch passHoldsTheLock = new CountDownLatch(1);
+        CountDownLatch releasePass = new CountDownLatch(1);
+        GatewayRequestScope holding = GatewayRequestScope.forBot("group-1", "bot-race", () -> {
+            if (armed.get()) {
+                passHoldsTheLock.countDown();
+                try {
+                    releasePass.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return false;
+        });
+        AtomicBoolean sent = new AtomicBoolean();
+        AtomicReference<Throwable> outcome = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(1);
+        Thread.ofVirtual().name("timing-out-waiter").start(() -> {
+            try {
+                budget.execute(RequestTier.DEFAULT, holding, () -> {
+                    sent.set(true);
+                    return "sent";
+                }, Duration.ofMillis(300));
+            } catch (Throwable t) {
+                outcome.set(t);
+            } finally {
+                done.countDown();
+            }
+        });
+        for (int i = 0; i < 400 && budget.snapshot().queuedDefault() < 1; i++) {
+            Thread.sleep(5);
+        }
+        assertThat(budget.snapshot().queuedDefault()).isEqualTo(1);
+
+        armed.set(true);
+        Thread opener = Thread.ofVirtual().start(() -> {
+            try {
+                budget.reportEdgeBlock(GatewayEndpoint.LOGIN, "race-ray");
+            } catch (GatewayCircuitOpenException expected) {
+                // the detecting request is refused
+            }
+        });
+        assertThat(passHoldsTheLock.await(5, TimeUnit.SECONDS)).isTrue();
+        // Let the waiter's 300 ms wait expire while the pass holds the lock, so its dequeue()
+        // queues behind the pass that is about to refuse it.
+        Thread.sleep(800);
+        releasePass.countDown();
+        opener.join(5_000);
+
+        assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(sent)
+                .as("a request the circuit refused must never leave the JVM")
+                .isFalse();
+        assertThat(outcome.get()).isInstanceOf(GatewayCircuitOpenException.class);
+        assertThat(budget.windowRequests()).isEqualTo(500);
+    }
+
+    private void fill500Default() throws Exception {
+        for (int i = 0; i < 500; i++) {
+            budget.execute(RequestTier.DEFAULT, SCOPE, () -> "fill");
+        }
+    }
+
+    @Test
     @DisplayName("observe mode refuses nothing, even with the circuit open")
     void observeModeNeverRefusesOnACircuit() throws Exception {
         // The mode is an environment variable and `observe` is the shipped default, so a box that

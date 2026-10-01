@@ -638,10 +638,22 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             return true;
         } catch (TimeoutException e) {
             if (!dequeue(waiter)) {
-                // Admitted in the instant between the timeout firing and the lock: the stamp
-                // is already taken, so reporting a timeout here would make the counter and
-                // the window disagree — and the request really is going out.
-                return true;
+                // Someone else removed it in the instant between the timeout firing and the lock —
+                // and "someone else" is NOT necessarily admission (review-phase5 bug). Since the
+                // circuit-open pass refuses queued waiters, and cancellation (the pass and
+                // cancelScope) removes them, there are three removers, and two of them mean "do
+                // not send". Reading `false` as "admitted" sent a refused request, unstamped, into
+                // an edge that had just been seen blocking us — or a WS upgrade for a stopped bot
+                // (AD-8). Every remover puts this waiter's completion in its deferred list, which
+                // runs right after it unlocks, so the outcome is about to exist: wait for it and
+                // honour it. Admitted is still "true" — the stamp is taken and the request goes out.
+                try {
+                    waiter.admitted.get();
+                    return true;
+                } catch (ExecutionException removed) {
+                    reportThrottleState();
+                    return refusedOutcome(removed, soft);
+                }
             }
             counter(waiter.tier, OUTCOME_TIMEOUT).increment();
             recordWait(waiter);
@@ -660,17 +672,26 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             // open circuit refusing the queued waiter (admitWaitersLocked, A16.2).
             dequeue(waiter);
             reportThrottleState();
-            if (soft && e.getCause() instanceof GatewayCircuitOpenException) {
-                // A soft caller is told "no" the same way on both paths: the arrival path returns
-                // false for an open circuit, so a waiter refused by one must too, or a drift read
-                // on a message-processor thread would see an exception the arrival path hides.
-                return false;
-            }
-            if (e.getCause() instanceof RuntimeException runtime) {
-                throw runtime;
-            }
-            throw new IllegalStateException("unexpected gateway budget waiter failure", e.getCause());
+            return refusedOutcome(e, soft);
         }
+    }
+
+    /**
+     * What a waiter that was removed without being admitted tells its caller: {@code false} for a
+     * soft caller refused by an open circuit, the remover's exception otherwise. Shared by the
+     * {@code ExecutionException} arm and the timeout arm's lost race, so the two cannot disagree.
+     */
+    private boolean refusedOutcome(ExecutionException e, boolean soft) {
+        if (soft && e.getCause() instanceof GatewayCircuitOpenException) {
+            // A soft caller is told "no" the same way on both paths: the arrival path returns
+            // false for an open circuit, so a waiter refused by one must too, or a drift read
+            // on a message-processor thread would see an exception the arrival path hides.
+            return false;
+        }
+        if (e.getCause() instanceof RuntimeException runtime) {
+            throw runtime;
+        }
+        throw new IllegalStateException("unexpected gateway budget waiter failure", e.getCause());
     }
 
     /** Refuse outright if the edge is blocking this host — no tier parks on a block (A16.2). */
