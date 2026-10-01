@@ -133,7 +133,10 @@ public class ApiGatewayClient {
      * <p>
      * The permit is taken <b>inside</b> the budget-admitted call ({@link #httpCall}), never before
      * admission: a request holding a permit while it queued in the budget would let a DEFAULT
-     * read starve an ESSENTIAL one of streams. {@code ApiGatewayClientStreamLimitTest} reproduces
+     * read starve an ESSENTIAL one of streams. The one exception is the AD-10 drift read
+     * ({@link #sendIfAdmitted}), which takes its permit first and <b>without waiting</b>, then
+     * asks the budget with {@code Duration.ZERO}: neither step can park, so neither can starve
+     * anything. {@code ApiGatewayClientStreamLimitTest} reproduces
      * the failure against a loopback HTTP/2 server and pins this value below the RFC floor.
      */
     static final int MAX_IN_FLIGHT_REQUESTS = 32;
@@ -167,6 +170,9 @@ public class ApiGatewayClient {
      */
     private GatewayBudget gatewayBudget = GatewayBudget.UNLIMITED;
 
+    /** The environment the stream meters are tagged with; null until a real budget is wired. */
+    private String metricsEnvironmentId;
+
     @Autowired
     public ApiGatewayClient(DisplayNameService displayNameService, BotMetrics metrics) {
         this.displayNameService = displayNameService;
@@ -188,6 +194,13 @@ public class ApiGatewayClient {
         this.updateFullnamePath = authProfile.updateFullnamePath();
         this.xToken = authProfile.xToken();
         this.loginRequestFactory = authProfile.loginRequestFactory();
+        // A33: in-flight gauge and permit-timeout counter, at zero, the moment the environment's
+        // client exists. Skipped for UNLIMITED (fixtures), which carries no environment.
+        String environmentId = this.gatewayBudget.snapshot().environmentId();
+        if (environmentId != null && metrics != null) {
+            this.metricsEnvironmentId = environmentId;
+            metrics.registerGatewayClientStreams(environmentId, this::inFlightRequests);
+        }
         this.initialized = true;
         log.debug("ApiGatewayClient initialized with gateway: {}, appId: {}", apiGateway, appId);
         return this;
@@ -285,8 +298,11 @@ public class ApiGatewayClient {
      */
     private HttpResponse<String> send(RequestTier tier, GatewayRequestScope scope, HttpRequest request,
                                       Duration maxWait) throws IOException, InterruptedException {
+        // The permit wait shares the caller's deadline (A33 review): budget wait + permit wait <=
+        // maxWait, so the session path's watchdog invariant (Bot.sessionBudgetWait) is unchanged.
+        long deadlineNanos = System.nanoTime() + maxWait.toNanos();
         try {
-            return gatewayBudget.execute(tier, scope, httpCall(request), maxWait);
+            return gatewayBudget.execute(tier, scope, httpCall(request, deadlineNanos), maxWait);
         } catch (IOException | InterruptedException | RuntimeException e) {
             throw e;
         } catch (Exception e) {
@@ -309,13 +325,22 @@ public class ApiGatewayClient {
     private Optional<HttpResponse<String>> sendIfAdmitted(RequestTier tier, GatewayRequestScope scope,
                                                           HttpRequest request)
             throws IOException, InterruptedException {
+        // A33 review: AD-10's "never parks" covers the stream permit too. It is taken BEFORE
+        // admission and without waiting, so a saturated connection answers exactly like a full
+        // window — empty — and, because the budget was never asked, nothing is stamped either.
+        // Holding the permit across tryExecute(ZERO) cannot starve anyone: that call never waits.
+        if (!inFlight.tryAcquire()) {
+            return Optional.empty();
+        }
         try {
-            return gatewayBudget.tryExecute(tier, scope, httpCall(request), Duration.ZERO);
+            return gatewayBudget.tryExecute(tier, scope, () -> sendClassified(request), Duration.ZERO);
         } catch (IOException | InterruptedException | RuntimeException e) {
             throw e;
         } catch (Exception e) {
             throw new IllegalStateException(
                     "Unexpected checked exception from the gateway budget funnel", e);
+        } finally {
+            inFlight.release();
         }
     }
 
@@ -335,35 +360,96 @@ public class ApiGatewayClient {
      * stays stamped either way — it reached the edge.
      */
     private Callable<HttpResponse<String>> httpCall(HttpRequest request) {
+        return httpCall(request, null);
+    }
+
+    /**
+     * @param deadlineNanos the caller's overall deadline ({@link System#nanoTime()} scale), or
+     *                      {@code null} when the caller has none; see {@link #permitWait}
+     */
+    private Callable<HttpResponse<String>> httpCall(HttpRequest request, Long deadlineNanos) {
         return () -> {
-            acquireStream();
+            acquireStream(permitWait(deadlineNanos, System.nanoTime()));
             try {
-                return classified(request, httpClient.send(request, HttpResponse.BodyHandlers.ofString()));
+                return sendClassified(request);
             } finally {
+                // In finally on purpose, and pinned by ApiGatewayClientStreamPermitReleaseTest: a
+                // permit lost on a failure path is lost for the life of the JVM, and after 32 of
+                // them every gateway request on the environment times out.
                 inFlight.release();
             }
         };
     }
 
+    /** The one {@code httpClient.send} — every caller above already holds a stream permit. */
+    private HttpResponse<String> sendClassified(HttpRequest request) throws IOException, InterruptedException {
+        return classified(request, httpClient.send(request, HttpResponse.BodyHandlers.ofString()));
+    }
+
     /**
-     * Wait for one of the {@link #MAX_IN_FLIGHT_REQUESTS} stream permits (A33).
+     * How long a request may wait for a stream permit: {@link #GATEWAY_REQUEST_TIMEOUT}, or less
+     * if the caller has a deadline and less than that is left of it — never negative.
      * <p>
-     * The wait is bounded by {@link #GATEWAY_REQUEST_TIMEOUT}, on top of the request's own
-     * timeout, which is left exactly as it was. Every permit is held by a request that is itself
-     * bounded by that timeout, so a wait this long means the gateway has stopped answering 32
-     * requests in a row. It surfaces as an {@link HttpTimeoutException} — an {@code IOException},
-     * so every caller already treats it as the transport failure it is: the login's IOException
-     * arm, the registration worker's transport attempt (review S3), the balance read's
-     * "Failed to fetch balance". It is not an edge block: only a response is ever classified.
+     * The deadline is what keeps the session path inside the watchdog (A33 review). A
+     * session-path call passes {@code Bot.sessionBudgetWait()} (watchdog / 4) as its
+     * {@code maxWait}; with a separate permit wait on top, the three-call {@code onNewSession}
+     * chain could reach 3 x (45 + 10 + 10 + 0.5) = 196.5 s against a 180 s watchdog. Sharing the
+     * deadline restores 3 x (45 + 10 + 0.5) = 166.5 s: the budget wait and the permit wait
+     * together are at most {@code maxWait}, and the request's own 10 s timeout and
+     * {@code readBalance}'s 500 ms sleep come on top, exactly as before A33.
+     */
+    static Duration permitWait(Long deadlineNanos, long nowNanos) {
+        if (deadlineNanos == null) {
+            return GATEWAY_REQUEST_TIMEOUT;
+        }
+        long left = Math.max(0L, deadlineNanos - nowNanos);
+        return Duration.ofNanos(Math.min(left, GATEWAY_REQUEST_TIMEOUT.toNanos()));
+    }
+
+    /**
+     * Wait up to {@code wait} for one of the {@link #MAX_IN_FLIGHT_REQUESTS} stream permits (A33).
+     * <p>
+     * The wait is at most {@link #GATEWAY_REQUEST_TIMEOUT} (see {@link #permitWait}), on top of
+     * the request's own timeout, which is left exactly as it was. Every permit is held by a
+     * request that is itself bounded by that timeout, so a full wait means the gateway has stopped
+     * answering 32 requests in a row — or our own connection is saturated.
+     * <p>
+     * It surfaces as {@link StreamWaitTimeoutException}, an {@link HttpTimeoutException} and so an
+     * {@code IOException}: the registration worker charges it as a transport attempt (review S3),
+     * a login gets its {@code UpstreamLoginException}, a balance read its "Failed to fetch
+     * balance". It is never an edge block: only a response is ever classified. What it does
+     * <b>not</b> do is count as a gateway failure: {@code bot_login_total{outcome="failure"}} and
+     * {@code bot_verify_token_total{outcome="failure"}} — the inputs to
+     * {@code EnvironmentLoginFailing} / {@code EnvironmentAuthDown} — skip it, because the gateway
+     * was never asked. It is counted in {@link BotMetrics#GATEWAY_CLIENT_STREAM_WAIT_TIMEOUTS_TOTAL}
+     * instead, beside the {@link BotMetrics#GATEWAY_CLIENT_INFLIGHT_REQUESTS} gauge.
      * <p>
      * The request was admitted, and therefore stamped, before this wait; a timed-out wait leaves
      * it stamped and unsent. That over-counts the window, which is the safe direction, and is not
      * a re-send — nothing here sends anything twice.
      */
-    private void acquireStream() throws InterruptedException, HttpTimeoutException {
-        if (!inFlight.tryAcquire(GATEWAY_REQUEST_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
-            throw new HttpTimeoutException("no free gateway stream within " + GATEWAY_REQUEST_TIMEOUT
+    private void acquireStream(Duration wait) throws InterruptedException, HttpTimeoutException {
+        if (!inFlight.tryAcquire(wait.toNanos(), TimeUnit.NANOSECONDS)) {
+            if (metricsEnvironmentId != null) {
+                metrics.incGatewayClientStreamWaitTimeout(metricsEnvironmentId);
+            }
+            throw new StreamWaitTimeoutException("no free gateway stream within " + wait
                     + ": " + MAX_IN_FLIGHT_REQUESTS + " requests already in flight on this environment");
+        }
+    }
+
+    /** Permits in use right now — what {@link BotMetrics#GATEWAY_CLIENT_INFLIGHT_REQUESTS} reads. */
+    int inFlightRequests() {
+        return MAX_IN_FLIGHT_REQUESTS - inFlight.availablePermits();
+    }
+
+    /**
+     * Our own connection had no free stream in time; the gateway was never asked (A33). A distinct
+     * type only so the login and balance-read failure counters can leave it out.
+     */
+    static final class StreamWaitTimeoutException extends HttpTimeoutException {
+        StreamWaitTimeoutException(String message) {
+            super(message);
         }
     }
 
@@ -488,7 +574,10 @@ public class ApiGatewayClient {
             // and the gateway did not answer, so incLogin(false) is correct here and is exactly
             // what must NOT happen on the budget arm below. The contract callers see is
             // unchanged: an UpstreamLoginException, i.e. a RuntimeException.
-            metrics.incLogin(false);
+            if (!(e instanceof StreamWaitTimeoutException)) {
+                // A33: a permit timeout never reached the gateway; it has its own counter.
+                metrics.incLogin(false);
+            }
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
@@ -1085,7 +1174,10 @@ public class ApiGatewayClient {
                 throw new RuntimeException("User: " + username + ": Data array is missing or empty: " + responseBody);
             }
         } catch (IOException | InterruptedException e) {
-            metrics.incVerifyToken(false);
+            if (!(e instanceof StreamWaitTimeoutException)) {
+                // A33: a permit timeout never reached the gateway; it has its own counter.
+                metrics.incVerifyToken(false);
+            }
             throw new RuntimeException("Failed to fetch balance for user: " + username, e);
         } catch (GatewayBudgetException e) {
             if (deferrable && e instanceof com.vingame.bot.common.exception.GatewayCircuitOpenException) {

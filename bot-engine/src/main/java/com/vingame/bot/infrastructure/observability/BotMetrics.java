@@ -69,6 +69,17 @@ public class BotMetrics {
     public static final String BOT_BET_AMOUNT_TOTAL = "bot_bet_amount_total";
     public static final String BOT_LOGIN_TOTAL = "bot_login_total";
     public static final String BOT_VERIFY_TOKEN_TOTAL = "bot_verify_token_total";
+    /**
+     * Stream permits in use on an environment's {@code ApiGatewayClient} (GATEWAY_REQUEST_BUDGET
+     * A33): requests on the wire right now, out of {@code MAX_IN_FLIGHT_REQUESTS}.
+     */
+    public static final String GATEWAY_CLIENT_INFLIGHT_REQUESTS = "gateway_client_inflight_requests";
+    /**
+     * Requests that found no free stream permit in time and failed without being sent (A33). Not in
+     * {@code bot_login_total} / {@code bot_verify_token_total}: the gateway was never asked.
+     */
+    public static final String GATEWAY_CLIENT_STREAM_WAIT_TIMEOUTS_TOTAL =
+            "gateway_client_stream_wait_timeouts_total";
     public static final String BOT_WATCHDOG_EXPIRED_TOTAL = "bot_watchdog_expired_total";
     public static final String BOT_WS_CONNECTIONS_TOTAL = "bot_ws_connections_total";
     public static final String BOT_DEAD_SECONDS_TOTAL = "bot_dead_seconds_total";
@@ -373,6 +384,43 @@ public class BotMetrics {
         Counter.builder(BOT_LOGIN_TOTAL)
                 .tag("outcome", success ? "success" : "failure")
                 .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * Register an environment client's stream meters (A33): the in-flight gauge and the
+     * permit-timeout counter, the latter pre-registered at zero for the reason
+     * {@link #initGroupRecoverySeries} gives. Tagged by {@code environmentId} only — not MDC,
+     * because the client is per environment and the caller is the registry, not a bot.
+     * <p>
+     * A re-created client (environment re-loaded) replaces the old gauge rather than leaving it
+     * bound to a discarded client: Micrometer would otherwise keep answering from the first
+     * registration. The gauge holds the reader strongly for that reason; the replacement is what
+     * releases the old one.
+     */
+    public void registerGatewayClientStreams(String environmentId, java.util.function.IntSupplier inFlight) {
+        Tags tags = Tags.of("environmentId", environmentId);
+        io.micrometer.core.instrument.Gauge old =
+                registry.find(GATEWAY_CLIENT_INFLIGHT_REQUESTS).tags(tags).gauge();
+        if (old != null) {
+            registry.remove(old);
+        }
+        io.micrometer.core.instrument.Gauge.builder(GATEWAY_CLIENT_INFLIGHT_REQUESTS, inFlight, s -> s.getAsInt())
+                .description("Requests on the wire on this environment's gateway client (stream permits in use)")
+                .tags(tags)
+                .strongReference(true)
+                .register(registry);
+        Counter.builder(GATEWAY_CLIENT_STREAM_WAIT_TIMEOUTS_TOTAL)
+                .description("Gateway requests that found no free stream permit in time and were not sent")
+                .tags(tags)
+                .register(registry);
+    }
+
+    /** One request on {@code environmentId}'s client found no free stream permit in time (A33). */
+    public void incGatewayClientStreamWaitTimeout(String environmentId) {
+        Counter.builder(GATEWAY_CLIENT_STREAM_WAIT_TIMEOUTS_TOTAL)
+                .tags("environmentId", environmentId)
                 .register(registry)
                 .increment();
     }
