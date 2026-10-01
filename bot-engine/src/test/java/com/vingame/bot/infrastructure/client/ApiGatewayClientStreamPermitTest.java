@@ -201,4 +201,110 @@ class ApiGatewayClientStreamPermitTest {
                 .isEqualTo(ApiGatewayClient.GATEWAY_REQUEST_TIMEOUT);
         assertThat(ApiGatewayClient.permitWait(now - 1, now)).isEqualTo(Duration.ZERO);
     }
+
+    @Test
+    @DisplayName("FR-1: the drift read does not barge past a request already queued for a stream")
+    void theDriftReadHonoursTheFairQueue() throws Exception {
+        ApiGatewayClient client = client(stub.baseUrl(), new RecordingGatewayBudget());
+        Semaphore permits = permits(client);
+        // One permit free, and a waiter queued ahead of it that needs two: the only stable way to
+        // have a queued predecessor while a permit is available. tryAcquire() would take the free
+        // permit anyway; tryAcquire(0, NANOSECONDS) sees the queue and declines.
+        permits.acquireUninterruptibly(ApiGatewayClient.MAX_IN_FLIGHT_REQUESTS - 1);
+        Thread waiter = Thread.ofVirtual().start(() -> {
+            try {
+                if (permits.tryAcquire(2, 20, TimeUnit.SECONDS)) {
+                    permits.release(2);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (!permits.hasQueuedThreads() && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertThat(permits.hasQueuedThreads()).as("precondition: a request is queued").isTrue();
+
+        assertThat(client.getBalanceIfAdmitted("auth", "fg", "rikzz1", SCOPE)).isEmpty();
+        assertThat(stub.totalReceived()).isZero();
+
+        waiter.interrupt();
+        waiter.join();
+    }
+
+    @Test
+    @DisplayName("FR-2: drift reads release their permit whether admitted or refused by the budget")
+    void driftReadsReleaseTheirPermit() throws Exception {
+        int n = ApiGatewayClient.MAX_IN_FLIGHT_REQUESTS + 8;
+        RecordingGatewayBudget refusing = new RecordingGatewayBudget() {
+            @Override
+            public <T> java.util.Optional<T> tryExecute(RequestTier tier, GatewayRequestScope scope,
+                                                        java.util.concurrent.Callable<T> call, Duration maxWait) {
+                return java.util.Optional.empty();   // a full window: refused, nothing sent
+            }
+        };
+        ApiGatewayClient admitted = client(stub.baseUrl(), new RecordingGatewayBudget());
+        ApiGatewayClient refused = client(stub.baseUrl(), refusing);
+
+        for (ApiGatewayClient client : java.util.List.of(admitted, refused)) {
+            java.util.List<Thread> threads = new java.util.ArrayList<>();
+            for (int i = 0; i < n; i++) {
+                threads.add(Thread.ofVirtual().start(() -> client.getBalanceIfAdmitted("auth", "fg", "rikzz1", SCOPE)));
+            }
+            for (Thread t : threads) {
+                t.join();
+            }
+            assertThat(client.inFlightRequests()).isZero();
+        }
+        assertThat(stub.countFor("verifytoken")).as("anti-vacuity: the admitted reads were sent").isPositive();
+
+        long started = System.nanoTime();
+        assertThat(refused.getBalance("auth", "fg", "rikzz1", RequestTier.ESSENTIAL, SCOPE)).isNotNegative();
+        assertThat(Duration.ofNanos(System.nanoTime() - started)).isLessThan(Duration.ofSeconds(5));
+    }
+
+    @Test
+    @DisplayName("FR-3: a deposit that found no free stream is a WARN without a stack trace, not an ERROR")
+    void aDepositPermitTimeoutIsAWarn() {
+        Capture capture = new Capture();
+        capture.start();
+        org.apache.logging.log4j.core.LoggerContext ctx =
+                (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
+        org.apache.logging.log4j.core.config.LoggerConfig own = new org.apache.logging.log4j.core.config.LoggerConfig(
+                ApiGatewayClient.class.getName(), org.apache.logging.log4j.Level.INFO, false);
+        own.addAppender(capture, org.apache.logging.log4j.Level.INFO, null);
+        ctx.getConfiguration().addLogger(ApiGatewayClient.class.getName(), own);
+        ctx.updateLoggers();
+        try {
+            ApiGatewayClient client = client(stub.baseUrl(), new RecordingGatewayBudget());
+            permits(client).acquireUninterruptibly(ApiGatewayClient.MAX_IN_FLIGHT_REQUESTS);
+
+            assertThat(client.deposit("rikzz1", 1_000L, RequestTier.PRIORITIZED, SCOPE, Duration.ofMillis(200)))
+                    .isFalse();
+
+            assertThat(capture.events).noneMatch(e -> e.getLevel() == org.apache.logging.log4j.Level.ERROR);
+            assertThat(capture.events).filteredOn(e -> e.getLevel() == org.apache.logging.log4j.Level.WARN)
+                    .hasSize(1).allSatisfy(e -> assertThat(e.getThrown()).isNull());
+        } finally {
+            ctx.getConfiguration().removeLogger(ApiGatewayClient.class.getName());
+            ctx.updateLoggers();
+            capture.stop();
+        }
+    }
+
+    private static final class Capture extends org.apache.logging.log4j.core.appender.AbstractAppender {
+        private final java.util.List<org.apache.logging.log4j.core.LogEvent> events =
+                new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        Capture() {
+            super("a33-deposit-capture", null,
+                    org.apache.logging.log4j.core.layout.PatternLayout.createDefaultLayout(), true, null);
+        }
+
+        @Override
+        public void append(org.apache.logging.log4j.core.LogEvent event) {
+            events.add(event.toImmutable());
+        }
+    }
 }

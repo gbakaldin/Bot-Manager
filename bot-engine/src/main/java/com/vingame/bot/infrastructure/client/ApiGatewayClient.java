@@ -329,7 +329,10 @@ public class ApiGatewayClient {
         // admission and without waiting, so a saturated connection answers exactly like a full
         // window — empty — and, because the budget was never asked, nothing is stamped either.
         // Holding the permit across tryExecute(ZERO) cannot starve anyone: that call never waits.
-        if (!inFlight.tryAcquire()) {
+        // tryAcquire(0, NANOSECONDS), NOT tryAcquire(): the no-arg form ignores the semaphore's
+        // fairness and barges past requests already queued for a stream; the timed form with a
+        // zero wait honours the queue and still never parks (A33 fix round, FR-1).
+        if (!inFlight.tryAcquire(0L, TimeUnit.NANOSECONDS)) {
             return Optional.empty();
         }
         try {
@@ -373,7 +376,7 @@ public class ApiGatewayClient {
             try {
                 return sendClassified(request);
             } finally {
-                // In finally on purpose, and pinned by ApiGatewayClientStreamPermitReleaseTest: a
+                // In finally on purpose, and pinned by ApiGatewayClientStreamPermitTest: a
                 // permit lost on a failure path is lost for the life of the JVM, and after 32 of
                 // them every gateway request on the environment times out.
                 inFlight.release();
@@ -445,12 +448,25 @@ public class ApiGatewayClient {
 
     /**
      * Our own connection had no free stream in time; the gateway was never asked (A33). A distinct
-     * type only so the login and balance-read failure counters can leave it out.
+     * type so that what reads "the gateway refused us" can leave it out: the login and balance-read
+     * failure counters, {@code Bot.performReauth} (retryable, not DEAD), the deposit's ERROR, and
+     * {@code bot_creation_failures_total} (reason {@code local}, not {@code auth}). Public for those
+     * last callers; use {@link #isStreamWaitTimeout} rather than unwrapping by hand.
      */
-    static final class StreamWaitTimeoutException extends HttpTimeoutException {
-        StreamWaitTimeoutException(String message) {
+    public static final class StreamWaitTimeoutException extends HttpTimeoutException {
+        public StreamWaitTimeoutException(String message) {
             super(message);
         }
+    }
+
+    /** Whether {@code failure}'s cause chain holds a {@link StreamWaitTimeoutException}. */
+    public static boolean isStreamWaitTimeout(Throwable failure) {
+        for (Throwable c = failure; c != null; c = c.getCause()) {
+            if (c instanceof StreamWaitTimeoutException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private HttpResponse<String> classified(HttpRequest request, HttpResponse<String> response) {
@@ -1064,7 +1080,13 @@ public class ApiGatewayClient {
             }
             return success;
         } catch (IOException | InterruptedException e) {
-            log.error("Bot deposit failed for user: {}", username, e);
+            if (e instanceof StreamWaitTimeoutException) {
+                // Never sent: our own connection had no free stream (A33). Not an ERROR with a
+                // stack trace; gateway_client_stream_wait_timeouts_total counts it.
+                log.warn("Bot deposit for user {} not sent: {}", username, e.getMessage());
+            } else {
+                log.error("Bot deposit failed for user: {}", username, e);
+            }
             return false;
         }
     }

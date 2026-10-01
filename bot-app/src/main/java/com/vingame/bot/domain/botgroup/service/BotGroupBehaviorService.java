@@ -1469,9 +1469,9 @@ public class BotGroupBehaviorService {
      * {@code bot_creation_failures_total}. Bounded labels keep Prometheus
      * cardinality low. RESTART_LIFECYCLE_FIX Architecture Decision 5.
      * <p>
-     * The bounded value set is {@code validation | auth | budget | cancelled | unknown}.
+     * The bounded value set is {@code validation | auth | budget | cancelled | local | unknown}.
      */
-    private static String classifyCreationFailure(Throwable cause) {
+    static String classifyCreationFailure(Throwable cause) {
         // GATEWAY_REQUEST_BUDGET AD-9 — two NEW bounded label values, and they must be tested
         // FIRST, before the heuristic below, which matches on the substring "token" and can
         // appear in these messages.
@@ -1495,6 +1495,13 @@ public class BotGroupBehaviorService {
         // HTTP response.
         if (cause instanceof com.vingame.bot.common.exception.GatewayBudgetException) {
             return "budget";
+        }
+        // "local" (GATEWAY_REQUEST_BUDGET A33 fix round): the login found no free stream on our
+        // own HTTP/2 connection and was never sent. It arrives as an UpstreamLoginException, so
+        // it must be tested before the "auth" arm, which would count it against the brand's
+        // credentials. No alert or dashboard matches on this label's values.
+        if (com.vingame.bot.infrastructure.client.ApiGatewayClient.isStreamWaitTimeout(cause)) {
+            return "local";
         }
         // UpstreamLoginException is the typed auth-failure path (API_ERROR_-
         // FORWARDING Phase B). Match it explicitly so it lands in "auth"

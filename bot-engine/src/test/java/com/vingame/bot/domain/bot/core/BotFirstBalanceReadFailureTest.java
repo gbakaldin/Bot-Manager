@@ -13,6 +13,7 @@ import com.vingame.websocketparser.VingameWebSocketClient;
 import com.vingame.websocketparser.auth.TokensProvider;
 import com.vingame.websocketparser.scenario.Scenario;
 import com.vingame.bot.common.exception.GatewayRequestCancelledException;
+import com.vingame.bot.common.exception.UpstreamLoginException;
 import org.apache.logging.log4j.Level;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.LogEvent;
@@ -384,6 +385,28 @@ class BotFirstBalanceReadFailureTest {
                 });
         assertThat(capture.at(Level.INFO)).as("per-bot lines never at INFO").isEmpty();
         reloginReleased.countDown();
+    }
+
+    @Test
+    @DisplayName("FR-3: a re-login that never left the JVM (no free stream) is retryable, not DEAD")
+    void aReloginWithNoFreeStreamIsRetryable() throws Exception {
+        bot.initialize();
+        java.lang.reflect.Method performReauth = Bot.class.getDeclaredMethod("performReauth");
+        performReauth.setAccessible(true);
+
+        org.mockito.Mockito.doThrow(new UpstreamLoginException(
+                "Login failed for user 'rikzz87': no free gateway stream",
+                new ApiGatewayClient.StreamWaitTimeoutException("no free gateway stream within PT10S")))
+                .when(apiGatewayClient).authenticate(any(), any(), any());
+        assertThat(performReauth.invoke(bot)).hasToString("RETRYABLE");
+        assertThat(bot.getStatus()).isEqualTo(BotStatus.RECONNECTING);
+
+        // Contrast: a real refusal from the gateway is still terminal, exactly as before.
+        org.mockito.Mockito.doThrow(new UpstreamLoginException(
+                "Login failed for user 'rikzz87': wrong password (HTTP 200, status: INVALID)", null))
+                .when(apiGatewayClient).authenticate(any(), any(), any());
+        assertThat(performReauth.invoke(bot)).hasToString("TERMINAL");
+        assertThat(bot.getStatus()).isEqualTo(BotStatus.DEAD);
     }
 
     /** onStart shaped like BettingMiniGameBot's: first session, then the scenario. */

@@ -1165,6 +1165,16 @@ public abstract class Bot {
             transitionStatus(BotStatus.RECONNECTING);
             return ReauthOutcome.RETRYABLE;
         } catch (Exception e) {
+            if (ApiGatewayClient.isStreamWaitTimeout(e)) {
+                // A33 fix round (FR-3): the login never left the JVM — our own connection to the
+                // gateway had no free stream within the wait. Like a budget refusal (AD-9) that is
+                // not the gateway refusing this account, so it must not be terminal: one failed
+                // attempt of the backoff loop, still capped by MAX_RECONNECT_CYCLES.
+                log.debug("Bot {}: re-authentication not sent ({}) — counting one failed attempt "
+                        + "and continuing the backoff loop", userName, e.getMessage());
+                transitionStatus(BotStatus.RECONNECTING);
+                return ReauthOutcome.RETRYABLE;
+            }
             log.error("Bot {}: re-authentication failed — marking DEAD", userName);
             transitionStatus(BotStatus.DEAD);
             reconnecting.set(false);
