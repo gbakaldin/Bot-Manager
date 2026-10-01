@@ -58,6 +58,32 @@ class CloudflareBlockDetectorTest {
     }
 
     @Test
+    @DisplayName("an origin's own HTML 403 transiting the edge is not a block on the HTTP path (review-phase5)")
+    void anOriginHtmlForbiddenBehindTheEdgeIsNotABlock() {
+        // Cloudflare stamps server/cf-ray on every proxied response, and the gwms gateways are IIS,
+        // which serves HTML 403s of its own (403.6 "IP address rejected"). Reading that as a block
+        // would open the circuit for the whole brand, once per such request.
+        CloudflareBlockDetector.Verdict verdict = CloudflareBlockDetector.classify(403,
+                headers(Map.of("server", "cloudflare", "cf-ray", "abc-HKG",
+                        "content-type", "text/html; charset=utf-8")),
+                "<html><head><title>403 - Forbidden: Access is denied.</title></head>"
+                        + "<body><h2>403.6 - IP address rejected.</h2></body></html>");
+
+        assertThat(verdict.edgeBlock()).isFalse();
+    }
+
+    @Test
+    @DisplayName("with no body (the WS path), the edge's text/html content type alone is accepted")
+    void withNoBodyTheContentTypeIsEnough() {
+        CloudflareBlockDetector.Verdict verdict = CloudflareBlockDetector.classify(403,
+                headers(Map.of("server", "cloudflare", "cf-ray", "abc-HKG",
+                        "content-type", "text/html; charset=UTF-8")),
+                null);
+
+        assertThat(verdict.edgeBlock()).isTrue();
+    }
+
+    @Test
     @DisplayName("an HTML 403 without server: cloudflare or cf-ray is not a block")
     void aForbiddenPageThatDidNotComeFromTheEdgeIsNotABlock() {
         // An nginx 403 page from an origin: refused, but not by the rule this feature is about.

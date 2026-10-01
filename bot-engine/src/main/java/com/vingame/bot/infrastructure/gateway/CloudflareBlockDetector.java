@@ -26,12 +26,25 @@ import java.util.function.Function;
  *   <li>status {@code 403} or {@code 429};</li>
  *   <li>{@code server} equals {@code cloudflare} (ignoring case) <b>or</b> a {@code cf-ray}
  *       header is present — the response really came from the edge;</li>
- *   <li>{@code content-type} is {@code text/html} <b>or</b> the body carries
- *       {@code cf-error-details} or {@code Sorry, you have been blocked} — it is a page, not an
- *       origin's JSON passed through the edge.</li>
+ *   <li>it is <b>Cloudflare's</b> block page: when the body is available (the HTTP path), the body
+ *       must carry one of {@code cf-error-details}, {@code Sorry, you have been blocked} or
+ *       {@code Attention Required! | Cloudflare}; only when the transport kept no body (the WS
+ *       path) is {@code content-type: text/html} accepted in its place.</li>
  * </ol>
- * The third conjunct is what keeps a gateway's own JSON 403 that merely transits Cloudflare (and
- * therefore carries a {@code cf-ray}) from opening a circuit that would then refuse a whole brand.
+ * <b>Conjunct 2 proves almost nothing on its own</b> (review-phase5): Cloudflare stamps
+ * {@code server: cloudflare} and a {@code cf-ray} on <em>every</em> proxied response, so every gwms
+ * answer satisfies it. On the HTTP path the rule therefore rests on the body. "403 + text/html" was
+ * the rule until then, and the gwms gateways are IIS, which serves its own HTML 403 pages (403.6
+ * "IP address rejected" for an endpoint this host is not allow-listed for): that would have opened
+ * the circuit for the whole brand, the next probe would close it an hour later, and the next such
+ * request would reopen it — an hour-long outage per cycle.
+ * <p>
+ * <b>The WS path's limit</b> (QA phase 5, finding 1): ws-parser installs
+ * {@code HttpObjectAggregator(8192)}, so an edge page larger than 8 KB surfaces as a
+ * {@code TooLongHttpContentException} with no response attached and is <b>not</b> classified. The
+ * captured block page is ~5 KB (Cloudflare's 1015/1020 pages are of that size); a larger challenge
+ * or interstitial page would be missed on the WS path only — the HTTP path has no such limit, and
+ * the next login or balance read on the brand would still open the circuit.
  * <p>
  * <b>Two entry points, one rule.</b> {@link #classify(HttpResponse)} for the HTTP funnel, and
  * {@link #classifyHandshakeFailure(Throwable)} for a WebSocket upgrade, whose failure carries the
@@ -75,7 +88,8 @@ public final class CloudflareBlockDetector {
      * The rule itself.
      *
      * @param header a case-insensitive header lookup
-     * @param body   the response body, or {@code null} when the transport did not keep it
+     * @param body   the response body, or {@code null} when the transport did not keep it — which
+     *               is the only case in which {@code content-type: text/html} alone counts
      */
     public static Verdict classify(int status, Function<String, Optional<String>> header, String body) {
         if (status != 403 && status != 429) {
@@ -87,10 +101,18 @@ public final class CloudflareBlockDetector {
         if (!fromEdge) {
             return Verdict.NOT_A_BLOCK;
         }
-        String contentType = header.apply("content-type").orElse("");
-        boolean isPage = contentType.toLowerCase(Locale.ROOT).trim().startsWith("text/html")
-                || (body != null && (body.contains("cf-error-details")
-                        || body.contains("Sorry, you have been blocked")));
+        boolean isPage;
+        if (body != null) {
+            // The HTTP path: the body is the evidence. An origin's own HTML 403 transiting the
+            // edge carries the same server/cf-ray headers and must not open a circuit.
+            isPage = body.contains("cf-error-details")
+                    || body.contains("Sorry, you have been blocked")
+                    || body.contains("Attention Required! | Cloudflare");
+        } else {
+            // The WS path: Netty keeps no body, so the content type is all there is.
+            String contentType = header.apply("content-type").orElse("");
+            isPage = contentType.toLowerCase(Locale.ROOT).trim().startsWith("text/html");
+        }
         return isPage ? new Verdict(true, cfRay) : Verdict.NOT_A_BLOCK;
     }
 
