@@ -164,6 +164,20 @@ class ApiGatewayClientBlockTest {
     }
 
     @Test
+    @DisplayName("a deferrable drift read that DETECTS the block answers empty, never throws (AD-10)")
+    void aDriftReadThatDetectsTheBlockDoesNotThrow() {
+        // review-phase5. This read runs on a ws-parser message-processor thread; an exception here
+        // escapes onEndGame. It was admitted, so the refusal comes from reportEdgeBlock inside it.
+        ApiGatewayClient client = client(GatewayBudgetMode.ENFORCE);
+
+        java.util.OptionalLong read = client.getBalanceIfAdmitted("tok", "fp", "authtestws1", SCOPE);
+
+        assertThat(read).as("stale, not an exception through the message pipeline").isEmpty();
+        assertThat(budget.snapshot().circuitOpen()).as("the block was still detected and acted on").isTrue();
+        assertThat(edgeBlocks("verifytoken")).isEqualTo(1.0);
+    }
+
+    @Test
     @DisplayName("under observe, a blocked deposit WARNs with the verdict and the cf-ray — not the page")
     void anObservedBlockedDepositLogsTheVerdictNotThePage() {
         ApiGatewayClient client = client(GatewayBudgetMode.OBSERVE);

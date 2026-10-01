@@ -1009,6 +1009,19 @@ public class ApiGatewayClient {
             metrics.incVerifyToken(false);
             throw new RuntimeException("Failed to fetch balance for user: " + username, e);
         } catch (GatewayBudgetException e) {
+            if (deferrable && e instanceof com.vingame.bot.common.exception.GatewayCircuitOpenException) {
+                // review-phase5: AD-10 says the drift read never parks and never throws a budget
+                // outcome — it runs on a ws-parser message-processor thread (onEndGame ->
+                // onNewSession). Refused reads already answer empty, but the read that DETECTS the
+                // block was admitted, and httpCall's reportEdgeBlock throws from inside it. At
+                // fleet scale the drift read is one of the likeliest requests to meet a block first
+                // (per bot per round, on bots whose sockets are open), so every one in flight at
+                // that moment used to throw out of onEndGame. The figure is now stale, which is
+                // exactly what empty tells the bot; the next pre-deposit refresh is refused cleanly.
+                log.debug("[VerifyToken] drift read for user {} met the Cloudflare edge block — "
+                        + "the circuit is open; keeping the local estimate", username);
+                return OptionalLong.empty();
+            }
             // A4's milder twin, and it has to be AHEAD of the RuntimeException arm below.
             // This method already rethrows the type unwrapped (good — AD-9's non-terminal
             // handling in Bot can see it), but the arm below would increment
