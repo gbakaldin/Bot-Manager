@@ -146,6 +146,9 @@ public class EnvironmentClientRegistry {
                 env.getName(),
                 env.getProductCode() != null ? env.getProductCode().getCode() : null,
                 env.getApiGatewayUrl());
+        // A WS-upgrade block must be cleared by probing the WS host, not the API host — they may be
+        // different Cloudflare zones (review-phase5). webSocketMiniUrl is the URL every bot uses.
+        gatewayBudgetRegistry.bindWebSocketProbe(environmentId, env.getWebSocketMiniUrl());
 
         ApiGatewayClient apiGatewayClient = apiGatewayClientProvider.getObject();
         apiGatewayClient.init(env.getApiGatewayUrl(), appId,

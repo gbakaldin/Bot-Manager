@@ -290,4 +290,51 @@ class GatewayCircuitBreakerTest {
             observing.shutdown();
         }
     }
+
+    @Test
+    @DisplayName("a circuit opened by a WS-upgrade block is cleared by probing the WS host, not the API host")
+    void aWsOpenedCircuitProbesTheWsHost() {
+        // review-phase5. The API and WS hosts can be different Cloudflare zones; the API host
+        // answering says nothing about whether the WS host still refuses us.
+        AtomicInteger wsProbes = new AtomicInteger();
+        AtomicReference<CircuitProbe.Answer> wsAnswer = new AtomicReference<>(blocked());
+        budget.bindWsCircuitProbe(() -> {
+            wsProbes.incrementAndGet();
+            return wsAnswer.get();
+        });
+        nextProbeAnswer.set(gatewayAnswered()); // the API host is fine
+        assertThatThrownBy(() -> budget.reportEdgeBlock(GatewayEndpoint.WS_UPGRADE, RAY))
+                .isInstanceOf(GatewayCircuitOpenException.class);
+
+        clock.addAndGet(INTERVAL.toNanos());
+        budget.runCircuitProbe();
+
+        assertThat(wsProbes).hasValue(1);
+        assertThat(probes).as("the API probe is not the evidence for a WS block").hasValue(0);
+        assertThat(budget.snapshot().circuitOpen()).isTrue();
+
+        wsAnswer.set(new CircuitProbe.Answer(101, CloudflareBlockDetector.Verdict.NOT_A_BLOCK));
+        clock.addAndGet(INTERVAL.toNanos());
+        budget.runCircuitProbe();
+        assertThat(budget.snapshot().circuitOpen()).isFalse();
+    }
+
+    @Test
+    @DisplayName("a circuit opened by an HTTP block is cleared by the API probe even when a WS probe is bound")
+    void anHttpOpenedCircuitProbesTheApiHost() {
+        AtomicInteger wsProbes = new AtomicInteger();
+        budget.bindWsCircuitProbe(() -> {
+            wsProbes.incrementAndGet();
+            return blocked();
+        });
+        nextProbeAnswer.set(gatewayAnswered());
+        openTheCircuit(); // LOGIN
+
+        clock.addAndGet(INTERVAL.toNanos());
+        budget.runCircuitProbe();
+
+        assertThat(wsProbes).hasValue(0);
+        assertThat(probes).hasValue(1);
+        assertThat(budget.snapshot().circuitOpen()).isFalse();
+    }
 }

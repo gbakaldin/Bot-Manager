@@ -197,6 +197,58 @@ public class GatewayBudgetRegistry {
         };
     }
 
+    /**
+     * Bind the WebSocket-host clearance probe for {@code environmentId}'s budget, if the budget
+     * exists (review-phase5): an anonymous upgrade against {@code webSocketUrl}, used when the
+     * circuit was opened by a WS-upgrade block, so that it is the WS host's block that has to lift.
+     * <p>
+     * No headers, no token, no AUTH frame — the socket is aborted the moment the upgrade completes.
+     * A 101, or any refusal that is not the Cloudflare page (an origin's own 403 for an anonymous
+     * upgrade included), means the edge is letting this host through again. No answer at all is
+     * reported as an {@code IOException}, which keeps the circuit open.
+     */
+    public void bindWebSocketProbe(String environmentId, String webSocketUrl) {
+        SlidingWindowGatewayBudget budget = environmentId == null ? null : budgets.get(environmentId);
+        if (budget == null || webSocketUrl == null || webSocketUrl.isBlank()) {
+            return;
+        }
+        java.net.URI uri;
+        try {
+            uri = java.net.URI.create(webSocketUrl.trim());
+        } catch (IllegalArgumentException e) {
+            log.debug("No WS clearance probe for '{}': {}", webSocketUrl, e.getMessage());
+            return;
+        }
+        budget.bindWsCircuitProbe(() -> {
+            java.util.concurrent.CompletableFuture<java.net.http.WebSocket> handshake = probeClient()
+                    .newWebSocketBuilder()
+                    .connectTimeout(PROBE_TIMEOUT)
+                    .buildAsync(uri, new java.net.http.WebSocket.Listener() { });
+            try {
+                java.net.http.WebSocket socket = handshake.get(PROBE_TIMEOUT.toMillis(),
+                        java.util.concurrent.TimeUnit.MILLISECONDS);
+                socket.abort();
+                return new CircuitProbe.Answer(101, CloudflareBlockDetector.Verdict.NOT_A_BLOCK);
+            } catch (java.util.concurrent.ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof java.net.http.WebSocketHandshakeException refused
+                        && refused.getResponse() != null) {
+                    return new CircuitProbe.Answer(refused.getResponse().statusCode(),
+                            CloudflareBlockDetector.classifyHandshakeFailure(refused));
+                }
+                throw new java.io.IOException("WS clearance probe got no answer: " + cause, cause);
+            } catch (java.util.concurrent.TimeoutException e) {
+                handshake.cancel(true);
+                handshake.whenComplete((ws, error) -> {
+                    if (ws != null) {
+                        ws.abort();
+                    }
+                });
+                throw new java.io.IOException("WS clearance probe timed out", e);
+            }
+        });
+    }
+
     private HttpClient probeClient() {
         HttpClient client = probeClient;
         if (client == null) {

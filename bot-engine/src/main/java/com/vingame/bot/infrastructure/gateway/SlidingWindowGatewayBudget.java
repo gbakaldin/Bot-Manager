@@ -262,6 +262,24 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      */
     private volatile CircuitProbe circuitProbe;
 
+    /**
+     * The anonymous WebSocket-upgrade clearance probe against this environment's WS host, bound by
+     * {@link GatewayBudgetRegistry#bindWebSocketProbe}. Used instead of {@link #circuitProbe} when
+     * the circuit was opened by a {@link GatewayEndpoint#WS_UPGRADE} block (review-phase5).
+     * <p>
+     * A15 says the WS hosts sit behind the same Cloudflare <em>rule</em>; it does not say they
+     * share one <em>block</em>. Cloudflare counts per (egress IP x zone), and the API and WS hosts
+     * are in different zones on at least one brand ({@code apigw-w79.sgame.us} vs
+     * {@code s009-ws-proxy-119.stgame.win}). Probing the API host for a WS-opened circuit could
+     * therefore close it while the WS host still refuses us, and the reconnect fleet's upgrades
+     * would go straight back into the block once an hour. So the circuit probes the host that
+     * opened it.
+     */
+    private volatile CircuitProbe wsCircuitProbe;
+
+    /** Guarded by {@link #lock}: the request kind whose block opened the circuit. */
+    private GatewayEndpoint circuitOpenedBy;
+
     private Counter circuitOpenedCounter;
     private final Map<GatewayEndpoint, Counter> edgeBlockCounters = new EnumMap<>(GatewayEndpoint.class);
 
@@ -1164,6 +1182,7 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             if (!circuitOpen.get()) {
                 circuitOpen.set(true);
                 circuitCfRay = cfRay;
+                circuitOpenedBy = endpoint;
                 circuitOpenedAtNanos = now;
                 nextProbeAtNanos = now + settings.blockProbeInterval().toNanos();
                 scheduleProbeLocked(now);
@@ -1227,6 +1246,11 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
         this.circuitProbe = probe;
     }
 
+    /** Bind the WS-host clearance probe; see {@link #wsCircuitProbe}. Idempotent, latest wins. */
+    public void bindWsCircuitProbe(CircuitProbe probe) {
+        this.wsCircuitProbe = probe;
+    }
+
     /**
      * Schedule the next clearance probe at {@link #nextProbeAtNanos}. Caller holds {@link #lock}.
      * On the budget's own single-threaded scheduler (AD-13), which is free to block for the
@@ -1284,12 +1308,19 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
      * HTTP GET and not an upgrade (A5.3, A29.5).
      */
     void runCircuitProbe() {
-        CircuitProbe probe = circuitProbe;
+        CircuitProbe probe;
+        boolean wsProbe;
         lock.lock();
         try {
             if (!circuitOpen.get() || probeInFlight) {
                 return;
             }
+            // Probe the host that opened the circuit (see wsCircuitProbe). A WS-opened circuit with
+            // no WS probe bound falls back to the API probe rather than staying open for ever: the
+            // probe scheduler and the API probe were the only clearance before, and a permanent
+            // circuit on a never-bound probe is the worse failure.
+            wsProbe = circuitOpenedBy == GatewayEndpoint.WS_UPGRADE && wsCircuitProbe != null;
+            probe = wsProbe ? wsCircuitProbe : circuitProbe;
             long now = nanos.getAsLong();
             if (now - nextProbeAtNanos < 0) {
                 scheduleProbeLocked(now);
@@ -1312,7 +1343,12 @@ public class SlidingWindowGatewayBudget implements GatewayBudget {
             return;
         }
 
-        count("circuit-probe");
+        if (wsProbe) {
+            // An upgrade, so it honours count-ws-upgrades like every other upgrade (A5.3).
+            countWsUpgrade("circuit-probe");
+        } else {
+            count("circuit-probe");
+        }
         CircuitProbe.Answer answer = null;
         String failure = null;
         try {
