@@ -12,7 +12,17 @@ import com.vingame.bot.infrastructure.client.GameMsClient;
 import com.vingame.websocketparser.VingameWebSocketClient;
 import com.vingame.websocketparser.auth.TokensProvider;
 import com.vingame.websocketparser.scenario.Scenario;
+import com.vingame.bot.common.exception.GatewayRequestCancelledException;
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.LoggerConfig;
+import org.apache.logging.log4j.core.layout.PatternLayout;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -65,8 +75,53 @@ class BotFirstBalanceReadFailureTest {
     private SetupBot bot;
     private final java.util.concurrent.CountDownLatch reloginReleased = new java.util.concurrent.CountDownLatch(1);
 
+    /** Every event the com.vingame.bot logger tree emits while a test runs. */
+    private static final class Capture extends AbstractAppender {
+        private final List<LogEvent> events = new CopyOnWriteArrayList<>();
+
+        Capture() {
+            super("a33-start-capture", null, PatternLayout.createDefaultLayout(), true, null);
+        }
+
+        @Override
+        public void append(LogEvent event) {
+            if (event.getLoggerName().startsWith(Bot.class.getName())) {
+                events.add(event.toImmutable());
+            }
+        }
+
+        List<LogEvent> at(Level level) {
+            return events.stream().filter(e -> e.getLevel() == level).toList();
+        }
+
+        void clear() {
+            events.clear();
+        }
+    }
+
+    private Capture capture;
+    private LoggerConfig loggerConfig;
+
+    @AfterEach
+    void detachCapture() {
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        ctx.getConfiguration().removeLogger(Bot.class.getName());
+        ctx.updateLoggers();
+        capture.stop();
+    }
+
     @BeforeEach
     void setUp() {
+        capture = new Capture();
+        capture.start();
+        // A logger of its own for Bot, at INFO, not additive: WARN/ERROR/INFO are what these tests
+        // assert, and touching the shared config's level would flood the build output with DEBUG.
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        loggerConfig = new LoggerConfig(Bot.class.getName(), Level.INFO, false);
+        loggerConfig.addAppender(capture, Level.INFO, null);
+        ctx.getConfiguration().addLogger(Bot.class.getName(), loggerConfig);
+        ctx.updateLoggers();
+
         apiGatewayClient = mock(ApiGatewayClient.class);
         clientFactory = mock(ClientFactory.class);
         TokensProvider tokens = mock(TokensProvider.class);
@@ -85,14 +140,19 @@ class BotFirstBalanceReadFailureTest {
 
         bot = new SetupBot();
         bot.setClients(apiGatewayClient, mock(GameMsClient.class), clientFactory);
-        bot.setConfiguration(BotConfiguration.builder()
+        bot.setConfiguration(config(null));
+    }
+
+    private static BotConfiguration config(BooleanSupplier startCancelled) {
+        return BotConfiguration.builder()
                 .credentials(BotCredentials.builder()
                         .username("rikzz87").password("pw").fingerprint("fp").build())
                 .environmentId("env-114").botGroupId("group-zz").botIndex(87)
                 .game(Game.builder().id("g1").name("ZicZac").pluginName("Plugin")
                         .gameType(GameType.BETTING_MINI).offset(13000).numberOfOptions(6).build())
                 .zoneName("MiniGame").timeoutMillis(1000L).watchdogTimeoutSeconds(120L)
-                .build());
+                .startCancelled(startCancelled)
+                .build();
     }
 
     /** A WS client whose isOpen() is true between connect() and close(), like the real one. */
@@ -191,6 +251,11 @@ class BotFirstBalanceReadFailureTest {
         assertThat(bot.scenarioInstalled).isTrue();
         assertThat(bot.isConnected()).isTrue();
         verify(apiGatewayClient).authenticate(any(), eq(RequestTier.PRIORITIZED), any());
+        // The start path tried at ESSENTIAL, in place; the loop's read is one PRIORITIZED attempt.
+        verify(apiGatewayClient, times(Bot.INITIAL_BALANCE_READ_ATTEMPTS))
+                .getBalance(anyString(), anyString(), anyString(), eq(RequestTier.ESSENTIAL), any());
+        verify(apiGatewayClient, times(1))
+                .getBalance(anyString(), anyString(), anyString(), eq(RequestTier.PRIORITIZED), any());
     }
 
     @Test
@@ -215,7 +280,9 @@ class BotFirstBalanceReadFailureTest {
                 .thenThrow(new GatewayCircuitOpenException("env-114", "cf-ray-1", Duration.ofMinutes(2)));
         bot.initialize();
 
-        assertThatThrownBy(bot::start).isInstanceOf(GatewayCircuitOpenException.class);
+        assertThatThrownBy(bot::start)
+                .isInstanceOf(SessionSetupHandedOffException.class)
+                .hasCauseInstanceOf(GatewayCircuitOpenException.class);
 
         verify(apiGatewayClient, times(1))
                 .getBalance(anyString(), anyString(), anyString(), any(), any());
@@ -237,6 +304,86 @@ class BotFirstBalanceReadFailureTest {
         verify(apiGatewayClient, never()).authenticate(any(), eq(RequestTier.PRIORITIZED), any());
         verify(apiGatewayClient, times(1))
                 .getBalance(anyString(), anyString(), anyString(), any(), any());
+    }
+
+    @Test
+    @DisplayName("a start called off by /stop (GatewayRequestCancelledException, stopped still false) is not a reconnect")
+    void aCancelledStartIsNotHandedToTheReconnectLoop() {
+        // cancelStartInFlight -> budget.cancelScope completes every queued waiter BEFORE cleanup()
+        // sets `stopped` (A33 review): this is the state each queued first read wakes up in.
+        when(apiGatewayClient.getBalance(anyString(), anyString(), anyString(), any(), any()))
+                .thenThrow(new GatewayRequestCancelledException("env-114", "group-zz/rikzz87"));
+        reloginReleased.countDown();
+        bot.initialize();
+        BotStatus before = bot.getStatus();
+
+        assertThatThrownBy(bot::start)
+                .as("the original exception, unwrapped: the caller logs a called-off start at DEBUG")
+                .isInstanceOf(GatewayRequestCancelledException.class);
+
+        verify(apiGatewayClient, never()).authenticate(any(), eq(RequestTier.PRIORITIZED), any());
+        assertThat(bot.getStatus()).isEqualTo(before).isNotEqualTo(BotStatus.RECONNECTING);
+        assertThat(sockets).hasSize(1);
+        assertThat(capture.at(Level.WARN)).as("no reconnect WARN for an operator's stop").isEmpty();
+    }
+
+    @Test
+    @DisplayName("a start whose group start was cancelled is not handed over either, whatever the read failed with")
+    void aStartOfACancelledGroupIsNotHandedOver() {
+        AtomicBoolean startCancelled = new AtomicBoolean();
+        bot.setConfiguration(config(startCancelled::get));
+        when(apiGatewayClient.getBalance(anyString(), anyString(), anyString(), any(), any()))
+                .thenAnswer(inv -> {
+                    startCancelled.set(true);   // the /stop lands while the read is in flight
+                    throw a1();
+                });
+        reloginReleased.countDown();
+        bot.initialize();
+
+        assertThatThrownBy(bot::start).hasMessageContaining("Failed to fetch balance");
+
+        verify(apiGatewayClient, never()).authenticate(any(), eq(RequestTier.PRIORITIZED), any());
+        assertThat(bot.getStatus()).isNotEqualTo(BotStatus.RECONNECTING);
+    }
+
+    @Test
+    @DisplayName("inside the reconnect loop the first read is ONE attempt at PRIORITIZED, and its failure is DEBUG only")
+    void insideTheLoopTheFirstReadIsOnePrioritizedAttempt() {
+        firstReadFails(Integer.MAX_VALUE);
+        bot.initialize();
+        ((AtomicBoolean) ReflectionTestUtils.getField(bot, Bot.class, "reconnecting")).set(true);
+        capture.clear();
+
+        assertThatThrownBy(bot::start)
+                .as("rethrown unchanged: tryReconnectWs counts it as this attempt's failure")
+                .isNotInstanceOf(SessionSetupHandedOffException.class)
+                .hasMessageContaining("Failed to fetch balance");
+
+        verify(apiGatewayClient, times(1))
+                .getBalance(anyString(), anyString(), anyString(), eq(RequestTier.PRIORITIZED), any());
+        verify(apiGatewayClient, never())
+                .getBalance(anyString(), anyString(), anyString(), eq(RequestTier.ESSENTIAL), any());
+        assertThat(capture.at(Level.WARN)).isEmpty();
+        assertThat(capture.at(Level.ERROR)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("a hand-off logs one WARN without a stack trace, and no ERROR, and the caller can tell it is not final")
+    void aHandOffLogsOneWarnAndNoError() {
+        firstReadFails(Bot.INITIAL_BALANCE_READ_ATTEMPTS);
+        bot.initialize();
+        capture.clear();
+
+        assertThatThrownBy(bot::start).isInstanceOf(SessionSetupHandedOffException.class);
+
+        assertThat(capture.at(Level.ERROR)).isEmpty();
+        assertThat(capture.at(Level.WARN)).hasSize(1)
+                .allSatisfy(e -> {
+                    assertThat(e.getMessage().getFormattedMessage()).contains("session-setup failed");
+                    assertThat(e.getThrown()).isNull();
+                });
+        assertThat(capture.at(Level.INFO)).as("per-bot lines never at INFO").isEmpty();
+        reloginReleased.countDown();
     }
 
     /** onStart shaped like BettingMiniGameBot's: first session, then the scenario. */

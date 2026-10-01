@@ -487,12 +487,11 @@ public class SlotMachineBot extends Bot {
 
     @Override
     protected void onStart() {
-        try {
-            onNewSession();
-        } catch (Exception e) {
-            log.error("Bot {}: initial session setup failed", getUserName(), e);
-            throw e;
-        }
+        // No try/log here (GATEWAY_REQUEST_BUDGET A33): a failure propagates to Bot.start(), which
+        // decides whether it is called off, retried by the reconnect loop or final, and logs it
+        // once at the level that matches. This used to log ERROR with a stack trace on every
+        // reconnect attempt of a bot whose first read kept failing.
+        onNewSession();
 
         List<Integer> cmdList = List.of(
                 SlotMessageTypes.SUBSCRIBE_CMD,

@@ -1,5 +1,7 @@
 package com.vingame.bot.infrastructure.runtime;
 
+import com.vingame.bot.common.exception.GatewayRequestCancelledException;
+import com.vingame.bot.domain.bot.core.SessionSetupHandedOffException;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.domain.bot.core.Bot;
@@ -239,6 +241,17 @@ public class BotGroupRuntime {
                 // GroupLifecycleAggregator's single "N/M bots initialized" line.
                 log.debug("Bot starting in virtual thread {}", Thread.currentThread().getName());
                 bot.start();
+            } catch (SessionSetupHandedOffException e) {
+                // GATEWAY_REQUEST_BUDGET A33: not a final failure — the bot is RECONNECTING and
+                // Bot already logged the hand-off at WARN. A second ERROR here would page for a
+                // bot that may be back in a few seconds.
+                log.debug("Bot start handed to the reconnect loop in virtual thread {}: {}",
+                        Thread.currentThread().getName(), e.getMessage());
+            } catch (GatewayRequestCancelledException e) {
+                // A /stop, DELETE or activation STOP called the start off while this bot's
+                // request was queued (A33 review). An operator decision, not a failure.
+                log.debug("Bot start called off in virtual thread {}: {}",
+                        Thread.currentThread().getName(), e.getMessage());
             } catch (Exception e) {
                 log.error("Bot failed in virtual thread {}", Thread.currentThread().getName(), e);
             } finally {

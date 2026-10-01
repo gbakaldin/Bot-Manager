@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.service;
 
+import com.vingame.bot.domain.bot.core.SessionSetupHandedOffException;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.common.logging.BotMdc;
@@ -3438,6 +3439,11 @@ public class BotGroupBehaviorService {
             log.debug("Periodic logout for bot {} in group {} was refused by the gateway budget "
                             + "({}) — the bot's own reconnect loop will bring it back",
                     bot.getUserName(), runtime.getGroupId(), e.getMessage());
+        } catch (SessionSetupHandedOffException e) {
+            // GATEWAY_REQUEST_BUDGET A33: the restart's session setup failed and the bot was
+            // handed to its own reconnect loop, which logged the hand-off at WARN. Not final.
+            log.debug("Periodic logout restart for bot {} in group {} was handed to the reconnect "
+                    + "loop: {}", bot.getUserName(), runtime.getGroupId(), e.getMessage());
         } catch (Exception e) {
             log.error("Periodic logout failed for bot {} in group {}: {}",
                     bot.getUserName(), runtime.getGroupId(), e.getMessage(), e);

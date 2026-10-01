@@ -550,7 +550,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Phase 2 emits reason in {watchdog, ws-disconnect}. The reauth-cycle tag value is reserved but not currently emitted.",
+      "description": "Phase 2 emits reason in {watchdog, ws-disconnect}. session-setup (GATEWAY_REQUEST_BUDGET A33): a bot whose first balance read failed at start was handed to the reconnect loop instead of being left connected but idle. The reauth-cycle tag value is reserved but not currently emitted.",
       "gridPos": {
         "h": 8,
         "w": 12,

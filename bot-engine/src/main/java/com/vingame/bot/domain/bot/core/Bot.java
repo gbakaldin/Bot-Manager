@@ -1,6 +1,7 @@
 package com.vingame.bot.domain.bot.core;
 
 import com.vingame.bot.common.exception.GatewayBudgetException;
+import com.vingame.bot.common.exception.GatewayRequestCancelledException;
 import com.vingame.bot.common.gateway.GatewayRequestScope;
 import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.common.logging.BotMdc;
@@ -550,6 +551,13 @@ public abstract class Bot {
      * the game message that resets the watchdog. It is a fraction rather than a constant so that
      * lowering {@code bot.watchdog.timeout.seconds} lowers this too — the invariant has to survive
      * a config change nobody remembers to cross-check.
+     * <p>
+     * <b>The stream permit is inside this wait, not on top of it</b> (GATEWAY_REQUEST_BUDGET A33).
+     * {@code ApiGatewayClient} bounds in-flight requests per environment, and a request with a
+     * {@code maxWait} waits for its permit against the same deadline as its budget admission
+     * ({@code ApiGatewayClient.permitWait}). At the default 180 s watchdog the worst case of the
+     * three-call chain is therefore 3 x (45 budget+permit + 10 request timeout + 0.5 read sleep)
+     * = 166.5 s, as before A33. A separate permit wait would have made it 196.5 s.
      */
     private static final int SESSION_WAIT_FRACTION_OF_WATCHDOG = 4;
 
@@ -854,40 +862,50 @@ public abstract class Bot {
     }
 
     /**
-     * The first balance read, tried up to {@link #INITIAL_BALANCE_READ_ATTEMPTS} times
-     * (GATEWAY_REQUEST_BUDGET A33).
+     * The first balance read, tried up to {@link #INITIAL_BALANCE_READ_ATTEMPTS} times on the
+     * start path (GATEWAY_REQUEST_BUDGET A33).
      * <p>
-     * Every attempt is a fresh {@link RequestTier#ESSENTIAL} {@code getBalance}, i.e. admitted and
-     * stamped by the budget like any other request; nothing is re-sent around it. A
-     * {@link GatewayBudgetException} is <b>not</b> retried here: it means the JVM declined to send
-     * (a cancelled scope, an open circuit), which is the budget's decision to make and AD-9's to
-     * handle, and retrying in place would only ask the same question again. Neither is a stopped
-     * bot. Whatever is left after the last attempt propagates, and {@link #start()} hands the bot
-     * to the reconnect loop.
+     * Every attempt is a fresh {@code getBalance}, i.e. admitted and stamped by the budget like
+     * any other request; nothing is re-sent around it. A {@link GatewayBudgetException} is
+     * <b>not</b> retried here: it means the JVM declined to send (a cancelled scope, an open
+     * circuit), which is the budget's decision to make and AD-9's to handle, and retrying in place
+     * would only ask the same question again. Neither is a stopped bot. Whatever is left after the
+     * last attempt propagates, and {@link #start()} decides what happens to the bot.
+     * <p>
+     * <b>Inside the reconnect loop it is one attempt, at PRIORITIZED</b> (A33 review). The tier
+     * of the first read used to follow "has this bot ever read its balance", which made every
+     * reconnect attempt of a bot whose first read kept failing three requests at the
+     * <em>top</em> tier, competing with other groups' real starts for ~51 minutes. The loop is a
+     * bot that is already part of the fleet trying to get back in — AD-3's PRIORITIZED — and its
+     * own backoff already does the retrying.
      */
     private long readInitialBalance() {
+        boolean inReconnectLoop = reconnecting.get();
+        RequestTier tier = inReconnectLoop ? RequestTier.PRIORITIZED : RequestTier.ESSENTIAL;
+        int attempts = inReconnectLoop ? 1 : INITIAL_BALANCE_READ_ATTEMPTS;
         RuntimeException last = null;
-        for (int attempt = 1; attempt <= INITIAL_BALANCE_READ_ATTEMPTS; attempt++) {
+        for (int attempt = 1; attempt <= attempts; attempt++) {
             try {
                 return apiGatewayClient.getBalance(
                     getClient().getAuthToken(),
                     credentials.getFingerprint(),
                     userName,
-                    RequestTier.ESSENTIAL,
+                    tier,
                     scope()
                 );
             } catch (GatewayBudgetException e) {
                 throw e;
             } catch (RuntimeException e) {
                 last = e;
-                if (attempt == INITIAL_BALANCE_READ_ATTEMPTS || stopped
-                        || Thread.currentThread().isInterrupted()) {
+                // isInterrupted() is best effort: ApiGatewayClient.readBalance wraps an
+                // InterruptedException without restoring the flag (pre-existing, review note).
+                // `stopped` is what actually ends this loop on teardown.
+                if (attempt == attempts || stopped || Thread.currentThread().isInterrupted()) {
                     break;
                 }
-                // DEBUG: per bot. The failure that survives every attempt is reported by the
-                // caller (and by the reconnect it triggers, at WARN).
+                // DEBUG: per bot. A failure that survives every attempt is reported by start().
                 log.debug("Bot {}: first balance read failed (attempt {}/{}): {} — retrying",
-                        userName, attempt, INITIAL_BALANCE_READ_ATTEMPTS, e.getMessage());
+                        userName, attempt, attempts, e.getMessage());
                 sleep(INITIAL_BALANCE_RETRY_DELAY_MS * attempt);
             }
         }
@@ -1437,15 +1455,15 @@ public abstract class Bot {
         try {
             onStart();
         } catch (RuntimeException e) {
-            onStartFailed(e);
-            throw e;
+            throw onStartFailed(e);
         }
         transitionStatus(BotStatus.STARTED);
     }
 
     /**
      * A start whose {@link #onStart()} threw — in practice, a first balance read that failed every
-     * attempt (GATEWAY_REQUEST_BUDGET A33, staging anomaly A1).
+     * attempt (GATEWAY_REQUEST_BUDGET A33, staging anomaly A1). Decides what becomes of the bot and
+     * returns the exception {@link #start()} throws.
      * <p>
      * <b>Such a bot must not stay "connected".</b> {@code onStart} installs the bot's scenario
      * only after its first session is set up, so a throw leaves an open, authenticated socket
@@ -1454,24 +1472,56 @@ public abstract class Bot {
      * the silence is armed by the very scenario that was never installed. {@code monitorHealth}
      * counts DEAD and RECONNECTING; it saw neither, and five Zic Zac bots sat like that for good.
      * <p>
-     * So the bot is handed to the existing full-reconnect path: RECONNECTING (which health and
-     * the rollup see), a PRIORITIZED re-login, a fresh socket, and {@code start()} again — the
-     * same recovery a watchdog expiry gets, capped by {@link #MAX_RECONNECT_CYCLES} and ending in
-     * DEAD if it never succeeds. Not straight to DEAD: A1's failure was transient, and DEAD is
-     * terminal for a bot.
-     * <p>
-     * <b>Not from inside a reconnect loop.</b> {@code tryReconnectWs} and the periodic-logout
-     * {@code restart} also call {@link #start()}; in the loop, the throw is that attempt's failure
-     * and the loop owns the next step. {@code triggerFullReconnect}'s own guard (the
-     * {@code reconnecting} CAS, and {@code stopped}/DEAD) already makes this a no-op there; the
-     * explicit check says so. The exception is rethrown either way, so callers see exactly the
-     * failure they saw before.
+     * The four cases, and what each one logs (per bot, so never INFO):
+     * <ol>
+     *   <li><b>Called off</b> — the bot is stopped, its group's start was cancelled, or the read
+     *       was refused with {@link GatewayRequestCancelledException} (A33 review). A
+     *       {@code /stop}, DELETE or activation STOP calls {@code cancelStartInFlight} <em>before</em>
+     *       {@code cleanup()} sets {@code stopped}, so every queued first read of a paced start
+     *       fails this way while {@code stopped} is still false. That is an operator decision,
+     *       not a failure: no reconnect, no WARN, no {@code bot_reconnects_total}. DEBUG; the
+     *       original exception is rethrown.</li>
+     *   <li><b>Inside a reconnect loop</b> — {@code tryReconnectWs} and the periodic-logout
+     *       {@code restart} also call {@link #start()}; the throw is that attempt's failure and
+     *       the loop owns the next step. DEBUG; rethrown unchanged.</li>
+     *   <li><b>Handed to the reconnect loop</b> — the existing {@code triggerFullReconnect}:
+     *       RECONNECTING (which health and the rollup see), the idle socket closed, a PRIORITIZED
+     *       re-login, a fresh socket and {@code start()} again — the same recovery a watchdog
+     *       expiry gets, capped by {@link #MAX_RECONNECT_CYCLES} and ending in DEAD. Not straight
+     *       to DEAD: A1's failure was transient, and DEAD is terminal for a bot. An open circuit
+     *       takes this branch too: the bot still needs a way back once the block clears. The one
+     *       line is {@code triggerFullReconnect}'s WARN (no stack); the exception is wrapped in
+     *       {@link SessionSetupHandedOffException} so the caller can tell it apart from a final
+     *       failure and log it at DEBUG rather than a second ERROR.</li>
+     *   <li><b>Final</b> — the bot is already DEAD, so nothing will retry. Rethrown unchanged;
+     *       the caller's ERROR (with stack) is the one line.</li>
+     * </ol>
      */
-    private void onStartFailed(RuntimeException e) {
-        if (stopped || reconnecting.get()) {
-            return;
+    private RuntimeException onStartFailed(RuntimeException e) {
+        if (stopped || requestCancelled() || isCancellation(e)) {
+            log.debug("Bot {}: start called off during session setup: {}", userName, e.getMessage());
+            return e;
+        }
+        if (reconnecting.get()) {
+            log.debug("Bot {}: session setup failed inside the reconnect loop: {}",
+                    userName, e.getMessage());
+            return e;
+        }
+        if (status == BotStatus.DEAD) {
+            return e;
         }
         triggerFullReconnect(SESSION_SETUP_REASON + " failed: " + e.getMessage());
+        return new SessionSetupHandedOffException(e);
+    }
+
+    /** A {@link GatewayRequestCancelledException} anywhere in the cause chain. */
+    private static boolean isCancellation(Throwable e) {
+        for (Throwable c = e; c != null; c = c.getCause()) {
+            if (c instanceof GatewayRequestCancelledException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     protected abstract void onStart();
