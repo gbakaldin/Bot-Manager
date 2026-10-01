@@ -129,18 +129,42 @@ public class DeadGroupRecoveryScheduler {
     static final String OUTCOME_CIRCUIT_OPEN = "circuit_open";
 
     /**
-     * One increment per candidate per tick skipped for {@link #OUTCOME_CIRCUIT_OPEN} — <b>from the
-     * second skip of a group on</b>. Pre-registered at zero first, under the group MDC
-     * ({@code botGroupId}/{@code environmentId}/{@code product}), like every {@code group_recovery_*}
-     * series (CLAUDE.md, review-phase5). Registering and incrementing in the same tick would be the
-     * lazy shape with extra steps: the first scraped sample would still be 1. So a group's first
-     * skip makes the series visible at 0 and the run is counted from the next tick: a run of N
-     * skips reads N-1, and {@code increase()} never reads 0 for a run of two or more.
+     * One increment per candidate per tick skipped for {@link #OUTCOME_CIRCUIT_OPEN} — every skip
+     * counts. Pre-registered at zero under the group MDC ({@code botGroupId}/{@code environmentId}/
+     * {@code product}) <b>before</b> the first skip can happen, like every {@code group_recovery_*}
+     * series (CLAUDE.md, review-phase5 and its re-review):
+     * <ul>
+     *   <li>where the group dies in this JVM — {@code BotGroupBehaviorService.handleBotGroupDeath}
+     *       and the zero-bot DEAD branch of {@code startLocked}, both via
+     *       {@link #preRegisterSkipSeries};</li>
+     *   <li>and on every tick, for every candidate, ahead of its evaluation — which covers a group
+     *       persisted DEAD by a previous JVM from its first tick on.</li>
+     * </ul>
+     * The one remaining gap is a group that died in a previous JVM whose environment's circuit is
+     * already open at this JVM's first recovery tick (a circuit is in-memory, so it must have opened
+     * within that first minute): its first skip is registered and counted in the same tick.
      */
     static final String GROUP_RECOVERY_SKIPPED_TOTAL = BotMetrics.GROUP_RECOVERY_SKIPPED_TOTAL;
 
-    /** Groups whose skip series has been materialised at zero. Pruned to the live candidates. */
-    private final Set<String> skipSeriesMaterialised = ConcurrentHashMap.newKeySet();
+    /**
+     * Materialise {@code group_recovery_skipped_total{outcome="circuit_open"}} at zero for a group,
+     * under exactly the tag values the skip increments use ({@link #TAG_UNRESOLVED} for a missing
+     * value). Static so the lifecycle service can call it where a group dies without a dependency
+     * on this scheduler; it saves and restores the caller's MDC.
+     */
+    public static void preRegisterSkipSeries(BotMetrics botMetrics, String botGroupId,
+                                             String environmentId, String product) {
+        if (botMetrics == null || botGroupId == null) {
+            return;
+        }
+        Map<String, String> outer = BotMdc.snapshot();
+        BotMdc.setGroupContext(botGroupId, tagValue(environmentId), tagValue(product));
+        try {
+            botMetrics.initGroupRecoverySkipSeries(OUTCOME_CIRCUIT_OPEN);
+        } finally {
+            BotMdc.restore(outer);
+        }
+    }
 
     /**
      * The placeholder every recovery meter tag carries when the real value cannot be
@@ -294,7 +318,6 @@ public class DeadGroupRecoveryScheduler {
             candidateIds.add(group.getId());
         }
         expireStates(candidateIds, now);
-        skipSeriesMaterialised.retainAll(candidateIds);
 
         List<Due> due = new ArrayList<>();
         for (BotGroup group : candidates) {
@@ -306,6 +329,13 @@ public class DeadGroupRecoveryScheduler {
             // disables auto-recovery fleet-wide for as long as the bad row exists,
             // with a single ERROR that names nothing.
             try {
+                // Ahead of the evaluation, every tick (idempotent): a group persisted DEAD by a
+                // previous JVM never passed through this JVM's death handler, and its skip series
+                // must exist at 0 before the circuit check below can increment it.
+                if (group.getEnvironmentId() != null) {
+                    preRegisterSkipSeries(botMetrics, group.getId(), group.getEnvironmentId(),
+                            circuitProduct(group.getEnvironmentId()));
+                }
                 Due candidate = evaluateCandidate(group, now);
                 if (candidate != null) {
                     due.add(candidate);
@@ -393,11 +423,7 @@ public class DeadGroupRecoveryScheduler {
             BotMdc.setGroupContext(group.getId(), tagValue(group.getEnvironmentId()),
                     tagValue(circuitProduct(group.getEnvironmentId())));
             try {
-                if (skipSeriesMaterialised.add(group.getId())) {
-                    botMetrics.initGroupRecoverySkipSeries(OUTCOME_CIRCUIT_OPEN);
-                } else {
-                    botMetrics.incGroupRecoverySkipped(OUTCOME_CIRCUIT_OPEN);
-                }
+                botMetrics.incGroupRecoverySkipped(OUTCOME_CIRCUIT_OPEN);
             } finally {
                 BotMdc.restore(outer);
             }

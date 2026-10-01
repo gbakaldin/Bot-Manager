@@ -537,6 +537,9 @@ class BotGroupBehaviorServiceAsyncStartTest {
                 .startsWith("Started 0/3 bots — Gateway edge block")
                 .contains("a3c7e4004acc850e-HKG")
                 .doesNotContain("all bot creations failed");
+        // The zero-bot branch persists DEAD, so the group is a recovery candidate that the reconciler
+        // will skip on this very circuit: its skip series must already exist at 0 (re-review).
+        org.mockito.Mockito.verify(botMetrics).initGroupRecoverySkipSeries("circuit_open");
         assertThat(events.stream()
                 .filter(e -> e.getLevel() == Level.ERROR)
                 .filter(e -> e.getMessage().getFormattedMessage().startsWith("Failed to create bot")))

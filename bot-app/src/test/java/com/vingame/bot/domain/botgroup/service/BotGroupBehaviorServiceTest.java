@@ -1112,6 +1112,9 @@ class BotGroupBehaviorServiceTest {
                 BotGroup saved = botGroupCaptor.getValue();
                 assertThat(saved.getTargetStatus()).isEqualTo(BotGroupStatus.DEAD);
                 assertThat(saved.getLastFailureReason()).isNotNull();
+                // review-phase5 re-review: a group that dies is a recovery candidate, and its
+                // group_recovery_skipped_total must exist at 0 before the reconciler's first skip.
+                verify(botMetrics).initGroupRecoverySkipSeries("circuit_open");
             } finally {
                 runtime.getExecutor().shutdownNow();
             }

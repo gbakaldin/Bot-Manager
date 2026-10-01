@@ -387,25 +387,20 @@ class DeadGroupRecoverySchedulerTest {
                 .tags("botGroupId", "g1", "environmentId", "env-1", "product", "116",
                         "outcome", DeadGroupRecoveryScheduler.OUTCOME_CIRCUIT_OPEN)
                 .counter().count())
-                .as("the first skip materialises the series at 0; the other nine are counted")
-                .isEqualTo(9.0);
+                .as("every skip counts")
+                .isEqualTo(10.0);
         assertThat(lines(Level.INFO)).as("a skip is a DEBUG fact; the circuit's own ERROR is the signal")
                 .isEmpty();
     }
 
     @Test
-    @DisplayName("group_recovery_skipped_total is scraped at 0 before it moves, under the group's MDC tags")
+    @DisplayName("group_recovery_skipped_total exists at 0 from the group's death, and N skips read N")
     void theSkipCounterExistsAtZeroBeforeItMoves() {
-        // review-phase5 / QA finding 5. A counter registered at its first increment is first scraped
-        // at 1, and increase() over samples that start at 1 misses that first step (CLAUDE.md, the
-        // group_recovery_* rule). The first skip must leave the series visible at exactly 0.
-        persistedDead(deadGroup("g1"));
-        envIsHealthy();
-        openCircuitOn("env-1", "116");
-        DeadGroupRecoveryScheduler scheduler = scheduler(true, 6, 1, 0);
-
-        scheduler.reconcileAll(T0);
-
+        // review-phase5 re-review. The death path (handleBotGroupDeath / the zero-bot DEAD branch)
+        // pre-registers the series under the group's tags, so the reconciler's FIRST skip is a
+        // visible 0 -> 1 step and nothing is dropped. Simulated here with the same static the
+        // lifecycle service calls.
+        DeadGroupRecoveryScheduler.preRegisterSkipSeries(botMetrics, "g1", "env-1", "116");
         var series = registry.find(DeadGroupRecoveryScheduler.GROUP_RECOVERY_SKIPPED_TOTAL)
                 .tags("botGroupId", "g1", "environmentId", "env-1", "product", "116",
                         "outcome", DeadGroupRecoveryScheduler.OUTCOME_CIRCUIT_OPEN)
@@ -413,8 +408,18 @@ class DeadGroupRecoverySchedulerTest {
         assertThat(series).as("materialised with the same tag set the increments use").isNotNull();
         assertThat(series.count()).isZero();
 
-        scheduler.reconcileAll(T0.plusSeconds(60));
-        assertThat(series.count()).as("and the next skip is a visible 0 -> 1 step").isEqualTo(1.0);
+        persistedDead(deadGroup("g1"));
+        envIsHealthy();
+        openCircuitOn("env-1", "116");
+        DeadGroupRecoveryScheduler scheduler = scheduler(true, 6, 1, 0);
+        for (int i = 0; i < 3; i++) {
+            scheduler.reconcileAll(T0.plusSeconds(i * 60L));
+        }
+
+        assertThat(series.count()).as("three skips read three").isEqualTo(3.0);
+        assertThat(registry.find(DeadGroupRecoveryScheduler.GROUP_RECOVERY_SKIPPED_TOTAL).counters())
+                .as("one series for the group — the tick's own pre-registration matched it, not a second shape")
+                .hasSize(1);
     }
 
     @Test

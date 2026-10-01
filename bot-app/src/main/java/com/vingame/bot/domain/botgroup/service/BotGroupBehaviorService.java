@@ -1179,6 +1179,9 @@ public class BotGroupBehaviorService {
                     BotMdc.restore(outerMdc);
                 }
                 group.setTargetStatus(BotGroupStatus.DEAD);
+                // Same reason as handleBotGroupDeath: a recovery candidate from now on.
+                DeadGroupRecoveryScheduler.preRegisterSkipSeries(botMetrics, runtime.getGroupId(),
+                        runtime.getEnvironmentId(), runtime.getProduct());
                 // A16.2 / A32.3 S1: a start refused by an open circuit says so. Without this,
                 // /status read "all bot creations failed" — the auth-outage shape this feature
                 // exists to stop being misdiagnosed. The exception's message is ours and
@@ -3290,6 +3293,11 @@ public class BotGroupBehaviorService {
             log.error("Bot group {} has been marked as DEAD due to repeated failures", id);
 
             runtime.markAsDead();
+            // A DEAD group is a recovery candidate from now on, and the recovery reconciler may skip
+            // it on an open gateway circuit: its skip counter must exist at 0 before that first skip,
+            // or increase() misses it (CLAUDE.md's group_recovery_* rule; review-phase5 re-review).
+            DeadGroupRecoveryScheduler.preRegisterSkipSeries(botMetrics, id,
+                    runtime.getEnvironmentId(), runtime.getProduct());
 
             try {
                 BotGroup group = botGroupService.findById(id);
