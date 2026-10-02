@@ -119,6 +119,21 @@ public class BotGroupRuntime {
     private volatile Instant groupDeadSince;
 
     /**
+     * The highest bot index this runtime has built (BOT_PROVISIONING AD-12): indices
+     * {@code 1..builtUpTo} were attempted by the start, or by an attach after it. Set to the
+     * start's {@code botCount} by the constructor and advanced by
+     * {@code BotGroupBehaviorService.attachLocked} when accounts registered by a {@code botCount}
+     * raise join the running group. It is what makes an attach idempotent — a duplicate
+     * completion event finds {@code builtUpTo == botCount} and builds nothing.
+     * <p>
+     * "Attempted", not "up": a bot that failed to authenticate still counts, exactly as it does
+     * for a start, so a failed index is not retried by every later attach. Volatile because the
+     * attach writes it on its lifecycle thread under the group lock while the health and status
+     * paths read it without one.
+     */
+    private volatile int builtUpTo;
+
+    /**
      * Create a new runtime for a bot group.
      *
      * @param groupId       The bot group ID
@@ -179,6 +194,7 @@ public class BotGroupRuntime {
         this.playingStatus = BotGroupPlayingStatus.IDLE;
         this.startedAt = Instant.now();
         this.consecutiveFailures = 0;
+        this.builtUpTo = Math.max(0, botCount);
     }
 
     /**

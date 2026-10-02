@@ -1104,7 +1104,7 @@ public class BotGroupBehaviorService {
             java.util.concurrent.atomic.AtomicReference<com.vingame.bot.common.exception.GatewayCircuitOpenException>
                     circuitRefusal = new java.util.concurrent.atomic.AtomicReference<>();
             List<Bot> bots = createBotsInParallel(group, environment, game, strategyAssignment,
-                    circuitRefusal);
+                    circuitRefusal, 1, group.getBotCount());
 
             // A /stop landed during the build (AD-8/AD-16). Return without persisting anything:
             // `started` stays false, so the finally block below tears the half-built runtime down
@@ -1300,6 +1300,203 @@ public class BotGroupBehaviorService {
     }
 
     /**
+     * New accounts join a running group by attachment, not by restart (BOT_PROVISIONING AD-12).
+     * <p>
+     * {@link RegistrationWorker} publishes {@link RegistrationCompletedEvent} after a matched
+     * completion. Spring delivers it synchronously, i.e. <b>on the registration worker's single
+     * thread</b> — the serialisation of every group's registration — so this method only decides
+     * and hands off: an in-memory runtime check, then {@link #submitLifecycle}, which spawns the
+     * virtual thread that actually builds. Nothing here may throw back into the worker.
+     */
+    @EventListener
+    public void onRegistrationCompleted(RegistrationCompletedEvent event) {
+        attachIfRunning(event.botGroupId());
+    }
+
+    /**
+     * Hand an attach to a lifecycle thread if, and only if, the group has an {@code ACTIVE}
+     * runtime. No runtime, a {@code DEAD} one, or a {@code STARTING} one: nothing to do here —
+     * the next start (or the start already in flight) builds {@code 1..botCount} itself.
+     * <p>
+     * Reusing {@link #submitLifecycle} is the point: the attach becomes a {@link StartAttemptRegistry}
+     * attempt, so a {@code /stop} cancels it exactly as it cancels a start, a second
+     * {@code /start} during it is the existing "already in flight" no-op, and {@code GET /status}
+     * reads {@code STARTING} while it runs.
+     */
+    void attachIfRunning(String id) {
+        try {
+            BotGroupRuntime runtime = runningGroups.get(id);
+            if (runtime == null || runtime.getActualStatus() != BotGroupStatus.ACTIVE) {
+                log.debug("Bot group {}: registration completed with no ACTIVE runtime ({}) — "
+                                + "nothing to attach, the next start builds every account",
+                        id, runtime == null ? "none" : runtime.getActualStatus());
+                return;
+            }
+            submitLifecycle(id, StartOrigin.ATTACH, () -> { }, "attach", this::attach);
+        } catch (BadRequestException e) {
+            // validateStartable: e.g. botCount was raised again between the completion and this
+            // event, so the group is PENDING once more. Its own next completion attaches.
+            log.debug("Bot group {}: attach not submitted — {}", id, e.getMessage());
+        } catch (RuntimeException e) {
+            log.warn("Bot group {}: could not hand off the attach of newly registered accounts — "
+                    + "they will join at the next start: {}", id, e.toString());
+        }
+    }
+
+    /**
+     * The attach lifecycle body: {@link #attachLocked} under the same per-group lock as start and
+     * stop. Package-private so tests can run it synchronously.
+     */
+    void attach(String id) {
+        ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            attachLocked(id);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Build indices {@code builtUpTo+1 .. botCount} into the running group (AD-12).
+     * <p>
+     * Everything is re-read under the lock and the range recomputed, because a {@code /stop}, a
+     * lowered {@code botCount} or a restart may have landed since the event. {@code builtUpTo} is
+     * what makes a duplicate event a no-op. The build is the start's own machinery —
+     * {@link #createBotsInParallel} over the new range, the same {@code ESSENTIAL x 3 x added}
+     * declared demand, the same coordinator / jackpot-scaler injection before
+     * {@link BotGroupRuntime#startBot} — so an attached bot is indistinguishable from one the
+     * start built. The bots already playing are never touched.
+     */
+    private void attachLocked(String id) {
+        BotGroupRuntime runtime = runningGroups.get(id);
+        if (runtime == null || runtime.getActualStatus() != BotGroupStatus.ACTIVE) {
+            log.debug("Bot group {}: no ACTIVE runtime under the lock — attach abandoned", id);
+            return;
+        }
+
+        BotGroup group = botGroupService.findById(id);
+        if (group.getTargetStatus() != BotGroupStatus.ACTIVE) {
+            log.debug("Bot group {}: targetStatus is {} — attach abandoned", id, group.getTargetStatus());
+            return;
+        }
+        if (group.getRegistrationState() != null) {
+            log.debug("Bot group {}: registration is {} again — its next completion attaches",
+                    id, group.getRegistrationState());
+            return;
+        }
+
+        int fromIndex = runtime.getBuiltUpTo() + 1;
+        int toIndex = group.getBotCount();
+        if (fromIndex > toIndex) {
+            // The duplicate-event case, and the lowered-botCount case. Lowering never stops a
+            // running bot; it only means there is nothing new to build.
+            log.debug("Bot group {}: built up to {}, botCount {} — nothing to attach",
+                    id, runtime.getBuiltUpTo(), toIndex);
+            return;
+        }
+        int added = toIndex - fromIndex + 1;
+
+        Environment environment = environmentService.findById(group.getEnvironmentId());
+        Game game = gameService.findById(group.getGameId());
+        Map<String, String> strategyAssignment = attachStrategySlice(group, fromIndex, toIndex);
+        log.debug("Bot group {}: attach strategy slice {}", id, strategyCounts(strategyAssignment));
+
+        GatewayBudget.Reservation reservation = null;
+        List<Bot> bots = List.of();
+        boolean started = false;
+        try {
+            startAttempts.progress(id, StartAttemptRegistry.Phase.BUILDING);
+
+            // Same declared demand as startLocked, for the bots this attach builds — and taken
+            // with the runtime already published, so a /stop can find the scope to cancel.
+            GatewayBudget budget = gatewayBudgetRegistry.forEnvironment(
+                    group.getEnvironmentId(), environment.getName(),
+                    environment.getProductCode() != null
+                            ? environment.getProductCode().getCode() : null);
+            reservation = budget.reserve(RequestTier.ESSENTIAL, added * REQUESTS_PER_BOT_AT_START,
+                    GatewayRequestScope.forBot(id, null, () -> startAttempts.isCancelled(id)));
+
+            // Tier 1: one line per attach, never one per bot.
+            log.info("group {} ({}): attaching {} bots ({}-{}) to running group",
+                    id, group.getName(), added, fromIndex, toIndex);
+            groupLifecycleAggregator.expectInitialized(id, group.getName(), added);
+
+            java.util.concurrent.atomic.AtomicReference<com.vingame.bot.common.exception.GatewayCircuitOpenException>
+                    circuitRefusal = new java.util.concurrent.atomic.AtomicReference<>();
+            bots = createBotsInParallel(group, environment, game, strategyAssignment,
+                    circuitRefusal, fromIndex, toIndex);
+
+            if (startAttempts.isCancelled(id)) {
+                // The stop parked on this lock tears the runtime down next; the bots built here
+                // were never handed to it, so they are cleaned up below.
+                log.info("A stop during the attach to group {} cancelled it at {}/{} bots — unwinding",
+                        id, bots.size(), added);
+                return;
+            }
+            if (runningGroups.get(id) != runtime || runtime.getActualStatus() != BotGroupStatus.ACTIVE) {
+                // Died while building. The reclaim on the next start builds 1..botCount.
+                log.info("Bot group {} is no longer ACTIVE ({}) — discarding the {} attached bots",
+                        id, runtime.getActualStatus(), bots.size());
+                return;
+            }
+
+            startAttempts.progress(id, StartAttemptRegistry.Phase.STARTING_BOTS);
+            for (Bot bot : bots) {
+                bot.setCoordinator(runtime.getCoordinator());
+                bot.setJackpotScaler(runtime.getJackpotScaler());
+                runtime.startBot(bot);
+                log.debug("Started attached bot {}", bot.getUserName());
+            }
+            // Advanced to the range attempted, not the bots that came up — a failed index is not
+            // retried by every later attach, exactly as a start does not retry one.
+            runtime.setBuiltUpTo(toIndex);
+            started = true;
+
+            log.info("group {} ({}): attached {}/{} bots ({}-{}), {} bots in the group",
+                    id, group.getName(), bots.size(), added, fromIndex, toIndex,
+                    runtime.getBotInstances().size());
+        } finally {
+            if (reservation != null) {
+                reservation.release();
+            }
+            if (!started) {
+                for (Bot bot : bots) {
+                    try {
+                        bot.cleanup();
+                    } catch (Exception e) {
+                        log.debug("Error cleaning up unattached bot {}: {}", bot.getUserName(), e.toString());
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The strategy assignment for indices {@code fromIndex..toIndex}, taken from an assignment
+     * over the whole group {@code 1..toIndex} (AD-12). {@link StrategyAssignment#assign} is
+     * deterministic over the identifier list, so this is the same slice a fresh start of the
+     * grown group would give these bots. The bots already running keep their own assignment, so
+     * the group's mix may drift by one slice's rounding — accepted by the plan.
+     */
+    static Map<String, String> attachStrategySlice(BotGroup group, int fromIndex, int toIndex) {
+        List<String> identifiers = new ArrayList<>(Math.max(0, toIndex));
+        for (int i = 1; i <= toIndex; i++) {
+            identifiers.add(group.getNamePrefix() + i);
+        }
+        Map<String, String> full = StrategyAssignment.assign(effectiveStrategyMix(group), identifiers);
+        Map<String, String> slice = new LinkedHashMap<>();
+        for (int i = fromIndex; i <= toIndex; i++) {
+            String identifier = group.getNamePrefix() + i;
+            String strategyId = full.get(identifier);
+            if (strategyId != null) {
+                slice.put(identifier, strategyId);
+            }
+        }
+        return slice;
+    }
+
+    /**
      * Create bots in parallel with controlled concurrency.
      * <p>
      * Uses a Semaphore to limit how many bots are being created simultaneously,
@@ -1308,13 +1505,20 @@ public class BotGroupBehaviorService {
      * @param group       The bot group configuration
      * @param environment The environment configuration
      * @param game        The game configuration
+     * @param fromIndex   first bot index to build, 1-based and inclusive
+     * @param toIndex     last bot index to build, inclusive. A start passes
+     *                    {@code (1, botCount)}; an attach (BOT_PROVISIONING AD-12) passes only
+     *                    the indices a {@code botCount} raise registered.
      * @return List of created and initialized bots
      */
     private List<Bot> createBotsInParallel(BotGroup group, Environment environment, Game game,
                                            Map<String, String> strategyAssignment,
                                            java.util.concurrent.atomic.AtomicReference<
-                                                   com.vingame.bot.common.exception.GatewayCircuitOpenException> circuitRefusal) {
-        int botCount = group.getBotCount();
+                                                   com.vingame.bot.common.exception.GatewayCircuitOpenException> circuitRefusal,
+                                           int fromIndex, int toIndex) {
+        // How many this call builds, which is what every "n/m" below reports against. For a start
+        // it is botCount, exactly as before the range parameters existed.
+        int botCount = Math.max(0, toIndex - fromIndex + 1);
         Semaphore semaphore = new Semaphore(botCreationParallelism);
         // The group's product, for the MDC that tags bot_creation_failures_total below.
         // A failure here means no Bot object exists to carry it, so this is the only
@@ -1324,7 +1528,7 @@ public class BotGroupBehaviorService {
 
         List<CompletableFuture<Bot>> futures = new ArrayList<>(botCount);
 
-        for (int i = 1; i <= botCount; i++) {
+        for (int i = fromIndex; i <= toIndex; i++) {
             final int botIndex = i;
 
             CompletableFuture<Bot> future = CompletableFuture.supplyAsync(() -> {
@@ -1416,7 +1620,7 @@ public class BotGroupBehaviorService {
                         // ERROR here pages someone for a /stop that worked. Still counted — with
                         // its own label — because a cancelled build's shape is worth seeing.
                         log.debug("Bot {}/{} of group {} was cancelled while queued at the gateway "
-                                        + "budget", i + 1, botCount, group.getId());
+                                        + "budget", fromIndex + i, toIndex, group.getId());
                     } else if (cause instanceof com.vingame.bot.common.exception.GatewayCircuitOpenException refusal) {
                         // Every bot of a start during a block lands here, refused inside the JVM.
                         // One ERROR with a stack trace per bot was N identical traces into Loki for
@@ -1425,10 +1629,10 @@ public class BotGroupBehaviorService {
                         circuitRefusal.compareAndSet(null, refusal);
                         circuitRefused++;
                         log.debug("Bot {}/{} of group {} refused by an open gateway circuit: {}",
-                                i + 1, botCount, group.getId(), refusal.getMessage());
+                                fromIndex + i, toIndex, group.getId(), refusal.getMessage());
                     } else {
                         log.error("Failed to create bot {}/{} for group {} (env {}): {}",
-                                i + 1, botCount, group.getId(), group.getEnvironmentId(),
+                                fromIndex + i, toIndex, group.getId(), group.getEnvironmentId(),
                                 cause.toString(), cause);
                     }
                     botMetrics.incBotCreationFailure(classifyCreationFailure(cause));

@@ -199,6 +199,44 @@ class RegistrationWorkerTest {
     }
 
     @Test
+    @DisplayName("a matched completion publishes RegistrationCompletedEvent (BOT_PROVISIONING AD-12)")
+    void aMatchedCompletionPublishesTheEvent() throws Exception {
+        List<Object> events = new ArrayList<>();
+        worker.setApplicationEventPublisher(events::add);
+        pending(group(2, 0, 0));
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenReturn(RegistrationOutcome.CREATED);
+
+        worker.tick();
+
+        assertThat(events).containsExactly(new RegistrationCompletedEvent(GROUP));
+    }
+
+    @Test
+    @DisplayName("an unmatched completion (botCount raised meanwhile) publishes nothing")
+    void anUnmatchedCompletionPublishesNothing() throws Exception {
+        List<Object> events = new ArrayList<>();
+        worker.setApplicationEventPublisher(events::add);
+        pending(group(1, 0, 0));
+        when(client.registerOne(anyString(), anyString(), anyInt(), any(), any()))
+                .thenReturn(RegistrationOutcome.CREATED);
+        // Progress writes match; the conditional completion write does not.
+        when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq(BotGroup.class)))
+                .thenAnswer(inv -> {
+                    Update update = inv.getArgument(1);
+                    Object set = update.getUpdateObject().get("$set");
+                    boolean completion = set instanceof org.bson.Document doc
+                            && doc.containsKey("registrationState");
+                    return com.mongodb.client.result.UpdateResult.acknowledged(
+                            completion ? 0 : 1, completion ? 0L : 1L, null);
+                });
+
+        worker.tick();
+
+        assertThat(events).as("the group is still PENDING; nothing new is registered yet").isEmpty();
+    }
+
+    @Test
     @DisplayName("resumes from registeredCount rather than starting over — the restart case")
     void resumesFromTheHighWaterMark() throws Exception {
         // What a JVM restart mid-registration leaves behind: the document says 2 of 5 exist.

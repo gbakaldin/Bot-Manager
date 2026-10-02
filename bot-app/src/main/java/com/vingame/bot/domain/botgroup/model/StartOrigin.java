@@ -24,5 +24,11 @@ public enum StartOrigin {
     RECOVERY,
 
     /** A restart previously booked through {@code POST /{id}/schedule-restart}. */
-    SCHEDULED_RESTART
+    SCHEDULED_RESTART,
+
+    /**
+     * {@code BotGroupBehaviorService.attachIfRunning}: accounts registered by a {@code botCount}
+     * raise joining a running group without a restart (BOT_PROVISIONING AD-12).
+     */
+    ATTACH
 }

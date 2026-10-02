@@ -19,6 +19,8 @@ import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.ApplicationEventPublisherAware;
 import org.springframework.context.event.EventListener;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
@@ -112,7 +114,7 @@ import java.util.concurrent.TimeUnit;
  */
 @Slf4j
 @Component
-public class RegistrationWorker {
+public class RegistrationWorker implements ApplicationEventPublisherAware {
 
     /** {@code outcome} tag values on {@code registration_accounts_total}. */
     static final String OUTCOME_SUCCESS = "success";
@@ -201,6 +203,18 @@ public class RegistrationWorker {
     private volatile Instant gaugesRefreshedAt;
 
     private ScheduledExecutorService worker;
+
+    /**
+     * Where {@link RegistrationCompletedEvent} goes (BOT_PROVISIONING AD-12). Injected through
+     * {@link ApplicationEventPublisherAware} rather than the constructor so the constructor — and
+     * every test that builds a worker directly — is unchanged; outside Spring it is a no-op.
+     */
+    private ApplicationEventPublisher eventPublisher = event -> { };
+
+    @Override
+    public void setApplicationEventPublisher(ApplicationEventPublisher applicationEventPublisher) {
+        this.eventPublisher = applicationEventPublisher;
+    }
 
     public RegistrationWorker(BotGroupRepository repository,
                               MongoTemplate mongoTemplate,
@@ -620,6 +634,18 @@ public class RegistrationWorker {
         log.info("group {} ({}): registration complete, {}/{} accounts{}",
                 group.getId(), group.getName(), registered, target,
                 names ? " (" + named + " named)" : " (no display-name pool configured)");
+
+        // BOT_PROVISIONING AD-12: only after a MATCHED completion — an unmatched one left the
+        // group PENDING, so there is nothing new to attach yet. The listener only decides and
+        // hands off to a lifecycle thread; it must never build bots on this thread, which is the
+        // serialisation of every group's registration. A listener failure is not this worker's
+        // failure: the accounts exist, and the next start builds them regardless.
+        try {
+            eventPublisher.publishEvent(new RegistrationCompletedEvent(group.getId()));
+        } catch (RuntimeException e) {
+            log.warn("group {}: registration-completed hand-off failed — new accounts will join "
+                    + "at the next start: {}", group.getId(), e.toString());
+        }
     }
 
     /**
