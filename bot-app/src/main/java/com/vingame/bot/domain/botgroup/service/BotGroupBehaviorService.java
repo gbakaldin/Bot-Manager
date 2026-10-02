@@ -831,19 +831,24 @@ public class BotGroupBehaviorService {
      */
     private boolean cancelAttemptAndScope(String id) {
         boolean cancelled = startAttempts.cancel(id);
+        cancelScope(id);
+        return cancelled;
+    }
+
+    /** Call off whatever this group has queued at its environment's gateway budget. */
+    private void cancelScope(String id) {
         // The budget is per environment and only exists once something has been sent through it;
         // find() deliberately does not create one, because conjuring a budget (and a fresh set of
         // gateway_budget_* series) as a side effect of a stop would be a lie about the fleet.
         BotGroupRuntime runtime = runningGroups.get(id);
         String environmentId = runtime != null ? runtime.getEnvironmentId() : null;
         if (environmentId == null) {
-            return cancelled;
+            return;
         }
         GatewayBudget budget = gatewayBudgetRegistry.find(environmentId);
         if (budget != null) {
             budget.cancelScope(id);
         }
-        return cancelled;
     }
 
     /**
@@ -3686,14 +3691,17 @@ public class BotGroupBehaviorService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        if (!held && startAttempts.openOrigin(id).filter(o -> o == StartOrigin.ATTACH).isPresent()) {
-            // BOT_PROVISIONING review: an attach holds this lock for its whole paced build on an
-            // ACTIVE runtime and does not take the status over. Abort it — the same cancellation
-            // a /stop uses, checked by the build before and after every bot's permit — and give it
-            // one more short wait to unwind. If it has not, the next 30 s tick finds it gone.
+        // BOT_PROVISIONING review: an attach holds this lock for its whole paced build on an
+        // ACTIVE runtime and does not take the status over. Abort it — the same cancellation a
+        // /stop uses, checked by the build before and after every bot's permit — and give it one
+        // more short wait to unwind. If it has not, the next 30 s tick finds it gone.
+        // Compare-and-cancel (re-check advisory #4): only an ATTACH attempt is ever cancelled
+        // here. A separate check-then-cancel could hit the attempt that replaced it — e.g. the
+        // scheduled restart deferred behind the attach — leaving no runtime and targetStatus=ACTIVE.
+        if (!held && startAttempts.cancelIf(id, StartOrigin.ATTACH)) {
             log.warn("Bot group {} looks DEAD while an attach holds its lock — aborting the attach "
                     + "so the group can be marked", id);
-            cancelAttemptAndScope(id);
+            cancelScope(id);
             try {
                 held = lock.tryLock(DEATH_LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
             } catch (InterruptedException e) {

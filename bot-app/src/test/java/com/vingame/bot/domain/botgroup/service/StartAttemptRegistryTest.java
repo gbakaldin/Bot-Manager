@@ -236,6 +236,26 @@ class StartAttemptRegistryTest {
         }
 
         @Test
+        @DisplayName("cancelIf cancels only an attempt of the given origin (BOT_PROVISIONING re-check #4)")
+        void cancelIfIsCompareAndCancel() {
+            assertThat(registry.cancelIf("g1", StartOrigin.ATTACH)).as("nothing open").isFalse();
+
+            // The attach finished and its deferred scheduled restart opened the next attempt:
+            // handleBotGroupDeath's abort must not land on it.
+            registry.begin("g1", StartOrigin.ATTACH);
+            registry.finish("g1", null);
+            registry.begin("g1", StartOrigin.SCHEDULED_RESTART);
+            assertThat(registry.cancelIf("g1", StartOrigin.ATTACH)).isFalse();
+            assertThat(registry.isCancelled("g1")).isFalse();
+            registry.finish("g1", null);
+
+            registry.begin("g1", StartOrigin.ATTACH);
+            assertThat(registry.cancelIf("g1", StartOrigin.ATTACH)).isTrue();
+            assertThat(registry.isCancelled("g1")).isTrue();
+            assertThat(registry.isOpen("g1")).as("the build still closes it").isTrue();
+        }
+
+        @Test
         @DisplayName("cancellation does not survive into the next attempt")
         void cancellationDoesNotLeak() {
             registry.begin("g1", StartOrigin.REST);

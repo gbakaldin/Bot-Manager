@@ -126,6 +126,29 @@ public class StartAttemptRegistry {
     }
 
     /**
+     * Compare-and-cancel: call off the attempt in flight <b>only if</b> it has {@code origin}.
+     * <p>
+     * A separate "is it an attach?" check followed by {@link #cancel} is two steps, and between
+     * them the attach can finish and its deferred follow-up (e.g. a scheduled restart) can open
+     * the next attempt — which the plain cancel would then hit, leaving a group with no runtime
+     * and {@code targetStatus=ACTIVE}. Atomic with {@code begin}/{@code finish} through
+     * {@code computeIfPresent}.
+     *
+     * @return whether an attempt of that origin was open and is now cancelled
+     */
+    public boolean cancelIf(String botGroupId, StartOrigin origin) {
+        boolean[] cancelled = {false};
+        open.computeIfPresent(botGroupId, (id, attempt) -> {
+            if (attempt.origin == origin) {
+                attempt.cancelled = true;
+                cancelled[0] = true;
+            }
+            return attempt;
+        });
+        return cancelled[0];
+    }
+
+    /**
      * Whether the start in flight for this group has been called off. {@code false} when no
      * start is open, which is what makes this safe to poll from the per-bot creation task
      * without knowing whether a start is tracked at all.

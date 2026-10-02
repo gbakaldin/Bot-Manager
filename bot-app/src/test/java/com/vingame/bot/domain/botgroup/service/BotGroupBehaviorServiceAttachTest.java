@@ -701,6 +701,43 @@ class BotGroupBehaviorServiceAttachTest {
         assertThat(runtime().getBotInstances()).hasSize(6);
     }
 
+    @Test
+    @DisplayName("re-check #4: death never cancels a non-attach attempt holding the lock")
+    void deathDoesNotCancelANonAttachAttempt() throws Exception {
+        startWith(3);
+        BotGroupRuntime runtime = runtime();
+        // A scheduled restart (e.g. the one deferred behind a finished attach) is in flight and
+        // holds the group lock.
+        assertThat(startAttempts().begin("g-1", com.vingame.bot.domain.botgroup.model.StartOrigin.SCHEDULED_RESTART)).isTrue();
+        java.util.concurrent.CountDownLatch locked = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        Thread holder = Thread.ofVirtual().start(() -> {
+            java.util.concurrent.locks.ReentrantLock lock = groupLocks().get("g-1");
+            lock.lock();
+            try {
+                locked.countDown();
+                release.await(20, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            } finally {
+                lock.unlock();
+            }
+        });
+        try {
+            assertThat(locked.await(20, TimeUnit.SECONDS)).isTrue();
+            ReflectionTestUtils.invokeMethod(service, "handleBotGroupDeath", runtime);
+
+            assertThat(startAttempts().isCancelled("g-1"))
+                    .as("cancelling the restart would leave no runtime with targetStatus=ACTIVE")
+                    .isFalse();
+            assertThat(runtime.getActualStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+        } finally {
+            release.countDown();
+            holder.join(TimeUnit.SECONDS.toMillis(20));
+            startAttempts().finish("g-1", null);
+        }
+    }
+
     /** Start 3, raise to 5, submit the attach through the event and park both new bots. */
     private java.util.concurrent.CountDownLatch parkAttach() throws Exception {
         startWith(3);
