@@ -82,6 +82,8 @@ class BotGroupBehaviorServiceAttachTest {
 
     private final List<BotConfiguration> built = new CopyOnWriteArrayList<>();
     private final List<int[]> reservations = new CopyOnWriteArrayList<>();
+    private final java.util.concurrent.atomic.AtomicInteger releases =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     @BeforeEach
     void setUp() {
@@ -325,6 +327,191 @@ class BotGroupBehaviorServiceAttachTest {
         assertThat(runtime().getBuiltUpTo()).isEqualTo(7);
     }
 
+    // ------------------------------------------------------------------ QA additions
+
+    @Test
+    @DisplayName("QA: a completion event for an ACTIVE group attaches through the lifecycle thread")
+    void completionEventAttachesAsynchronously() throws Exception {
+        startWith(3);
+        built.clear();
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+
+        service.onRegistrationCompleted(new RegistrationCompletedEvent("g-1"));
+
+        awaitUntil(() -> runtime().getBuiltUpTo() == 5
+                && service.getActualStatus("g-1") == BotGroupStatus.ACTIVE);
+        assertThat(indices()).containsExactlyInAnyOrder(4, 5);
+        assertThat(runtime().getBotInstances()).hasSize(5);
+    }
+
+    @Test
+    @DisplayName("QA: the budget reservation is released after a successful attach")
+    void reservationReleasedOnSuccess() {
+        startWith(3);
+        reservations.clear();
+        releases.set(0);
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+
+        service.attach("g-1");
+
+        assertThat(reservations).hasSize(1);
+        assertThat(releases.get()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("QA: the budget reservation is released when the attach throws after reserving")
+    void reservationReleasedOnFailure() {
+        startWith(3);
+        built.clear();
+        reservations.clear();
+        releases.set(0);
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+        org.mockito.Mockito.doThrow(new IllegalStateException("boom"))
+                .when(groupLifecycleAggregator).expectInitialized(anyString(), any(), org.mockito.ArgumentMatchers.eq(2));
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.attach("g-1"))
+                .isInstanceOf(IllegalStateException.class);
+
+        assertThat(reservations).hasSize(1);
+        assertThat(releases.get()).as("reservation released on the failure path").isEqualTo(1);
+        assertThat(built).isEmpty();
+        assertThat(runtime().getBuiltUpTo()).as("a failed attach does not consume the range").isEqualTo(3);
+        assertThat(runtime().getBotInstances()).hasSize(3);
+    }
+
+    @Test
+    @DisplayName("QA: a runtime that dies while the attach builds discards the new bots")
+    void runtimeDyingDuringAttachDiscardsNewBots() {
+        startWith(3);
+        built.clear();
+        releases.set(0);
+        reservations.clear();
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+        List<Bot> attached = new CopyOnWriteArrayList<>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            built.add(configuration);
+            runtime().markAsDead();
+            Bot bot = stubBot("bot" + configuration.getBotIndex());
+            attached.add(bot);
+            return bot;
+        }).when(botFactory).createBot(anyString(), any());
+
+        service.attach("g-1");
+
+        assertThat(attached).hasSize(2);
+        attached.forEach(bot -> {
+            verify(bot).cleanup();
+            verify(bot, never()).setCoordinator(any());
+        });
+        assertThat(runtime().getBotInstances()).hasSize(3).doesNotContainAnyElementsOf(attached);
+        assertThat(runtime().getBuiltUpTo()).isEqualTo(3);
+        assertThat(releases.get()).isEqualTo(reservations.size()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("QA: a /stop during an attach cancels it, cleans up the new bots and never starts them")
+    void stopDuringAttachUnwinds() throws Exception {
+        List<Bot> attached = runAttachInterruptedBy(() -> service.stop("g-1"));
+
+        assertThat(runningGroups()).as("the stop tore the runtime down").doesNotContainKey("g-1");
+        org.mockito.ArgumentCaptor<BotGroup> saved = org.mockito.ArgumentCaptor.forClass(BotGroup.class);
+        verify(botGroupService, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
+        assertThat(saved.getValue().getTargetStatus()).isEqualTo(BotGroupStatus.STOPPED);
+        assertThat(service.getActualStatus("g-1")).isEqualTo(BotGroupStatus.STOPPED);
+    }
+
+    @Test
+    @DisplayName("QA: a delete during an attach cancels it, cleans up the new bots and writes nothing")
+    void deleteDuringAttachUnwinds() throws Exception {
+        List<Bot> attached = runAttachInterruptedBy(() -> service.stopAndLogout("g-1"));
+
+        assertThat(runningGroups()).doesNotContainKey("g-1");
+        verify(botGroupService, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("QA: a group deleted between completion and event does not throw into the worker")
+    void deletedGroupDoesNotThrowIntoTheWorker() {
+        startWith(3);
+        built.clear();
+        when(botGroupService.findById("g-1"))
+                .thenThrow(new com.vingame.bot.common.exception.ResourceNotFoundException("gone"));
+
+        org.assertj.core.api.Assertions.assertThatCode(
+                        () -> service.onRegistrationCompleted(new RegistrationCompletedEvent("g-1")))
+                .doesNotThrowAnyException();
+        assertThat(built).isEmpty();
+        assertThat(runtime().getBuiltUpTo()).isEqualTo(3);
+    }
+
+    /**
+     * Start with 3 bots, raise to 5, submit the attach through the event, park both new bots
+     * inside the factory, run {@code interrupt} on another thread until it is queued on the group
+     * lock (i.e. it has already cancelled the attempt), then let the build finish. Returns the
+     * attached bot mocks after asserting they were cleaned up and never wired into the runtime,
+     * and that the reservation was released.
+     */
+    private List<Bot> runAttachInterruptedBy(Runnable interrupt) throws Exception {
+        startWith(3);
+        built.clear();
+        reservations.clear();
+        releases.set(0);
+        org.mockito.Mockito.clearInvocations(botGroupService);
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+
+        java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(2);
+        java.util.concurrent.CountDownLatch proceed = new java.util.concurrent.CountDownLatch(1);
+        List<Bot> attached = new CopyOnWriteArrayList<>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            built.add(configuration);
+            entered.countDown();
+            assertThat(proceed.await(20, TimeUnit.SECONDS)).isTrue();
+            Bot bot = stubBot("bot" + configuration.getBotIndex());
+            attached.add(bot);
+            return bot;
+        }).when(botFactory).createBot(anyString(), any());
+
+        service.onRegistrationCompleted(new RegistrationCompletedEvent("g-1"));
+        assertThat(entered.await(20, TimeUnit.SECONDS)).as("both new bots entered the factory").isTrue();
+
+        Thread interrupter = Thread.ofVirtual().start(interrupt);
+        java.util.concurrent.locks.ReentrantLock lock = groupLocks().get("g-1");
+        awaitUntil(lock::hasQueuedThreads);
+        proceed.countDown();
+        interrupter.join(TimeUnit.SECONDS.toMillis(20));
+        assertThat(interrupter.isAlive()).isFalse();
+        awaitUntil(() -> service.getActualStatus("g-1") != BotGroupStatus.STARTING);
+
+        assertThat(indices()).containsExactlyInAnyOrder(4, 5);
+        assertThat(attached).hasSize(2);
+        attached.forEach(bot -> {
+            verify(bot).cleanup();
+            verify(bot, never()).setCoordinator(any());
+            verify(bot, never()).setJackpotScaler(any());
+        });
+        assertThat(reservations).hasSize(1);
+        assertThat(releases.get()).isEqualTo(1);
+        return attached;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, java.util.concurrent.locks.ReentrantLock> groupLocks() {
+        return (Map<String, java.util.concurrent.locks.ReentrantLock>)
+                ReflectionTestUtils.getField(service, "groupLocks");
+    }
+
+    private static void awaitUntil(java.util.function.BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("condition not met within 20 s");
+            }
+            Thread.sleep(10);
+        }
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void startWith(int botCount) {
@@ -382,6 +569,7 @@ class BotGroupBehaviorServiceAttachTest {
             return new Reservation() {
                 @Override
                 public void release() {
+                    releases.incrementAndGet();
                 }
 
                 @Override
