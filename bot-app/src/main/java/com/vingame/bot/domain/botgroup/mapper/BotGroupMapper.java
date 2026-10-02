@@ -60,7 +60,7 @@ public interface BotGroupMapper {
                         ? null : entity.getNamedCount())
                 .registrationError(entity.getRegistrationError())
                 .initialDeposit(entity.getInitialDeposit())
-                .depositedCount(entity.getDepositedCount() == 0 ? null : entity.getDepositedCount())
+                .depositedCount(entity.getDepositedCount())
                 .depositInFlight(entity.getDepositInFlight())
                 .scheduledRestartTime(entity.getScheduledRestartTime())
                 .lastStartedAt(entity.getLastStartedAt())

@@ -139,4 +139,24 @@ class BotGroupRegistrationRenderingTest {
         rendered.setRegisteredCount(120);
         assertThat(json.writeValueAsString(rendered)).contains("\"registeredCount\":120");
     }
+
+    @Test
+    @DisplayName("BOT_PROVISIONING compliance D1: depositedCount renders as-is — 0 stays 0, not absent")
+    void depositedCountZeroIsRendered() throws Exception {
+        BotGroup funded = BotGroup.builder().id("g-1").name("G").botCount(3).initialDeposit(1_000_000L)
+                .registrationState(RegistrationState.PENDING).build();
+
+        BotGroupDTO dto = mapper.toDTO(funded);
+
+        assertThat(dto.getDepositedCount()).isZero();
+        assertThat(json.writeValueAsString(dto)).contains("\"depositedCount\":0");
+
+        funded.setDepositedCount(2);
+        assertThat(mapper.toDTO(funded).getDepositedCount()).isEqualTo(2);
+
+        // Read-only inbound, like the registration counters.
+        BotGroupDTO read = json.readValue("{\"depositedCount\":9,\"depositInFlight\":4}", BotGroupDTO.class);
+        assertThat(read.getDepositedCount()).isNull();
+        assertThat(read.getDepositInFlight()).isNull();
+    }
 }
