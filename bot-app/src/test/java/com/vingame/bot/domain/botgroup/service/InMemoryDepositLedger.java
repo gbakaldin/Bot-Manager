@@ -14,8 +14,8 @@ class InMemoryDepositLedger extends DepositLedger {
 
     private final Map<String, State> states = new ConcurrentHashMap<>();
     final List<String> journal = new CopyOnWriteArrayList<>();
-    /** When set, the next {@code credit} throws as if Mongo were down. */
-    volatile boolean failNextCredit;
+    /** How many upcoming {@code credit} calls throw as if Mongo were down. */
+    volatile int failCredits;
     /** When set, the next {@code markInFlight} throws (and writes nothing). */
     volatile boolean failNextMark;
 
@@ -49,13 +49,34 @@ class InMemoryDepositLedger extends DepositLedger {
     @Override
     public synchronized void credit(String botGroupId, int index) {
         journal.add("credit:" + index);
-        if (failNextCredit) {
-            failNextCredit = false;
+        if (failCredits > 0) {
+            failCredits--;
             throw new IllegalStateException("simulated Mongo failure on the credit write");
         }
+        // Unconditional and monotonic, like the Mongo ledger: $max the count, then clear the
+        // marker only if it still names this index.
         State s = read(botGroupId);
-        if (s.depositInFlight() == null || s.depositInFlight() != index) {
-            throw new IllegalStateException("marker lost");
+        Integer marker = s.depositInFlight() != null && s.depositInFlight() == index ? null : s.depositInFlight();
+        states.put(botGroupId, new State(Math.max(s.depositedCount(), index), marker));
+    }
+
+    @Override
+    public synchronized boolean reassertInFlight(String botGroupId, int index) {
+        journal.add("reassert:" + index);
+        State s = read(botGroupId);
+        if (s.depositedCount() < index && (s.depositInFlight() == null || s.depositInFlight() == index)) {
+            states.put(botGroupId, new State(s.depositedCount(), index));
+            return true;
+        }
+        return false;
+    }
+
+    @Override
+    public synchronized void skip(String botGroupId, int index) {
+        journal.add("skip:" + index);
+        State s = read(botGroupId);
+        if (s.depositedCount() != index - 1 || s.depositInFlight() != null) {
+            throw new IllegalStateException("ledger refused skip " + index + " over " + s);
         }
         states.put(botGroupId, new State(index, null));
     }

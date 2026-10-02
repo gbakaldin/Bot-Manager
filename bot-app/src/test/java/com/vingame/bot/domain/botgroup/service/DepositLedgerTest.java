@@ -136,27 +136,66 @@ class DepositLedgerTest {
     // ------------------------------------------------------------------ credit
 
     @Test
-    @DisplayName("credit: ONE write, conditioned on the marker naming index, that advances the mark AND clears the marker")
-    void creditAdvancesAndClearsInOneConditionalWrite() {
-        updateFirstMatches(1);
+    @DisplayName("credit: UNCONDITIONAL $max on the count (filter _id only), then clears the marker only if it names index")
+    void creditIsUnconditionalAndMonotonic() {
+        // Review Phase 2 bug 2: a 200 is authoritative. Gating the record on the marker let a
+        // racing operator answer un-record a deposit that went through, which was then resent.
+        updateFirstMatches(0);
 
         ledger.credit(GROUP, 3);
 
-        ArgumentCaptor<Update> update = ArgumentCaptor.forClass(Update.class);
-        Query query = capturedUpdateFirstQuery(update);
-        assertThat(query.getQueryObject()).isEqualTo(new Document("_id", GROUP).append("depositInFlight", 3));
-        Document expected = new Document("depositedCount", 3);
-        expected.put("depositInFlight", null);
-        assertThat(set(update.getValue())).isEqualTo(expected);
+        ArgumentCaptor<Query> upsertQuery = ArgumentCaptor.forClass(Query.class);
+        ArgumentCaptor<Update> upsert = ArgumentCaptor.forClass(Update.class);
+        verify(mongo).upsert(upsertQuery.capture(), upsert.capture(), eq(DepositLedger.Entry.class),
+                eq(DepositLedger.COLLECTION));
+        assertThat(upsertQuery.getValue().getQueryObject()).isEqualTo(new Document("_id", GROUP));
+        assertThat(upsert.getValue().getUpdateObject())
+                .isEqualTo(new Document("$max", new Document("depositedCount", 3)));
+
+        ArgumentCaptor<Update> clear = ArgumentCaptor.forClass(Update.class);
+        Query clearQuery = capturedUpdateFirstQuery(clear);
+        assertThat(clearQuery.getQueryObject()).isEqualTo(new Document("_id", GROUP).append("depositInFlight", 3));
+        assertThat(set(clear.getValue())).containsOnlyKeys("depositInFlight");
     }
 
     @Test
-    @DisplayName("credit: no match (the marker was lost) throws, so the worker stops the group")
-    void creditWithoutMatchThrows() {
+    @DisplayName("credit: a lost marker no longer throws — the record is the point")
+    void creditWithoutMarkerStillRecords() {
         updateFirstMatches(0);
 
-        assertThatThrownBy(() -> ledger.credit(GROUP, 3)).isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("index 3");
+        org.assertj.core.api.Assertions.assertThatCode(() -> ledger.credit(GROUP, 3)).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("reassertInFlight: only below the funded mark and only over no/same marker")
+    void reassertIsConditional() {
+        updateFirstMatches(1);
+
+        assertThat(ledger.reassertInFlight(GROUP, 4)).isTrue();
+
+        ArgumentCaptor<Update> update = ArgumentCaptor.forClass(Update.class);
+        Query query = capturedUpdateFirstQuery(update);
+        String filter = query.getQueryObject().toJson();
+        assertThat(filter).contains("\"depositedCount\": {\"$lt\": 4}")
+                .contains("\"depositInFlight\": null").contains("\"depositInFlight\": 4");
+        assertThat(set(update.getValue())).isEqualTo(new Document("depositInFlight", 4));
+    }
+
+    @Test
+    @DisplayName("skip: same guard as markInFlight, advances the count without a marker")
+    void skipIsConditional() {
+        when(mongo.findAndModify(any(Query.class), any(Update.class), any(FindAndModifyOptions.class),
+                eq(DepositLedger.Entry.class), eq(DepositLedger.COLLECTION))).thenReturn(entry(5, null), entry(4, null));
+
+        ledger.skip(GROUP, 5);
+
+        ArgumentCaptor<Query> query = ArgumentCaptor.forClass(Query.class);
+        ArgumentCaptor<Update> update = ArgumentCaptor.forClass(Update.class);
+        verify(mongo).findAndModify(query.capture(), update.capture(), any(FindAndModifyOptions.class),
+                eq(DepositLedger.Entry.class), eq(DepositLedger.COLLECTION));
+        assertThat(query.getValue().getQueryObject()).containsEntry("depositedCount", 4).containsKey("depositInFlight");
+        assertThat(set(update.getValue())).isEqualTo(new Document("depositedCount", 5));
+        assertThatThrownBy(() -> ledger.skip(GROUP, 5)).isInstanceOf(IllegalStateException.class);
     }
 
     // ------------------------------------------------------------------ clearInFlight

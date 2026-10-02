@@ -80,6 +80,9 @@ class RegistrationWorkerDepositTest {
     /** The outcome to give each send; null = refuse at the budget, before admission. */
     private IntFunction<Step> script;
 
+    /** Something to run while a deposit is in flight (after its marker, before its outcome). */
+    private volatile Runnable racingResolve;
+
     /** What one simulated deposit call does. */
     enum Step { CREDIT, REFUSE, NOT_SENT, UNKNOWN, CRASH_AFTER_SEND, BUDGET_REFUSAL }
 
@@ -133,6 +136,11 @@ class RegistrationWorkerDepositTest {
                     }
                     if (step == Step.NOT_SENT) {
                         return new DepositOutcome.Result(DepositOutcome.NOT_SENT, "stream wait");
+                    }
+                    Runnable race = racingResolve;
+                    racingResolve = null;
+                    if (race != null) {
+                        race.run();
                     }
                     ledger.journal.add("send:" + index);
                     sends.merge(index, 1, Integer::sum);
@@ -336,13 +344,14 @@ class RegistrationWorkerDepositTest {
     @Test
     @DisplayName("CRASH: credited, but the credit write fails — the group stops, the index is not re-sent")
     void creditWriteFailureStopsTheGroup() {
-        ledger.failNextCredit = true;
+        ledger.failCredits = 1_000;
 
         tickUntilSettled(5);
 
         assertThat(sends).containsExactly(Map.entry(1, 1));
         assertThat(group.getRegistrationState()).isEqualTo(RegistrationState.FAILED);
-        assertThat(group.getRegistrationError()).contains("HTTP 200 but recording it failed");
+        assertThat(group.getRegistrationError()).contains("recording that failed")
+                .contains("answer depositOutcome=credited").contains("depositIndex=1");
         assertThat(ledger.read(GROUP).depositInFlight()).isEqualTo(1);
     }
 
@@ -531,6 +540,151 @@ class RegistrationWorkerDepositTest {
         assertThat(ledger.read(GROUP)).isEqualTo(new DepositLedger.State(accounts, null));
     }
 
+    // ------------------------------------------------------------------ Phase 2 fix round
+
+    @Test
+    @DisplayName("review bug 2a: a 200 is recorded even if a racing answer cleared the marker — never resent")
+    void creditIsRecordedEvenWithoutTheMarker() {
+        // While index 2 is in flight, a stale operator answer "not-credited" clears its marker.
+        script = index -> {
+            if (index == 2) {
+                racingResolve = () -> ledger.resolve(GROUP, 2, false);
+            }
+            return Step.CREDIT;
+        };
+
+        tickUntilSettled(5);
+
+        assertThat(group.getRegistrationState()).isNull();
+        assertThat(sends).containsExactlyInAnyOrderEntriesOf(Map.of(1, 1, 2, 1, 3, 1));
+        assertThat(ledger.read(GROUP)).isEqualTo(new DepositLedger.State(3, null));
+    }
+
+    @Test
+    @DisplayName("review bug 2b: an UNKNOWN whose marker was cleared meanwhile puts it back before stopping")
+    void unknownReassertsTheMarker() {
+        script = index -> {
+            if (index == 2) {
+                racingResolve = () -> ledger.resolve(GROUP, 2, false);
+                return Step.UNKNOWN;
+            }
+            return Step.CREDIT;
+        };
+
+        worker.tick();
+        worker.enqueue(GROUP);
+        worker.tick();
+
+        assertThat(group.getRegistrationState()).isEqualTo(RegistrationState.FAILED);
+        assertThat(ledger.read(GROUP)).as("the question survives the race").isEqualTo(new DepositLedger.State(1, 2));
+        assertThat(sends.get(2)).as("and nothing resends it").isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("review smell: a credit write that fails once is retried, not handed to the operator")
+    void transientCreditFailureIsRetried() {
+        ledger.failCredits = 2;
+
+        worker.tick();
+
+        assertThat(group.getRegistrationState()).isNull();
+        assertThat(ledger.read(GROUP)).isEqualTo(new DepositLedger.State(3, null));
+    }
+
+    @Test
+    @DisplayName("review bug 3: an account that answers EXISTED to this job's registration is not funded")
+    void existedAccountIsNotFunded() throws Exception {
+        when(client.registerOne(anyString(), anyString(), eq(2), any(), any()))
+                .thenReturn(RegistrationOutcome.ALREADY_EXISTED);
+
+        worker.tick();
+
+        assertThat(group.getRegistrationState()).isNull();
+        assertThat(sends).as("bot2 belongs to someone else").containsOnlyKeys(1, 3);
+        assertThat(ledger.read(GROUP)).isEqualTo(new DepositLedger.State(3, null));
+        assertThat(ledger.journal).contains("skip:2");
+        assertThat(deposits("skipped_existing")).isEqualTo(1);
+        assertThat(deposits("credited")).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("review bug 3: EXISTED for an index already covered by registeredCount is our own account and is funded")
+    void ownRegisteredAccountIsFunded() throws Exception {
+        group.setRegisteredCount(3);   // registered by this group earlier; only the deposits are left
+
+        worker.tick();
+
+        verify(client, never()).registerOne(anyString(), anyString(), anyInt(), any(), any());
+        assertThat(sends).containsOnlyKeys(1, 2, 3);
+        assertThat(deposits("skipped_existing")).isZero();
+    }
+
+    @Test
+    @DisplayName("review bug 3: a crash between the skip and registeredCount re-registers and still never funds it")
+    void skipSurvivesACrashBeforeTheCounterWrite() throws Exception {
+        when(client.registerOne(anyString(), anyString(), eq(1), any(), any()))
+                .thenReturn(RegistrationOutcome.ALREADY_EXISTED);
+        // The registeredCount write for index 1 "crashes" once.
+        java.util.concurrent.atomic.AtomicBoolean crashed = new java.util.concurrent.atomic.AtomicBoolean();
+        when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq(BotGroup.class)))
+                .thenAnswer(inv -> {
+                    Update u = inv.getArgument(1);
+                    Object set = u.getUpdateObject().get("$set");
+                    if (set instanceof Document d && Integer.valueOf(1).equals(d.get("registeredCount"))
+                            && crashed.compareAndSet(false, true)) {
+                        throw new IllegalStateException("simulated crash");
+                    }
+                    apply(u);
+                    return com.mongodb.client.result.UpdateResult.acknowledged(1, 1L, null);
+                });
+
+        tickUntilSettled(5);
+
+        assertThat(group.getRegistrationState()).isNull();
+        assertThat(sends).doesNotContainKey(1).containsOnlyKeys(2, 3);
+    }
+
+    @Test
+    @DisplayName("review smell: an unknown-deposit ERROR is logged once even when the FAILED write keeps failing")
+    void unknownErrorIsNotRepeatedEveryTick() throws Exception {
+        group.setRegisteredCount(3);
+        ledger.put(GROUP, 1, 2);
+        when(mongoTemplate.updateFirst(any(Query.class), any(Update.class), eq(BotGroup.class)))
+                .thenThrow(new IllegalStateException("mongo down"));
+        List<org.apache.logging.log4j.core.LogEvent> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+        var appender = new org.apache.logging.log4j.core.appender.AbstractAppender("dep-err-capture", null,
+                org.apache.logging.log4j.core.layout.PatternLayout.createDefaultLayout(), true, null) {
+            @Override
+            public void append(org.apache.logging.log4j.core.LogEvent event) {
+                events.add(event.toImmutable());
+            }
+        };
+        appender.start();
+        var ctx = (org.apache.logging.log4j.core.LoggerContext) org.apache.logging.log4j.LogManager.getContext(false);
+        var config = ctx.getConfiguration().getLoggerConfig(RegistrationWorker.class.getName());
+        config.addAppender(appender, org.apache.logging.log4j.Level.WARN, null);
+        ctx.updateLoggers();
+        try {
+            for (int i = 0; i < 4; i++) {
+                // Make the deferral due again by hand WITHOUT enqueue (which is the operator's reset).
+                ((java.util.Map<?, ?>) org.springframework.test.util.ReflectionTestUtils
+                        .getField(worker, "attempts")).clear();
+                worker.tick();
+            }
+        } finally {
+            config.removeAppender("dep-err-capture");
+            ctx.updateLoggers();
+            appender.stop();
+        }
+
+        assertThat(events).filteredOn(e -> e.getLevel() == org.apache.logging.log4j.Level.ERROR)
+                .as("one page per incident").hasSize(1);
+        assertThat(events).filteredOn(e -> e.getLevel() == org.apache.logging.log4j.Level.WARN
+                        && e.getMessage().getFormattedMessage().contains("could not mark the group REGISTRATION_FAILED"))
+                .as("the write failure is visible at WARN, with its cause").isNotEmpty();
+        verify(client, never()).depositForRegistration(anyString(), anyLong(), any(), any(), any());
+    }
+
     // ------------------------------------------------------------------ QA additions (Phase 2)
 
     @Test
@@ -553,7 +707,7 @@ class RegistrationWorkerDepositTest {
         assertThat(meters.find(BotMetrics.REGISTRATION_DEPOSIT_AMOUNT_TOTAL).counters())
                 .singleElement().satisfies(c -> assertThat(c.count()).isZero());
         assertThat(meters.find(BotMetrics.REGISTRATION_DEPOSITS_TOTAL).tag("botGroupId", GROUP).counters())
-                .as("tagged with the group from MDC").hasSize(4);
+                .as("tagged with the group from MDC").hasSize(5);
     }
 
     @Test
@@ -575,7 +729,7 @@ class RegistrationWorkerDepositTest {
     @Test
     @DisplayName("QA: credited-but-unrecorded is still counted as credited (the money moved) and is never re-sent")
     void creditWriteFailureCountsTheMoney() {
-        ledger.failNextCredit = true;
+        ledger.failCredits = 1_000;
 
         for (int i = 0; i < 5; i++) {
             worker.enqueue(GROUP);
@@ -617,7 +771,6 @@ class RegistrationWorkerDepositTest {
      * is named while some are nameless — the RIK-room freeze shape (RIK review G1).
      * Disabled so the branch stays green; enable it with the fix.
      */
-    @org.junit.jupiter.api.Disabled("QA P2-1: funded mark ahead of named mark skips naming — see qa.md Phase 2")
     @Test
     @DisplayName("QA P2-1: a seeded funded mark must not let namedCount skip unnamed accounts")
     void seededFundedMarkDoesNotSkipNaming() throws Exception {

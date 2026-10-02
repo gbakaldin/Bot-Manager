@@ -142,6 +142,16 @@ All paths under `/Users/gleb/IdeaProjects/Bot/`.
   `initialDeposit = 0`, and untracked groups. Accounts that existed before the PATCH are never
   funded by it. Seeding does **not** happen on a raise during `PENDING` (those indices genuinely
   still owe a deposit).
+
+  **Existing accounts are never funded (Phase 2 fix round, orchestrator decision).** If an index
+  this job registers (one not already covered by `registeredCount`) answers `EXISTED`, the account
+  was not created by this job — another group's under an overlapping or reused prefix, or a
+  previous incarnation of a deleted-and-recreated group. The worker records the index as done
+  without funding it (`DepositLedger.skip`, before `registeredCount` is written), counts it as
+  `registration_deposits_total{outcome="skipped_existing"}`, and logs one group-level WARN with
+  the count at completion. This errs to under-funding: an own account whose register succeeded but
+  whose `registeredCount` write was lost before a crash re-registers as `EXISTED` and stays
+  unfunded. Accepted cost; it is visible in the WARN and the metric, and is fixed by hand.
 - **AD-10 — Deposit tier is `DEFAULT` with the registration wait**
   (`bot.gateway.budget.registration.max-wait`), exactly like `registerOne`. Never PRIORITIZED.
   Cost: up to 3 DEFAULT requests per account; a 100-account funded create is ~300 requests

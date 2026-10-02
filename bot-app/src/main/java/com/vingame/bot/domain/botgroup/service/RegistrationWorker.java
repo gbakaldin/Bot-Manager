@@ -127,6 +127,11 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
     static final String DEPOSIT_REFUSED = "refused";
     static final String DEPOSIT_NOT_SENT = "not_sent";
     static final String DEPOSIT_UNKNOWN = "unknown";
+    /** An account that answered EXISTED to a registration this job sent: never funded (AD-9). */
+    static final String DEPOSIT_SKIPPED_EXISTING = "skipped_existing";
+
+    /** How many times a credited deposit's record write is tried before the operator is asked. */
+    private static final int CREDIT_WRITE_ATTEMPTS = 3;
 
     /** See {@code DeadGroupRecoveryScheduler.TAG_UNRESOLVED} — a dropped tag key is a dropped series. */
     static final String TAG_UNRESOLVED = "unknown";
@@ -158,6 +163,16 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
      * logged total smaller than what moved — the ledger and the metrics are the record.
      */
     private final ConcurrentHashMap<String, Integer> fundedThisJob = new ConcurrentHashMap<>();
+
+    /** Accounts skipped as not-ours per group since the job started, for the completion WARN. */
+    private final ConcurrentHashMap<String, Integer> skippedThisJob = new ConcurrentHashMap<>();
+
+    /**
+     * {@code groupId:index} pairs whose unknown-deposit ERROR has been logged, so a group that
+     * cannot be marked FAILED (its write failed) does not repeat the page every tick. Cleared by
+     * {@link #enqueue}, which is what an operator's retry calls.
+     */
+    private final Set<String> reportedUnknown = ConcurrentHashMap.newKeySet();
 
     private final long tickSeconds;
     private final int maxAttemptsPerUser;
@@ -344,6 +359,7 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
     public void enqueue(String botGroupId) {
         cancelled.remove(botGroupId);
         attempts.remove(botGroupId);
+        reportedUnknown.removeIf(key -> key.startsWith(botGroupId + ":"));
         if (worker == null) {
             return;
         }
@@ -461,8 +477,8 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
             // increment one. A counter that first appears at 1 is invisible to increase() — see
             // BotMetrics.initRegistrationSeries for why that silently disarms an alert rule.
             botMetrics.initRegistrationSeries(OUTCOME_SUCCESS, OUTCOME_EXISTS, OUTCOME_FAILED);
-            botMetrics.initRegistrationDepositSeries(
-                    DEPOSIT_CREDITED, DEPOSIT_REFUSED, DEPOSIT_NOT_SENT, DEPOSIT_UNKNOWN);
+            botMetrics.initRegistrationDepositSeries(DEPOSIT_CREDITED, DEPOSIT_REFUSED,
+                    DEPOSIT_NOT_SENT, DEPOSIT_UNKNOWN, DEPOSIT_SKIPPED_EXISTING);
 
             // BOT_PROVISIONING AD-5/AD-6. The amount is the job's: AD-3 forbids changing it while
             // registration is PENDING or FAILED. The funded high-water mark comes from the LEDGER,
@@ -536,7 +552,13 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
                 // rather than the three requests the plan budgeted for it (A30).
                 // With a deposit, the first index not yet FUNDED — which may already be registered and
                 // named; the earlier stages are skipped for it below. Never skips an index (AD-5).
-                int index = (deposit ? deposited : names ? named : registered) + 1;
+                //
+                // The deposit mark can be AHEAD of the name mark (QA P2-1): an AD-9 seed after a
+                // group completed with no display-name pool loaded. Starting at the funded mark would
+                // then jump namedCount over accounts that were never named, so the index is the
+                // lowest of the marks that apply; the deposit stage skips indices already funded.
+                int stageMark = names ? named : registered;
+                int index = (deposit ? Math.min(deposited, stageMark) : stageMark) + 1;
                 String username = group.getNamePrefix() + index;
 
                 try {
@@ -544,6 +566,20 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
                         RegistrationOutcome outcome =
                                 client.registerOne(group.getNamePrefix(), group.getPassword(),
                                         index, scope, maxWait);
+                        if (outcome == RegistrationOutcome.ALREADY_EXISTED && deposit && deposited < index) {
+                            // BOT_PROVISIONING AD-9 (review Phase 2, bug 3): an account this job did
+                            // not just create — another group's (an overlapping or reused prefix), or
+                            // one created before a delete-and-recreate — is not ours to fund. Recorded
+                            // BEFORE registeredCount, so a crash in between re-registers, gets EXISTED
+                            // again and finds the index already settled. Errs to under-funding: an own
+                            // account whose registeredCount write was lost before a crash is skipped too.
+                            depositLedger.skip(id, index);
+                            deposited = index;
+                            mirrorDeposited(id, deposited);
+                            skippedThisJob.merge(id, 1, Integer::sum);
+                            botMetrics.incRegistrationDeposit(DEPOSIT_SKIPPED_EXISTING);
+                            log.debug("{} already existed — not funded (not created by this job)", username);
+                        }
                         registered = index;
                         persistProgress(id, registered, named);
                         botMetrics.incRegistrationAccount(
@@ -590,18 +626,21 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
                                 () -> depositLedger.markInFlight(id, index));
                         switch (result.outcome()) {
                             case CREDITED -> {
-                                try {
-                                    // AD-6 step 2: one write advances the mark and clears the marker.
-                                    depositLedger.credit(id, index);
-                                } catch (RuntimeException recordFailure) {
-                                    // Credited, but the record of it could not be written. The marker
-                                    // is (probably) still set, so the next selection would stop the
-                                    // group anyway; stopping it now is the same outcome, sooner.
+                                // AD-6 step 2. The record is unconditional and idempotent ($max), so
+                                // a Mongo blip is simply retried before anyone is asked.
+                                RuntimeException recordFailure = recordCredit(id, index);
+                                if (recordFailure != null) {
+                                    // Credited, and the record still could not be written. Put the
+                                    // marker back (it is what stops the next pass sending again) and
+                                    // ask — with the answer, since we know it.
+                                    reassertMarkerQuietly(id, index);
+                                    fundedThisJob.merge(id, 1, Integer::sum);
                                     botMetrics.incRegistrationDeposit(DEPOSIT_CREDITED);
                                     botMetrics.addRegistrationDepositAmount(depositAmount);
                                     recordDepositUnknown(group, index, depositAmount,
-                                            "the gateway answered HTTP 200 but recording it failed: "
-                                                    + recordFailure.getMessage());
+                                            "the gateway CREDITED it (" + result.detail() + ") but "
+                                                    + "recording that failed: " + recordFailure.getMessage()
+                                                    + " — answer depositOutcome=credited");
                                     return;
                                 }
                                 deposited = index;
@@ -625,7 +664,9 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
                                 throw new DepositNotSentException(username, result.detail());
                             }
                             case UNKNOWN -> {
-                                // The marker stays set. No retry, ever, without a human.
+                                // The marker stays set — and is put back if anything cleared it
+                                // meanwhile (review bug 2b). No retry, ever, without a human.
+                                reassertMarkerQuietly(id, index);
                                 botMetrics.incRegistrationDeposit(DEPOSIT_UNKNOWN);
                                 recordDepositUnknown(group, index, depositAmount, result.detail());
                                 return;
@@ -734,6 +775,16 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
         attempts.remove(group.getId());
         // Tier 1: one INFO line per group per registration, which is the whole of this feature's
         // INFO budget. Nothing per account reaches INFO by any path.
+        Integer skipped = skippedThisJob.remove(group.getId());
+        if (skipped != null && skipped > 0) {
+            // ONE group-level WARN per job (AD-9): these accounts answered EXISTED to a registration
+            // this job sent, so they were deliberately not funded.
+            log.warn("group {} ({}): {} accounts already existed when this job registered them and "
+                            + "were NOT funded with initialDeposit {} — they belong to another group or a "
+                            + "previous incarnation of this one (or a crash lost this job's record of "
+                            + "creating them). Fund them by hand if they are this group's.",
+                    group.getId(), group.getName(), skipped, depositAmount);
+        }
         Integer funded = fundedThisJob.remove(group.getId());
         int fundedCount = funded == null ? 0 : funded;
         log.info("group {} ({}): registration complete, {}/{} accounts{}{}",
@@ -846,8 +897,9 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
         String username = group.getNamePrefix() + index;
         String reason = String.format("deposit outcome unknown for %s (index %d, amount %d): %s — "
                         + "check its balance, then POST /api/v1/bot-group/%s/registration/retry"
-                        + "?depositOutcome=credited|not-credited",
-                username, index, amount, detail, id);
+                        + "?depositOutcome=credited|not-credited&depositIndex=%d",
+                username, index, amount, detail, id, index);
+        boolean recorded;
         try {
             mongoTemplate.updateFirst(byId(id),
                     new Update().set("registrationState", RegistrationState.FAILED)
@@ -855,13 +907,52 @@ public class RegistrationWorker implements ApplicationEventPublisherAware {
                             .set("depositInFlight", index)
                             .set("updatedAt", Instant.now()),
                     BotGroup.class);
+            recorded = true;
+            attempts.remove(id);
         } catch (RuntimeException e) {
             // The ledger marker is what keeps the money safe, and it is untouched: the next
-            // selection lands back here. Only the operator-facing state is late.
-            log.debug("group {}: could not record the unknown deposit outcome yet: {}", id, e.getMessage());
+            // selection lands back here. Only the operator-facing state is late — say so, and pass
+            // the group over for a while rather than re-selecting it every tick.
+            recorded = false;
+            log.warn("group {} ({}): could not mark the group REGISTRATION_FAILED for its unknown "
+                    + "deposit outcome (index {}): {} — nothing will be sent for it; retrying the "
+                    + "write later", id, group.getName(), index, e.toString());
+            recordDeferral(id, index);
         }
-        attempts.remove(id);
-        log.error("group {} ({}): {}", id, group.getName(), reason);
+        // Once per incident, not once per tick (review smell): a failed FAILED-write re-selects
+        // the group, which must not re-page.
+        if (reportedUnknown.add(id + ":" + index)) {
+            log.error("group {} ({}): {}{}", id, group.getName(), reason,
+                    recorded ? "" : " (group state not yet updated — see the WARN)");
+        }
+    }
+
+    /**
+     * Record a credited deposit, retrying a failed write a couple of times (it is idempotent).
+     *
+     * @return {@code null} when recorded, otherwise the last failure
+     */
+    private RuntimeException recordCredit(String id, int index) {
+        RuntimeException last = null;
+        for (int attempt = 0; attempt < CREDIT_WRITE_ATTEMPTS; attempt++) {
+            try {
+                depositLedger.credit(id, index);
+                return null;
+            } catch (RuntimeException e) {
+                last = e;
+            }
+        }
+        return last;
+    }
+
+    /** {@link DepositLedger#reassertInFlight}, never throwing: this runs on the way to a hand-off. */
+    private void reassertMarkerQuietly(String id, int index) {
+        try {
+            depositLedger.reassertInFlight(id, index);
+        } catch (RuntimeException e) {
+            log.warn("group {}: could not re-assert the in-flight marker for index {}: {}",
+                    id, index, e.toString());
+        }
     }
 
     /** Best-effort display mirror of the ledger's funded count (see {@code BotGroup.depositedCount}). */

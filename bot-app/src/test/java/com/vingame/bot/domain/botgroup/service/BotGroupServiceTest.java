@@ -79,6 +79,33 @@ class BotGroupServiceTest {
     @InjectMocks
     private BotGroupService service;
 
+    /**
+     * Make {@code mongoTemplate.updateFirst} behave like Mongo for the retry's conditional
+     * {@code FAILED -> PENDING} flip on {@code group}: it matches only while the group is FAILED,
+     * and applies the {@code $set} fields it carries.
+     */
+    private void stubConditionalFlip(BotGroup group) {
+        org.mockito.Mockito.lenient().when(mongoTemplate.updateFirst(any(Query.class),
+                any(org.springframework.data.mongodb.core.query.Update.class), eq(BotGroup.class)))
+                .thenAnswer(inv -> {
+                    if (!RegistrationState.isFailed(group.getRegistrationState())) {
+                        return com.mongodb.client.result.UpdateResult.acknowledged(0, 0L, null);
+                    }
+                    org.bson.Document set = (org.bson.Document) inv
+                            .<org.springframework.data.mongodb.core.query.Update>getArgument(1)
+                            .getUpdateObject().get("$set");
+                    group.setRegistrationState((String) set.get("registrationState"));
+                    group.setRegistrationError((String) set.get("registrationError"));
+                    if (set.get("depositedCount") instanceof Integer d) {
+                        group.setDepositedCount(d);
+                    }
+                    if (set.containsKey("depositInFlight")) {
+                        group.setDepositInFlight((Integer) set.get("depositInFlight"));
+                    }
+                    return com.mongodb.client.result.UpdateResult.acknowledged(1, 1L, null);
+                });
+    }
+
     @Nested
     @DisplayName("findById")
     class FindByIdTests {
@@ -640,7 +667,7 @@ class BotGroupServiceTest {
                     .registrationError("Registration stopped at account 64 of 500")
                     .build();
             when(repository.findById("g-1")).thenReturn(Optional.of(failed));
-            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            stubConditionalFlip(failed);
 
             BotGroup result = service.retryRegistration("g-1");
 
@@ -1098,7 +1125,7 @@ class BotGroupServiceTest {
             // Another request resolved it first, between read and resolve.
             org.mockito.Mockito.doReturn(false).when(depositLedger).resolve("g-d", 2, true);
 
-            assertThatThrownBy(() -> service.retryRegistration("g-d", BotGroupService.DepositResolution.CREDITED))
+            assertThatThrownBy(() -> service.retryRegistration("g-d", BotGroupService.DepositResolution.CREDITED, 2))
                     .isInstanceOf(BadRequestException.class).hasMessageContaining("changed");
             verify(registrationWorker, never()).enqueue(anyString());
         }
@@ -1180,8 +1207,7 @@ class BotGroupServiceTest {
             failed.setDepositInFlight(2);
             ledger().put("g-d", 1, 2);
             when(repository.findById("g-d")).thenReturn(Optional.of(failed));
-            org.mockito.Mockito.lenient().when(repository.save(any(BotGroup.class)))
-                    .thenAnswer(inv -> inv.getArgument(0));
+            stubConditionalFlip(failed);
             return failed;
         }
 
@@ -1202,7 +1228,7 @@ class BotGroupServiceTest {
         void retryCreditedAdvances() {
             failedOnUnknownDeposit();
 
-            BotGroup result = service.retryRegistration("g-d", BotGroupService.DepositResolution.CREDITED);
+            BotGroup result = service.retryRegistration("g-d", BotGroupService.DepositResolution.CREDITED, 2);
 
             assertThat(ledger().read("g-d")).isEqualTo(new DepositLedger.State(2, null));
             assertThat(result.getDepositedCount()).isEqualTo(2);
@@ -1216,7 +1242,7 @@ class BotGroupServiceTest {
         void retryNotCreditedLeavesTheMark() {
             failedOnUnknownDeposit();
 
-            service.retryRegistration("g-d", BotGroupService.DepositResolution.NOT_CREDITED);
+            service.retryRegistration("g-d", BotGroupService.DepositResolution.NOT_CREDITED, 2);
 
             assertThat(ledger().read("g-d")).isEqualTo(new DepositLedger.State(1, null));
         }
@@ -1230,8 +1256,92 @@ class BotGroupServiceTest {
             when(repository.findById("g-d")).thenReturn(Optional.of(failed));
 
             assertThatThrownBy(() -> service.retryRegistration("g-d",
-                    BotGroupService.DepositResolution.CREDITED))
+                    BotGroupService.DepositResolution.CREDITED, 2))
                     .isInstanceOf(BadRequestException.class).hasMessageContaining("does not apply");
+        }
+
+        @Test
+        @DisplayName("review bug 2c: an answer without the index checked is a 400")
+        void answerWithoutIndexIsRejected() {
+            failedOnUnknownDeposit();
+
+            assertThatThrownBy(() -> service.retryRegistration("g-d",
+                    BotGroupService.DepositResolution.NOT_CREDITED, null))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("depositIndex=2");
+            assertThat(ledger().read("g-d")).isEqualTo(new DepositLedger.State(1, 2));
+        }
+
+        @Test
+        @DisplayName("review bug 2c: an answer for a different index than the live marker is a 400 and changes nothing")
+        void answerForTheWrongIndexIsRejected() {
+            failedOnUnknownDeposit();
+            // The operator checked bot2 — but meanwhile the marker moved to bot5 (a second JVM, or
+            // a double-submitted retry already resolved 2 and the resend of 5 is in flight).
+            ledger().put("g-d", 4, 5);
+
+            assertThatThrownBy(() -> service.retryRegistration("g-d",
+                    BotGroupService.DepositResolution.NOT_CREDITED, 2))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("does not match");
+            assertThat(ledger().read("g-d")).as("the live marker for 5 is untouched")
+                    .isEqualTo(new DepositLedger.State(4, 5));
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("review bug 2d: FAILED -> PENDING is conditional — a second concurrent retry is a 400, no save")
+        void flipIsConditional() {
+            BotGroup failed = failedOnUnknownDeposit();
+            service.retryRegistration("g-d", BotGroupService.DepositResolution.CREDITED, 2);
+            assertThat(failed.getRegistrationState()).isEqualTo(RegistrationState.PENDING);
+
+            // The second retry read FAILED before the first flipped it: simulate by re-failing the
+            // ledger question but leaving the document PENDING.
+            ledger().put("g-d", 2, 3);
+            failed.setRegistrationState(RegistrationState.FAILED);
+            org.mockito.Mockito.doAnswer(inv -> {
+                failed.setRegistrationState(RegistrationState.PENDING);  // the other retry won
+                return inv.callRealMethod();
+            }).when(depositLedger).resolve("g-d", 3, false);
+
+            assertThatThrownBy(() -> service.retryRegistration("g-d",
+                    BotGroupService.DepositResolution.NOT_CREDITED, 3))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("another retry");
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("review smell: lowering botCount does not clear an unknown-deposit FAILED, marker kept")
+        void loweringDoesNotOrphanTheMarker() {
+            BotGroup failed = failedOnUnknownDeposit();
+            failed.setBotCount(3);
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            mergeDeposit(null, 2);
+
+            BotGroup result = service.update("g-d", BotGroupDTO.builder().botCount(2).build());
+
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.FAILED);
+            assertThat(ledger().read("g-d")).isEqualTo(new DepositLedger.State(1, 2));
+        }
+
+        @Test
+        @DisplayName("review smell: lowering botCount does not declare a funded group startable with an unfunded index")
+        void loweringRequiresTheDepositsToo() {
+            BotGroup failed = newGroup(100);
+            failed.setId("g-d");
+            failed.setBotCount(5);
+            failed.setRegisteredCount(3);
+            failed.setRegistrationState(RegistrationState.FAILED);
+            ledger().put("g-d", 2, null);   // index 3 registered, its deposit refused
+            when(repository.findById("g-d")).thenReturn(Optional.of(failed));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            mergeDeposit(null, 3);
+
+            assertThat(service.update("g-d", BotGroupDTO.builder().botCount(3).build())
+                    .getRegistrationState()).isEqualTo(RegistrationState.FAILED);
+
+            mergeDeposit(null, 2);
+            assertThat(service.update("g-d", BotGroupDTO.builder().botCount(2).build())
+                    .getRegistrationState()).as("2 registered and funded: startable").isNull();
         }
 
         @Test

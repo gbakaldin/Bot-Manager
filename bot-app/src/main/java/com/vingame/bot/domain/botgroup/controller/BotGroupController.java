@@ -266,18 +266,20 @@ public class BotGroupController {
                     + "over and no account is created twice. 200 means accepted, like /start: "
                     + "poll GET /{id}/status for registeredCount climbing toward botCount. "
                     + "400 if the group is not in REGISTRATION_FAILED, 404 for an unknown id. "
-                    + "depositOutcome=credited|not-credited is REQUIRED when the group stopped on "
-                    + "an unknown deposit outcome (depositInFlight set) and rejected otherwise: "
-                    + "credited means the account was funded and is not sent again, not-credited "
-                    + "means it is sent exactly once more.")
+                    + "depositOutcome=credited|not-credited together with depositIndex=<the "
+                    + "depositInFlight shown on the group> are REQUIRED when the group stopped on "
+                    + "an unknown deposit outcome and rejected otherwise; a depositIndex that does "
+                    + "not match is a 400. credited means the account was funded and is not sent "
+                    + "again, not-credited means it is sent exactly once more.")
     public ResponseEntity<BotGroupStatusDTO> retryRegistration(
             @PathVariable String id,
-            @RequestParam(name = "depositOutcome", required = false) String depositOutcome) {
+            @RequestParam(name = "depositOutcome", required = false) String depositOutcome,
+            @RequestParam(name = "depositIndex", required = false) Integer depositIndex) {
         // No manual-override flip (contrast /start): retrying a registration says nothing about
         // whether the group should be running, so it must not park a SCHEDULED group as
         // MANUAL_ON — the same reasoning that keeps /restart mode-neutral (TIMED_ACTIVATION AD-4).
         BotGroup group = service.retryRegistration(id,
-                BotGroupService.DepositResolution.parse(depositOutcome));
+                BotGroupService.DepositResolution.parse(depositOutcome), depositIndex);
         return ResponseEntity.ok(statusDTO(group, behaviorService.getActualStatus(id)));
     }
 

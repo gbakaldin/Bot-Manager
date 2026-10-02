@@ -22,6 +22,7 @@ import org.springframework.context.annotation.Lazy;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -476,13 +477,33 @@ public class BotGroupService {
             return;
         }
         if (RegistrationState.isFailed(group.getRegistrationState())
-                && group.getBotCount() <= group.getRegisteredCount()) {
+                && group.getBotCount() <= group.getRegisteredCount()
+                && depositTargetMet(group)) {
             log.info("Bot group '{}' ({}): botCount lowered to {} with {} accounts registered — "
                             + "REGISTRATION_FAILED cleared, the group is startable with what it has",
                     group.getName(), group.getId(), group.getBotCount(), group.getRegisteredCount());
             group.setRegistrationState(null);
             group.setRegistrationError(null);
         }
+    }
+
+    /**
+     * Whether lowering the target to {@code botCount} also discharges the deposit side of a
+     * {@code FAILED} group (review Phase 2 smell): never while the ledger carries an unknown
+     * outcome — that question must be answered, not orphaned — and, for a funded group, only when
+     * every remaining index is funded. Otherwise the group would be declared startable with an
+     * unfunded account, or left with a marker a later raise would ask about for an index already
+     * seeded past.
+     */
+    private boolean depositTargetMet(BotGroup group) {
+        DepositLedger.State ledger = depositLedger.read(group.getId());
+        if (ledger.depositInFlight() != null) {
+            log.info("Bot group '{}' ({}): botCount lowered, but a deposit outcome is unknown (index {}) "
+                            + "— REGISTRATION_FAILED stays until it is answered via /registration/retry",
+                    group.getName(), group.getId(), ledger.depositInFlight());
+            return false;
+        }
+        return group.getInitialDeposit() <= 0 || group.getBotCount() <= ledger.depositedCount();
     }
 
     /**
@@ -501,69 +522,94 @@ public class BotGroupService {
      *         worth naming rather than a no-op worth hiding.
      */
     public BotGroup retryRegistration(String id) {
-        return retryRegistration(id, null);
+        return retryRegistration(id, null, null);
     }
 
     /**
      * {@link #retryRegistration(String)} with an operator's resolution of an unknown deposit
-     * outcome (BOT_PROVISIONING AD-8).
+     * outcome (BOT_PROVISIONING AD-8, hardened by review Phase 2 bug 2).
      * <p>
-     * {@code depositOutcome} is <b>required</b> when the group stopped on an unknown outcome and
-     * <b>rejected</b> otherwise: the worker refuses to send anything for a group whose ledger
-     * carries an in-flight marker, so a retry without a decision would only fail again, and a
-     * decision for a group that has no marker would be a statement about money nobody asked
-     * about. {@code CREDITED} advances the funded high-water mark to the marker; {@code
-     * NOT_CREDITED} leaves it, so the index is sent exactly once more. Both clear the marker.
+     * {@code depositOutcome} <b>and</b> {@code depositIndex} are required when the group stopped
+     * on an unknown outcome and rejected otherwise. The index is the account the operator actually
+     * checked: an answer is applied only if the ledger's marker still names it, so a stale or
+     * double-submitted retry — or a second JVM that moved on — can never have the answer applied to
+     * a different, live deposit. {@code CREDITED} advances the funded mark ({@code $max});
+     * {@code NOT_CREDITED} leaves it, so the index is sent once more. A credited 200 is recorded
+     * unconditionally by the worker, so even a wrong {@code not-credited} cannot erase a deposit
+     * that is in flight.
+     * <p>
+     * {@code FAILED -> PENDING} is one conditional update, not read-then-save: of two concurrent
+     * retries exactly one succeeds, and the whole document is never written back.
      */
-    public BotGroup retryRegistration(String id, DepositResolution depositOutcome) {
+    public BotGroup retryRegistration(String id, DepositResolution depositOutcome, Integer depositIndex) {
         BotGroup group = findById(id);
         if (!RegistrationState.isFailed(group.getRegistrationState())) {
-            throw new BadRequestException(String.format(
-                    "Bot group '%s' is not in REGISTRATION_FAILED (%d/%d accounts registered, "
-                            + "state %s), so there is nothing to retry.",
-                    group.getName(), group.getRegisteredCount(), group.getBotCount(),
-                    group.getRegistrationState() == null ? "complete"
-                            : group.getRegistrationState()));
+            throw notFailed(group);
         }
         DepositLedger.State ledger = depositLedger.read(id);
-        if (ledger.depositInFlight() != null) {
-            if (depositOutcome == null) {
+        Integer marker = ledger.depositInFlight();
+        if (marker != null) {
+            if (depositOutcome == null || depositIndex == null) {
                 throw new BadRequestException(String.format(
                         "Bot group '%s' stopped on an unknown deposit outcome for %s%d (index %d). "
                                 + "Check that account's balance, then retry with "
-                                + "?depositOutcome=credited or ?depositOutcome=not-credited.",
-                        group.getName(), group.getNamePrefix(), ledger.depositInFlight(),
-                        ledger.depositInFlight()));
+                                + "?depositOutcome=credited|not-credited&depositIndex=%d.",
+                        group.getName(), group.getNamePrefix(), marker, marker, marker));
             }
-        } else if (depositOutcome != null) {
+            if (!marker.equals(depositIndex)) {
+                throw new BadRequestException(String.format(
+                        "Bot group '%s': depositIndex %d does not match the deposit whose outcome is "
+                                + "unknown (index %d, account %s%d). Re-read the group and answer for "
+                                + "that account.", group.getName(), depositIndex, marker,
+                        group.getNamePrefix(), marker));
+            }
+        } else if (depositOutcome != null || depositIndex != null) {
             throw new BadRequestException(String.format(
                     "Bot group '%s' has no deposit with an unknown outcome, so depositOutcome does "
-                            + "not apply. Retry without it.", group.getName()));
+                            + "not apply, nor does depositIndex. Retry without them.", group.getName()));
         }
-        if (ledger.depositInFlight() != null) {
-            int index = ledger.depositInFlight();
+
+        Update update = new Update().set("registrationState", RegistrationState.PENDING)
+                .set("registrationError", null)
+                .set("updatedAt", Instant.now());
+        if (marker != null) {
             boolean credited = depositOutcome == DepositResolution.CREDITED;
-            if (!depositLedger.resolve(id, index, credited)) {
+            if (!depositLedger.resolve(id, marker, credited)) {
                 throw new BadRequestException(String.format(
                         "Bot group '%s': the unknown deposit outcome changed while this request was "
                                 + "being handled. Re-read the group and retry.", group.getName()));
             }
-            DepositLedger.State resolved = depositLedger.read(id);
-            group.setDepositedCount(resolved.depositedCount());
-            group.setDepositInFlight(null);
+            update.set("depositedCount", depositLedger.read(id).depositedCount())
+                    .set("depositInFlight", null);
             log.info("group {} ({}): operator resolved the unknown deposit for {}{} (index {}) as {} — "
-                            + "{}", id, group.getName(), group.getNamePrefix(), index, index,
+                            + "{}", id, group.getName(), group.getNamePrefix(), marker, marker,
                     credited ? "credited" : "not credited",
                     credited ? "it will not be sent again" : "it will be sent once more");
         }
-        group.setRegistrationState(RegistrationState.PENDING);
-        group.setRegistrationError(null);
-        group.setUpdatedAt(Instant.now());
-        BotGroup saved = repository.save(group);
+        long matched = mongoTemplate.updateFirst(
+                Query.query(Criteria.where("_id").is(id)
+                        .and("registrationState").is(RegistrationState.FAILED)),
+                update, BotGroup.class).getMatchedCount();
+        if (matched == 0) {
+            // Another retry won the race (or the group moved on): this one changes nothing more.
+            throw new BadRequestException(String.format(
+                    "Bot group '%s' is no longer REGISTRATION_FAILED — another retry was already "
+                            + "accepted.", group.getName()));
+        }
+        BotGroup saved = findById(id);
         log.info("group {} ({}): registration retry requested — resuming from account {}",
                 id, saved.getName(), saved.getRegisteredCount() + 1);
         registrationWorker.enqueue(id);
         return saved;
+    }
+
+    private static BadRequestException notFailed(BotGroup group) {
+        return new BadRequestException(String.format(
+                "Bot group '%s' is not in REGISTRATION_FAILED (%d/%d accounts registered, "
+                        + "state %s), so there is nothing to retry.",
+                group.getName(), group.getRegisteredCount(), group.getBotCount(),
+                group.getRegistrationState() == null ? "complete"
+                        : group.getRegistrationState()));
     }
 
     /**
