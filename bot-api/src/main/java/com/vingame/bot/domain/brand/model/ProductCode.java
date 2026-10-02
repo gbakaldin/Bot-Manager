@@ -12,10 +12,10 @@ public enum ProductCode {
     P_098("098", "B52", "bc114098", null, null),
     P_103("103", "HIT", null, null, null),
     P_105("105", "IWIN", null, null, null),
-    P_114("114", "RIK", "rik.vip", null, null),
+    P_114("114", "RIK", "rik.vip", null, "!sBVCdgmzBJJKydMBQX:matrix-uat.viptalk.org"),
     P_116("116", "TIP", "bc115116", 12, "!mPUwMJaqokWLVMsCMw:matrix-uat.viptalk.org"),
     P_118("118", "NOHU", null, null, null),
-    P_119("119", "WIN79", null, null, null),
+    P_119("119", "WIN79", null, null, "!zWQTybTFpwJujvchvJ:matrix-uat.viptalk.org"),
     P_222("222", "BKK WIN", null, null, null);
 
     private final String code;
