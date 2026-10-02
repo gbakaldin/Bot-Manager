@@ -45,6 +45,16 @@ class ApiGatewayClientRegistrationDepositTest {
             GatewayRequestScope.registration("group-1", "dep", () -> false);
     private static final Duration WAIT = Duration.ofMinutes(15);
 
+    /** HTTP-200 bodies, selected by username "b" + key. */
+    private static final java.util.Map<String, String> BODIES = java.util.Map.of(
+            "ok", "{\"status\":\"OK\",\"code\":200,\"message\":\"Nạp tiền thành công\"}",
+            "okstring", "{\"status\":\"OK\",\"code\":\"200\",\"message\":\"ok\"}",
+            "refused", "{\"status\":\"ERROR\",\"code\":409,\"message\":\"Tài khoản bị khóa\"}",
+            "servererr", "{\"status\":\"ERROR\",\"code\":500,\"message\":\"internal\"}",
+            "nocode", "{\"status\":\"OK\",\"message\":\"done\"}",
+            "html", "<html><body>gateway</body></html>",
+            "empty", "");
+
     private HttpServer server;
     private final AtomicInteger arrivals = new AtomicInteger();
     /** Whether the marker had run by the time each request arrived. */
@@ -58,9 +68,21 @@ class ApiGatewayClientRegistrationDepositTest {
             arrivals.incrementAndGet();
             markedAtArrival.add(marked.get());
             String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
-            // The username selects the answer: "s200", "s403", "s500", ...
-            int status = Integer.parseInt(body.replaceAll(".*\"username\"\\s*:\\s*\"s(\\d{3})\".*", "$1"));
-            byte[] bytes = "{\"status\":\"x\"}".getBytes(StandardCharsets.UTF_8);
+            // The username selects the answer: "s200", "s403", "s500", ... answer that HTTP status
+            // with a matching gwms envelope; "b<name>" answers HTTP 200 with BODIES[name].
+            String username = body.replaceAll(".*\"username\"\\s*:\\s*\"([^\"]+)\".*", "$1");
+            int status;
+            String reply;
+            if (username.startsWith("b")) {
+                status = 200;
+                reply = BODIES.get(username.substring(1));
+            } else {
+                status = Integer.parseInt(username.substring(1));
+                reply = status == 200
+                        ? "{\"status\":\"OK\",\"code\":200,\"message\":\"Nạp tiền thành công\"}"
+                        : "{\"status\":\"ERROR\",\"code\":" + status + ",\"message\":\"IP not allowed\"}";
+            }
+            byte[] bytes = reply.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().add("Content-Type", "application/json");
             exchange.sendResponseHeaders(status, bytes.length);
             try (OutputStream out = exchange.getResponseBody()) {
@@ -105,6 +127,32 @@ class ApiGatewayClientRegistrationDepositTest {
         assertThat(budget.tiers())
                 .as("DEFAULT with the registration wait (AD-10) — never PRIORITIZED")
                 .containsExactly(RequestTier.DEFAULT);
+    }
+
+    @Test
+    @DisplayName("review bug 1: HTTP 200 is CREDITED only when the gwms body says code 200")
+    void http200IsClassifiedOnTheBody() {
+        ApiGatewayClient c = client(baseUrl(), new RecordingGatewayBudget());
+        assertThat(deposit(c, "bok").outcome()).isEqualTo(DepositOutcome.CREDITED);
+        assertThat(deposit(c, "bokstring").outcome()).as("a numeric string code").isEqualTo(DepositOutcome.CREDITED);
+
+        DepositOutcome.Result refused = deposit(c, "brefused");
+        assertThat(refused.outcome()).as("200 + code 409 is a business refusal").isEqualTo(DepositOutcome.REFUSED);
+        assertThat(refused.detail()).contains("code 409").contains("Tài khoản bị khóa");
+
+        assertThat(deposit(c, "bservererr").outcome()).isEqualTo(DepositOutcome.UNKNOWN);
+        assertThat(deposit(c, "bnocode").outcome()).as("no code: the body does not say it credited")
+                .isEqualTo(DepositOutcome.UNKNOWN);
+        assertThat(deposit(c, "bhtml").outcome()).isEqualTo(DepositOutcome.UNKNOWN);
+        assertThat(deposit(c, "bempty").outcome()).isEqualTo(DepositOutcome.UNKNOWN);
+    }
+
+    @Test
+    @DisplayName("a refusal carries the gwms message into its detail")
+    void refusalCarriesTheGatewayMessage() {
+        DepositOutcome.Result r = deposit(client(baseUrl(), new RecordingGatewayBudget()), "s401");
+        assertThat(r.outcome()).isEqualTo(DepositOutcome.REFUSED);
+        assertThat(r.detail()).contains("HTTP 401").contains("IP not allowed");
     }
 
     @Test

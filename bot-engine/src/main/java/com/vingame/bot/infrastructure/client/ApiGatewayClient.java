@@ -1157,16 +1157,9 @@ public class ApiGatewayClient {
 
         try {
             HttpResponse<String> response = gatewayBudget.execute(RequestTier.DEFAULT, scope, call, maxWait);
-            int status = response.statusCode();
-            log.debug("[RegistrationDeposit] response HTTP {} for {}", status, username);
-            if (status == 200) {
-                return new DepositOutcome.Result(DepositOutcome.CREDITED, "HTTP 200");
-            }
-            if (status >= 400 && status < 500) {
-                return new DepositOutcome.Result(DepositOutcome.REFUSED, "HTTP " + status);
-            }
-            // Nothing in the contract says a 5xx did not credit (plan Open Item 4).
-            return new DepositOutcome.Result(DepositOutcome.UNKNOWN, "HTTP " + status);
+            log.debug("[RegistrationDeposit] response HTTP {} for {} | body: {}",
+                    response.statusCode(), username, response.body());
+            return classifyDepositAnswer(response);
         } catch (DepositMarkerException e) {
             throw e;
         } catch (GatewayBudgetException e) {
@@ -1196,6 +1189,76 @@ public class ApiGatewayClient {
             return new DepositOutcome.Result(marked.get() ? DepositOutcome.UNKNOWN : DepositOutcome.NOT_SENT,
                     e.getClass().getSimpleName());
         }
+    }
+
+    /** How much of a gwms {@code message} is carried into an outcome's detail. */
+    private static final int DEPOSIT_MESSAGE_MAX = 200;
+
+    /**
+     * Classify a deposit answer on the gwms <b>envelope</b>, not only the status line (review
+     * Phase 2, bug 1). gwms reports business errors at HTTP 200 — the register endpoint's
+     * {@code {"status":"EXISTED","code":409}} is the documented case, and the TIP prod funding
+     * runbook only trusts {@code "code":200} — so a bare 200 proves nothing.
+     * <ul>
+     *   <li>HTTP 200 with body {@code code == 200}: {@code CREDITED};</li>
+     *   <li>HTTP 200 with a 4xx body {@code code}, or HTTP 4xx: {@code REFUSED};</li>
+     *   <li>HTTP 200 with any other, absent or unparseable {@code code}: {@code UNKNOWN} — the
+     *       body does not say the money moved, and it does not say it did not;</li>
+     *   <li>anything else (5xx, 3xx): {@code UNKNOWN}.</li>
+     * </ul>
+     * The detail carries the gwms {@code status}, {@code code} and {@code message}: the difference
+     * between "IP not allowlisted" and "bad amount" is what an operator acts on.
+     */
+    DepositOutcome.Result classifyDepositAnswer(HttpResponse<String> response) {
+        int status = response.statusCode();
+        JsonNode body = null;
+        try {
+            String text = response.body();
+            body = text == null || text.isBlank() ? null : mapper.readTree(text);
+        } catch (IOException | RuntimeException unparseable) {
+            body = null;
+        }
+        Integer code = null;
+        String gwStatus = null;
+        String message = null;
+        if (body != null && body.isObject()) {
+            JsonNode c = body.get("code");
+            if (c != null && c.isIntegralNumber()) {
+                code = c.asInt();
+            } else if (c != null && c.isTextual() && c.asText().trim().matches("-?\\d{1,9}")) {
+                code = Integer.parseInt(c.asText().trim());
+            }
+            gwStatus = body.hasNonNull("status") ? body.get("status").asText() : null;
+            message = body.hasNonNull("message") ? body.get("message").asText() : null;
+        }
+        StringBuilder detail = new StringBuilder("HTTP ").append(status);
+        if (gwStatus != null) {
+            detail.append(", status ").append(gwStatus);
+        }
+        if (code != null) {
+            detail.append(", code ").append(code);
+        }
+        if (message != null) {
+            detail.append(": ").append(message.length() <= DEPOSIT_MESSAGE_MAX
+                    ? message : message.substring(0, DEPOSIT_MESSAGE_MAX) + "…");
+        }
+        if (status == 200) {
+            if (code != null && code == 200) {
+                return new DepositOutcome.Result(DepositOutcome.CREDITED, detail.toString());
+            }
+            if (code != null && code >= 400 && code < 500) {
+                return new DepositOutcome.Result(DepositOutcome.REFUSED, detail.toString());
+            }
+            if (body == null || code == null) {
+                detail.append(" (no readable gwms code in the body)");
+            }
+            return new DepositOutcome.Result(DepositOutcome.UNKNOWN, detail.toString());
+        }
+        if (status >= 400 && status < 500) {
+            return new DepositOutcome.Result(DepositOutcome.REFUSED, detail.toString());
+        }
+        // Nothing in the contract says a 5xx did not credit (plan Open Item 4).
+        return new DepositOutcome.Result(DepositOutcome.UNKNOWN, detail.toString());
     }
 
     /**
