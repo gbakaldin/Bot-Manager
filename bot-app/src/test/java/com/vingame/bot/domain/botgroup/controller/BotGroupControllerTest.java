@@ -1053,7 +1053,7 @@ class BotGroupControllerTest {
                     .id(groupId).name("Tai Xiu 500").botCount(500).registeredCount(63)
                     .registrationState("PENDING")
                     .build();
-            when(service.retryRegistration(groupId)).thenReturn(resumed);
+            when(service.retryRegistration(groupId, null)).thenReturn(resumed);
             when(behaviorService.getActualStatus(groupId)).thenReturn(BotGroupStatus.STOPPED);
 
             mockMvc.perform(post("/api/v1/bot-group/{id}/registration/retry", groupId))
@@ -1070,7 +1070,7 @@ class BotGroupControllerTest {
         @DisplayName("the 400 from a group that is not FAILED is answered synchronously")
         void retryOfAHealthyGroupIsABadRequest() throws Exception {
             String groupId = "123";
-            when(service.retryRegistration(groupId))
+            when(service.retryRegistration(groupId, null))
                     .thenThrow(new BadRequestException("Bot group 'G' is not in REGISTRATION_FAILED"));
 
             mockMvc.perform(post("/api/v1/bot-group/{id}/registration/retry", groupId))
@@ -1084,7 +1084,7 @@ class BotGroupControllerTest {
             // registration says nothing about whether the group should be running, and parking it
             // MANUAL_ON would silently take it off its schedule.
             String groupId = "123";
-            when(service.retryRegistration(groupId)).thenReturn(
+            when(service.retryRegistration(groupId, null)).thenReturn(
                     BotGroup.builder().id(groupId).name("S").botCount(10)
                             .activationMode(ActivationMode.SCHEDULED)
                             .registrationState("PENDING").build());
@@ -1093,6 +1093,29 @@ class BotGroupControllerTest {
                     .andExpect(status().isOk());
 
             verify(service, never()).setActivationMode(any(BotGroup.class), any(ActivationMode.class));
+        }
+
+        @Test
+        @DisplayName("BOT_PROVISIONING AD-8: ?depositOutcome=credited reaches the service parsed")
+        void depositOutcomeIsPassedThrough() throws Exception {
+            String groupId = "123";
+            when(service.retryRegistration(groupId,
+                    com.vingame.bot.domain.botgroup.service.BotGroupService.DepositResolution.NOT_CREDITED))
+                    .thenReturn(BotGroup.builder().id(groupId).name("D").botCount(3)
+                            .registrationState("PENDING").build());
+
+            mockMvc.perform(post("/api/v1/bot-group/{id}/registration/retry", groupId)
+                            .param("depositOutcome", "not-credited"))
+                    .andExpect(status().isOk());
+        }
+
+        @Test
+        @DisplayName("BOT_PROVISIONING AD-8: an unrecognised depositOutcome is a 400")
+        void unknownDepositOutcomeIsABadRequest() throws Exception {
+            mockMvc.perform(post("/api/v1/bot-group/{id}/registration/retry", "123")
+                            .param("depositOutcome", "maybe"))
+                    .andExpect(status().isBadRequest());
+            verify(service, never()).retryRegistration(anyString(), any());
         }
     }
 }

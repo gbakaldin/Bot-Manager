@@ -153,6 +153,9 @@ class BotGroupStrategyKeyValidationTest {
     @MockitoBean
     private RegistrationWorker registrationWorker;
 
+    @MockitoBean
+    private com.vingame.bot.domain.botgroup.service.DepositLedger depositLedger;
+
     @BeforeEach
     void stubGames() {
         when(gameService.findById(BM_GAME))

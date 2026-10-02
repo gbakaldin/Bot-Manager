@@ -25,6 +25,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.validation.annotation.Validated;
 
@@ -264,12 +265,19 @@ public class BotGroupController {
                     + "the group. Registration resumes from registeredCount + 1 — nothing starts "
                     + "over and no account is created twice. 200 means accepted, like /start: "
                     + "poll GET /{id}/status for registeredCount climbing toward botCount. "
-                    + "400 if the group is not in REGISTRATION_FAILED, 404 for an unknown id.")
-    public ResponseEntity<BotGroupStatusDTO> retryRegistration(@PathVariable String id) {
+                    + "400 if the group is not in REGISTRATION_FAILED, 404 for an unknown id. "
+                    + "depositOutcome=credited|not-credited is REQUIRED when the group stopped on "
+                    + "an unknown deposit outcome (depositInFlight set) and rejected otherwise: "
+                    + "credited means the account was funded and is not sent again, not-credited "
+                    + "means it is sent exactly once more.")
+    public ResponseEntity<BotGroupStatusDTO> retryRegistration(
+            @PathVariable String id,
+            @RequestParam(name = "depositOutcome", required = false) String depositOutcome) {
         // No manual-override flip (contrast /start): retrying a registration says nothing about
         // whether the group should be running, so it must not park a SCHEDULED group as
         // MANUAL_ON — the same reasoning that keeps /restart mode-neutral (TIMED_ACTIVATION AD-4).
-        BotGroup group = service.retryRegistration(id);
+        BotGroup group = service.retryRegistration(id,
+                BotGroupService.DepositResolution.parse(depositOutcome));
         return ResponseEntity.ok(statusDTO(group, behaviorService.getActualStatus(id)));
     }
 
@@ -330,6 +338,7 @@ public class BotGroupController {
                         ? group.getRegisteredCount() : null)
                 .namedCount(registering || group.getNamedCount() > 0
                         ? group.getNamedCount() : null)
+                .depositedCount(group.getDepositedCount() > 0 ? group.getDepositedCount() : null)
                 // A start error wins a tie because it is necessarily the newer event: a group
                 // cannot be started until its registrationState has cleared.
                 .lastError(startError != null ? startError : group.getRegistrationError())

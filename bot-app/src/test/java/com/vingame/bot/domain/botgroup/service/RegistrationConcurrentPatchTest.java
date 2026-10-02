@@ -116,7 +116,7 @@ class RegistrationConcurrentPatchTest {
 
         worker = new RegistrationWorker(repository, mongoTemplate, clientRegistry,
                 mock(GatewayBudgetRegistry.class), environmentService,
-                new BotMetrics(new SimpleMeterRegistry()), 10, 3, 5, 30, 10, 60);
+                new BotMetrics(new SimpleMeterRegistry()), new InMemoryDepositLedger(), 10, 3, 5, 30, 10, 60);
     }
 
     private void pending(int botCount) {

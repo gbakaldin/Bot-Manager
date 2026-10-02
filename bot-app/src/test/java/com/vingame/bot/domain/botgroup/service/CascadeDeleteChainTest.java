@@ -74,7 +74,8 @@ class CascadeDeleteChainTest {
                 mock(org.springframework.data.mongodb.core.MongoTemplate.class),
                 mock(BotGroupConfigValidationService.class),
                 behaviorService,
-                mock(RegistrationWorker.class));
+                mock(RegistrationWorker.class),
+                new InMemoryDepositLedger());
 
         gameService = new GameService(
                 gameRepo,

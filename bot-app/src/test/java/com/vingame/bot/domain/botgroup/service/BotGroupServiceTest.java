@@ -70,6 +70,9 @@ class BotGroupServiceTest {
     @Mock
     private RegistrationWorker registrationWorker;
 
+    @org.mockito.Spy
+    private DepositLedger depositLedger = new InMemoryDepositLedger();
+
     @Captor
     private ArgumentCaptor<Query> queryCaptor;
 
@@ -940,6 +943,230 @@ class BotGroupServiceTest {
 
             assertThat(result.getId()).isNotNull().isNotEmpty();
             verify(environmentService, never()).findById(anyString());
+        }
+    }
+
+    @Nested
+    @DisplayName("registration-time deposit (BOT_PROVISIONING Phase 2)")
+    class InitialDepositTests {
+
+        private InMemoryDepositLedger ledger() {
+            return (InMemoryDepositLedger) depositLedger;
+        }
+
+        private BotGroup newGroup(long initialDeposit) {
+            return BotGroup.builder().name("Dep").environmentId("env-1").namePrefix("dep")
+                    .password("pw").botCount(3).initialDeposit(initialDeposit).build();
+        }
+
+        private void mergeDeposit(Long deposit, Integer botCount) {
+            org.mockito.Mockito.doAnswer(inv -> {
+                BotGroup target = inv.getArgument(1);
+                if (deposit != null) {
+                    target.setInitialDeposit(deposit);
+                }
+                if (botCount != null) {
+                    target.setBotCount(botCount);
+                }
+                return null;
+            }).when(mapper).updateEntityFromDTO(any(BotGroupDTO.class), any(BotGroup.class));
+        }
+
+        @Test
+        @DisplayName("a negative initialDeposit is a 400")
+        void negativeIsRejected() {
+            assertThatThrownBy(() -> service.save(newGroup(-1)))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("initialDeposit");
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("an initialDeposit above bot.provisioning.max-initial-deposit is a 400")
+        void aboveTheCapIsRejected() {
+            assertThatThrownBy(() -> service.save(newGroup(1_000_000_001L)))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("1000000000");
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("the cap itself and 0 are accepted")
+        void boundsAreAccepted() {
+            when(environmentService.findById("env-1")).thenReturn(envWithProductCode(ProductCode.P_097));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            assertThat(service.save(newGroup(1_000_000_000L)).getInitialDeposit()).isEqualTo(1_000_000_000L);
+            assertThat(service.save(newGroup(0)).getInitialDeposit()).isZero();
+        }
+
+        @Test
+        @DisplayName("existingGroup=true with initialDeposit > 0 is a 400 — nothing is registered, nothing is funded")
+        void existingGroupWithDepositIsRejected() {
+            assertThatThrownBy(() -> service.save(newGroup(5), true))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("existingGroup");
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("initialDeposit cannot change while registration is PENDING (or FAILED)")
+        void changeDuringRegistrationIsRejected() {
+            BotGroup pending = newGroup(100);
+            pending.setId("g-d");
+            pending.setRegistrationState(RegistrationState.PENDING);
+            when(repository.findById("g-d")).thenReturn(Optional.of(pending));
+            mergeDeposit(200L, null);
+
+            assertThatThrownBy(() -> service.update("g-d", BotGroupDTO.builder().initialDeposit(200L).build()))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("PENDING");
+
+            pending.setRegistrationState(RegistrationState.FAILED);
+            pending.setInitialDeposit(100);
+            assertThatThrownBy(() -> service.update("g-d", BotGroupDTO.builder().initialDeposit(200L).build()))
+                    .isInstanceOf(BadRequestException.class);
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("initialDeposit can change once registration is complete")
+        void changeWhenCompleteIsAllowed() {
+            BotGroup complete = newGroup(100);
+            complete.setId("g-d");
+            complete.setRegisteredCount(3);
+            when(repository.findById("g-d")).thenReturn(Optional.of(complete));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            mergeDeposit(200L, null);
+
+            assertThat(service.update("g-d", BotGroupDTO.builder().initialDeposit(200L).build())
+                    .getInitialDeposit()).isEqualTo(200L);
+        }
+
+        @Test
+        @DisplayName("AD-9: a raise on a complete group never funds the accounts that existed before it")
+        void raiseOnCompleteGroupSeedsTheLedger() {
+            BotGroup complete = newGroup(100);
+            complete.setId("g-d");
+            complete.setRegisteredCount(3);
+            when(repository.findById("g-d")).thenReturn(Optional.of(complete));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            when(environmentService.findById("env-1")).thenReturn(envWithProductCode(ProductCode.P_097));
+            mergeDeposit(null, 5);
+
+            BotGroup result = service.update("g-d", BotGroupDTO.builder().botCount(5).build());
+
+            assertThat(ledger().read("g-d").depositedCount())
+                    .as("accounts 1-3 pre-date the raise: the worker starts funding at 4")
+                    .isEqualTo(3);
+            assertThat(result.getDepositedCount()).isEqualTo(3);
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.PENDING);
+        }
+
+        @Test
+        @DisplayName("AD-9: the seed never moves the mark back")
+        void seedIsMonotonic() {
+            BotGroup complete = newGroup(100);
+            complete.setId("g-d");
+            complete.setBotCount(3);
+            complete.setRegisteredCount(5);
+            ledger().put("g-d", 5, null);
+            when(repository.findById("g-d")).thenReturn(Optional.of(complete));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            when(environmentService.findById("env-1")).thenReturn(envWithProductCode(ProductCode.P_097));
+            mergeDeposit(null, 8);
+
+            service.update("g-d", BotGroupDTO.builder().botCount(8).build());
+
+            assertThat(ledger().read("g-d").depositedCount()).isEqualTo(5);
+        }
+
+        @Test
+        @DisplayName("AD-9: a raise during PENDING seeds nothing — those indices still owe a deposit")
+        void raiseDuringPendingDoesNotSeed() {
+            BotGroup pending = newGroup(100);
+            pending.setId("g-d");
+            pending.setRegisteredCount(1);
+            pending.setRegistrationState(RegistrationState.PENDING);
+            when(repository.findById("g-d")).thenReturn(Optional.of(pending));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            when(environmentService.findById("env-1")).thenReturn(envWithProductCode(ProductCode.P_097));
+            mergeDeposit(null, 5);
+
+            service.update("g-d", BotGroupDTO.builder().botCount(5).build());
+
+            assertThat(ledger().read("g-d").depositedCount()).isZero();
+            assertThat(ledger().journal).noneMatch(e -> e.startsWith("seed"));
+        }
+
+        private BotGroup failedOnUnknownDeposit() {
+            BotGroup failed = newGroup(100);
+            failed.setId("g-d");
+            failed.setRegisteredCount(3);
+            failed.setRegistrationState(RegistrationState.FAILED);
+            failed.setDepositInFlight(2);
+            ledger().put("g-d", 1, 2);
+            when(repository.findById("g-d")).thenReturn(Optional.of(failed));
+            org.mockito.Mockito.lenient().when(repository.save(any(BotGroup.class)))
+                    .thenAnswer(inv -> inv.getArgument(0));
+            return failed;
+        }
+
+        @Test
+        @DisplayName("AD-8: retrying an unknown deposit outcome without an answer is a 400")
+        void retryWithoutAnswerIsRejected() {
+            failedOnUnknownDeposit();
+
+            assertThatThrownBy(() -> service.retryRegistration("g-d"))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("depositOutcome=credited");
+            assertThat(ledger().read("g-d")).isEqualTo(new DepositLedger.State(1, 2));
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("AD-8: 'credited' advances the funded mark and clears the marker")
+        void retryCreditedAdvances() {
+            failedOnUnknownDeposit();
+
+            BotGroup result = service.retryRegistration("g-d", BotGroupService.DepositResolution.CREDITED);
+
+            assertThat(ledger().read("g-d")).isEqualTo(new DepositLedger.State(2, null));
+            assertThat(result.getDepositedCount()).isEqualTo(2);
+            assertThat(result.getDepositInFlight()).isNull();
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.PENDING);
+            verify(registrationWorker).enqueue("g-d");
+        }
+
+        @Test
+        @DisplayName("AD-8: 'not-credited' leaves the mark, so the index is sent once more")
+        void retryNotCreditedLeavesTheMark() {
+            failedOnUnknownDeposit();
+
+            service.retryRegistration("g-d", BotGroupService.DepositResolution.NOT_CREDITED);
+
+            assertThat(ledger().read("g-d")).isEqualTo(new DepositLedger.State(1, null));
+        }
+
+        @Test
+        @DisplayName("AD-8: an answer for a group with no unknown outcome is a 400")
+        void answerWithoutUnknownIsRejected() {
+            BotGroup failed = newGroup(100);
+            failed.setId("g-d");
+            failed.setRegistrationState(RegistrationState.FAILED);
+            when(repository.findById("g-d")).thenReturn(Optional.of(failed));
+
+            assertThatThrownBy(() -> service.retryRegistration("g-d",
+                    BotGroupService.DepositResolution.CREDITED))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("does not apply");
+        }
+
+        @Test
+        @DisplayName("depositOutcome parses only 'credited' and 'not-credited'")
+        void resolutionParsing() {
+            assertThat(BotGroupService.DepositResolution.parse(null)).isNull();
+            assertThat(BotGroupService.DepositResolution.parse("credited"))
+                    .isEqualTo(BotGroupService.DepositResolution.CREDITED);
+            assertThat(BotGroupService.DepositResolution.parse("NOT-CREDITED"))
+                    .isEqualTo(BotGroupService.DepositResolution.NOT_CREDITED);
+            assertThatThrownBy(() -> BotGroupService.DepositResolution.parse("yes"))
+                    .isInstanceOf(BadRequestException.class);
         }
     }
 

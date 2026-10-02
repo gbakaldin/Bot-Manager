@@ -69,6 +69,12 @@ public class BotGroupStatusDTO {
     private Integer namedCount;
 
     /**
+     * Accounts funded by the registration-time deposit so far — indices {@code 1..k}
+     * (BOT_PROVISIONING AD-5). {@code null} when nothing has been funded.
+     */
+    private Integer depositedCount;
+
+    /**
      * The most recent start <b>or registration</b> failure, whichever is more recent, or
      * {@code null}. A start failure is retained until the next start or stop; a registration
      * failure until {@code POST /{id}/registration/retry} clears it.

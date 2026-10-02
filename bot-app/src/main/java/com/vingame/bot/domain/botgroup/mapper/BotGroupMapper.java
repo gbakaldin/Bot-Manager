@@ -59,6 +59,9 @@ public interface BotGroupMapper {
                 .namedCount(entity.getRegistrationState() == null && entity.getNamedCount() == 0
                         ? null : entity.getNamedCount())
                 .registrationError(entity.getRegistrationError())
+                .initialDeposit(entity.getInitialDeposit())
+                .depositedCount(entity.getDepositedCount() == 0 ? null : entity.getDepositedCount())
+                .depositInFlight(entity.getDepositInFlight())
                 .scheduledRestartTime(entity.getScheduledRestartTime())
                 .lastStartedAt(entity.getLastStartedAt())
                 .lastStoppedAt(entity.getLastStoppedAt())
@@ -132,6 +135,9 @@ public interface BotGroupMapper {
                 .autoDepositEnabled(Optional.ofNullable(dto.getAutoDepositEnabled()).orElse(false))
                 .strategyMix(dto.getStrategyMix())
                 .slotStrategyId(dto.getSlotStrategyId())
+                // BOT_PROVISIONING AD-1: optional, absent = 0 = no money moves. depositedCount and
+                // depositInFlight are system-managed like registeredCount and never copied.
+                .initialDeposit(Optional.ofNullable(dto.getInitialDeposit()).orElse(0L))
                 // targetStatus is deliberately NOT mapped from the DTO (GATEWAY_REQUEST_BUDGET
                 // R1/Q1). It is system-managed: the lifecycle endpoints write it, and three of
                 // the six BotGroupStatus constants cannot be read back by a pre-feature jar, so a
@@ -244,6 +250,9 @@ public interface BotGroupMapper {
         // strategyMix.
         entity.setSlotStrategyId(Optional.ofNullable(dto.getSlotStrategyId()).orElse(entity.getSlotStrategyId()));
         entity.setScheduledRestartTime(Optional.ofNullable(dto.getScheduledRestartTime()).orElse(entity.getScheduledRestartTime()));
+        // BOT_PROVISIONING AD-3: BotGroupService.update rejects a change while registration is in
+        // progress; depositedCount / depositInFlight are never copied (system-managed).
+        entity.setInitialDeposit(Optional.ofNullable(dto.getInitialDeposit()).orElse(entity.getInitialDeposit()));
         // Note: targetStatus, lastStartedAt, lastStoppedAt and lastFailureReason are
         // system-managed, not updated via DTO — and since the QA re-check, that is true of
         // toEntity as well. It was true of this method alone for as long as the comment existed.

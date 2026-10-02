@@ -241,6 +241,30 @@ public class BotGroup {
      */
     private String registrationError;
 
+    /**
+     * Amount credited to each account this group registers (BOT_PROVISIONING AD-1), in brand
+     * currency units. {@code 0} — the default, and what an older document reads as — means no
+     * money moves. Distinct from the global auto top-up {@code bot.deposit.amount}. Mutable only
+     * while registration is complete (AD-3), so one job never mixes two amounts.
+     */
+    private long initialDeposit;
+
+    /**
+     * <b>Display mirror</b> of {@code DepositLedger}'s high-water mark: indices {@code 1..k} have
+     * been funded (AD-5). The worker decides from the ledger, never from this field, because every
+     * whole-document {@code save} of a group (a PATCH, a start, a stop) writes back whatever value
+     * it read — harmless for {@link #registeredCount} (a re-register answers {@code EXISTED}),
+     * a second deposit for this one. System-managed, read-only on the DTO.
+     */
+    private int depositedCount;
+
+    /**
+     * Display mirror of the ledger's write-ahead marker (AD-6): the index whose deposit outcome
+     * is unknown. Set when a group goes {@code REGISTRATION_FAILED} on an unknown outcome and
+     * cleared by {@code /registration/retry?depositOutcome=…}. System-managed, read-only.
+     */
+    private Integer depositInFlight;
+
     // Scheduled operations
     private LocalDateTime scheduledRestartTime;
 

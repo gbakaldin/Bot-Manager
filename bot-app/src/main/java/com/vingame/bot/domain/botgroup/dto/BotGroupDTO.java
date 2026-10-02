@@ -194,6 +194,25 @@ public class BotGroupDTO {
     @JsonProperty(access = JsonProperty.Access.READ_ONLY)
     private String registrationError;
 
+    /**
+     * Amount credited to each account at registration (BOT_PROVISIONING AD-1). Optional on
+     * create, default {@code 0} (no money moves); {@code 0..bot.provisioning.max-initial-deposit}.
+     * PATCHable only while registration is complete (AD-3).
+     */
+    private Long initialDeposit;
+
+    /** Accounts funded so far — indices {@code 1..k} (AD-5). Read-only. */
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+    private Integer depositedCount;
+
+    /**
+     * The account index whose deposit outcome is unknown (AD-6), set only while the group is
+     * {@code REGISTRATION_FAILED} for that reason. Read-only; resolved by
+     * {@code POST /{id}/registration/retry?depositOutcome=credited|not-credited}.
+     */
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+    private Integer depositInFlight;
+
     // Scheduled operations
     private LocalDateTime scheduledRestartTime;
 

@@ -114,7 +114,7 @@ class RegistrationWorkerCancellationScopeTest {
                 .thenReturn(com.mongodb.client.result.UpdateResult.acknowledged(1, 1L, null));
 
         worker = new RegistrationWorker(repository, mongoTemplate, clientRegistry, budgetRegistry,
-                environmentService, new BotMetrics(new SimpleMeterRegistry()),
+                environmentService, new BotMetrics(new SimpleMeterRegistry()), new InMemoryDepositLedger(),
                 10, 3, 5, 30, 10, 60);
     }
 

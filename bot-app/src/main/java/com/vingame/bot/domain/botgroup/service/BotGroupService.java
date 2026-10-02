@@ -17,6 +17,7 @@ import com.vingame.bot.domain.environment.service.EnvironmentService;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.service.GameService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
@@ -40,6 +41,14 @@ public class BotGroupService {
     private final BotGroupConfigValidationService configValidation;
     private final BotGroupBehaviorService behaviorService;
     private final RegistrationWorker registrationWorker;
+    private final DepositLedger depositLedger;
+
+    /**
+     * Upper bound on {@code initialDeposit} (BOT_PROVISIONING AD-3), in brand currency units.
+     * The initialiser is for Mockito fixtures that construct this service directly.
+     */
+    @Value("${bot.provisioning.max-initial-deposit:1000000000}")
+    private long maxInitialDeposit = 1_000_000_000L;
 
     public BotGroupService(BotGroupRepository repository, BotGroupMapper mapper,
                            EnvironmentService environmentService,
@@ -47,7 +56,8 @@ public class BotGroupService {
                            MongoTemplate mongoTemplate,
                            BotGroupConfigValidationService configValidation,
                            @Lazy BotGroupBehaviorService behaviorService,
-                           RegistrationWorker registrationWorker) {
+                           RegistrationWorker registrationWorker,
+                           DepositLedger depositLedger) {
         this.repository = repository;
         this.mapper = mapper;
         this.environmentService = environmentService;
@@ -56,6 +66,7 @@ public class BotGroupService {
         this.configValidation = configValidation;
         this.behaviorService = behaviorService;
         this.registrationWorker = registrationWorker;
+        this.depositLedger = depositLedger;
     }
 
     public BotGroup findById(String id) {
@@ -147,6 +158,15 @@ public class BotGroupService {
             // Referenced game must belong to the group's environment (AD-7).
             validateGameEnvironmentMatch(botGroup);
 
+            // BOT_PROVISIONING AD-3: range, and no money for a group that registers nothing.
+            validateInitialDepositRange(botGroup.getInitialDeposit());
+            if (skipRegistration && botGroup.getInitialDeposit() > 0) {
+                throw new BadRequestException(String.format(
+                        "existingGroup=true registers no accounts, so initialDeposit %d would fund "
+                                + "nothing. Omit initialDeposit (or send 0) for a migrated group.",
+                        botGroup.getInitialDeposit()));
+            }
+
             if (skipRegistration) {
                 // existingGroup=true. No upstream call, so there is nothing to pace and nothing
                 // to resume: the group is left with no registration state at all, exactly as it
@@ -173,9 +193,13 @@ public class BotGroupService {
                 botGroup.setRegisteredCount(0);
                 botGroup.setNamedCount(0);
                 botGroup.setRegistrationError(null);
+                botGroup.setDepositedCount(0);
+                botGroup.setDepositInFlight(null);
                 log.info("Bot group '{}' will register {} accounts with prefix '{}' in the "
-                                + "background", botGroup.getName(), botGroup.getBotCount(),
-                        botGroup.getNamePrefix());
+                                + "background{}", botGroup.getName(), botGroup.getBotCount(),
+                        botGroup.getNamePrefix(),
+                        botGroup.getInitialDeposit() > 0
+                                ? ", funding each with " + botGroup.getInitialDeposit() : "");
             }
 
             botGroup.setId(UUID.randomUUID().toString());
@@ -334,8 +358,23 @@ public class BotGroupService {
         // document carried on the way in (review B1).
         int botCountBefore = existing.getBotCount();
         boolean registrationUntracked = isRegistrationUntracked(existing);
+        long initialDepositBefore = existing.getInitialDeposit();
+        String registrationStateBefore = existing.getRegistrationState();
 
         mapper.updateEntityFromDTO(updateDTO, existing);
+
+        // BOT_PROVISIONING AD-3: range, and only while registration is complete — a PENDING or
+        // FAILED job keeps the amount it started with, so one job never mixes two amounts.
+        if (existing.getInitialDeposit() != initialDepositBefore) {
+            validateInitialDepositRange(existing.getInitialDeposit());
+            if (registrationStateBefore != null) {
+                throw new BadRequestException(String.format(
+                        "initialDeposit cannot change while registration is %s (%d/%d accounts): "
+                                + "the job in progress keeps the amount it started with. Wait for it "
+                                + "to complete, or resolve the failure first.",
+                        registrationStateBefore, existing.getRegisteredCount(), existing.getBotCount()));
+            }
+        }
         // Validate the post-merge entity (AD-6) so cross-field PATCH rules — e.g.
         // lowering maxBet below the persisted minBet — are caught before save.
         configValidation.validate(existing);
@@ -414,6 +453,16 @@ public class BotGroupService {
                                                boolean untracked) {
         if (group.getBotCount() > botCountBefore
                 && !RegistrationState.isFailed(group.getRegistrationState())) {
+            if (group.getRegistrationState() == null) {
+                // BOT_PROVISIONING AD-9 — no retro-funding. Registration is complete, so accounts
+                // 1..botCountBefore exist and were funded (or were never meant to be: a
+                // pre-feature group, one created with initialDeposit 0, an untracked one). This
+                // raise funds only the indices it adds. Monotonic, so it can never move the mark
+                // back. NOT done for a raise during PENDING: those indices genuinely still owe a
+                // deposit.
+                depositLedger.seedAtLeast(group.getId(), botCountBefore);
+                group.setDepositedCount(Math.max(group.getDepositedCount(), botCountBefore));
+            }
             if (untracked) {
                 group.setRegisteredCount(botCountBefore);
                 group.setNamedCount(botCountBefore);
@@ -452,6 +501,21 @@ public class BotGroupService {
      *         worth naming rather than a no-op worth hiding.
      */
     public BotGroup retryRegistration(String id) {
+        return retryRegistration(id, null);
+    }
+
+    /**
+     * {@link #retryRegistration(String)} with an operator's resolution of an unknown deposit
+     * outcome (BOT_PROVISIONING AD-8).
+     * <p>
+     * {@code depositOutcome} is <b>required</b> when the group stopped on an unknown outcome and
+     * <b>rejected</b> otherwise: the worker refuses to send anything for a group whose ledger
+     * carries an in-flight marker, so a retry without a decision would only fail again, and a
+     * decision for a group that has no marker would be a statement about money nobody asked
+     * about. {@code CREDITED} advances the funded high-water mark to the marker; {@code
+     * NOT_CREDITED} leaves it, so the index is sent exactly once more. Both clear the marker.
+     */
+    public BotGroup retryRegistration(String id, DepositResolution depositOutcome) {
         BotGroup group = findById(id);
         if (!RegistrationState.isFailed(group.getRegistrationState())) {
             throw new BadRequestException(String.format(
@@ -460,6 +524,37 @@ public class BotGroupService {
                     group.getName(), group.getRegisteredCount(), group.getBotCount(),
                     group.getRegistrationState() == null ? "complete"
                             : group.getRegistrationState()));
+        }
+        DepositLedger.State ledger = depositLedger.read(id);
+        if (ledger.depositInFlight() != null) {
+            if (depositOutcome == null) {
+                throw new BadRequestException(String.format(
+                        "Bot group '%s' stopped on an unknown deposit outcome for %s%d (index %d). "
+                                + "Check that account's balance, then retry with "
+                                + "?depositOutcome=credited or ?depositOutcome=not-credited.",
+                        group.getName(), group.getNamePrefix(), ledger.depositInFlight(),
+                        ledger.depositInFlight()));
+            }
+        } else if (depositOutcome != null) {
+            throw new BadRequestException(String.format(
+                    "Bot group '%s' has no deposit with an unknown outcome, so depositOutcome does "
+                            + "not apply. Retry without it.", group.getName()));
+        }
+        if (ledger.depositInFlight() != null) {
+            int index = ledger.depositInFlight();
+            boolean credited = depositOutcome == DepositResolution.CREDITED;
+            if (!depositLedger.resolve(id, index, credited)) {
+                throw new BadRequestException(String.format(
+                        "Bot group '%s': the unknown deposit outcome changed while this request was "
+                                + "being handled. Re-read the group and retry.", group.getName()));
+            }
+            DepositLedger.State resolved = depositLedger.read(id);
+            group.setDepositedCount(resolved.depositedCount());
+            group.setDepositInFlight(null);
+            log.info("group {} ({}): operator resolved the unknown deposit for {}{} (index {}) as {} — "
+                            + "{}", id, group.getName(), group.getNamePrefix(), index, index,
+                    credited ? "credited" : "not credited",
+                    credited ? "it will not be sent again" : "it will be sent once more");
         }
         group.setRegistrationState(RegistrationState.PENDING);
         group.setRegistrationError(null);
@@ -493,5 +588,33 @@ public class BotGroupService {
                 group -> registrationWorker.cancel(id, group.getEnvironmentId()));
         behaviorService.stopAndLogout(id);
         repository.deleteById(id);
+        depositLedger.delete(id);
+    }
+
+    /** BOT_PROVISIONING AD-3: {@code 0 <= initialDeposit <= bot.provisioning.max-initial-deposit}. */
+    private void validateInitialDepositRange(long initialDeposit) {
+        if (initialDeposit < 0 || initialDeposit > maxInitialDeposit) {
+            throw new BadRequestException(String.format(
+                    "initialDeposit must be between 0 and %d (bot.provisioning.max-initial-deposit), "
+                            + "got %d", maxInitialDeposit, initialDeposit));
+        }
+    }
+
+    /** The operator's answer to an unknown deposit outcome (AD-8). */
+    public enum DepositResolution {
+        CREDITED, NOT_CREDITED;
+
+        /** {@code credited} / {@code not-credited}; {@code null} for an absent parameter. */
+        public static DepositResolution parse(String value) {
+            if (value == null || value.isBlank()) {
+                return null;
+            }
+            return switch (value.trim().toLowerCase(java.util.Locale.ROOT)) {
+                case "credited" -> CREDITED;
+                case "not-credited" -> NOT_CREDITED;
+                default -> throw new BadRequestException(
+                        "depositOutcome must be 'credited' or 'not-credited', got '" + value + "'");
+            };
+        }
     }
 }

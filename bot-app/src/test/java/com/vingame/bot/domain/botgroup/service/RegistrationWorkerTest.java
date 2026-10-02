@@ -69,6 +69,7 @@ class RegistrationWorkerTest {
     private BotMetrics metrics;
     private SimpleMeterRegistry meterRegistry;
     private RegistrationWorker worker;
+    private final InMemoryDepositLedger ledger = new InMemoryDepositLedger();
 
     /** Every {@code $set} the worker issued, in order — the persisted-progress ledger. */
     private final List<Update> updates = new ArrayList<>();
@@ -122,7 +123,7 @@ class RegistrationWorkerTest {
                 });
 
         worker = new RegistrationWorker(repository, mongoTemplate, clientRegistry, budgetRegistry,
-                environmentService, metrics, 10, 3, 5, 30, 10, 60);
+                environmentService, metrics, ledger, 10, 3, 5, 30, 10, 60);
     }
 
     private BotGroup group(int botCount, int registered, int named) {
@@ -802,7 +803,7 @@ class RegistrationWorkerTest {
         // max-attempts-per-user=3) and deferral 0 s (floored to one 10 s tick).
         RegistrationWorker floored = new RegistrationWorker(repository, mongoTemplate,
                 mock(EnvironmentClientRegistry.class), budgetRegistry,
-                mock(EnvironmentService.class), metrics, 10, 3, 5, 30, 1, 0);
+                mock(EnvironmentService.class), metrics, new InMemoryDepositLedger(), 10, 3, 5, 30, 1, 0);
         List<String> lines = new java.util.concurrent.CopyOnWriteArrayList<>();
         var appender = new org.apache.logging.log4j.core.appender.AbstractAppender("rw-start-capture", null,
                 org.apache.logging.log4j.core.layout.PatternLayout.createDefaultLayout(), true, null) {
