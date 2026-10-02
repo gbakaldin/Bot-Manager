@@ -465,6 +465,8 @@ class BotGroupServiceTest {
                     .build();
             when(repository.findById("g-1")).thenReturn(Optional.of(existing));
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            // A raise runs the username pre-flight (BOT_PROVISIONING AD-4); BOM has no cap.
+            when(environmentService.findById("env-1")).thenReturn(envWithProductCode(ProductCode.P_097));
             // The mapper is a mock here, so apply the merge the real one would.
             org.mockito.Mockito.doAnswer(inv -> {
                 inv.<BotGroup>getArgument(1).setBotCount(300);
@@ -603,6 +605,8 @@ class BotGroupServiceTest {
                     .build();
             when(repository.findById("g-1")).thenReturn(Optional.of(migrated));
             when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            // A raise runs the username pre-flight (BOT_PROVISIONING AD-4); BOM has no cap.
+            when(environmentService.findById("env-1")).thenReturn(envWithProductCode(ProductCode.P_097));
             org.mockito.Mockito.doAnswer(inv -> {
                 inv.<BotGroup>getArgument(1).setBotCount(60);
                 return null;
@@ -935,6 +939,88 @@ class BotGroupServiceTest {
             BotGroup result = service.save(group, true);
 
             assertThat(result.getId()).isNotNull().isNotEmpty();
+            verify(environmentService, never()).findById(anyString());
+        }
+    }
+
+    @Nested
+    @DisplayName("update - username length pre-flight on a botCount raise (BOT_PROVISIONING AD-4)")
+    class UpdateUsernameLengthValidationTests {
+
+        private BotGroup tipGroup(int botCount) {
+            // Tip cap is 12; prefix "prov0123ab" is 10 characters.
+            return BotGroup.builder()
+                    .id("g-tip").name("Tip").environmentId("env-tip").namePrefix("prov0123ab")
+                    .password("pass").botCount(botCount).registeredCount(botCount)
+                    .namedCount(botCount)
+                    .build();
+        }
+
+        private void mergeBotCount(int botCount) {
+            org.mockito.Mockito.doAnswer(inv -> {
+                inv.<BotGroup>getArgument(1).setBotCount(botCount);
+                return null;
+            }).when(mapper).updateEntityFromDTO(any(BotGroupDTO.class), any(BotGroup.class));
+        }
+
+        @Test
+        @DisplayName("a raise past the product cap is a 400 and persists nothing")
+        void raisePastTheCapIsRejected() {
+            // 99 -> 100 crosses from 12 to 13 characters: this used to pass PATCH and fail at
+            // the gateway on index 100.
+            when(repository.findById("g-tip")).thenReturn(Optional.of(tipGroup(99)));
+            when(environmentService.findById("env-tip")).thenReturn(envWithProductCode(ProductCode.P_116));
+            mergeBotCount(100);
+
+            assertThatThrownBy(() -> service.update("g-tip", BotGroupDTO.builder().botCount(100).build()))
+                    .isInstanceOf(BadRequestException.class)
+                    .hasMessageContaining("P_116")
+                    .hasMessageContaining("prov0123ab")
+                    .hasMessageContaining("13")
+                    .hasMessageContaining("12");
+
+            verify(repository, never()).save(any());
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("a raise that still fits the cap passes")
+        void raiseWithinTheCapPasses() {
+            when(repository.findById("g-tip")).thenReturn(Optional.of(tipGroup(9)));
+            when(environmentService.findById("env-tip")).thenReturn(envWithProductCode(ProductCode.P_116));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            mergeBotCount(99);
+
+            BotGroup result = service.update("g-tip", BotGroupDTO.builder().botCount(99).build());
+
+            assertThat(result.getBotCount()).isEqualTo(99);
+            assertThat(result.getRegistrationState()).isEqualTo(RegistrationState.PENDING);
+        }
+
+        @Test
+        @DisplayName("a PATCH that does not raise botCount never runs the check")
+        void noRaiseNoCheck() {
+            // A group whose prefix already violates the cap (it predates the check) must stay
+            // editable: a rename does not make any username longer.
+            BotGroup legacy = tipGroup(999);
+            when(repository.findById("g-tip")).thenReturn(Optional.of(legacy));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+
+            BotGroup result = service.update("g-tip", BotGroupDTO.builder().name("Renamed").build());
+
+            assertThat(result).isNotNull();
+            verify(environmentService, never()).findById(anyString());
+        }
+
+        @Test
+        @DisplayName("lowering botCount never runs the check")
+        void loweringNeverChecks() {
+            when(repository.findById("g-tip")).thenReturn(Optional.of(tipGroup(999)));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            mergeBotCount(500);
+
+            service.update("g-tip", BotGroupDTO.builder().botCount(500).build());
+
             verify(environmentService, never()).findById(anyString());
         }
     }

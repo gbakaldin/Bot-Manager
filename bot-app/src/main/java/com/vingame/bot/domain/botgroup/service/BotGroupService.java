@@ -340,6 +340,15 @@ public class BotGroupService {
         // lowering maxBet below the persisted minBet — are caught before save.
         configValidation.validate(existing);
 
+        // BOT_PROVISIONING AD-4: the username pre-flight used to run on create only, so raising a
+        // TIP group from 99 to 100 with a 10-char prefix passed PATCH and failed at the gateway
+        // on index 100, after the worker had spent requests getting there. Only a raise can make
+        // the longest username longer, so only a raise is checked — a rename or a maxBet change
+        // on a group whose prefix predates the check must keep working.
+        if (existing.getBotCount() > botCountBefore) {
+            validateUsernameLength(existing);
+        }
+
         applyRegistrationTargetChange(existing, botCountBefore, registrationUntracked);
 
         // Route through save so updatedAt is (re)stamped on every mutation (AD-16);
