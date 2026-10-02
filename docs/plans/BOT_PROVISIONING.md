@@ -95,8 +95,10 @@ All paths under `/Users/gleb/IdeaProjects/Bot/`.
   `depositedCount <= (names ? namedCount : registeredCount)`. Index selection becomes
   `(deposit ? depositedCount : names ? namedCount : registeredCount) + 1`; completion adds
   `!deposit || depositedCount >= target`. Never skips an index.
+  *(Amended 2026-10-02: the authoritative `depositedCount`/`depositInFlight` live in
+  `DepositLedger`, not on `BotGroup` — see the Amendment section.)*
 - **AD-6 — Write-ahead marker for the money call.** A nullable `Integer depositInFlight` on the
-  document:
+  document (amended: on the `DepositLedger` entry; the group field is a display mirror):
   1. The worker calls a new `ApiGatewayClient.depositForRegistration(username, amount, scope,
      maxWait, Runnable onAdmitted)`. `onAdmitted` runs **inside the budget's callable, after
      admission, immediately before the HTTP send**, and persists `depositInFlight = index`
@@ -275,3 +277,46 @@ Use a fresh prefix each run: `P=prov$(date +%H%M)` (check the brand's username c
 10. Username cap on raise (TIP env, 12 chars): create with an 11-char prefix and `botCount:9`,
     then PATCH `{"botCount":10}` → expect HTTP `400` naming the cap.
 11. Cleanup: `curl -s -XDELETE $B/api/v1/bot-group/$ID` → expect `200`/`204`.
+
+## Amendment — 2026-10-02
+
+Recorded by the compliance check (`docs/reviews/BOT_PROVISIONING/compliance.md`). Supersedes the
+text above where they disagree.
+
+1. **Funded count + marker live in `DepositLedger` (AD-5/AD-6, Phase 2 steps 1 and 4).** The
+   plan put `depositedCount`/`depositInFlight` on the `BotGroup` document and relied on targeted
+   `$set`s. That is unsafe: `BotGroup` has no `@Version`, and every PATCH / start / stop / DEAD
+   write is a `repository.save` — a full-document `replaceOne` of what that caller read. A save
+   that read the group before the worker credited index `k` and wrote after reverts the count to
+   `k-1` and clears the marker, and the next pass deposits index `k` twice. (`persistProgress`
+   tolerates the same race for `registeredCount` only because re-register answers `EXISTED`.)
+   So the authoritative state is a separate collection `botGroupDepositLedger`, keyed by group
+   id, written only by conditional targeted updates: `markInFlight` (upsert conditioned on
+   `depositedCount == index-1 && depositInFlight == null`; a mismatch throws and nothing is
+   sent), `credit` / `clearInFlight` / `resolve` (conditioned on the marker naming the index),
+   `seedAtLeast` (`$max`, for AD-9), `delete` (on group delete). The worker and the retry
+   endpoint decide only from the ledger. `BotGroup.depositedCount`/`depositInFlight` remain as
+   best-effort display mirrors (a stale save may lag them; they never drive a deposit).
+   `persistProgress` does not gain `depositedCount`.
+2. **Attach (AD-12) — behaviour beyond the original text, accepted:**
+   - `POST /{id}/restart` while an `ATTACH` attempt is open is **409** (`ConflictException`),
+     not a silent 200. `/start` during an attach stays the "already in flight" no-op.
+   - A scheduled restart that lands during an attach is **deferred** and runs after it (a
+     restart behind a start/restart is still the pre-existing no-op).
+   - An attach refused because another attempt is in flight is **queued on that attempt**
+     (`StartAttemptRegistry.defer`, atomic with `finish`) and run by its closer; a successful
+     start, and each attach pass, also catch up (`attachRemainderLocked`, capped at 5 passes,
+     remainder handed to a fresh attempt). Follow-ups of a **cancelled** attempt are dropped, so
+     a `/stop` never resurrects a group.
+   - `handleBotGroupDeath` **cancels an in-flight attach** (`cancelIf(id, ATTACH)`, atomic
+     compare-and-cancel) so a long attach cannot block DEAD marking; it never cancels a
+     start/restart.
+   - `builtUpTo` advances only over the **contiguous started prefix** below the first index the
+     gateway budget/circuit refused (never sent); bots built past the gap are cleaned up and the
+     remainder stays pending for the next trigger. Other failures (auth, upstream) count as
+     attempted, as in a start.
+   - The catch-up after a start releases the start's ESSENTIAL reservation before reserving its
+     own, and uses `GroupLifecycleAggregator.expectAdditional` (adds to an open expectation).
+3. **AD-7 detail:** a Cloudflare edge block on the deposit response (403/429 page) is `REFUSED`;
+   a failure of the `onAdmitted` marker write is not an outcome — nothing is sent, the worker
+   charges an attempt and the next selection decides from the ledger.
