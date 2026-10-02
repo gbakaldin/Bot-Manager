@@ -130,6 +130,12 @@ public class BotMetrics {
      */
     public static final String REGISTRATION_ACCOUNTS_TOTAL = "registration_accounts_total";
 
+    /** BOT_PROVISIONING AD-14: registration-time deposits by {@code outcome}. */
+    public static final String REGISTRATION_DEPOSITS_TOTAL = "registration_deposits_total";
+
+    /** BOT_PROVISIONING AD-14: amount credited by registration-time deposits. */
+    public static final String REGISTRATION_DEPOSIT_AMOUNT_TOTAL = "registration_deposit_amount_total";
+
     private final MeterRegistry registry;
 
     public BotMetrics(MeterRegistry registry) {
@@ -662,5 +668,40 @@ public class BotMetrics {
                     .tags(tags)
                     .register(registry);
         }
+    }
+
+    /** One registration-time deposit outcome (BOT_PROVISIONING AD-14), tagged from MDC. */
+    public void incRegistrationDeposit(String outcome) {
+        Counter.builder(REGISTRATION_DEPOSITS_TOTAL)
+                .tag("outcome", outcome)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /** Amount credited by one registration-time deposit (BOT_PROVISIONING AD-14). */
+    public void addRegistrationDepositAmount(long amount) {
+        Counter.builder(REGISTRATION_DEPOSIT_AMOUNT_TOTAL)
+                .tags(mdcTags())
+                .register(registry)
+                .increment(amount);
+    }
+
+    /**
+     * {@link #initRegistrationSeries} for the deposit counters: every outcome series and the
+     * amount series at zero under the group's MDC, before anything can increment one — the same
+     * counter-first-appears-at-1 trap, for the same reason (AD-14).
+     */
+    public void initRegistrationDepositSeries(String... outcomes) {
+        Tags tags = mdcTags();
+        for (String outcome : outcomes) {
+            Counter.builder(REGISTRATION_DEPOSITS_TOTAL)
+                    .tag("outcome", outcome)
+                    .tags(tags)
+                    .register(registry);
+        }
+        Counter.builder(REGISTRATION_DEPOSIT_AMOUNT_TOTAL)
+                .tags(tags)
+                .register(registry);
     }
 }

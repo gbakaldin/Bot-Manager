@@ -9,6 +9,7 @@ import com.vingame.bot.common.gateway.RequestTier;
 import com.vingame.bot.infrastructure.auth.AuthProfile;
 import com.vingame.bot.infrastructure.gateway.GatewayBudget;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationRequest;
+import com.vingame.bot.infrastructure.client.dto.DepositOutcome;
 import com.vingame.bot.infrastructure.client.dto.RegistrationOutcome;
 import com.vingame.bot.infrastructure.client.dto.UserRegistrationResponse;
 import com.vingame.bot.infrastructure.observability.BotMetrics;
@@ -1088,6 +1089,124 @@ public class ApiGatewayClient {
                 log.error("Bot deposit failed for user: {}", username, e);
             }
             return false;
+        }
+    }
+
+    /**
+     * The registration-time deposit (BOT_PROVISIONING AD-6 / AD-7): same endpoint and body as
+     * {@link #deposit}, but every outcome is classified rather than folded into a boolean, and
+     * {@code onAdmitted} runs <b>inside the budget's callable, after admission and after the
+     * stream permit, immediately before the HTTP send</b>.
+     * <p>
+     * {@code onAdmitted} is the write-ahead marker. If it throws, the request is not sent and the
+     * failure is rethrown as {@link DepositMarkerException} — never classified as an outcome,
+     * because the marker may or may not have landed and the caller must not clear it.
+     * <p>
+     * Runs at {@link RequestTier#DEFAULT} with the caller's registration wait, exactly like
+     * {@link #registerOne} — never PRIORITIZED (AD-10).
+     *
+     * <table>
+     *   <tr><td>{@link GatewayBudgetException} before the marker</td><td>rethrown — the worker defers</td></tr>
+     *   <tr><td>stream-permit timeout, any failure before the marker</td><td>{@code NOT_SENT}</td></tr>
+     *   <tr><td>{@code ConnectException} after the marker</td><td>{@code NOT_SENT}</td></tr>
+     *   <tr><td>HTTP 200</td><td>{@code CREDITED}</td></tr>
+     *   <tr><td>HTTP 4xx, Cloudflare block page</td><td>{@code REFUSED}</td></tr>
+     *   <tr><td>HTTP 5xx / other, I/O failure or interrupt after the marker</td><td>{@code UNKNOWN}</td></tr>
+     * </table>
+     *
+     * @throws GatewayBudgetException when the budget refused before anything was marked or sent
+     * @throws DepositMarkerException when {@code onAdmitted} threw; nothing was sent
+     */
+    public DepositOutcome.Result depositForRegistration(String username, long amount,
+                                                        GatewayRequestScope scope, Duration maxWait,
+                                                        Runnable onAdmitted) {
+        checkInitialized();
+        String requestBody;
+        try {
+            requestBody = mapper.writeValueAsString(java.util.Map.of("username", username, "amount", amount));
+        } catch (IOException e) {
+            return new DepositOutcome.Result(DepositOutcome.NOT_SENT, "could not build the request body");
+        }
+        String url = apiGateway + BOT_DEPOSIT_ENDPOINT;
+        log.debug("[RegistrationDeposit] POST {} | X-TOKEN: {} | body: {}", url, masked(xToken), requestBody);
+        HttpRequest httpRequest = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", USER_AGENT)
+                .header(SESSION_TOKEN_HEADER, xToken)
+                .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                .timeout(GATEWAY_REQUEST_TIMEOUT)
+                .build();
+
+        java.util.concurrent.atomic.AtomicBoolean marked = new java.util.concurrent.atomic.AtomicBoolean();
+        long deadlineNanos = System.nanoTime() + maxWait.toNanos();
+        Callable<HttpResponse<String>> call = () -> {
+            acquireStream(permitWait(deadlineNanos, System.nanoTime()));
+            try {
+                try {
+                    onAdmitted.run();
+                } catch (RuntimeException markerFailure) {
+                    throw new DepositMarkerException(username, markerFailure);
+                }
+                marked.set(true);
+                return sendClassified(httpRequest);
+            } finally {
+                inFlight.release();
+            }
+        };
+
+        try {
+            HttpResponse<String> response = gatewayBudget.execute(RequestTier.DEFAULT, scope, call, maxWait);
+            int status = response.statusCode();
+            log.debug("[RegistrationDeposit] response HTTP {} for {}", status, username);
+            if (status == 200) {
+                return new DepositOutcome.Result(DepositOutcome.CREDITED, "HTTP 200");
+            }
+            if (status >= 400 && status < 500) {
+                return new DepositOutcome.Result(DepositOutcome.REFUSED, "HTTP " + status);
+            }
+            // Nothing in the contract says a 5xx did not credit (plan Open Item 4).
+            return new DepositOutcome.Result(DepositOutcome.UNKNOWN, "HTTP " + status);
+        } catch (DepositMarkerException e) {
+            throw e;
+        } catch (GatewayBudgetException e) {
+            if (!marked.get()) {
+                throw e;
+            }
+            // After the send, the only budget exception is the edge-block classification of the
+            // answer: a Cloudflare 403/429 page, i.e. the edge refused and the origin never saw it.
+            if (e instanceof com.vingame.bot.common.exception.GatewayCircuitOpenException) {
+                return new DepositOutcome.Result(DepositOutcome.REFUSED, "Cloudflare edge block");
+            }
+            return new DepositOutcome.Result(DepositOutcome.UNKNOWN, e.getClass().getSimpleName());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new DepositOutcome.Result(marked.get() ? DepositOutcome.UNKNOWN : DepositOutcome.NOT_SENT,
+                    "interrupted");
+        } catch (java.net.ConnectException e) {
+            return new DepositOutcome.Result(DepositOutcome.NOT_SENT, "connection refused");
+        } catch (IOException e) {
+            // StreamWaitTimeoutException is an HttpTimeoutException: it can only happen before the
+            // marker, so `marked` already says NOT_SENT for it — tested before the generic case.
+            if (e instanceof StreamWaitTimeoutException || !marked.get()) {
+                return new DepositOutcome.Result(DepositOutcome.NOT_SENT, e.getClass().getSimpleName());
+            }
+            return new DepositOutcome.Result(DepositOutcome.UNKNOWN, e.getClass().getSimpleName());
+        } catch (Exception e) {
+            return new DepositOutcome.Result(marked.get() ? DepositOutcome.UNKNOWN : DepositOutcome.NOT_SENT,
+                    e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * The write-ahead marker could not be written, so the deposit was not sent (AD-6). Distinct
+     * from every {@link DepositOutcome}: the marker may or may not have landed, so the caller must
+     * leave it alone and let the next pass's selection check decide.
+     */
+    public static final class DepositMarkerException extends RuntimeException {
+        public DepositMarkerException(String username, Throwable cause) {
+            super("deposit for " + username + " not sent: the in-flight marker could not be written ("
+                    + cause.getMessage() + ")", cause);
         }
     }
 
