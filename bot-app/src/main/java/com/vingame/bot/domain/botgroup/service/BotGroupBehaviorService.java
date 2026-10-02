@@ -2,6 +2,7 @@ package com.vingame.bot.domain.botgroup.service;
 
 import com.vingame.bot.domain.bot.core.SessionSetupHandedOffException;
 import com.vingame.bot.common.exception.BadRequestException;
+import com.vingame.bot.common.exception.ConflictException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.common.logging.BotMdc;
 import com.vingame.bot.domain.bot.coordination.BetCoordinator;
@@ -549,10 +550,15 @@ public class BotGroupBehaviorService {
         BotGroup group = botGroupService.findById(id);
         validateStartable(group);
 
-        if (!startAttempts.begin(id, origin)) {
-            log.info("Bot group {} ({}): {} ignored — a start is already in flight ({})",
-                    id, group.getName(), action, startAttempts.describe(id));
-            return getActualStatus(id);
+        while (!startAttempts.begin(id, origin)) {
+            // BOT_PROVISIONING review: a refusal must never silently lose an attach or a booked
+            // restart. defer() is atomic with the holder's finish(), so either the follow-up lands
+            // on an attempt whose closer will run it, or no attempt is open any more and begin()
+            // is simply tried again.
+            StartAttemptRegistry.Deferral deferral = deferBehindAttemptInFlight(id, origin, action, group);
+            if (deferral != StartAttemptRegistry.Deferral.NO_ATTEMPT) {
+                return getActualStatus(id);
+            }
         }
 
         String environmentId = group.getEnvironmentId();
@@ -569,6 +575,82 @@ public class BotGroupBehaviorService {
         }
 
         return BotGroupStatus.STARTING;
+    }
+
+    /**
+     * What happens to a lifecycle request that finds another attempt in flight.
+     * <ul>
+     *   <li>An attach is queued behind it ({@link StartAttemptRegistry.FollowUp#ATTACH}); the
+     *       holder's closer re-runs {@link #attachIfRunning} after {@code finish}.</li>
+     *   <li>A scheduled restart behind an <b>attach</b> is queued too and runs after it. Behind a
+     *       start or restart it stays the pre-existing no-op: the group is being rebuilt anyway.</li>
+     *   <li>An operator {@code /restart} behind an attach is refused with a 409 naming the attach —
+     *       never a 200 that does nothing.</li>
+     *   <li>Everything else keeps the existing "already in flight" answer.</li>
+     * </ul>
+     */
+    private StartAttemptRegistry.Deferral deferBehindAttemptInFlight(String id, StartOrigin origin,
+                                                                   String action, BotGroup group) {
+        if (origin == StartOrigin.ATTACH) {
+            StartAttemptRegistry.Deferral d = startAttempts.defer(id, StartAttemptRegistry.FollowUp.ATTACH);
+            if (d == StartAttemptRegistry.Deferral.DEFERRED) {
+                log.info("Bot group {} ({}): attach deferred to the attempt in flight ({}) — it "
+                        + "runs when that attempt finishes", id, group.getName(), startAttempts.describe(id));
+            }
+            return d;
+        }
+        boolean behindAttach = startAttempts.openOrigin(id).filter(o -> o == StartOrigin.ATTACH).isPresent();
+        if (behindAttach && "restart".equals(action)) {
+            if (origin == StartOrigin.SCHEDULED_RESTART) {
+                StartAttemptRegistry.Deferral d = startAttempts.defer(id, StartAttemptRegistry.FollowUp.RESTART);
+                if (d == StartAttemptRegistry.Deferral.DEFERRED) {
+                    log.info("Bot group {} ({}): scheduled restart deferred until the attach of newly "
+                            + "registered accounts finishes ({})", id, group.getName(), startAttempts.describe(id));
+                }
+                return d;
+            }
+            if (startAttempts.isOpen(id)) {
+                throw new ConflictException(String.format(
+                        "Bot group %s is attaching newly registered accounts to the running group "
+                                + "(%s). Retry the restart once GET /api/v1/bot-group/%s/status no "
+                                + "longer reads STARTING.", group.getName(), startAttempts.describe(id), id));
+            }
+            return StartAttemptRegistry.Deferral.NO_ATTEMPT;
+        }
+        if (!startAttempts.isOpen(id)) {
+            return StartAttemptRegistry.Deferral.NO_ATTEMPT;
+        }
+        log.info("Bot group {} ({}): {} not submitted — a start is already in flight ({})",
+                id, group.getName(), action, startAttempts.describe(id));
+        return StartAttemptRegistry.Deferral.NOT_DEFERRABLE;
+    }
+
+    /**
+     * Run what was queued on an attempt while it was in flight. Called by every closer of an
+     * attempt, right after {@code finish}. Both follow-ups hand off to a new lifecycle thread, so
+     * this never builds on the caller's thread and never throws.
+     */
+    private void runFollowUps(String id, java.util.Set<StartAttemptRegistry.FollowUp> followUps) {
+        if (followUps.isEmpty()) {
+            java.util.Set<StartAttemptRegistry.FollowUp> dropped = startAttempts.droppedFollowUps(id);
+            if (dropped.contains(StartAttemptRegistry.FollowUp.RESTART)) {
+                log.warn("Bot group {}: a scheduled restart deferred behind an attach was dropped — "
+                        + "the attach was cancelled by a stop, a delete or the group dying", id);
+            }
+            return;
+        }
+        if (followUps.contains(StartAttemptRegistry.FollowUp.RESTART)) {
+            // A restart rebuilds 1..botCount, so it covers a pending attach as well.
+            log.info("Bot group {}: running the scheduled restart deferred behind the attach", id);
+            try {
+                restartAsync(id, StartOrigin.SCHEDULED_RESTART, () -> { });
+            } catch (RuntimeException e) {
+                log.error("Deferred scheduled restart of bot group {} could not be accepted: {}",
+                        id, e.toString(), e);
+            }
+            return;
+        }
+        attachIfRunning(id);
     }
 
     private void submit(String id, String action, StartOrigin origin, String environmentId,
@@ -592,8 +674,12 @@ public class BotGroupBehaviorService {
                             action, id, rollbackFailure.getMessage(), rollbackFailure);
                 }
             } finally {
-                startAttempts.finish(id, failure);
-                BotMdc.clear();
+                java.util.Set<StartAttemptRegistry.FollowUp> followUps = startAttempts.finish(id, failure);
+                try {
+                    runFollowUps(id, followUps);
+                } finally {
+                    BotMdc.clear();
+                }
             }
         });
     }
@@ -635,7 +721,7 @@ public class BotGroupBehaviorService {
             failure = t;
             throw t;
         } finally {
-            startAttempts.finish(id, failure);
+            runFollowUps(id, startAttempts.finish(id, failure));
         }
     }
 
@@ -732,22 +818,32 @@ public class BotGroupBehaviorService {
      * a half-built client, so interrupting a build would not stop it — it would corrupt it.
      */
     private void cancelStartInFlight(String id) {
-        if (startAttempts.cancel(id)) {
+        if (cancelAttemptAndScope(id)) {
             log.info("Bot group {}: stop requested while a start was in flight ({}) — cancelling it",
                     id, startAttempts.describe(id));
         }
+    }
+
+    /**
+     * The cancellation half of {@link #cancelStartInFlight}, without its stop-shaped log line.
+     *
+     * @return whether an attempt was open to cancel
+     */
+    private boolean cancelAttemptAndScope(String id) {
+        boolean cancelled = startAttempts.cancel(id);
         // The budget is per environment and only exists once something has been sent through it;
         // find() deliberately does not create one, because conjuring a budget (and a fresh set of
         // gateway_budget_* series) as a side effect of a stop would be a lie about the fleet.
         BotGroupRuntime runtime = runningGroups.get(id);
         String environmentId = runtime != null ? runtime.getEnvironmentId() : null;
         if (environmentId == null) {
-            return;
+            return cancelled;
         }
         GatewayBudget budget = gatewayBudgetRegistry.find(environmentId);
         if (budget != null) {
             budget.cancelScope(id);
         }
+        return cancelled;
     }
 
     /**
@@ -849,7 +945,9 @@ public class BotGroupBehaviorService {
                 failure = t;
                 throw t;
             } finally {
-                startAttempts.finish(id, failure);
+                // Follow-ups hand off to their own thread, which queues on this lock until the
+                // recovery tick returns.
+                runFollowUps(id, startAttempts.finish(id, failure));
             }
 
             BotGroupRuntime rebuilt = runningGroups.get(id);
@@ -1234,6 +1332,10 @@ public class BotGroupBehaviorService {
             // had its attach refused as "already in flight". Catch up now, under the same lock and
             // the same attempt, so those accounts do not wait for the next restart. A failure here
             // is an attach failure, not a start failure -- the group is up -- so it is contained.
+            // Review bug 1: the start's admissions are finished, so its declared demand goes back
+            // BEFORE the catch-up declares its own under the same tier|group key. Idempotent; the
+            // finally releases it again harmlessly.
+            reservation.release();
             try {
                 attachRemainderLocked(id);
             } catch (RuntimeException e) {
@@ -1390,6 +1492,16 @@ public class BotGroupBehaviorService {
                 return;
             }
         }
+        // Cap hit with the last pass still building: hand the remainder to a fresh attempt
+        // through the same post-finish follow-up a refused event uses, so the lock is released
+        // and nothing is stranded.
+        if (startAttempts.defer(id, StartAttemptRegistry.FollowUp.ATTACH)
+                == StartAttemptRegistry.Deferral.DEFERRED) {
+            log.info("Bot group {}: {} attach passes in one hold — handing any remainder to a "
+                    + "fresh attempt", id, MAX_ATTACH_PASSES);
+        } else {
+            attachIfRunning(id);
+        }
     }
 
     /**
@@ -1439,7 +1551,6 @@ public class BotGroupBehaviorService {
 
         GatewayBudget.Reservation reservation = null;
         List<Bot> bots = List.of();
-        boolean started = false;
         try {
             startAttempts.progress(id, StartAttemptRegistry.Phase.BUILDING);
 
@@ -1455,18 +1566,24 @@ public class BotGroupBehaviorService {
             // Tier 1: one line per attach, never one per bot.
             log.info("group {} ({}): attaching {} bots ({}-{}) to running group",
                     id, group.getName(), added, fromIndex, toIndex);
-            groupLifecycleAggregator.expectInitialized(id, group.getName(), added);
+            // Additive (review advisory): a catch-up right after a start must not overwrite the
+            // start's still-open "n/m bots initialized" expectation.
+            groupLifecycleAggregator.expectAdditional(id, group.getName(), added);
 
             java.util.concurrent.atomic.AtomicReference<com.vingame.bot.common.exception.GatewayCircuitOpenException>
                     circuitRefusal = new java.util.concurrent.atomic.AtomicReference<>();
+            java.util.SortedMap<Integer, Bot> builtByIndex =
+                    java.util.Collections.synchronizedSortedMap(new java.util.TreeMap<>());
+            java.util.Set<Integer> refused = java.util.concurrent.ConcurrentHashMap.newKeySet();
             bots = createBotsInParallel(group, environment, game, strategyAssignment,
-                    circuitRefusal, fromIndex, toIndex);
+                    circuitRefusal, fromIndex, toIndex, builtByIndex, refused);
 
             if (startAttempts.isCancelled(id)) {
-                // The stop parked on this lock tears the runtime down next; the bots built here
-                // were never handed to it, so they are cleaned up below.
-                log.info("A stop during the attach to group {} cancelled it at {}/{} bots — unwinding",
-                        id, bots.size(), added);
+                // A /stop, a delete, or handleBotGroupDeath aborting the attach so the group can be
+                // marked DEAD. Whoever cancelled tears the runtime down or marks it next; the bots
+                // built here were never handed to it, so they are cleaned up below.
+                log.info("The attach to group {} was cancelled (stop, delete or the group dying) at "
+                        + "{}/{} bots — unwinding", id, bots.size(), added);
                 return false;
             }
             if (runningGroups.get(id) != runtime || runtime.getActualStatus() != BotGroupStatus.ACTIVE) {
@@ -1476,33 +1593,51 @@ public class BotGroupBehaviorService {
                 return false;
             }
 
+            // QA: builtUpTo may only advance over the contiguous prefix below the first index the
+            // gateway budget or circuit refused — those requests were never sent, so the accounts
+            // are owed a retry, and builtUpTo is the only record of what is owed. A bot that came
+            // up ABOVE that index is cleaned up and not started, or the retry would log the same
+            // account in twice. Any other failure (auth, upstream) still counts as attempted, as
+            // it does for a start: retrying a permanent failure on every trigger would never end.
+            int prefixEnd = refused.isEmpty() ? toIndex : java.util.Collections.min(refused) - 1;
+            List<Bot> toStart = new ArrayList<>(builtByIndex.headMap(prefixEnd + 1).values());
+            bots = new ArrayList<>(bots);
+            bots.removeAll(toStart);   // what remains in `bots` is cleaned up in the finally
+
             startAttempts.progress(id, StartAttemptRegistry.Phase.STARTING_BOTS);
-            for (Bot bot : bots) {
+            List<Bot> handedOver = new ArrayList<>(toStart.size());
+            for (Bot bot : toStart) {
                 bot.setCoordinator(runtime.getCoordinator());
                 bot.setJackpotScaler(runtime.getJackpotScaler());
                 runtime.startBot(bot);
+                handedOver.add(bot);
                 log.debug("Started attached bot {}", bot.getUserName());
             }
-            // Advanced to the range attempted, not the bots that came up — a failed index is not
-            // retried by every later attach, exactly as a start does not retry one.
-            runtime.setBuiltUpTo(toIndex);
-            started = true;
+            runtime.setBuiltUpTo(Math.max(runtime.getBuiltUpTo(), prefixEnd));
 
+            if (!refused.isEmpty()) {
+                // ONE group-level line, never per bot.
+                log.warn("group {} ({}): attach stopped at index {} — {} of accounts {}-{} were "
+                                + "refused by the gateway budget/circuit and {} accounts ({}-{}) are "
+                                + "left pending; the next attach trigger or start retries them",
+                        id, group.getName(), prefixEnd + 1, refused.size(), fromIndex, toIndex,
+                        toIndex - prefixEnd, prefixEnd + 1, toIndex);
+            }
             log.info("group {} ({}): attached {}/{} bots ({}-{}), {} bots in the group",
-                    id, group.getName(), bots.size(), added, fromIndex, toIndex,
+                    id, group.getName(), handedOver.size(), added, fromIndex, toIndex,
                     runtime.getBotInstances().size());
-            return true;
+            // A refusal ends this hold: retrying straight away would hammer an open circuit.
+            return refused.isEmpty();
         } finally {
             if (reservation != null) {
                 reservation.release();
             }
-            if (!started) {
-                for (Bot bot : bots) {
-                    try {
-                        bot.cleanup();
-                    } catch (Exception e) {
-                        log.debug("Error cleaning up unattached bot {}: {}", bot.getUserName(), e.toString());
-                    }
+            // On success `bots` holds only what was built past the refusal gap; otherwise all of it.
+            for (Bot bot : bots) {
+                try {
+                    bot.cleanup();
+                } catch (Exception e) {
+                    log.debug("Error cleaning up unattached bot {}: {}", bot.getUserName(), e.toString());
                 }
             }
         }
@@ -1552,6 +1687,22 @@ public class BotGroupBehaviorService {
                                            java.util.concurrent.atomic.AtomicReference<
                                                    com.vingame.bot.common.exception.GatewayCircuitOpenException> circuitRefusal,
                                            int fromIndex, int toIndex) {
+        return createBotsInParallel(group, environment, game, strategyAssignment, circuitRefusal,
+                fromIndex, toIndex, null, null);
+    }
+
+    /**
+     * {@link #createBotsInParallel(BotGroup, Environment, Game, Map, java.util.concurrent.atomic.AtomicReference, int, int)}
+     * that also reports, per index, which bots were built and which were refused by the gateway
+     * budget or circuit without being sent (BOT_PROVISIONING attach). Both sinks are optional.
+     */
+    private List<Bot> createBotsInParallel(BotGroup group, Environment environment, Game game,
+                                           Map<String, String> strategyAssignment,
+                                           java.util.concurrent.atomic.AtomicReference<
+                                                   com.vingame.bot.common.exception.GatewayCircuitOpenException> circuitRefusal,
+                                           int fromIndex, int toIndex,
+                                           Map<Integer, Bot> builtByIndex,
+                                           java.util.Set<Integer> refusedIndices) {
         // How many this call builds, which is what every "n/m" below reports against. For a start
         // it is botCount, exactly as before the range parameters existed.
         int botCount = Math.max(0, toIndex - fromIndex + 1);
@@ -1646,6 +1797,9 @@ public class BotGroupBehaviorService {
                         continue;
                     }
                     bots.add(bot);
+                    if (builtByIndex != null) {
+                        builtByIndex.put(fromIndex + i, bot);
+                    }
                 } catch (Exception e) {
                     // Unwrap CompletionException → real cause; users care about the
                     // actual auth/validation failure, not the wrapper.
@@ -1672,6 +1826,12 @@ public class BotGroupBehaviorService {
                                 cause.toString(), cause);
                     }
                     botMetrics.incBotCreationFailure(classifyCreationFailure(cause));
+                    if (refusedIndices != null
+                            && cause instanceof com.vingame.bot.common.exception.GatewayBudgetException
+                            && !(cause instanceof com.vingame.bot.common.exception.GatewayRequestCancelledException)) {
+                        // Refused inside this JVM (budget exhausted / circuit open): never sent.
+                        refusedIndices.add(fromIndex + i);
+                    }
                     errors.add(e);
                 }
             }
@@ -3526,9 +3686,23 @@ public class BotGroupBehaviorService {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        if (!held && startAttempts.openOrigin(id).filter(o -> o == StartOrigin.ATTACH).isPresent()) {
+            // BOT_PROVISIONING review: an attach holds this lock for its whole paced build on an
+            // ACTIVE runtime and does not take the status over. Abort it — the same cancellation
+            // a /stop uses, checked by the build before and after every bot's permit — and give it
+            // one more short wait to unwind. If it has not, the next 30 s tick finds it gone.
+            log.warn("Bot group {} looks DEAD while an attach holds its lock — aborting the attach "
+                    + "so the group can be marked", id);
+            cancelAttemptAndScope(id);
+            try {
+                held = lock.tryLock(DEATH_LOCK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
         if (!held) {
-            log.warn("Bot group {} looks DEAD but a start/stop holds its lock — leaving the "
-                    + "status to that operation", id);
+            log.warn("Bot group {} looks DEAD but a start/stop/attach holds its lock — the next "
+                    + "health tick re-evaluates", id);
             return;
         }
         try {

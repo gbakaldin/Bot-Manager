@@ -95,6 +95,14 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
                 .body(new ErrorResponse("Bad request", e.getMessage()));
     }
 
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ErrorResponse> handleConflict(ConflictException e, HttpServletRequest request) {
+        log.info("Handled {} from {}: {}", e.getClass().getSimpleName(),
+                request.getRequestURI(), e.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(new ErrorResponse("Conflict", e.getMessage()));
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ErrorResponse> handleIllegalArgument(IllegalArgumentException e, HttpServletRequest request) {
         log.warn("Handled {} from {}: {}", e.getClass().getSimpleName(),

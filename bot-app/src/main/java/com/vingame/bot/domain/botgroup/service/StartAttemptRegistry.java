@@ -6,7 +6,9 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -177,15 +179,84 @@ public class StartAttemptRegistry {
      * A reason already set by {@link #recordFailure} is kept: it is more specific than anything
      * derivable from the throwable.
      */
-    public void finish(String botGroupId, Throwable error) {
+    public Set<FollowUp> finish(String botGroupId, Throwable error) {
         StartAttempt attempt = open.remove(botGroupId);
         if (attempt == null) {
-            return;
+            return EnumSet.noneOf(FollowUp.class);
         }
         if (error != null && attempt.error == null) {
             attempt.error = truncate(ClientSafeMessage.of(error));
         }
         last.put(botGroupId, attempt);
+        // Read AFTER the remove: defer() flags through computeIfPresent, which is atomic with
+        // the remove, so nothing can be added to this set once it is read here.
+        if (attempt.cancelled) {
+            // A cancelled attempt is a /stop, a delete or a dying group. Running its follow-ups
+            // would restart a group the operator just stopped; the caller logs what was dropped.
+            attempt.droppedFollowUps.addAll(attempt.followUps);
+            return EnumSet.noneOf(FollowUp.class);
+        }
+        return attempt.followUps.isEmpty()
+                ? EnumSet.noneOf(FollowUp.class)
+                : EnumSet.copyOf(attempt.followUps);
+    }
+
+    /**
+     * Something that arrived while an attempt was in flight and must run after it closes
+     * (BOT_PROVISIONING review bug 2 / smell "dropped restarts").
+     */
+    public enum FollowUp {
+        /** A registration completed: attach the new accounts once the holder lets go. */
+        ATTACH,
+        /** A booked scheduled restart landed during an attach: run it after the attach. */
+        RESTART
+    }
+
+    /** What {@link #defer} did. */
+    public enum Deferral {
+        /** Flagged on the open attempt; its closer runs it. */
+        DEFERRED,
+        /** An attempt is open but this follow-up cannot be queued behind it. */
+        NOT_DEFERRABLE,
+        /** No attempt is open any more — the caller should simply try {@code begin} again. */
+        NO_ATTEMPT
+    }
+
+    /**
+     * Queue {@code followUp} on the attempt in flight, so the closer of that attempt runs it
+     * after {@link #finish}. Atomic with {@code finish}'s remove: either the flag lands on an
+     * attempt whose closer will see it, or the answer is {@link Deferral#NO_ATTEMPT} and the
+     * caller retries {@code begin} — there is no window in which the request is lost.
+     * <p>
+     * An {@code ATTACH} can be queued behind any attempt (whoever holds the group re-reads it and
+     * catches up). A {@code RESTART} only behind an attach: behind a start or another restart, the
+     * pre-existing "already in flight" outcome is unchanged.
+     */
+    public Deferral defer(String botGroupId, FollowUp followUp) {
+        Deferral[] result = {Deferral.NO_ATTEMPT};
+        open.computeIfPresent(botGroupId, (id, attempt) -> {
+            if (followUp == FollowUp.RESTART && attempt.origin != StartOrigin.ATTACH) {
+                result[0] = Deferral.NOT_DEFERRABLE;
+            } else {
+                attempt.followUps.add(followUp);
+                result[0] = Deferral.DEFERRED;
+            }
+            return attempt;
+        });
+        return result[0];
+    }
+
+    /** The origin of the attempt in flight, if one is open (not the retained one). */
+    public Optional<StartOrigin> openOrigin(String botGroupId) {
+        return Optional.ofNullable(open.get(botGroupId)).map(a -> a.origin);
+    }
+
+    /** Follow-ups the last attempt dropped because it was cancelled, for the closer's log line. */
+    public Set<FollowUp> droppedFollowUps(String botGroupId) {
+        StartAttempt attempt = last.get(botGroupId);
+        return attempt == null || attempt.droppedFollowUps.isEmpty()
+                ? EnumSet.noneOf(FollowUp.class)
+                : EnumSet.copyOf(attempt.droppedFollowUps);
     }
 
     /**
@@ -293,6 +364,9 @@ public class StartAttemptRegistry {
         private volatile Phase phase = Phase.PENDING;
         private volatile boolean cancelled;
         private volatile String error;
+        /** Mutated only inside {@code open.computeIfPresent} and read after {@code open.remove}. */
+        private final Set<FollowUp> followUps = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        private final Set<FollowUp> droppedFollowUps = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
         private StartAttempt(StartOrigin origin) {
             this.origin = origin;

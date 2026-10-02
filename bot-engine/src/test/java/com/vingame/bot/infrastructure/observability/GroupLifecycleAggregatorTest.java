@@ -164,6 +164,42 @@ class GroupLifecycleAggregatorTest {
         }
 
         @Test
+        @DisplayName("an attach while the start's line is still open adds to it instead of overwriting it")
+        void expectAdditionalAddsToAnOpenExpectation() {
+            aggregator.expectInitialized(GROUP, "prod-baucua", 50);
+            withGroupMdc(GROUP, () -> {
+                for (int i = 0; i < 48; i++) {
+                    aggregator.recordInitialized("game=BauCua, strategy=RANDOM");
+                }
+            });
+            // BOT_PROVISIONING catch-up: two more bots join before the start's line flushed.
+            aggregator.expectAdditional(GROUP, "prod-baucua", 2);
+            withGroupMdc(GROUP, () -> {
+                aggregator.recordInitialized("game=BauCua, strategy=RANDOM");
+                aggregator.recordInitialized("game=BauCua, strategy=RANDOM");
+            });
+
+            aggregator.sweepOnce(nanos.get() + GroupLifecycleAggregator.IDLE_FLUSH_NANOS);
+            assertThat(emitted()).hasSize(1);
+            assertThat(emitted().get(0))
+                    .as("not '48/2' — the attach must not overwrite the start's target")
+                    .contains("50/52 bots initialized");
+        }
+
+        @Test
+        @DisplayName("expectAdditional with nothing open is a plain expectation")
+        void expectAdditionalWithNothingOpen() {
+            aggregator.expectAdditional(GROUP, "prod-baucua", 2);
+            withGroupMdc(GROUP, () -> {
+                aggregator.recordInitialized("game=BauCua, strategy=RANDOM");
+                aggregator.recordInitialized("game=BauCua, strategy=RANDOM");
+            });
+
+            assertThat(emitted()).hasSize(1);
+            assertThat(emitted().get(0)).contains("2/2 bots initialized");
+        }
+
+        @Test
         @DisplayName("with no declared expectation the line reports a bare count")
         void undeclaredGroupReportsBareCount() {
             withGroupMdc(GROUP, () -> {

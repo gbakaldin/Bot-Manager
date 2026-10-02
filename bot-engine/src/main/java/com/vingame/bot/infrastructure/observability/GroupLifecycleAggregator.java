@@ -212,6 +212,31 @@ public class GroupLifecycleAggregator {
     }
 
     /**
+     * {@link #expectInitialized} for bots joining a group whose own line may still be open
+     * (BOT_PROVISIONING attach). If the group's previous expectation has not flushed yet — a
+     * start with a failed bot waits out the idle window — the new bots are <b>added</b> to it
+     * rather than replacing it, so the line reads {@code 50/52} instead of {@code 48/2}. With
+     * nothing open, it is exactly {@code expectInitialized(…, additional)}.
+     */
+    public void expectAdditional(String botGroupId, String groupName, int additional) {
+        if (botGroupId == null) {
+            return;
+        }
+        long now = nanoClock.getAsLong();
+        boolean[] created = {false};
+        Pending pending = initializations.computeIfAbsent(botGroupId, id -> {
+            created[0] = true;
+            return new Pending(id, now);
+        });
+        pending.groupName = groupName;
+        pending.expected = created[0]
+                ? Math.max(additional, 0)
+                : pending.expected + Math.max(additional, 0);
+        pending.touch(now);
+        enforceCap(initializations);
+    }
+
+    /**
      * Per-bot "initialized" feed, called from {@code initializeSubclass()} on the
      * bot-creation thread (which has the bot's MDC applied by {@code Bot.initialize}).
      *

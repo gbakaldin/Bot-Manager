@@ -84,6 +84,7 @@ class BotGroupBehaviorServiceAttachTest {
     private final List<int[]> reservations = new CopyOnWriteArrayList<>();
     private final java.util.concurrent.atomic.AtomicInteger releases =
             new java.util.concurrent.atomic.AtomicInteger();
+    private final List<String> budgetLog = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void setUp() {
@@ -146,7 +147,7 @@ class BotGroupBehaviorServiceAttachTest {
                 .as("ESSENTIAL x 3 x added, exactly as a start declares it")
                 .singleElement()
                 .satisfies(r -> assertThat(r).containsExactly(RequestTier.ESSENTIAL.ordinal(), 6));
-        verify(groupLifecycleAggregator).expectInitialized("g-1", "Group", 2);
+        verify(groupLifecycleAggregator).expectAdditional("g-1", "Group", 2);
     }
 
     @Test
@@ -367,7 +368,7 @@ class BotGroupBehaviorServiceAttachTest {
         releases.set(0);
         when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
         org.mockito.Mockito.doThrow(new IllegalStateException("boom"))
-                .when(groupLifecycleAggregator).expectInitialized(anyString(), any(), org.mockito.ArgumentMatchers.eq(2));
+                .when(groupLifecycleAggregator).expectAdditional(anyString(), any(), org.mockito.ArgumentMatchers.eq(2));
 
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.attach("g-1"))
                 .isInstanceOf(IllegalStateException.class);
@@ -512,6 +513,229 @@ class BotGroupBehaviorServiceAttachTest {
         }
     }
 
+    // ------------------------------------------------------------------ fix round (review + QA)
+
+    @Test
+    @DisplayName("fix 1: the start's reservation is released before the catch-up attach reserves")
+    void startReservationReleasedBeforeCatchUpReserves() throws Exception {
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(3));
+        java.util.concurrent.atomic.AtomicBoolean raised = new java.util.concurrent.atomic.AtomicBoolean();
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            if (raised.compareAndSet(false, true)) {
+                when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+            }
+            built.add(configuration);
+            return stubBot("bot" + configuration.getBotIndex());
+        }).when(botFactory).createBot(anyString(), any());
+
+        service.start("g-1");
+
+        assertThat(runtime().getBuiltUpTo()).isEqualTo(5);
+        assertThat(budgetLog).contains("reserve:9", "release:9", "reserve:6");
+        assertThat(budgetLog.indexOf("release:9"))
+                .as("no second ESSENTIAL reservation on the same tier|group key while the start's is live: %s",
+                        budgetLog)
+                .isLessThan(budgetLog.indexOf("reserve:6"));
+    }
+
+    @Test
+    @DisplayName("fix 2: an event refused after the holder's last re-read is run when the holder finishes")
+    void eventAfterTheHoldersLastReReadIsNotLost() throws Exception {
+        startWith(3);
+        built.clear();
+        java.util.concurrent.atomic.AtomicReference<BotGroup> current =
+                new java.util.concurrent.atomic.AtomicReference<>(activeGroup(5));
+        java.util.concurrent.atomic.AtomicBoolean fired = new java.util.concurrent.atomic.AtomicBoolean();
+        when(botGroupService.findById("g-1")).thenAnswer(inv -> {
+            BotGroup answer = current.get();
+            // The attach's catch-up re-read after pass 1 (builtUpTo already 5): answer the stale
+            // document, and let the registration of 6-7 complete and publish right now — the
+            // window between the holder's last re-read and its finish().
+            if (runtime().getBuiltUpTo() == 5 && fired.compareAndSet(false, true)) {
+                current.set(activeGroup(7));
+                service.onRegistrationCompleted(new RegistrationCompletedEvent("g-1"));
+            }
+            return answer;
+        });
+
+        service.onRegistrationCompleted(new RegistrationCompletedEvent("g-1"));
+
+        awaitUntil(() -> runtime().getBuiltUpTo() == 7 && !service.getActualStatus("g-1").equals(BotGroupStatus.STARTING));
+        assertThat(fired).isTrue();
+        assertThat(indices()).containsExactlyInAnyOrder(4, 5, 6, 7);
+    }
+
+    @Test
+    @DisplayName("fix 2: hitting the pass cap hands the remainder to a fresh attempt instead of stranding it")
+    void passCapRemainderIsPickedUp() throws Exception {
+        startWith(3);
+        built.clear();
+        java.util.concurrent.atomic.AtomicInteger count = new java.util.concurrent.atomic.AtomicInteger(4);
+        when(botGroupService.findById("g-1")).thenAnswer(inv -> activeGroup(count.get()));
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            built.add(configuration);
+            // Every pass's build completes another raise, up to 10: 4,5,6,7,8 fill the five
+            // passes of the first hold and 9,10 are left for the cap's hand-off.
+            count.updateAndGet(c -> Math.min(10, c + 1));
+            return stubBot("bot" + configuration.getBotIndex());
+        }).when(botFactory).createBot(anyString(), any());
+
+        service.onRegistrationCompleted(new RegistrationCompletedEvent("g-1"));
+
+        awaitUntil(() -> runtime().getBuiltUpTo() == 10 && service.getActualStatus("g-1") == BotGroupStatus.ACTIVE);
+        assertThat(indices()).containsExactlyInAnyOrder(4, 5, 6, 7, 8, 9, 10);
+    }
+
+    @Test
+    @DisplayName("fix 3: a group dying during an attach aborts it and is marked DEAD")
+    void deathDuringAttachAbortsItAndMarksDead() throws Exception {
+        startWith(3);
+        built.clear();
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+        java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(2);
+        java.util.concurrent.CountDownLatch proceed = new java.util.concurrent.CountDownLatch(1);
+        List<Bot> attached = new CopyOnWriteArrayList<>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            built.add(configuration);
+            entered.countDown();
+            assertThat(proceed.await(20, TimeUnit.SECONDS)).isTrue();
+            Bot bot = stubBot("bot" + configuration.getBotIndex());
+            attached.add(bot);
+            return bot;
+        }).when(botFactory).createBot(anyString(), any());
+
+        service.onRegistrationCompleted(new RegistrationCompletedEvent("g-1"));
+        assertThat(entered.await(20, TimeUnit.SECONDS)).isTrue();
+        BotGroupRuntime runtime = runtime();
+
+        Thread monitor = Thread.ofVirtual().start(
+                () -> ReflectionTestUtils.invokeMethod(service, "handleBotGroupDeath", runtime));
+        awaitUntil(() -> startAttempts().isCancelled("g-1"));
+        proceed.countDown();
+        monitor.join(TimeUnit.SECONDS.toMillis(20));
+
+        assertThat(runtime.getActualStatus())
+                .as("the attach unwound inside the monitor's second wait and the group was marked")
+                .isEqualTo(BotGroupStatus.DEAD);
+        assertThat(runtime.getBuiltUpTo()).isEqualTo(3);
+        awaitUntil(() -> attached.size() == 2);
+        awaitUntil(() -> !startAttempts().isOpen("g-1"));
+        attached.forEach(bot -> {
+            verify(bot).cleanup();
+            verify(bot, never()).setCoordinator(any());
+        });
+        assertThat(runtime.getBotInstances()).hasSize(3);
+    }
+
+    @Test
+    @DisplayName("fix 4: an operator /restart during an attach is a 409, not a 200 that does nothing")
+    void restDuringAttachIsAConflict() throws Exception {
+        java.util.concurrent.CountDownLatch proceed = parkAttach();
+        try {
+            org.assertj.core.api.Assertions.assertThatThrownBy(
+                            () -> service.restartAsync("g-1", com.vingame.bot.domain.botgroup.model.StartOrigin.REST, () -> { }))
+                    .isInstanceOf(com.vingame.bot.common.exception.ConflictException.class)
+                    .hasMessageContaining("attaching");
+        } finally {
+            proceed.countDown();
+        }
+    }
+
+    @Test
+    @DisplayName("fix 4: a scheduled restart landing during an attach runs after it")
+    void scheduledRestartDuringAttachIsDeferred() throws Exception {
+        java.util.concurrent.CountDownLatch proceed = parkAttach();
+        BotGroupRuntime before = runtime();
+
+        BotGroupStatus answer = service.restartAsync("g-1",
+                com.vingame.bot.domain.botgroup.model.StartOrigin.SCHEDULED_RESTART, () -> { });
+        assertThat(answer).isEqualTo(BotGroupStatus.STARTING);
+        proceed.countDown();
+
+        awaitUntil(() -> runtime() != null && runtime() != before
+                && runtime().getActualStatus() == BotGroupStatus.ACTIVE
+                && !startAttempts().isOpen("g-1"));
+        assertThat(runtime().getBuiltUpTo()).isEqualTo(5);
+    }
+
+    @Test
+    @DisplayName("fix 5: a gateway refusal stops builtUpTo at the contiguous prefix; the rest is retried")
+    void refusalKeepsTheRemainderPending() {
+        startWith(3);
+        built.clear();
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(6));
+        List<Bot> attached = new CopyOnWriteArrayList<>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            built.add(configuration);
+            if (configuration.getBotIndex() == 5) {
+                throw new com.vingame.bot.common.exception.GatewayCircuitOpenException("env-1", "ray", Duration.ofSeconds(30));
+            }
+            Bot bot = stubBot("bot" + configuration.getBotIndex());
+            attached.add(bot);
+            return bot;
+        }).when(botFactory).createBot(anyString(), any());
+
+        service.attach("g-1");
+
+        assertThat(runtime().getBuiltUpTo()).as("4 came up, 5 was refused unsent").isEqualTo(4);
+        assertThat(runtime().getBotInstances()).hasSize(4);
+        Bot bot6 = attached.stream().filter(b -> b.getUserName().equals("bot6")).findFirst().orElseThrow();
+        verify(bot6).cleanup();
+        verify(bot6, never()).setCoordinator(any());
+
+        // The next trigger retries 5-6 and nothing else.
+        built.clear();
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            built.add(configuration);
+            return stubBot("bot" + configuration.getBotIndex());
+        }).when(botFactory).createBot(anyString(), any());
+        service.attach("g-1");
+
+        assertThat(indices()).containsExactlyInAnyOrder(5, 6);
+        assertThat(runtime().getBuiltUpTo()).isEqualTo(6);
+        assertThat(runtime().getBotInstances()).hasSize(6);
+    }
+
+    /** Start 3, raise to 5, submit the attach through the event and park both new bots. */
+    private java.util.concurrent.CountDownLatch parkAttach() throws Exception {
+        startWith(3);
+        built.clear();
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+        java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(2);
+        java.util.concurrent.CountDownLatch proceed = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicBoolean parking = new java.util.concurrent.atomic.AtomicBoolean(true);
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            built.add(configuration);
+            if (parking.get()) {
+                entered.countDown();
+                assertThat(proceed.await(20, TimeUnit.SECONDS)).isTrue();
+            }
+            return stubBot("bot" + configuration.getBotIndex());
+        }).when(botFactory).createBot(anyString(), any());
+        service.onRegistrationCompleted(new RegistrationCompletedEvent("g-1"));
+        assertThat(entered.await(20, TimeUnit.SECONDS)).isTrue();
+        // Later builds (the deferred restart) must not park.
+        Thread.ofVirtual().start(() -> {
+            try {
+                proceed.await();
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            parking.set(false);
+        });
+        return proceed;
+    }
+
+    private StartAttemptRegistry startAttempts() {
+        return (StartAttemptRegistry) ReflectionTestUtils.getField(service, "startAttempts");
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void startWith(int botCount) {
@@ -566,10 +790,12 @@ class BotGroupBehaviorServiceAttachTest {
         @Override
         public Reservation reserve(RequestTier tier, int permits, GatewayRequestScope scope) {
             reservations.add(new int[]{tier.ordinal(), permits});
+            budgetLog.add("reserve:" + permits);
             return new Reservation() {
                 @Override
                 public void release() {
                     releases.incrementAndGet();
+                    budgetLog.add("release:" + permits);
                 }
 
                 @Override
