@@ -262,6 +262,69 @@ class BotGroupBehaviorServiceAttachTest {
                 .isEqualTo(full.get("bot" + c.getBotIndex())));
     }
 
+    @Test
+    @DisplayName("a completion event refused while a start is in flight is caught up when the start finishes")
+    void eventDuringAnInFlightStartIsCaughtUp() throws Exception {
+        // The race: the start read botCount=3; while it is building, a raise to 5 finishes
+        // registering and its event arrives. The runtime is STARTING and the attempt is open, so
+        // the event is refused — and nothing would ever re-deliver it.
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(3));
+        java.util.concurrent.atomic.AtomicBoolean raised = new java.util.concurrent.atomic.AtomicBoolean();
+        java.util.concurrent.atomic.AtomicInteger builtWhenEventHandled =
+                new java.util.concurrent.atomic.AtomicInteger(-1);
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            if (raised.compareAndSet(false, true)) {
+                when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+                service.onRegistrationCompleted(new RegistrationCompletedEvent("g-1"));
+                // Other start bots build concurrently (parallelism 4), so count only new indices.
+                builtWhenEventHandled.set((int) built.stream()
+                        .filter(c -> c.getBotIndex() > 3).count());
+            }
+            built.add(configuration);
+            return stubBot("bot" + configuration.getBotIndex());
+        }).when(botFactory).createBot(anyString(), any());
+
+        service.startAsync("g-1", com.vingame.bot.domain.botgroup.model.StartOrigin.REST, () -> { });
+
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+        while (service.getActualStatus("g-1") == BotGroupStatus.STARTING && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+
+        assertThat(builtWhenEventHandled.get())
+                .as("the event itself built nothing — it was refused by the start in flight")
+                .isZero();
+        assertThat(indices())
+                .as("the start built 1-3, then caught up 4-5 before releasing the lock")
+                .containsExactlyInAnyOrder(1, 2, 3, 4, 5);
+        assertThat(runtime().getBuiltUpTo()).isEqualTo(5);
+        assertThat(runtime().getBotInstances()).hasSize(5);
+        assertThat(runtime().getActualStatus()).isEqualTo(BotGroupStatus.ACTIVE);
+    }
+
+    @Test
+    @DisplayName("a raise completing during an attach is caught up by the same attach")
+    void raiseDuringAnAttachIsCaughtUp() {
+        startWith(3);
+        built.clear();
+        when(botGroupService.findById("g-1")).thenReturn(activeGroup(5));
+        java.util.concurrent.atomic.AtomicBoolean raised = new java.util.concurrent.atomic.AtomicBoolean();
+        org.mockito.Mockito.doAnswer(inv -> {
+            BotConfiguration configuration = inv.getArgument(1);
+            if (raised.compareAndSet(false, true)) {
+                when(botGroupService.findById("g-1")).thenReturn(activeGroup(7));
+            }
+            built.add(configuration);
+            return stubBot("bot" + configuration.getBotIndex());
+        }).when(botFactory).createBot(anyString(), any());
+
+        service.attach("g-1");
+
+        assertThat(indices()).containsExactlyInAnyOrder(4, 5, 6, 7);
+        assertThat(runtime().getBuiltUpTo()).isEqualTo(7);
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private void startWith(int botCount) {

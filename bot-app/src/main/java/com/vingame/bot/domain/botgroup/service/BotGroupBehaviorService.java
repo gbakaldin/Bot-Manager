@@ -1229,6 +1229,17 @@ public class BotGroupBehaviorService {
 
             log.info("Bot group {} started successfully with {} bots", group.getName(), bots.size());
             started = true;
+
+            // BOT_PROVISIONING AD-12: a registration that completed while this start was building
+            // had its attach refused as "already in flight". Catch up now, under the same lock and
+            // the same attempt, so those accounts do not wait for the next restart. A failure here
+            // is an attach failure, not a start failure -- the group is up -- so it is contained.
+            try {
+                attachRemainderLocked(id);
+            } catch (RuntimeException e) {
+                log.warn("Bot group {}: catch-up attach after start failed -- new accounts will join "
+                        + "at the next registration completion or start: {}", id, e.toString());
+            }
             return true;
 
         } catch (Throwable t) {
@@ -1351,9 +1362,33 @@ public class BotGroupBehaviorService {
         ReentrantLock lock = groupLocks.computeIfAbsent(id, k -> new ReentrantLock());
         lock.lock();
         try {
-            attachLocked(id);
+            attachRemainderLocked(id);
         } finally {
             lock.unlock();
+        }
+    }
+
+    /** See {@link #attachRemainderLocked}. */
+    private static final int MAX_ATTACH_PASSES = 5;
+
+    /**
+     * Attach until the runtime has caught up with the document's {@code botCount}. Caller holds
+     * the group lock.
+     * <p>
+     * This is what closes the race {@code builtUpTo} alone does not: a
+     * {@link RegistrationCompletedEvent} that arrives while a start (or another attach) is in
+     * flight is refused by {@link StartAttemptRegistry#begin} and nothing re-delivers it. So the
+     * <em>holder</em> of the attempt catches up before letting go -- {@link #startLocked} on its
+     * success path and {@link #attach} after each pass -- re-reading the group each time.
+     * {@code builtUpTo} keeps every pass idempotent; a pass that builds nothing ends the loop.
+     * Bounded anyway, because each pass is a paced build and a group raised in a tight loop must
+     * not hold the lock forever -- its next completion event resumes it.
+     */
+    private void attachRemainderLocked(String id) {
+        for (int pass = 0; pass < MAX_ATTACH_PASSES; pass++) {
+            if (!attachLocked(id)) {
+                return;
+            }
         }
     }
 
@@ -1368,22 +1403,22 @@ public class BotGroupBehaviorService {
      * {@link BotGroupRuntime#startBot} — so an attached bot is indistinguishable from one the
      * start built. The bots already playing are never touched.
      */
-    private void attachLocked(String id) {
+    private boolean attachLocked(String id) {
         BotGroupRuntime runtime = runningGroups.get(id);
         if (runtime == null || runtime.getActualStatus() != BotGroupStatus.ACTIVE) {
             log.debug("Bot group {}: no ACTIVE runtime under the lock — attach abandoned", id);
-            return;
+            return false;
         }
 
         BotGroup group = botGroupService.findById(id);
         if (group.getTargetStatus() != BotGroupStatus.ACTIVE) {
             log.debug("Bot group {}: targetStatus is {} — attach abandoned", id, group.getTargetStatus());
-            return;
+            return false;
         }
         if (group.getRegistrationState() != null) {
             log.debug("Bot group {}: registration is {} again — its next completion attaches",
                     id, group.getRegistrationState());
-            return;
+            return false;
         }
 
         int fromIndex = runtime.getBuiltUpTo() + 1;
@@ -1393,7 +1428,7 @@ public class BotGroupBehaviorService {
             // running bot; it only means there is nothing new to build.
             log.debug("Bot group {}: built up to {}, botCount {} — nothing to attach",
                     id, runtime.getBuiltUpTo(), toIndex);
-            return;
+            return false;
         }
         int added = toIndex - fromIndex + 1;
 
@@ -1432,13 +1467,13 @@ public class BotGroupBehaviorService {
                 // were never handed to it, so they are cleaned up below.
                 log.info("A stop during the attach to group {} cancelled it at {}/{} bots — unwinding",
                         id, bots.size(), added);
-                return;
+                return false;
             }
             if (runningGroups.get(id) != runtime || runtime.getActualStatus() != BotGroupStatus.ACTIVE) {
                 // Died while building. The reclaim on the next start builds 1..botCount.
                 log.info("Bot group {} is no longer ACTIVE ({}) — discarding the {} attached bots",
                         id, runtime.getActualStatus(), bots.size());
-                return;
+                return false;
             }
 
             startAttempts.progress(id, StartAttemptRegistry.Phase.STARTING_BOTS);
@@ -1456,6 +1491,7 @@ public class BotGroupBehaviorService {
             log.info("group {} ({}): attached {}/{} bots ({}-{}), {} bots in the group",
                     id, group.getName(), bots.size(), added, fromIndex, toIndex,
                     runtime.getBotInstances().size());
+            return true;
         } finally {
             if (reservation != null) {
                 reservation.release();
