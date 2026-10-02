@@ -530,4 +530,113 @@ class RegistrationWorkerDepositTest {
         }
         assertThat(ledger.read(GROUP)).isEqualTo(new DepositLedger.State(accounts, null));
     }
+
+    // ------------------------------------------------------------------ QA additions (Phase 2)
+
+    @Test
+    @DisplayName("QA: all four deposit outcome series and the amount series exist at 0 before any deposit, one series each")
+    void depositSeriesArePreRegisteredAtZero() {
+        // A failing first deposit: if the series were registered lazily, the outcomes that did not
+        // happen would be absent, and the one that did would first appear at 1.
+        script = index -> Step.UNKNOWN;
+
+        worker.tick();
+
+        for (String outcome : List.of("credited", "refused", "not_sent")) {
+            assertThat(meters.find(BotMetrics.REGISTRATION_DEPOSITS_TOTAL).tag("outcome", outcome).counters())
+                    .as("outcome=%s pre-registered once, at zero", outcome)
+                    .singleElement().satisfies(c -> assertThat(c.count()).isZero());
+        }
+        assertThat(meters.find(BotMetrics.REGISTRATION_DEPOSITS_TOTAL).tag("outcome", "unknown").counters())
+                .as("the incremented series is the pre-registered one (same tags), not a second one")
+                .singleElement().satisfies(c -> assertThat(c.count()).isEqualTo(1));
+        assertThat(meters.find(BotMetrics.REGISTRATION_DEPOSIT_AMOUNT_TOTAL).counters())
+                .singleElement().satisfies(c -> assertThat(c.count()).isZero());
+        assertThat(meters.find(BotMetrics.REGISTRATION_DEPOSITS_TOTAL).tag("botGroupId", GROUP).counters())
+                .as("tagged with the group from MDC").hasSize(4);
+    }
+
+    @Test
+    @DisplayName("QA: NOT_SENT is charged to the transport budget (10), not the refusal budget (3)")
+    void notSentDoesNotSpendTheRefusalBudget() {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        // Four definite non-sends of index 1 — more than max-attempts-per-user (3) — then success.
+        script = index -> index == 1 && calls.getAndIncrement() < 4 ? Step.NOT_SENT : Step.CREDIT;
+
+        tickUntilSettled(10);
+
+        assertThat(group.getRegistrationState()).as("never FAILED: a non-send is a transport attempt").isNull();
+        assertThat(sends).containsExactlyInAnyOrderEntriesOf(Map.of(1, 1, 2, 1, 3, 1));
+        assertThat(deposits("not_sent")).isEqualTo(4);
+        assertThat(ledger.journal).as("each non-send clears its own marker")
+                .filteredOn(e -> e.equals("clear:1")).hasSize(4);
+    }
+
+    @Test
+    @DisplayName("QA: credited-but-unrecorded is still counted as credited (the money moved) and is never re-sent")
+    void creditWriteFailureCountsTheMoney() {
+        ledger.failNextCredit = true;
+
+        for (int i = 0; i < 5; i++) {
+            worker.enqueue(GROUP);
+            worker.tick();
+        }
+
+        assertThat(sends).containsExactly(Map.entry(1, 1));
+        assertThat(deposits("credited")).isEqualTo(1);
+        assertThat(meters.find(BotMetrics.REGISTRATION_DEPOSIT_AMOUNT_TOTAL).counter().count()).isEqualTo(AMOUNT);
+        assertThat(group.getDepositInFlight()).as("mirrored for the operator").isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("QA: REFUSED and NOT_SENT never advance the funded mark, and UNKNOWN never clears the marker")
+    void nonCreditOutcomesNeverAdvance() {
+        script = index -> Step.REFUSE;
+        worker.tick();
+        assertThat(ledger.read(GROUP)).isEqualTo(new DepositLedger.State(0, null));
+        assertThat(ledger.journal).doesNotContain("credit:1");
+
+        script = index -> Step.NOT_SENT;
+        worker.tick();
+        assertThat(ledger.read(GROUP)).isEqualTo(new DepositLedger.State(0, null));
+
+        script = index -> Step.UNKNOWN;
+        worker.tick();
+        assertThat(ledger.read(GROUP)).isEqualTo(new DepositLedger.State(0, 1));
+        assertThat(ledger.journal).doesNotContain("credit:1");
+    }
+
+    /**
+     * QA defect P2-1 (low severity, no money at stake). The worker picks the next index as
+     * {@code deposited + 1} whenever the group funds, which assumes {@code deposited <= named}. AD-9's
+     * seed breaks that for a group that completed while no display-name pool was loaded
+     * ({@code namedCount = 0}) and is later raised with {@code initialDeposit > 0}: the ledger is
+     * seeded to the old botCount, the pass starts at the first NEW index, and {@code named = index}
+     * then jumps the named mark over accounts 1..old that were never named. Without a deposit the
+     * same raise names 1..new (index = named + 1). Result: {@code namedCount} claims every account
+     * is named while some are nameless — the RIK-room freeze shape (RIK review G1).
+     * Disabled so the branch stays green; enable it with the fix.
+     */
+    @org.junit.jupiter.api.Disabled("QA P2-1: funded mark ahead of named mark skips naming — see qa.md Phase 2")
+    @Test
+    @DisplayName("QA P2-1: a seeded funded mark must not let namedCount skip unnamed accounts")
+    void seededFundedMarkDoesNotSkipNaming() throws Exception {
+        when(client.hasDisplayNames()).thenReturn(true);
+        List<String> named = new java.util.concurrent.CopyOnWriteArrayList<>();
+        when(client.setDisplayNameWithRetry(anyString(), anyInt(), any(), any())).thenAnswer(inv -> {
+            named.add(inv.getArgument(0));
+            return "N";
+        });
+        // Completed 3 accounts with no pool loaded, then raised to 5: AD-9 seeded the ledger to 3.
+        group = group(5, AMOUNT);
+        group.setRegisteredCount(3);
+        group.setNamedCount(0);
+        ledger.put(GROUP, 3, null);
+
+        worker.tick();
+
+        assertThat(sends).as("funding is right: only the new indices").containsOnlyKeys(4, 5);
+        assertThat(named).as("every account the named mark covers was actually named")
+                .containsExactly("bot1", "bot2", "bot3", "bot4", "bot5");
+    }
 }

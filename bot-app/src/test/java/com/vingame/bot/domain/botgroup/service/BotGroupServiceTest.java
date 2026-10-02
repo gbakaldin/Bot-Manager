@@ -1040,6 +1040,83 @@ class BotGroupServiceTest {
         }
 
         @Test
+        @DisplayName("QA: PATCH initialDeposit on a complete group is range-checked too (negative, above cap → 400)")
+        void patchOutOfRangeIsRejected() {
+            BotGroup complete = newGroup(100);
+            complete.setId("g-d");
+            complete.setRegisteredCount(3);
+            when(repository.findById("g-d")).thenReturn(Optional.of(complete));
+
+            mergeDeposit(-1L, null);
+            assertThatThrownBy(() -> service.update("g-d", BotGroupDTO.builder().initialDeposit(-1L).build()))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("initialDeposit");
+
+            complete.setInitialDeposit(100);
+            mergeDeposit(1_000_000_001L, null);
+            assertThatThrownBy(() -> service.update("g-d",
+                    BotGroupDTO.builder().initialDeposit(1_000_000_001L).build()))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("1000000000");
+            verify(repository, never()).save(any());
+        }
+
+        @Test
+        @DisplayName("QA: a PATCH during PENDING that leaves initialDeposit unchanged is not rejected for it")
+        void unchangedDepositDuringRegistrationIsAllowed() {
+            BotGroup pending = newGroup(100);
+            pending.setId("g-d");
+            pending.setRegistrationState(RegistrationState.PENDING);
+            when(repository.findById("g-d")).thenReturn(Optional.of(pending));
+            when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            mergeDeposit(100L, null);
+
+            assertThat(service.update("g-d", BotGroupDTO.builder().initialDeposit(100L).build())
+                    .getInitialDeposit()).isEqualTo(100L);
+        }
+
+        @Test
+        @DisplayName("QA: a raise on a REGISTRATION_FAILED group seeds nothing — the failed job still owes its deposits")
+        void raiseDuringFailedDoesNotSeed() {
+            BotGroup failed = newGroup(100);
+            failed.setId("g-d");
+            failed.setRegisteredCount(2);
+            failed.setRegistrationState(RegistrationState.FAILED);
+            when(repository.findById("g-d")).thenReturn(Optional.of(failed));
+            org.mockito.Mockito.lenient().when(repository.save(any(BotGroup.class))).thenAnswer(inv -> inv.getArgument(0));
+            org.mockito.Mockito.lenient().when(environmentService.findById("env-1"))
+                    .thenReturn(envWithProductCode(ProductCode.P_097));
+            mergeDeposit(null, 5);
+
+            service.update("g-d", BotGroupDTO.builder().botCount(5).build());
+
+            assertThat(ledger().journal).noneMatch(e -> e.startsWith("seed"));
+        }
+
+        @Test
+        @DisplayName("QA: a resolution whose marker moved under it (stale) is a 400 and enqueues nothing")
+        void staleResolutionIsRejected() {
+            failedOnUnknownDeposit();
+            // Another request resolved it first, between read and resolve.
+            org.mockito.Mockito.doReturn(false).when(depositLedger).resolve("g-d", 2, true);
+
+            assertThatThrownBy(() -> service.retryRegistration("g-d", BotGroupService.DepositResolution.CREDITED))
+                    .isInstanceOf(BadRequestException.class).hasMessageContaining("changed");
+            verify(registrationWorker, never()).enqueue(anyString());
+        }
+
+        @Test
+        @DisplayName("QA: deleting a group forgets its ledger entry")
+        void deleteForgetsTheLedger() {
+            BotGroup g = newGroup(100);
+            g.setId("g-d");
+            ledger().put("g-d", 3, null);
+            org.mockito.Mockito.lenient().when(repository.findById("g-d")).thenReturn(Optional.of(g));
+
+            service.delete("g-d");
+
+            assertThat(ledger().read("g-d")).isEqualTo(new DepositLedger.State(0, null));
+        }
+
+        @Test
         @DisplayName("AD-9: a raise on a complete group never funds the accounts that existed before it")
         void raiseOnCompleteGroupSeedsTheLedger() {
             BotGroup complete = newGroup(100);
