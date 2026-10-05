@@ -35,16 +35,19 @@ class GameConfigValidatorFactoryTest {
                 stub(GameType.TAI_XIU),
                 stub(GameType.CARD_GAME),
                 stub(GameType.UP_DOWN),
-                stub(GameType.CASHOUT));
+                stub(GameType.CASHOUT),
+                stub(GameType.CRASH));
     }
 
     /**
      * The real {@code @Component} validators, as Spring would discover them. CASHOUT_BOT
      * AD-15: adding {@code GameType.CASHOUT} without {@link CashoutConfigValidator}
-     * fails {@link GameConfigValidatorFactory#init()} — i.e. the app does not boot.
+     * fails {@link GameConfigValidatorFactory#init()} — i.e. the app does not boot. The
+     * same holds for {@code GameType.CRASH} and {@link CrashConfigValidator}
+     * (AVIATOR_BOT AD-15).
      */
     @Test
-    @DisplayName("boots with the real validators, CASHOUT included")
+    @DisplayName("boots with the real validators, CASHOUT and CRASH included")
     void bootsWithTheRealValidators() {
         GameConfigValidatorFactory factory = new GameConfigValidatorFactory(List.of(
                 new BettingMiniConfigValidator(),
@@ -52,11 +55,13 @@ class GameConfigValidatorFactoryTest {
                 new TaiXiuConfigValidator(),
                 new CardGameConfigValidator(),
                 new UpDownConfigValidator(),
-                new CashoutConfigValidator()));
+                new CashoutConfigValidator(),
+                new CrashConfigValidator()));
         factory.init();
 
         assertThat(factory.registeredTypes()).containsExactlyInAnyOrder(GameType.values());
         assertThat(factory.forType(GameType.CASHOUT)).isInstanceOf(CashoutConfigValidator.class);
+        assertThat(factory.forType(GameType.CRASH)).isInstanceOf(CrashConfigValidator.class);
     }
 
     @Test

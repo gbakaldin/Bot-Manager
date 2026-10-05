@@ -17,6 +17,7 @@ import com.vingame.bot.domain.botgroup.validation.BettingMiniConfigValidator;
 import com.vingame.bot.domain.botgroup.validation.BotGroupConfigValidationService;
 import com.vingame.bot.domain.botgroup.validation.CardGameConfigValidator;
 import com.vingame.bot.domain.botgroup.validation.CashoutConfigValidator;
+import com.vingame.bot.domain.botgroup.validation.CrashConfigValidator;
 import com.vingame.bot.domain.botgroup.validation.GameConfigValidatorFactory;
 import com.vingame.bot.domain.botgroup.validation.SlotConfigValidator;
 import com.vingame.bot.domain.botgroup.validation.TaiXiuConfigValidator;
@@ -98,6 +99,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         CardGameConfigValidator.class,
         UpDownConfigValidator.class,
         CashoutConfigValidator.class,
+        CrashConfigValidator.class,
         BotGroupStrategyKeyValidationTest.RealStrategyRegistries.class
 })
 @DisplayName("Unknown strategy keys are a 400 on create and PATCH (AD-15)")

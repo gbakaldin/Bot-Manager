@@ -202,7 +202,10 @@ public class BotFactory {
                 cashoutBot.setMessageTypes(messageTypesRegistry.cashout(productKey(env)));
                 yield cashoutBot;
             }
-            case CARD_GAME, UP_DOWN ->
+            // CRASH: the message layer and registry lookup exist (AVIATOR_BOT Phase 1)
+            // but there is no bot yet — Phase 3 replaces this with CrashBot +
+            // messageTypesRegistry.crash(productKey(env)).
+            case CARD_GAME, UP_DOWN, CRASH ->
                 throw new IllegalArgumentException("Game type not yet implemented: " + game.getGameType());
         };
 

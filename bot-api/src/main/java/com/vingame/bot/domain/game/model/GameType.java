@@ -13,7 +13,16 @@ public enum GameType {
      * shared round. Not a crash/Aviator type: those have shared rounds
      * ({@code docs/plans/CASHOUT_BOT.md} AD-1).
      */
-    CASHOUT("Cash-out");
+    CASHOUT("Cash-out"),
+    /**
+     * Shared-round crash games — 119 Avatar ({@code aviatorPlugin}, two runners, Jake and
+     * Neytiri). Every player bets in one betting window, then a multiplier climbs until the
+     * runner crashes; the bot cashes out at a target drawn at placement or loses. One type
+     * for every crash brand, not {@code AVIATOR}; the runner count is protocol metadata on
+     * the brand's message layer. Separate from {@link #CASHOUT}, which has no shared rounds
+     * ({@code docs/plans/AVIATOR_BOT.md} AD-3).
+     */
+    CRASH("Crash");
 
     private final String displayName;
 

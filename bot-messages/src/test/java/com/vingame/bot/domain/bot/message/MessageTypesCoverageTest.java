@@ -83,7 +83,7 @@ class MessageTypesCoverageTest {
      * decision rather than defaulting to silence.
      */
     private static final Set<GameType> GAME_TYPES_WITHOUT_A_LOOKUP =
-            Set.of(GameType.CARD_GAME, GameType.UP_DOWN);
+            Set.of(GameType.CARD_GAME, GameType.UP_DOWN, GameType.CRASH);
 
     private static AnnotationConfigApplicationContext context;
     private static MessageTypesRegistry registry;
