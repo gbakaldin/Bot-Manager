@@ -67,4 +67,17 @@ public class RikStockRequest implements GameRequest {
     public Optional<ActionRequestMessage> commit(long sid) {
         return Optional.of(new RikStockCommit(cmdPrefix + 3022, zoneName, pluginName, sid));
     }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * True on stock: the server locks a player to the entry of their first bet in a
+     * round and throws {@code BETTING_INVALID} for any later bet on the other side. The
+     * legacy Node bot never tripped it (one bet per round, side re-rolled only at EndGame);
+     * a multi-bet group under {@code RANDOM} switched sides on ~half its follow-up bets.
+     */
+    @Override
+    public boolean singleEntryPerRound() {
+        return true;
+    }
 }

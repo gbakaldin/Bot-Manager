@@ -67,4 +67,19 @@ public interface GameRequest {
     default Optional<ActionRequestMessage> commit(long sid) {
         return Optional.empty();
     }
+
+    /**
+     * Whether the server binds a player to <b>one</b> entry per round. When true the
+     * bot remaps every bet after the round's first onto the entry that first bet chose,
+     * because the server rejects a bet on any other entry with {@code BETTING_INVALID}
+     * ({@code entry != player.getEntryPosition()}) — one backend exception per bet.
+     * <p>
+     * The default is <b>false</b>: BettingMini games such as Bau Cua legitimately take
+     * bets on several entries in one round, so only a product that overrides this is
+     * locked. Tai Xiu has the same rule but enforces it in {@code TaiXiuGameBot}, which
+     * predates this method.
+     */
+    default boolean singleEntryPerRound() {
+        return false;
+    }
 }

@@ -47,6 +47,7 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Random;
 import java.util.concurrent.Executors;
@@ -724,20 +725,62 @@ public class BettingMiniGameBot extends Bot {
      * (pops/re-derives) — route through this method so a subclass can post-process
      * the strategy's chosen entry without touching the strategy itself.
      *
-     * <p><b>Default is identity</b>: it returns the strategy's decision verbatim, so
-     * {@link BettingMiniGameBot} behavior is byte-for-byte unchanged and BettingMini
-     * keeps allowing multiple distinct entries within a single round.
+     * <p><b>Identity unless {@link #singleEntryPerRound()}</b>: by default it returns
+     * the strategy's decision verbatim, so BettingMini keeps allowing multiple distinct
+     * entries within a single round.
      *
-     * <p>{@link TaiXiuGameBot} overrides this to enforce the single-entry-per-round
-     * lock (a Tai Xiu bot bets only one of Tài/Xỉu per round; later ticks may only
-     * increase the stake on the entry already bet this round). The strategy's
+     * <p>When {@link #singleEntryPerRound()} is true (Tai Xiu, 114 stock) the first bet
+     * of a round is unconstrained and every later bet in the <i>same</i> round is
+     * remapped onto the entry already bet, so a strategy that flips side can still
+     * <i>increase</i> the locked side's stake but never bet the other one. The strategy's
      * <i>amount</i> is preserved either way — only the <i>entry</i> is constrained.
+     *
+     * <p>The lock is <b>derived from round memory</b>, not a separate field: the
+     * already-bet entry is read from the in-flight round's per-option bet map, which
+     * {@code beginRound} clears on every StartGame. So it resets per round by itself, and
+     * both call sites read the same memory, which keeps the park ({@code betCondition})
+     * and re-derive ({@code bet()}) paths consistent without extra synchronization. It
+     * runs before {@link #applyCoordination}, so the coordinator reserves on the locked
+     * entry, not on the one the strategy proposed.
      *
      * @param ctx the per-tick context, also handed to the strategy
      * @return the (possibly remapped) decision, or empty to skip the tick
      */
     protected Optional<BetDecision> decideBet(BetContext ctx) {
-        return strategy.decide(ctx);
+        Optional<BetDecision> decision = strategy.decide(ctx);
+        if (decision.isEmpty() || !singleEntryPerRound()) {
+            return decision;
+        }
+        Integer lockedEntry = lockedEntryThisRound(ctx);
+        BetDecision chosen = decision.get();
+        if (lockedEntry == null || chosen.optionId() == lockedEntry) {
+            return decision;
+        }
+        log.trace("Bot {}: single-entry lock — remapping bet entry {} -> {} (amount={})",
+                getUserName(), chosen.optionId(), lockedEntry, chosen.amount());
+        return Optional.of(new BetDecision(lockedEntry, chosen.amount()));
+    }
+
+    /**
+     * Whether the server binds a player to one entry per round (see {@link #decideBet}).
+     * Default: whatever the game's request says ({@link GameRequest#singleEntryPerRound()}),
+     * false for every product except 114 stock. {@link TaiXiuGameBot} overrides it to true.
+     */
+    protected boolean singleEntryPerRound() {
+        return request != null && request.singleEntryPerRound();
+    }
+
+    /**
+     * The entry already bet in the current round, or {@code null} if no bet has been
+     * recorded yet (so the next bet is unconstrained). Under the lock there is at most
+     * one key; if more are ever present (defensive), the first by iteration order wins.
+     */
+    private static Integer lockedEntryThisRound(BetContext ctx) {
+        Map<Integer, Long> betsThisRound = ctx.memory().snapshotCurrentRoundBets();
+        if (betsThisRound.isEmpty()) {
+            return null;
+        }
+        return betsThisRound.keySet().iterator().next();
     }
 
     /**

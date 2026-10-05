@@ -4,7 +4,8 @@ import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
-import com.vingame.bot.domain.bot.message.request.Bet;
+import com.vingame.bot.domain.bot.message.g3.rik.RikGameMessageTypes;
+import com.vingame.bot.domain.bot.message.request.RikStockBet;
 import com.vingame.bot.domain.bot.strategy.BetContext;
 import com.vingame.bot.domain.bot.strategy.BetDecision;
 import com.vingame.bot.domain.bot.strategy.BettingStrategy;
@@ -40,19 +41,14 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Regression guard for the AD-13 {@code decideBet} seam (TAI_XIU_BOT plan): the
- * default seam in {@link BettingMiniGameBot} is the <b>identity</b> over
- * {@code strategy.decide(...)}, so BettingMini must keep allowing <b>multiple
- * distinct entries within the same round</b> — only {@link TaiXiuGameBot} and a game
- * whose request opts in via {@code GameRequest.singleEntryPerRound()} (114 stock, see
- * {@code BettingMiniGameBotRikStockSingleEntryTest}) lock to a single entry.
- *
- * <p>This pins that the single-entry lock did NOT leak into BettingMini: a
- * BettingMini bot whose strategy picks option 0 on the first tick and option 3
- * on a later tick of the same round emits both options verbatim.
+ * 114 {@code stockPlugin} binds a player to the entry of their first bet in a round and
+ * answers any later bet on the other side with {@code BETTING_INVALID} (one backend
+ * exception per bet). {@code RikStockRequest.singleEntryPerRound()} switches on the
+ * {@code decideBet} lock, so a strategy that flips side mid-round is remapped onto the
+ * locked entry, keeping its amount, and the lock resets at the next StartGame.
  */
-@DisplayName("BettingMiniGameBot multi-entry within a round (AD-13 seam = identity)")
-class BettingMiniGameBotMultiEntrySeamTest {
+@DisplayName("114 stockPlugin: single entry per round")
+class BettingMiniGameBotRikStockSingleEntryTest {
 
     private BettingMiniGameBot bot;
     private MutableStrategy strategy;
@@ -77,10 +73,11 @@ class BettingMiniGameBotMultiEntrySeamTest {
 
     private BettingMiniGameBot newBot() {
         Map<Integer, Integer> affinities = new LinkedHashMap<>();
-        for (int i = 0; i < 6; i++) affinities.put(i, 1); // BauCua-style 0..5 options
+        affinities.put(0, 1);
+        affinities.put(1, 1);
         Game game = Game.builder()
-                .id("g-bc").name("BauCua").pluginName("BauCua")
-                .offset(2000).optionAffinities(affinities).build();
+                .id("g-stock").name("Coins").pluginName("stockPlugin")
+                .offset(10000).optionAffinities(affinities).build();
 
         BotBehaviorConfig behavior = BotBehaviorConfig.builder()
                 .minBet(100).maxBet(1000).betIncrement(100)
@@ -88,10 +85,10 @@ class BettingMiniGameBotMultiEntrySeamTest {
                 .chatEnabled(false).autoDepositEnabled(false).betSkipPercentage(0)
                 .build();
         BotConfiguration cfg = BotConfiguration.builder()
-                .credentials(BotCredentials.builder().username("bcbot").password("pw").fingerprint("fp").build())
+                .credentials(BotCredentials.builder().username("rikcoins1").password("pw").fingerprint("fp").build())
                 .environmentId("env-1").botGroupId("group-1").botIndex(1)
                 .game(game).behaviorConfig(behavior)
-                .zoneName("MiniGame3").timeoutMillis(60_000L)
+                .zoneName("MiniGame").timeoutMillis(60_000L)
                 .watchdogTimeoutSeconds(120L)
                 .strategyId(StrategyId.RANDOM.name())
                 .build();
@@ -101,6 +98,7 @@ class BettingMiniGameBotMultiEntrySeamTest {
         when(factory.create(StrategyId.RANDOM.name())).thenReturn(strategy);
 
         BettingMiniGameBot b = new BettingMiniGameBot();
+        b.setMessageTypes(new RikGameMessageTypes());
         b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         b.setConfiguration(cfg);
         b.setStrategyFactory(factory);
@@ -123,36 +121,57 @@ class BettingMiniGameBotMultiEntrySeamTest {
     }
 
     @Test
-    @DisplayName("BettingMini bets two different options in the same round (no single-entry lock)")
-    void bettingMiniAllowsMultipleEntriesPerRound() throws Exception {
+    @DisplayName("a mid-round side flip is remapped onto the first bet's entry, amount kept")
+    void laterBetsInARoundStayOnTheFirstEntry() throws Exception {
         bot = newBot();
         invokeOnStartGame(100L);
         setRemainingTime(50_000L);
         setField("gameState", BettingMiniGameState.BET);
 
-        // First bet of the round: option 0.
+        strategy.optionId = 1;
+        strategy.amount = 1_000L;
+        assertThat(eidOf(placeBet())).as("first bet: strategy's entry passes through").isEqualTo(1L);
+
         strategy.optionId = 0;
-        assertThat(eidOf(placeBet())).as("first option").isEqualTo(0L);
+        strategy.amount = 5_000L;
+        RikStockBet.BetData second = placeBet();
+        assertThat(second.getEid()).as("second bet, other side proposed").isEqualTo(1L);
+        assertThat(second.getV()).as("strategy's amount is preserved").isEqualTo(5_000L);
 
-        // Same round, strategy now picks a DIFFERENT option (3). BettingMini must
-        // pass it through — the AD-13 lock is Tai-Xiu only.
-        strategy.optionId = 3;
-        assertThat(eidOf(placeBet())).as("second option (different entry, same round)").isEqualTo(3L);
+        assertThat(bot.getMemory().snapshotCurrentRoundBets())
+                .as("the round accumulator only ever sees the locked entry")
+                .containsOnlyKeys(1);
+    }
 
-        // And a third distinct option, still the same round.
-        strategy.optionId = 5;
-        assertThat(eidOf(placeBet())).as("third option (different entry, same round)").isEqualTo(5L);
+    @Test
+    @DisplayName("the lock resets at the next StartGame")
+    void lockResetsOnNewRound() throws Exception {
+        bot = newBot();
+        invokeOnStartGame(100L);
+        setRemainingTime(50_000L);
+        setField("gameState", BettingMiniGameState.BET);
+
+        strategy.optionId = 1;
+        assertThat(eidOf(placeBet())).isEqualTo(1L);
+
+        invokeOnStartGame(101L);
+        setRemainingTime(50_000L);
+        setField("gameState", BettingMiniGameState.BET);
+
+        strategy.optionId = 0;
+        assertThat(eidOf(placeBet())).as("first bet of the new round is unconstrained").isEqualTo(0L);
     }
 
     /* ---- helpers ---- */
 
-    private Bet.BetData placeBet() throws Exception {
+    private RikStockBet.BetData placeBet() throws Exception {
         assertThat(invokeBetCondition()).as("bet gate open").isTrue();
         ActionRequestMessage out = invokeBetSupplier();
-        return (Bet.BetData) readBody(out);
+        assertThat(out).isInstanceOf(RikStockBet.class);
+        return (RikStockBet.BetData) readBody(out);
     }
 
-    private long eidOf(Bet.BetData data) {
+    private long eidOf(RikStockBet.BetData data) {
         return data.getEid();
     }
 
