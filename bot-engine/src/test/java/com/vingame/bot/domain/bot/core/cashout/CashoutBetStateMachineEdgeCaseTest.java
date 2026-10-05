@@ -265,14 +265,14 @@ class CashoutBetStateMachineEdgeCaseTest {
         }
 
         @Test
-        @DisplayName("a backoff longer than every pause is the exact next delay")
-        void backoffIsExactWhenItDominates() {
+        @DisplayName("the next delay is the backoff plus a [500, 4500] ms pause draw (review #2: jitter)")
+        void backoffPlusPauseDraw() {
             place();
             long at = now.get();
             TimeoutAction.TimedOut t = timeOut();
 
-            assertThat(t.nextDelayMs()).isEqualTo(BACKOFF_MS);
-            assertThat(machine.nextBetAt()).hasValue(at + FRAME_TIMEOUT_MS + BACKOFF_MS);
+            assertThat(t.nextDelayMs()).isBetween(BACKOFF_MS + 500, BACKOFF_MS + 4_500);
+            assertThat(machine.nextBetAt()).hasValue(at + FRAME_TIMEOUT_MS + t.nextDelayMs());
         }
 
         @Test

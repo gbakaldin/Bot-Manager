@@ -3,7 +3,6 @@ package com.vingame.bot.domain.bot.core.cashout;
 import com.vingame.bot.domain.bot.core.cashout.CashoutBetStateMachine.FrameAction;
 import com.vingame.bot.domain.bot.core.cashout.CashoutBetStateMachine.Plan;
 import com.vingame.bot.domain.bot.message.cashout.CashoutBetFrame;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -16,11 +15,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * CASHOUT_BOT QA: defects confirmed red against {@code ed85d86} and committed
- * {@code @Disabled} so the build stays green until Dev fixes them. Each test is the
- * acceptance check for its fix: remove {@code @Disabled} in the fixing commit.
+ * {@code @Disabled} until Dev fixed them. Each test is the acceptance check for its fix,
+ * and both are enabled now that the fixes have landed.
  * See {@code docs/reviews/CASHOUT_BOT/qa.md} (Q-1, Q-2) and review.md.
  */
-@DisplayName("CashoutBetStateMachine — known defects (red, @Disabled)")
+@DisplayName("CashoutBetStateMachine — QA defects Q-1 / Q-2 (fixed)")
 class CashoutKnownDefectsTest {
 
     private static final List<Long> STAKES = List.of(1_000L, 10_000L, 100_000L);
@@ -57,7 +56,6 @@ class CashoutKnownDefectsTest {
     }
 
     @Test
-    @Disabled("Q-1 (review [bug]): reset() does not remember the bound sid — red until fixed")
     @DisplayName("Q-1: after reset() mid-bet, a late frame of the abandoned bet does not bind the next bet")
     void resetRemembersBoundSid() {
         Plan live = place();
@@ -77,7 +75,6 @@ class CashoutKnownDefectsTest {
     }
 
     @Test
-    @Disabled("Q-2 (review [smell]): a frame with no sid (deserialised as 0) binds — red until fixed")
     @DisplayName("Q-2: a frame with sid 0 (the server's 'no bet' value) does not bind a PLACED bet")
     void sidZeroDoesNotBind() {
         place();

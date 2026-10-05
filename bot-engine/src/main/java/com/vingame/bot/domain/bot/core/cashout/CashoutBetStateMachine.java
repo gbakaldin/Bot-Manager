@@ -36,8 +36,15 @@ import java.util.function.LongSupplier;
  * state — the bet phase, the bound sid, the frozen plan, the consecutive-timeout count
  * and the recently-ended ring — lives in immutable records behind <b>one</b>
  * {@link AtomicReference}, and every change is a {@code compareAndSet} retried on
- * conflict. That is what makes "exactly one cash-out" and "a final frame wins every
- * race" true by construction. Do not add a second atomic beside it.
+ * conflict. That is what makes "at most one cash-out per bet" and "a final frame wins
+ * every race" true by construction. Do not add a second atomic beside it.
+ *
+ * <p><b>What the CAS does not guarantee: no cash-out on the wire after the end.</b> The
+ * decision is atomic, the send is not. Thread A can win LIVE → CASHING, thread B can then
+ * win CASHING → IDLE on the final frame, and A's cash-out still leaves afterwards for an
+ * already-ended sid. The machine still emits at most one cash-out per bet and the server
+ * simply refuses the stale one, so this is harmless — but do not build on the stronger
+ * claim (for example, by treating an error reply to a cash-out as a fault).
  *
  * <h2>Rules worth knowing before changing anything</h2>
  * <ul>
@@ -45,14 +52,17 @@ import java.util.function.LongSupplier;
  *       {@link Plan}. It is never re-drawn per frame or per tick.</li>
  *   <li><b>Binding.</b> The bet frame carries no sid, so the first frame after PLACED
  *       binds the server's sid — only if its stake is absent or equals the plan's, and
- *       its sid is not one of the last {@value #RECENT_CAPACITY} ended (or timed-out)
- *       bets. Without that ring, a late frame of the previous bet could bind the next.</li>
+ *       its sid is positive (a missing {@code sid} deserialises to {@code 0}, which is the
+ *       server's "no bet" value) and not one of the last {@value #RECENT_CAPACITY} ended,
+ *       timed-out or reset-away bets. Without that ring, a late frame of the previous bet
+ *       could bind the next.</li>
  *   <li>A frame for another sid, or any frame while IDLE, is ignored.</li>
  *   <li>CASHING keeps accepting progress frames and never emits a second cash-out.</li>
  *   <li><b>Timeout ladder</b> (AD-9). {@code consecutiveTimeouts} is reset only by a
  *       frame that binds to a bet — never by {@link #reset()}. While it is &gt;= 1 every
- *       bet is a <i>probe</i> at the cheapest eligible stake, and the next bet waits at
- *       least the timeout backoff. A reconnect is requested at
+ *       bet is a <i>probe</i> at the cheapest eligible stake, and the next bet waits the
+ *       timeout backoff <b>plus</b> a normal pause draw, so a group that times out
+ *       together does not re-probe and reconnect in lockstep. A reconnect is requested at
  *       {@code R·2^k} consecutive timeouts for {@code k = 0..5}, then every
  *       {@code R·32}.</li>
  * </ul>
@@ -205,11 +215,16 @@ public final class CashoutBetStateMachine {
      * @param behavior               target and delay ranges (AD-7)
      * @param frameTimeoutMillis     silence on a live bet that counts as a timeout
      *                               ({@code bot.cashout.frame-timeout-seconds})
-     * @param timeoutBackoffMillis   the minimum wait after a timeout
+     * @param timeoutBackoffMillis   the fixed part of the wait after a timeout; a normal
+     *                               pause draw is added on top as jitter
      *                               ({@code bot.cashout.timeout-backoff-seconds})
      * @param reconnectAfterTimeouts {@code R} of the reconnect ladder
-     *                               ({@code bot.cashout.reconnect-after-timeouts});
-     *                               {@code <= 0} disables reconnects
+     *                               ({@code bot.cashout.reconnect-after-timeouts}).
+     *                               At this level {@code <= 0} means "never request a
+     *                               reconnect", but that value is <b>not reachable from
+     *                               configuration</b>: {@code CashoutBot} maps a property
+     *                               {@code <= 0} to the default 3, so a deployed bot's
+     *                               ladder cannot be switched off.
      * @param clock                  milliseconds, monotonic enough for deltas
      * @param random                 all draws (stake, target, delay)
      */
@@ -306,7 +321,9 @@ public final class CashoutBetStateMachine {
                     return NONE;
                 }
                 case Placed placed -> {
-                    if (placed.memo().hasEnded(frame.sid())) {
+                    // sid <= 0 is never a bet: a missing sid deserialises to 0, the server's
+                    // "no bet" value — e.g. a rejected-bet reply of unknown shape (OI-2).
+                    if (frame.sid() <= 0 || placed.memo().hasEnded(frame.sid())) {
                         return NONE;
                     }
                     OptionalLong stake = frame.stake();
@@ -410,7 +427,10 @@ public final class CashoutBetStateMachine {
             }
             Memo afterTimeout = memo.timedOut();
             int count = afterTimeout.timeouts();
-            long delay = Math.max(timeoutBackoffMillis, drawDelay());
+            // Backoff PLUS a pause draw, not max(): with a 30 s backoff, max() is always
+            // exactly 30 s, so a group that timed out together re-probes and climbs the
+            // reconnect rungs together — a burst of N re-logins (review #2).
+            long delay = timeoutBackoffMillis + drawDelay();
             if (state.compareAndSet(current, new Idle(afterTimeout, now + delay))) {
                 return new TimeoutAction.TimedOut(plan, count, delay, isReconnectRung(count));
             }
@@ -443,11 +463,27 @@ public final class CashoutBetStateMachine {
      * Back to IDLE from any state, with a fresh pause and no emission. Called on
      * reconnect and on (re-)subscribe. Does <b>not</b> reset the timeout ladder (AD-9):
      * a reconnect that reaches the same silent server must keep climbing it.
+     * <ul>
+     *   <li><b>A bound sid is remembered</b>, exactly as {@link #onTimeout()} does. The
+     *       abandoned bet keeps running on the server for up to ~20 s, and without this a
+     *       late frame of it (any X502, or progress at an equal stake) would bind the
+     *       next bet — which then drives the old bet and leaves the new one uncashed.
+     *       A reset from PLACED has no sid to remember.</li>
+     *   <li><b>A pending pause is never shortened.</b> From IDLE the new {@code nextBetAt}
+     *       is the later of the current one and a fresh draw, so the subscribe reply that
+     *       follows a ladder reconnect does not erase the timeout backoff.</li>
+     * </ul>
      */
     public void reset() {
         while (true) {
             BetState current = state.get();
-            Idle next = new Idle(current.memo(), clock.getAsLong() + drawDelay());
+            long fresh = clock.getAsLong() + drawDelay();
+            Idle next = switch (current) {
+                case Idle idle -> new Idle(idle.memo(), Math.max(idle.nextBetAt(), fresh));
+                case Placed placed -> new Idle(placed.memo(), fresh);
+                case Live live -> new Idle(live.memo().remember(live.sid()), fresh);
+                case Cashing cashing -> new Idle(cashing.memo().remember(cashing.sid()), fresh);
+            };
             if (state.compareAndSet(current, next)) {
                 return;
             }

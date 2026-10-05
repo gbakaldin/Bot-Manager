@@ -568,6 +568,82 @@ class CashoutBetStateMachineTest {
         }
     }
 
+    @Nested
+    @DisplayName("review fixes (#1, #2, #3, #5)")
+    class ReviewFixes {
+
+        @Test
+        @DisplayName("#1: reset() from CASHING remembers the bound sid too")
+        void resetFromCashingRemembersSid() {
+            Plan plan = placeAndBind(61L);
+            machine.onFrame(progress(61L, plan.amount(), plan.target()));
+
+            machine.reset();
+            Plan next = place();
+
+            assertThat(machine.onFrame(win(61L, 5_000.0))).isSameAs(CashoutBetStateMachine.NONE);
+            assertThat(machine.onFrame(progress(61L, next.amount(), 1.0))).isSameAs(CashoutBetStateMachine.NONE);
+            assertThat(machine.onFrame(progress(62L, next.amount(), 1.0))).isInstanceOf(FrameAction.Progress.class);
+        }
+
+        @Test
+        @DisplayName("#2: a negative sid never binds either; a positive one still does")
+        void nonPositiveSidNeverBinds() {
+            Plan plan = place();
+
+            assertThat(machine.onFrame(progress(-1L, plan.amount(), 1.0))).isSameAs(CashoutBetStateMachine.NONE);
+            assertThat(machine.onFrame(burst(0L))).isSameAs(CashoutBetStateMachine.NONE);
+            assertThat(machine.inFlight()).isTrue();
+            assertThat(machine.onFrame(progress(1L, plan.amount(), 1.0))).isInstanceOf(FrameAction.Progress.class);
+        }
+
+        @Test
+        @DisplayName("#3: the post-timeout pause is backoff + U[500, 4500] ms, and differs between bots")
+        void timeoutBackoffIsJittered() {
+            java.util.Set<Long> delays = new java.util.HashSet<>();
+            for (long seed = 0; seed < 20; seed++) {
+                machine = newMachine(seed);
+                now.set(1_000_000L);
+                place();
+                now.addAndGet(FRAME_TIMEOUT_MS);
+                TimeoutAction.TimedOut t = (TimeoutAction.TimedOut) machine.onTimeout();
+
+                assertThat(t.nextDelayMs()).isBetween(BACKOFF_MS + 500, BACKOFF_MS + 4_500);
+                delays.add(t.nextDelayMs());
+            }
+            assertThat(delays)
+                    .as("bots that timed out at the same instant must not re-probe in lockstep")
+                    .hasSizeGreaterThan(10);
+        }
+
+        @Test
+        @DisplayName("#5: reset() from IDLE keeps a pending timeout backoff")
+        void resetKeepsPendingBackoff() {
+            place();
+            now.addAndGet(FRAME_TIMEOUT_MS);
+            machine.onTimeout();
+            long backoffUntil = machine.nextBetAt().orElseThrow();
+
+            now.addAndGet(1_000L); // a reconnect, then the subscribe reply
+            machine.reset();
+
+            assertThat(machine.nextBetAt()).hasValue(backoffUntil);
+            now.set(backoffUntil - 1);
+            assertThat(machine.tryPlace(STAKES, RICH)).isEmpty();
+        }
+
+        @Test
+        @DisplayName("#5: reset() from IDLE with no pending pause still draws a fresh one")
+        void resetFromIdleWithoutBackoffDrawsFresh() {
+            now.addAndGet(60_000L);
+            long at = now.get();
+
+            machine.reset();
+
+            assertThat(machine.nextBetAt().orElseThrow()).isBetween(at + 500, at + 4_500);
+        }
+    }
+
     @Test
     @DisplayName("CashoutBehavior.LEGACY is the legacy loop's numbers")
     void legacyBehavior() {
