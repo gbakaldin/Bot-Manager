@@ -144,6 +144,14 @@ class Win79CashoutMessageTypesTest {
         }
 
         @Test
+        @DisplayName("Q-3: null entries in bets are dropped before sorting, not an NPE")
+        void nullBetsAreDropped() throws Exception {
+            CashoutMessage parsed = readBody(BALLOON, "{\"cmd\":1500,\"bets\":[100000,null,1000,10000],\"sid\":0}");
+
+            assertThat(((CashoutSubscribeResponse) parsed).allowedBets()).containsExactly(1_000L, 10_000L, 100_000L);
+        }
+
+        @Test
         @DisplayName("an uncaptured key lands in unmapped() instead of being dropped (V-8)")
         void unknownKeysAreKept() throws Exception {
             CashoutBetFrame frame = (CashoutBetFrame) readBody(BALLOON,

@@ -35,13 +35,23 @@ public class Win79CashoutSubscribeResponse extends CashoutSubscribeResponse {
         this.sid = sid;
     }
 
-    /** @return {@code bets}, sorted ascending; empty when absent. */
+    /**
+     * @return {@code bets} without {@code null} elements, sorted ascending; empty when
+     *         absent. Nulls are dropped <em>before</em> sorting: sorting first throws an NPE
+     *         inside {@code onSubscribe}, after the bot is already marked authenticated, and
+     *         the bot then sits connected and never bets.
+     */
     @Override
     public List<Long> allowedBets() {
         if (bets == null) {
             return List.of();
         }
-        List<Long> sorted = new ArrayList<>(bets);
+        List<Long> sorted = new ArrayList<>(bets.size());
+        for (Long bet : bets) {
+            if (bet != null) {
+                sorted.add(bet);
+            }
+        }
         Collections.sort(sorted);
         return Collections.unmodifiableList(sorted);
     }
