@@ -695,3 +695,46 @@ For reconnects, expect **≤ 3** per group (`null`/absent also passes) over the 
 
 **Cleanup:** leave the groups running only if the user asks. Otherwise
 `POST $BASE/api/v1/bot-group/$G/stop` for both, and expect **200**.
+
+---
+
+## Amendment — 2026-10-05
+
+Made by Architect-2 at the compliance check of Phases 1-3
+(`docs/reviews/CASHOUT_BOT/compliance.md`). Nothing above is rewritten; this section takes
+precedence where it disagrees.
+
+**A1: `CashoutBetStateMachine` is `public`, not package-private (AD-8, Phase 2 item 2).**
+The plan put the class in `bot-engine/.../core/cashout/` and its only caller, `CashoutBot`,
+in `bot-engine/.../core/`. Java package-private visibility does not extend to a parent
+package, so "package-private" and that placement cannot both hold. The placement is kept;
+the class (and its nested `Plan`, `Outcome`, `FrameAction`, `TimeoutAction`) is public.
+Test-only reads (`isReconnectRung`, `RECENT_CAPACITY`) stay package-private.
+
+**A2: the Phase 2 API sketch, as shipped.** The sketch's
+`FrameAction = NONE | SEND_CASHOUT | ENDED` could not tell the bot "this was a bound,
+non-terminal frame of the live bet" apart from "this frame was ignored", which Phase 3
+item 1 (`onFrame`: "on any non-terminal bound frame ...") needs. The shipped shape is:
+- `FrameAction = None | Progress(sid) | SendCashout(plan, sid, multiplier) | Ended(outcome, plan, sid, winnings, nextDelayMs)`.
+- `TimeoutAction = None | TimedOut(plan, consecutiveTimeouts, nextDelayMs, reconnect)`.
+  The `reconnect` flag is the sketch's `TIMED_OUT_AND_RECONNECT`. The meaning is the same.
+
+**A3: the bet supplier's race fallback when the machine refuses (AD-10).** AD-10 says
+"race-fallback re-derive as in `SlotMachineBot.spin()`". The slot re-derive cannot fail,
+but this one can: after a `reset()`, `placeIgnoringDelay` returns empty when the stake set
+is empty or the balance covers nothing. ws-parser forbids a supplier that returns nothing.
+Sending a bet the machine did not record as PLACED would debit without a way to bind its
+frames. So in that case the supplier returns `request.subscribe()`. That frame is safe to
+send twice, and its reply only re-runs `onSubscribe` (reset + session check) while no bet
+is in flight. The normal re-derive uses `placeIgnoringDelay`, which is `tryPlace` without
+the `nextBetAt` check.
+
+Not amended, because these follow the plan and are recorded in the compliance file:
+- The watchdog is armed once per bet and re-armed only for the remaining time when it
+  fires early. This meets AD-9's definition (timeout = time since the last frame of this
+  bet, armed only while a bet is in flight) without a cancel+schedule per progress frame.
+- The `sessionCheckInProgress` gate is how the AD-9 invariant (no bet placed while
+  `checkBalance`/deposit runs) is enforced, given that the bet loop and the frame handler
+  run on different threads.
+- The session-aggregator feed is a marked hook. It is wired in Phase 4 with
+  `CashoutSessionStrategy`.
