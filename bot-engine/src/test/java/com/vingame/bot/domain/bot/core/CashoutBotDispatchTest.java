@@ -79,6 +79,10 @@ class CashoutBotDispatchTest {
     }
 
     private CashoutBot newBot(long minBet, long maxBet) {
+        return newBot(minBet, maxBet, 3);
+    }
+
+    private CashoutBot newBot(long minBet, long maxBet, int reconnectAfter) {
         Game game = Game.builder()
                 .id("g-balloon").name("Balloon").pluginName("balloonPlugin")
                 .gameType(GameType.CASHOUT).offset(OFFSET).build();
@@ -89,7 +93,7 @@ class CashoutBotDispatchTest {
                 .environmentId("env-119").botGroupId("group-1").botIndex(1)
                 .game(game).behaviorConfig(behavior)
                 .zoneName("MiniGame").timeoutMillis(60_000L)
-                .cashoutFrameTimeoutSeconds(20).cashoutTimeoutBackoffSeconds(30).cashoutReconnectAfterTimeouts(3)
+                .cashoutFrameTimeoutSeconds(20).cashoutTimeoutBackoffSeconds(30).cashoutReconnectAfterTimeouts(reconnectAfter)
                 .build();
 
         CashoutBot b = new CashoutBot() {
@@ -353,6 +357,76 @@ class CashoutBotDispatchTest {
 
         assertThat(bot.betCondition().get()).isFalse();
         assertThat(bot.machine().inFlight()).isFalse();
+    }
+
+    @Test
+    @DisplayName("review #3: a bet's late terminal handling does not cancel the NEXT bet's watchdog")
+    void lateTerminalKeepsNextBetsWatchdog() {
+        subscribe(SERVER_BETS);
+        Plan first = placeBet();
+        assertThat(bot.watchdogArmed()).isTrue();
+
+        // The frame handler wins the CAS to IDLE and then stalls before its follow-up...
+        CashoutBetFrame terminal = burstOnResultCmd(70L);
+        bot.machine().onFrame(progress(70L, first.amount(), 1.01));
+        var ended = (com.vingame.bot.domain.bot.core.cashout.CashoutBetStateMachine.FrameAction.Ended)
+                bot.machine().onFrame(terminal);
+        // ...long enough for the bet loop to place bet N+1 and arm its watchdog...
+        placeBet();
+        assertThat(bot.watchdogArmed()).isTrue();
+
+        // ...then the stalled handler resumes.
+        bot.onBetEnded(ended, terminal);
+
+        assertThat(bot.watchdogArmed())
+                .as("bet N+1 must keep its watchdog, or a silent bet N+1 wedges the bot forever")
+                .isTrue();
+        assertThat(bot.machine().inFlight()).isTrue();
+    }
+
+    @Test
+    @DisplayName("review #5: the subscribe reply after a ladder reconnect keeps the timeout backoff")
+    void subscribeAfterTimeoutKeepsBackoff() {
+        subscribe(SERVER_BETS);
+        placeBet();
+        now.addAndGet(20_000L);
+        bot.onWatchdogExpired();
+        long backoffUntil = bot.machine().nextBetAt().orElseThrow();
+
+        bot.beforeReconnect();          // reconnect...
+        now.addAndGet(2_000L);
+        subscribe(SERVER_BETS);         // ...and the re-subscribe's reply
+
+        assertThat(bot.machine().nextBetAt()).hasValue(backoffUntil);
+        now.set(backoffUntil - 1);
+        assertThat(bot.betCondition().get()).as("still inside the backoff").isFalse();
+    }
+
+    @Test
+    @DisplayName("review #6: bot.cashout.reconnect-after-timeouts=0 means the default 3, not 'disabled'")
+    void zeroReconnectAfterMeansDefault() {
+        bot.cleanup();
+        bot = newBot(1_000L, 100_000L, 0);
+        subscribe(SERVER_BETS);
+        for (int i = 1; i <= 3; i++) {
+            placeBet();
+            now.addAndGet(20_000L);
+            bot.onWatchdogExpired();
+        }
+        assertThat(reconnectReasons).hasSize(1);
+    }
+
+    @Test
+    @DisplayName("review #9 / Q-3: a null in the server's bets does not break subscribe")
+    void nullServerBetIsDropped() {
+        List<Long> withNull = new ArrayList<>(SERVER_BETS);
+        withNull.add(1, null);
+
+        subscribe(withNull);
+
+        assertThat(bot.eligibleStakes()).containsExactly(1_000L, 10_000L, 100_000L);
+        now.addAndGet(60_000L);
+        assertThat(bot.betCondition().get()).as("the bot bets").isTrue();
     }
 
     @Test

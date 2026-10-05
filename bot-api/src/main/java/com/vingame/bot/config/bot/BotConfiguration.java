@@ -97,7 +97,8 @@ public class BotConfiguration {
     /**
      * CASHOUT only ({@code bot.cashout.reconnect-after-timeouts}, AD-9): {@code R} of the
      * reconnect ladder — reconnect at {@code R·2^k} consecutive timeouts, then every
-     * {@code R·32}. {@code <= 0} (unset) means the default, 3.
+     * {@code R·32}. {@code <= 0} (unset) means the default, 3 — it never disables the
+     * ladder; reconnects cannot be switched off from configuration.
      */
     int cashoutReconnectAfterTimeouts;
 

@@ -59,7 +59,10 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  *   <li><b>Cash-out</b> (AD-10): sent straight from the frame handler when the machine
  *       says {@code SEND_CASHOUT}, on the client captured once in
  *       {@link #botBehaviorScenario()} — no second scheduler, no poll latency, because a
- *       late cash-out is a lost one.</li>
+ *       late cash-out is a lost one. At most one cash-out is <em>decided</em> per bet; the
+ *       send happens after the decision, so a final frame handled in between can end the
+ *       bet first and the cash-out then reaches the server for an ended sid. The server
+ *       refuses it — harmless, but not "no cash-out after the end".</li>
  *   <li><b>Frames</b>: one handler for both the progress ({@code X501}) and the cash-out
  *       reply ({@code X502}) classes; the outcome is keyed on {@code isFinal}, never on
  *       the cmd (AD-5). ws-parser runs four inbound workers per client, so frames for
@@ -179,6 +182,8 @@ public class CashoutBot extends Bot {
         }
         long frameTimeoutSeconds = positiveOr(configuration.getCashoutFrameTimeoutSeconds(), DEFAULT_FRAME_TIMEOUT_SECONDS);
         long backoffSeconds = positiveOr(configuration.getCashoutTimeoutBackoffSeconds(), DEFAULT_TIMEOUT_BACKOFF_SECONDS);
+        // <= 0 means the default, never "disabled" (review #6): the machine can run with no
+        // ladder, but that is deliberately not reachable from bot.cashout.* configuration.
         int reconnectAfter = configuration.getCashoutReconnectAfterTimeouts() > 0
                 ? configuration.getCashoutReconnectAfterTimeouts()
                 : DEFAULT_RECONNECT_AFTER_TIMEOUTS;
@@ -321,8 +326,14 @@ public class CashoutBot extends Bot {
         }
     }
 
-    private void onBetEnded(FrameAction.Ended ended, CashoutBetFrame frame) {
-        cancelWatchdog();
+    /** Package-private as a test seam (review #3). */
+    void onBetEnded(FrameAction.Ended ended, CashoutBetFrame frame) {
+        // No cancelWatchdog() here (review #3). The machine's CAS to IDLE and this handler
+        // are not atomic: if the thread stalls past the 0.5 s pause, the bet loop places
+        // bet N+1 and arms ITS watchdog, and a cancel here would leave that bet with none —
+        // a permanent per-bot wedge if it then goes silent. Leaving the old task is safe:
+        // a watchdog that fires on IDLE does nothing, and one that fires on a newer bet
+        // re-checks against that bet and re-arms for its remainder.
         Plan plan = ended.plan();
 
         // AD-11: the terminal frame is the server's confirmation of the bet.
@@ -573,6 +584,13 @@ public class CashoutBot extends Bot {
                 mdcSnapshot));
 
         getClient().addScenario(botBehaviorScenario());
+    }
+
+    /** Visible for testing: whether a watchdog task is scheduled and not yet run. */
+    boolean watchdogArmed() {
+        synchronized (watchdogLock) {
+            return watchdogTask != null && !watchdogTask.isDone();
+        }
     }
 
     /** Visible for testing. */
