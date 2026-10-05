@@ -157,6 +157,17 @@ class AlertRuleMetricsTest {
         metrics.incGroupRecoveryExhausted();
         MDC.clear();
 
+        // --- the crash outcome counter (AVIATOR_BOT AD-11), emitted under a CRASH bot's MDC
+        // exactly as CrashBot does: all three outcomes materialised at zero in
+        // initializeSubclass, then the one that happened. CrashBetsUnacked selects
+        // outcome="unacked" and aggregates by (environmentId, botGroupId), so both the series
+        // and that label value have to be in this exposition or the rule is unverifiable here.
+        BotMdc.set("group-uuid-2", 1, "env-uuid-1", "119", "CRASH",
+                "game-uuid-2", "Avatar", "crashbot1");
+        metrics.initCrashSeries();
+        metrics.incCrashOutcome("cashout");
+        MDC.clear();
+
         // --- the per-environment gateway request budget (GATEWAY_REQUEST_BUDGET AD-20),
         // created exactly as EnvironmentClientRegistry creates it: one per environment id,
         // tagged EXPLICITLY with {environmentId, product} rather than from bot MDC, because it
@@ -723,6 +734,49 @@ class AlertRuleMetricsTest {
                 if (!line.startsWith("group_recovery_")) continue;
                 assertThat(line).contains("botGroupId=\"group-uuid-1\"",
                         "environmentId=\"env-uuid-1\"", "product=\"116\"");
+            }
+        } finally {
+            MDC.clear();
+            fresh.close();
+        }
+    }
+
+    @Test
+    @DisplayName("CrashBetsUnacked reads series that are scraped at 0 before the first bet ends")
+    void theCrashOutcomeSeriesExistBeforeTheyMove() {
+        // AVIATOR_BOT Phase 4. CrashBetsUnacked is increase() over bot_crash_bets_total, and the
+        // first unacked bet of a group is exactly the one it must see. Lazily registered, that
+        // series would first appear at 1 and increase() would read 0 — the same defect
+        // theRecoveryCountersExistBeforeTheyMove pins for the recovery rules. So: a fresh
+        // exposition with ONLY the pre-registration CrashBot.initializeSubclass performs.
+        Rule rule = rules().stream()
+                .filter(r -> "CrashBetsUnacked".equals(r.name()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("CrashBetsUnacked is not in alerts.yml"));
+        assertThat(rule.expr())
+                .contains("bot_crash_bets_total{outcome=\"unacked\"}")
+                .contains("clamp_min(");
+        assertThat(rule.labels()).containsEntry("severity", "warning");
+
+        PrometheusMeterRegistry fresh = new PrometheusMeterRegistry(PrometheusConfig.DEFAULT);
+        fresh.config().meterFilter(new BotMdcTagsMeterFilter());
+        try {
+            BotMdc.set("group-uuid-2", 1, "env-uuid-1", "119", "CRASH",
+                    "game-uuid-2", "Avatar", "crashbot1");
+            new BotMetrics(fresh).initCrashSeries();
+            MDC.clear();
+            String beforeAnyBet = fresh.scrape();
+
+            for (String outcome : BotMetrics.CRASH_OUTCOMES) {
+                assertThat(beforeAnyBet)
+                        .as("outcome=%s must be scrapeable at 0 before any bet ends", outcome)
+                        .containsPattern("(?m)^bot_crash_bets_total\\{[^}]*outcome=\""
+                                + outcome + "\"[^}]*} 0\\.0$");
+            }
+            for (String line : beforeAnyBet.split("\n")) {
+                if (!line.startsWith("bot_crash_bets_total")) continue;
+                assertThat(line).contains("botGroupId=\"group-uuid-2\"",
+                        "environmentId=\"env-uuid-1\"");
             }
         } finally {
             MDC.clear();

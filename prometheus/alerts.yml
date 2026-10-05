@@ -389,6 +389,39 @@ groups:
           summary: "No rounds on game {{ $labels.gameName }} (env {{ $labels.environmentId }}) for 20 minutes"
           description: "Bots are subscribed and authenticated but the server is sending no StartGame/SpinResult. Game is stopped server-side, the subchannel is wrong, or subscribers were pruned."
 
+      # AVIATOR_BOT Phase 4 — CRASH bets the server never acknowledged. `unacked` is counted
+      # at the round end (X707) for a bet that was sent but got no X702 ack, i.e. the server
+      # refused the stake. Over half of a group's finished bets for 15 minutes is a stake the
+      # game will not take (OI-1: tighten the group's minBet/betIncrement — config, not code)
+      # or an account the brand will not let bet (back office only). A refused SUBSCRIBE
+      # never gets here — no rounds, no bets — that is the bot's silent-window WARN.
+      #
+      # A late cash-out refused after the crash is NOT this: it has an ack and records
+      # `crash` (plan §6). A reconnect abandons a live bet without any outcome, so reconnect
+      # churn deflates the denominator rather than inflating the numerator.
+      #
+      # Fires on the FIRST occurrence because CrashBot.initializeSubclass pre-registers all
+      # three outcome series at 0 under the same MDC the increments use
+      # (BotMetrics.initCrashSeries) — a lazily registered counter first seen at 1 is
+      # invisible to increase(). clamp_min(..., 1) keeps an idle group from dividing by 0.
+      #
+      # audience: internal. The remedy is ours (group config) or a back-office request we
+      # make; the rule keeps the plan's `by (environmentId, botGroupId)`, which does not
+      # carry `product`, so it cannot route to a product room anyway (AD-V3). No
+      # Alertmanager route: it falls through to the viptalk receiver.
+      - alert: CrashBetsUnacked
+        expr: |
+          sum by (environmentId, botGroupId) (increase(bot_crash_bets_total{outcome="unacked"}[15m]))
+            / clamp_min(sum by (environmentId, botGroupId) (increase(bot_crash_bets_total[15m])), 1) > 0.5
+        for: 15m
+        labels:
+          job: bot-manager
+          severity: warning
+          audience: internal
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of crash bets unacknowledged in bot group {{ $labels.botGroupId }} (env {{ $labels.environmentId }})"
+          description: "Bets are being sent but the server answers no X702 ack, so they settle as bot_crash_bets_total{outcome=\"unacked\"}. If it is concentrated on small or odd stakes, the game rejects those amounts: tighten the group's minBet/betIncrement (no code change). If every stake is unacked, the bot accounts are seeing rounds but may not be allowed to bet on this brand/env — a back-office question. Not a cash-out race: a cash-out refused after the crash records `crash`, not `unacked`."
+
   - name: bot-manager-balance
     rules:
       # A3 — a group that will NOT top itself up is running out of money.
