@@ -102,6 +102,18 @@ public class BotMetrics {
     /** The three {@code outcome} values of {@link #BOT_CASHOUT_BETS_TOTAL}. */
     public static final List<String> CASHOUT_OUTCOMES = List.of("cashout", "burst", "timeout");
 
+    /**
+     * AVIATOR_BOT AD-11 — one increment per finished crash bet, tagged
+     * {@code outcome = cashout | crash | unacked}. A separate metric from
+     * {@link #BOT_CASHOUT_BETS_TOTAL}: the outcome vocabulary differs, and widening CASHOUT's
+     * label set would change its semantics. Same per-bot MDC tag shape as the other
+     * {@code bot_*} counters. Pre-registered at zero by {@link #initCrashSeries()}.
+     */
+    public static final String BOT_CRASH_BETS_TOTAL = "bot_crash_bets_total";
+
+    /** The three {@code outcome} values of {@link #BOT_CRASH_BETS_TOTAL}. */
+    public static final List<String> CRASH_OUTCOMES = List.of("cashout", "crash", "unacked");
+
     // RESTART_LIFECYCLE_FIX — per-bot creation failures during group start.
     // Tag {@code reason} is bounded: validation | auth | unknown (Architecture
     // Decision 5). Same MDC-driven per-bot tag shape as the rest.
@@ -182,7 +194,9 @@ public class BotMetrics {
      *
      * @param cmd one of {@code subscribe|startGame|updateBet|endGame}, the slot
      *            {@code spin}, or the cash-out
-     *            {@code cashoutSubscribe|cashoutProgress|cashoutResult} (CASHOUT_BOT AD-12)
+     *            {@code cashoutSubscribe|cashoutProgress|cashoutResult} (CASHOUT_BOT AD-12),
+     *            or the crash {@code crashSubscribe|crashRoundStart|crashBettingClosed|
+     *            crashBetAck|crashTick|crashCashoutAck|crashRoundEnd} (AVIATOR_BOT AD-11)
      */
     public void incBotMessage(String cmd) {
         Counter.builder(BOT_MESSAGES_TOTAL)
@@ -345,6 +359,39 @@ public class BotMetrics {
      */
     public void incCashoutOutcome(String outcome) {
         Counter.builder(BOT_CASHOUT_BETS_TOTAL)
+                .tag("outcome", outcome)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
+    }
+
+    /**
+     * Materialise {@code bot_crash_bets_total{outcome}} at zero for all three outcomes, for
+     * the group whose MDC is currently set (AVIATOR_BOT AD-11). Idempotent. A crash bot calls
+     * it from {@code initializeSubclass}, before any frame and before the subscribe, so the
+     * series exist even when the subscribe is refused (CASHOUT release finding 3).
+     * <p>
+     * Same reason as {@link #initCashoutSeries()}: a lazily registered counter first appears
+     * at 1 and {@code increase()} over it reads 0. The tags must come from the same MDC as
+     * {@link #incCrashOutcome(String)}'s, or this registers a second series and fixes nothing.
+     */
+    public void initCrashSeries() {
+        Tags tags = mdcTags();
+        for (String outcome : CRASH_OUTCOMES) {
+            Counter.builder(BOT_CRASH_BETS_TOTAL)
+                    .tag("outcome", outcome)
+                    .tags(tags)
+                    .register(registry);
+        }
+    }
+
+    /**
+     * Count one finished crash bet (AVIATOR_BOT AD-11).
+     *
+     * @param outcome {@code cashout | crash | unacked}
+     */
+    public void incCrashOutcome(String outcome) {
+        Counter.builder(BOT_CRASH_BETS_TOTAL)
                 .tag("outcome", outcome)
                 .tags(mdcTags())
                 .register(registry)
