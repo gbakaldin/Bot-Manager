@@ -91,6 +91,17 @@ public class BotMetrics {
     public static final String BOT_JACKPOTS_TOTAL = "bot_jackpots_total";
     public static final String BOT_JACKPOT_AMOUNT_TOTAL = "bot_jackpot_amount_total";
 
+    /**
+     * CASHOUT_BOT AD-12 — one increment per finished cash-out bet, tagged
+     * {@code outcome = cashout | burst | timeout}. Same per-bot MDC tag shape as the other
+     * {@code bot_*} counters (group-level, never per bot). Pre-registered at zero by
+     * {@link #initCashoutSeries()}.
+     */
+    public static final String BOT_CASHOUT_BETS_TOTAL = "bot_cashout_bets_total";
+
+    /** The three {@code outcome} values of {@link #BOT_CASHOUT_BETS_TOTAL}. */
+    public static final List<String> CASHOUT_OUTCOMES = List.of("cashout", "burst", "timeout");
+
     // RESTART_LIFECYCLE_FIX — per-bot creation failures during group start.
     // Tag {@code reason} is bounded: validation | auth | unknown (Architecture
     // Decision 5). Same MDC-driven per-bot tag shape as the rest.
@@ -169,7 +180,9 @@ public class BotMetrics {
     /**
      * Increment the per-bot message counter for the given protocol command.
      *
-     * @param cmd one of {@code subscribe|startGame|updateBet|endGame}
+     * @param cmd one of {@code subscribe|startGame|updateBet|endGame}, the slot
+     *            {@code spin}, or the cash-out
+     *            {@code cashoutSubscribe|cashoutProgress|cashoutResult} (CASHOUT_BOT AD-12)
      */
     public void incBotMessage(String cmd) {
         Counter.builder(BOT_MESSAGES_TOTAL)
@@ -302,6 +315,40 @@ public class BotMetrics {
                 .tags(mdcTags())
                 .register(registry)
                 .increment(amount);
+    }
+
+    /**
+     * Materialise {@code bot_cashout_bets_total{outcome}} at zero for all three outcomes,
+     * for the group whose MDC is currently set (CASHOUT_BOT AD-12). Idempotent, so every
+     * cash-out bot calls it on every subscribe.
+     * <p>
+     * Same reason as {@link #initGroupRecoverySeries(String...)}: a counter registered
+     * lazily first appears at 1, so {@code increase()} over it reads 0 and the first
+     * {@code timeout} — the outcome the alert is for — would be invisible. The tags must
+     * come from the same MDC as {@link #incCashoutOutcome(String)}'s, or this registers a
+     * second series and fixes nothing.
+     */
+    public void initCashoutSeries() {
+        Tags tags = mdcTags();
+        for (String outcome : CASHOUT_OUTCOMES) {
+            Counter.builder(BOT_CASHOUT_BETS_TOTAL)
+                    .tag("outcome", outcome)
+                    .tags(tags)
+                    .register(registry);
+        }
+    }
+
+    /**
+     * Count one finished cash-out bet (CASHOUT_BOT AD-12).
+     *
+     * @param outcome {@code cashout | burst | timeout}
+     */
+    public void incCashoutOutcome(String outcome) {
+        Counter.builder(BOT_CASHOUT_BETS_TOTAL)
+                .tag("outcome", outcome)
+                .tags(mdcTags())
+                .register(registry)
+                .increment();
     }
 
     /**

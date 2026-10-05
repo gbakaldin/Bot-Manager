@@ -174,6 +174,18 @@ public class BotGroupBehaviorService {
     @Value("${bot.watchdog.timeout.seconds:180}")
     private long watchdogTimeoutSeconds;
 
+    /** CASHOUT_BOT AD-9: silence on an in-flight cash-out bet that counts as a timeout. */
+    @Value("${bot.cashout.frame-timeout-seconds:20}")
+    private long cashoutFrameTimeoutSeconds;
+
+    /** CASHOUT_BOT AD-9: minimum wait before the next cash-out bet after a timeout. */
+    @Value("${bot.cashout.timeout-backoff-seconds:30}")
+    private long cashoutTimeoutBackoffSeconds;
+
+    /** CASHOUT_BOT AD-9: R of the reconnect ladder (reconnect at R·2^k consecutive timeouts). */
+    @Value("${bot.cashout.reconnect-after-timeouts:3}")
+    private int cashoutReconnectAfterTimeouts;
+
     /**
      * Amount credited by a single auto-deposit top-up, per environment. Defaults to
      * the value {@code Bot.deposit()} previously hardcoded, so an instance with no
@@ -2056,6 +2068,10 @@ public class BotGroupBehaviorService {
                 .behaviorConfig(behaviorConfig)
                 .zoneName(environment.resolveZoneName(game))
                 .watchdogTimeoutSeconds(watchdogTimeoutSeconds)
+                // Read only by CashoutBot (CASHOUT_BOT AD-9); inert for every other type.
+                .cashoutFrameTimeoutSeconds(cashoutFrameTimeoutSeconds)
+                .cashoutTimeoutBackoffSeconds(cashoutTimeoutBackoffSeconds)
+                .cashoutReconnectAfterTimeouts(cashoutReconnectAfterTimeouts)
                 .strategyId(strategyId)
                 .slotStrategyId(slotStrategyId)
                 // GATEWAY_REQUEST_BUDGET AD-8: how the bot's queued gateway requests learn that

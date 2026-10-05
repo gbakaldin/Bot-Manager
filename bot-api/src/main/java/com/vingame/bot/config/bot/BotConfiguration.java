@@ -82,6 +82,26 @@ public class BotConfiguration {
     long watchdogTimeoutSeconds;
 
     /**
+     * CASHOUT only ({@code bot.cashout.frame-timeout-seconds}, CASHOUT_BOT AD-9): silence on
+     * an in-flight cash-out bet, measured from its last frame, that abandons the bet as a
+     * timeout. {@code <= 0} (unset) means the bot's default, 20.
+     */
+    long cashoutFrameTimeoutSeconds;
+
+    /**
+     * CASHOUT only ({@code bot.cashout.timeout-backoff-seconds}, AD-9): the minimum wait
+     * before the next bet after a timeout. {@code <= 0} (unset) means the default, 30.
+     */
+    long cashoutTimeoutBackoffSeconds;
+
+    /**
+     * CASHOUT only ({@code bot.cashout.reconnect-after-timeouts}, AD-9): {@code R} of the
+     * reconnect ladder — reconnect at {@code R·2^k} consecutive timeouts, then every
+     * {@code R·32}. {@code <= 0} (unset) means the default, 3.
+     */
+    int cashoutReconnectAfterTimeouts;
+
+    /**
      * Strategy id assigned to this bot by the group's strategy mix at start.
      * <p>
      * Populated by {@code BotGroupBehaviorService.createSingleBot()} from the
