@@ -161,6 +161,36 @@ class EnvironmentZoneResolutionTest {
         assertThat(env.resolveZoneName(game)).isEqualTo("MyMiniZone");
     }
 
+    /**
+     * AVIATOR_BOT AD-14. Without it a crash bot authenticates into {@code Simms} and its
+     * subscribe is never answered.
+     */
+    @Test
+    @DisplayName("customZone=false + CRASH returns the default mini zone name (crash shares the mini zone)")
+    void resolveZoneName_usesDefaultWhenCustomZoneFalse_crash() {
+        Environment env = Environment.builder()
+                .customZone(false)
+                .miniZoneName(null)
+                .cardZoneName(null)
+                .build();
+        Game game = Game.builder().gameType(GameType.CRASH).pluginName("aviatorPlugin").offset(1700).build();
+
+        assertThat(env.resolveZoneName(game)).isEqualTo("MiniGame");
+    }
+
+    @Test
+    @DisplayName("customZone=true + CRASH returns the env's custom miniZoneName (crash shares the mini zone)")
+    void resolveZoneName_usesCustomWhenCustomZoneTrue_crash() {
+        Environment env = Environment.builder()
+                .customZone(true)
+                .miniZoneName("MyMiniZone")
+                .cardZoneName("UnusedCard")
+                .build();
+        Game game = Game.builder().gameType(GameType.CRASH).build();
+
+        assertThat(env.resolveZoneName(game)).isEqualTo("MyMiniZone");
+    }
+
     @ParameterizedTest(name = "{0} → \"Simms\" default")
     @EnumSource(value = GameType.class, names = {"UP_DOWN"})
     @DisplayName("UP_DOWN is treated as a card game (default Simms)")
