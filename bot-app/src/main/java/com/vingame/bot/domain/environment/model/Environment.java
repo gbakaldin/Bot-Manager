@@ -81,8 +81,8 @@ public class Environment {
      * ({@link #DEFAULT_MINI_ZONE_NAME} / {@link #DEFAULT_CARD_ZONE_NAME}).
      * <p>
      * A game is considered mini iff its game type is {@link GameType#BETTING_MINI},
-     * {@link GameType#SLOT} or {@link GameType#TAI_XIU} (slot and Tai Xiu games share
-     * the mini zone).
+     * {@link GameType#SLOT}, {@link GameType#TAI_XIU} or {@link GameType#CASHOUT} (slot,
+     * Tai Xiu and cash-out games share the mini zone).
      * If {@code game} or its game type is {@code null}, the card/default branch is taken —
      * the resolver never throws on null and never returns {@code null} on the default path.
      * <p>
@@ -97,7 +97,11 @@ public class Environment {
         boolean mini = game != null
                 && (game.getGameType() == GameType.BETTING_MINI
                     || game.getGameType() == GameType.SLOT
-                    || game.getGameType() == GameType.TAI_XIU);
+                    || game.getGameType() == GameType.TAI_XIU
+                    // CASHOUT_BOT AD-14: balloonPlugin / soccerPlugin live in the
+                    // MiniGame zone (captured [6,"MiniGame","balloonPlugin",…]). Missing
+                    // this sends the bots to Simms, where subscribe is never answered.
+                    || game.getGameType() == GameType.CASHOUT);
         if (customZone) {
             return mini ? miniZoneName : cardZoneName;
         }

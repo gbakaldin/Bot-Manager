@@ -130,6 +130,37 @@ class EnvironmentZoneResolutionTest {
         assertThat(env.resolveZoneName(game)).isEqualTo("MyMiniZone");
     }
 
+    /**
+     * CASHOUT_BOT AD-14. Without it a cash-out bot authenticates into {@code Simms},
+     * its subscribe is never answered and — since no bet is ever placed — no watchdog
+     * is armed either: the group just sits in AUTHENTICATING_CONNECTION.
+     */
+    @Test
+    @DisplayName("customZone=false + CASHOUT returns the default mini zone name (cash-out shares the mini zone)")
+    void resolveZoneName_usesDefaultWhenCustomZoneFalse_cashout() {
+        Environment env = Environment.builder()
+                .customZone(false)
+                .miniZoneName(null)
+                .cardZoneName(null)
+                .build();
+        Game game = Game.builder().gameType(GameType.CASHOUT).pluginName("balloonPlugin").offset(1500).build();
+
+        assertThat(env.resolveZoneName(game)).isEqualTo("MiniGame");
+    }
+
+    @Test
+    @DisplayName("customZone=true + CASHOUT returns the env's custom miniZoneName (cash-out shares the mini zone)")
+    void resolveZoneName_usesCustomWhenCustomZoneTrue_cashout() {
+        Environment env = Environment.builder()
+                .customZone(true)
+                .miniZoneName("MyMiniZone")
+                .cardZoneName("UnusedCard")
+                .build();
+        Game game = Game.builder().gameType(GameType.CASHOUT).build();
+
+        assertThat(env.resolveZoneName(game)).isEqualTo("MyMiniZone");
+    }
+
     @ParameterizedTest(name = "{0} → \"Simms\" default")
     @EnumSource(value = GameType.class, names = {"UP_DOWN"})
     @DisplayName("UP_DOWN is treated as a card game (default Simms)")
