@@ -9,7 +9,7 @@ import java.lang.annotation.Target;
 
 /**
  * Marks a message-types provider — a {@link GameMessageTypes},
- * {@link SlotMessageTypes}, {@link TaiXiuMessageTypes} or {@link CashoutMessageTypes} implementation — as the
+ * {@link SlotMessageTypes}, {@link TaiXiuMessageTypes}, {@link CashoutMessageTypes} or {@link CrashMessageTypes} implementation — as the
  * canonical provider for a game type and a set of <b>product code strings</b>.
  * Discovered at startup by {@code MessageTypesRegistry}, which is what replaced
  * {@code GameMessageTypesResolver}'s hardcoded {@code switch (productCode)}
