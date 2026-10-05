@@ -5,6 +5,7 @@ import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.nohu.NohuGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.win79.cashout.Win79CashoutMessageTypes;
+import com.vingame.bot.domain.bot.message.g4.win79.crash.Win79CrashMessageTypes;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
@@ -155,8 +156,40 @@ class MessageTypesRegistryStartupLogTest {
                         + "BETTING_MINI 4 products [097, 098, 116, 118], "
                         + "TAI_XIU 2 products [114, 116], "
                         + "SLOT provider SlotMessageTypesImpl, "
-                        + "CASHOUT 1 products [119]")
+                        + "CASHOUT 1 products [119], "
+                        + "CRASH 1 products [119]")
                 .doesNotContain("\n");
+    }
+
+    /**
+     * AVIATOR_BOT AD-5: the CRASH segment is appended after CASHOUT, which is now no
+     * longer last. Everything up to and including {@code CASHOUT 1 products [119]} is
+     * the pre-CRASH line, byte for byte (verification V-2).
+     */
+    @Test
+    @DisplayName("the CRASH segment is appended after CASHOUT; everything before it is the pre-CRASH line")
+    void crashSegmentIsAppendedAfterCashout() {
+        newFullRegistry();
+
+        String message = registryEvents().get(0).getMessage().getFormattedMessage();
+
+        assertThat(message)
+                .startsWith("MessageTypesRegistry initialized: "
+                        + "BETTING_MINI 4 products [097, 098, 116, 118], "
+                        + "TAI_XIU 2 products [114, 116], "
+                        + "SLOT provider SlotMessageTypesImpl, "
+                        + "CASHOUT 1 products [119]")
+                .endsWith("CASHOUT 1 products [119], CRASH 1 products [119]")
+                .doesNotContain("\n");
+    }
+
+    @Test
+    @DisplayName("with no CRASH provider the segment reads CRASH 0 products []")
+    void crashSegmentWithNoProvider() {
+        newMinimalRegistry();
+
+        assertThat(registryEvents().get(0).getMessage().getFormattedMessage())
+                .endsWith(", CASHOUT 0 products [], CRASH 0 products []");
     }
 
     /**
@@ -190,12 +223,13 @@ class MessageTypesRegistryStartupLogTest {
                         new NohuGameMessageTypes()),
                 List.of(new SlotMessageTypesImpl()),
                 List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()),
-                List.of(new Win79CashoutMessageTypes()));
+                List.of(new Win79CashoutMessageTypes()),
+                List.of(new Win79CrashMessageTypes()));
     }
 
     private static MessageTypesRegistry newMinimalRegistry() {
         return new MessageTypesRegistry(
-                List.of(new BomGameMessageTypes()), List.of(), List.of(), List.of());
+                List.of(new BomGameMessageTypes()), List.of(), List.of(), List.of(), List.of());
     }
 
     private List<LogEvent> registryEvents() {

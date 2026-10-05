@@ -28,7 +28,8 @@ import java.util.TreeSet;
  *
  * <p><b>The lookups stay disjoint on purpose.</b> (A fourth,
  * {@link #cashout(String)}, joined them for CASHOUT_BOT AD-3 — product-keyed, offset
- * CMDs from code 0, its own contract.) {@link #bettingMini(String)},
+ * CMDs from code 0, its own contract — and a fifth, {@link #crash(String)}, for
+ * AVIATOR_BOT AD-5, the same shape again.) {@link #bettingMini(String)},
  * {@link #slot()} and {@link #taiXiu(String)} return three unrelated interfaces
  * because the provider shapes genuinely differ (SLOT_MACHINE_BOT AD-4,
  * TAI_XIU_BOT AD-3/AD-4): betting-mini registers {@code CODE + offset} CMDs, slot and
@@ -94,11 +95,13 @@ public class MessageTypesRegistry {
      * @param slot        the single product-neutral SLOT provider, or {@code null} if
      *                    none was discovered.
      * @param cashout     product-code string → CASHOUT provider (CASHOUT_BOT AD-3).
+     * @param crash       product-code string → CRASH provider (AVIATOR_BOT AD-5).
      */
     private record Tables(Map<String, GameMessageTypes> bettingMini,
                           Map<String, TaiXiuMessageTypes> taiXiu,
                           SlotMessageTypes slot,
-                          Map<String, CashoutMessageTypes> cashout) {
+                          Map<String, CashoutMessageTypes> cashout,
+                          Map<String, CrashMessageTypes> crash) {
     }
 
     private final Tables tables;
@@ -106,12 +109,14 @@ public class MessageTypesRegistry {
     public MessageTypesRegistry(List<GameMessageTypes> bettingMiniProviders,
                                 List<SlotMessageTypes> slotProviders,
                                 List<TaiXiuMessageTypes> taiXiuProviders,
-                                List<CashoutMessageTypes> cashoutProviders) {
+                                List<CashoutMessageTypes> cashoutProviders,
+                                List<CrashMessageTypes> crashProviders) {
         this.tables = new Tables(
                 indexByProduct(bettingMiniProviders, GameType.BETTING_MINI),
                 indexByProduct(taiXiuProviders, GameType.TAI_XIU),
                 resolveProductNeutral(slotProviders),
-                indexByProduct(cashoutProviders, GameType.CASHOUT));
+                indexByProduct(cashoutProviders, GameType.CASHOUT),
+                indexByProduct(crashProviders, GameType.CRASH));
 
         // Tier-1 INFO: one line per JVM at application startup, the same shape and
         // justification as (Betting|Slot)StrategyFactory's "registered N strategies".
@@ -125,13 +130,16 @@ public class MessageTypesRegistry {
         //
         // The CASHOUT segment is appended LAST (CASHOUT_BOT AD-3): releasers diff the
         // existing segments against the previous deploy, so they stay byte-identical
-        // and in order, and the line stays a single line.
+        // and in order, and the line stays a single line. The CRASH segment follows
+        // it, last again, for the same reason (AVIATOR_BOT AD-5).
         log.info("MessageTypesRegistry initialized: BETTING_MINI {} products {}, "
-                        + "TAI_XIU {} products {}, SLOT provider {}, CASHOUT {} products {}",
+                        + "TAI_XIU {} products {}, SLOT provider {}, CASHOUT {} products {}, "
+                        + "CRASH {} products {}",
                 tables.bettingMini().size(), new TreeSet<>(tables.bettingMini().keySet()),
                 tables.taiXiu().size(), new TreeSet<>(tables.taiXiu().keySet()),
                 tables.slot() == null ? "none" : tables.slot().getClass().getSimpleName(),
-                tables.cashout().size(), new TreeSet<>(tables.cashout().keySet()));
+                tables.cashout().size(), new TreeSet<>(tables.cashout().keySet()),
+                tables.crash().size(), new TreeSet<>(tables.crash().keySet()));
     }
 
     /**
@@ -196,6 +204,20 @@ public class MessageTypesRegistry {
     }
 
     /**
+     * Resolve the {@link CrashMessageTypes} for a product code (AVIATOR_BOT AD-5).
+     * Product-keyed like {@link #cashout(String)}: 119 Avatar is the first crash brand.
+     *
+     * @param productCode {@code ProductCode.getCode()} of the bot's environment.
+     * @return the provider claiming that product.
+     * @throws IllegalArgumentException if {@code productCode} is null, or no provider
+     *                                  claims it (AD-20 text, contract
+     *                                  {@code CrashMessageTypes}).
+     */
+    public CrashMessageTypes crash(String productCode) {
+        return lookup(tables.crash(), productCode, "CrashMessageTypes");
+    }
+
+    /**
      * @return the product codes with a betting-mini provider, in discovery order.
      *         Used by {@code MessageTypesCoverageTest} (AD-19) for its inventory.
      */
@@ -215,6 +237,13 @@ public class MessageTypesRegistry {
      */
     public Set<String> registeredCashoutProducts() {
         return tables.cashout().keySet();
+    }
+
+    /**
+     * @return the product codes with a CRASH provider, in discovery order.
+     */
+    public Set<String> registeredCrashProducts() {
+        return tables.crash().keySet();
     }
 
     /**

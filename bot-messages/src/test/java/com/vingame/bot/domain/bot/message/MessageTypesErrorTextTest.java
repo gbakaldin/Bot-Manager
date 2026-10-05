@@ -38,7 +38,7 @@ class MessageTypesErrorTextTest {
     private static final MessageTypesRegistry REGISTRY = new MessageTypesRegistry(
             List.of(new BomGameMessageTypes()),
             List.of(new SlotMessageTypesImpl()),
-            List.of(new MiniGameTaiXiuMessageTypes()), List.of());
+            List.of(new MiniGameTaiXiuMessageTypes()), List.of(), List.of());
 
     @Test
     @DisplayName("betting-mini miss reads exactly as GameMessageTypesResolver's did")
@@ -104,5 +104,14 @@ class MessageTypesErrorTextTest {
         assertThat(REGISTRY.bettingMini("098")).isInstanceOf(BomGameMessageTypes.class);
         assertThat(REGISTRY.taiXiu("116")).isInstanceOf(MiniGameTaiXiuMessageTypes.class);
         assertThat(REGISTRY.slot()).isInstanceOf(SlotMessageTypesImpl.class);
+    }
+
+    @Test
+    @DisplayName("CRASH miss reads in the same AD-20 shape, naming CrashMessageTypes")
+    void crashMissText() {
+        assertThatThrownBy(() -> REGISTRY.crash("116"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("CrashMessageTypes not yet implemented for product code: 116."
+                        + " Please create a CrashMessageTypes implementation for this product.");
     }
 }

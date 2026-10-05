@@ -7,6 +7,7 @@ import com.vingame.bot.domain.bot.message.g2.bom.BomStartGameMd5Message;
 import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.nohu.NohuGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.win79.cashout.Win79CashoutMessageTypes;
+import com.vingame.bot.domain.bot.message.g4.win79.crash.Win79CrashMessageTypes;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
@@ -162,6 +163,32 @@ class MessageTypesRegistryTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("CashoutMessageTypes not yet implemented for product code: 116."
                         + " Please create a CashoutMessageTypes implementation for this product.");
+    }
+
+    /**
+     * AVIATOR_BOT AD-5: a fifth, product-keyed table. 119 resolves the Win79 Avatar
+     * provider with its two runners; 116 does not, in the AD-20 shape with the
+     * {@code CrashMessageTypes} contract name.
+     */
+    @Test
+    @DisplayName("crash(119) resolves the Win79 provider with 2 runners; crash(116) throws the AD-20 text")
+    void crashResolvesOnlyItsProduct() {
+        CrashMessageTypes crash = registry.crash(ProductCode.P_119.getCode());
+        assertThat(crash).isInstanceOf(Win79CrashMessageTypes.class);
+        assertThat(crash.runnerCount()).isEqualTo(2);
+        assertThatThrownBy(() -> registry.crash(ProductCode.P_116.getCode()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("CrashMessageTypes not yet implemented for product code: 116."
+                        + " Please create a CrashMessageTypes implementation for this product.");
+    }
+
+    @Test
+    @DisplayName("The scan registers exactly 119 for CRASH, and every CRASH bean declares gameType CRASH")
+    void crashScan() {
+        assertThat(registry.registeredCrashProducts())
+                .as("AVIATOR_BOT AD-5 — 119 Avatar only")
+                .containsExactly("119");
+        assertGameType(context.getBeansOfType(CrashMessageTypes.class).values(), GameType.CRASH);
     }
 
     /* ---- what the scan did and did not pick up ---- */

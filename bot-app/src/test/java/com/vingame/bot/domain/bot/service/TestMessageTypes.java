@@ -5,6 +5,7 @@ import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.nohu.NohuGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.win79.cashout.Win79CashoutMessageTypes;
+import com.vingame.bot.domain.bot.message.g4.win79.crash.Win79CrashMessageTypes;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
@@ -30,7 +31,8 @@ final class TestMessageTypes {
             List.of(new BomGameMessageTypes(), new TipGameMessageTypes(), new NohuGameMessageTypes()),
             List.of(new SlotMessageTypesImpl()),
             List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()),
-            List.of(new Win79CashoutMessageTypes()));
+            List.of(new Win79CashoutMessageTypes()),
+            List.of(new Win79CrashMessageTypes()));
 
     private TestMessageTypes() {
     }

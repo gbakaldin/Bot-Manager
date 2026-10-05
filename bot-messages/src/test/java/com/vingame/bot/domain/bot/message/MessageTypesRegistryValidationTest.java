@@ -3,6 +3,7 @@ package com.vingame.bot.domain.bot.message;
 import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.win79.cashout.Win79CashoutMessageTypes;
+import com.vingame.bot.domain.bot.message.g4.win79.crash.Win79CrashMessageTypes;
 import com.vingame.bot.domain.bot.message.slot.SlotMessage;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
@@ -72,6 +73,16 @@ class MessageTypesRegistryValidationTest {
     static class CashoutClaimingTaiXiu extends Win79CashoutMessageTypes {
     }
 
+    /** CRASH is product-keyed too (AVIATOR_BOT AD-5). */
+    @MessageTypesImpl(gameType = GameType.CRASH, products = {})
+    static class CrashWithNoProducts extends Win79CrashMessageTypes {
+    }
+
+    /** The likeliest copy-paste slip: a crash provider still annotated as the cash-out one. */
+    @MessageTypesImpl(gameType = GameType.CASHOUT, products = "119")
+    static class CrashClaimingCashout extends Win79CrashMessageTypes {
+    }
+
     @MessageTypesImpl(gameType = GameType.SLOT, products = "116")
     static class ProductScopedSlot extends SlotMessageTypesImpl {
     }
@@ -113,7 +124,7 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("a GameMessageTypes declaring SLOT is rejected, naming the class")
         void bettingMiniDeclaringSlotIsRejected() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
-                    List.of(new BettingMiniClaimingSlot()), List.of(), List.of(), List.of()))
+                    List.of(new BettingMiniClaimingSlot()), List.of(), List.of(), List.of(), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(BettingMiniClaimingSlot.class.getName())
                     .hasMessageContaining("declares gameType = SLOT")
@@ -124,7 +135,7 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("a TaiXiuMessageTypes declaring BETTING_MINI is rejected")
         void taiXiuDeclaringBettingMiniIsRejected() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
-                    List.of(), List.of(), List.of(new TaiXiuClaimingBettingMini()), List.of()))
+                    List.of(), List.of(), List.of(new TaiXiuClaimingBettingMini()), List.of(), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(TaiXiuClaimingBettingMini.class.getName())
                     .hasMessageContaining("TAI_XIU");
@@ -134,7 +145,7 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("a SlotMessageTypes declaring products is rejected — SLOT is product-neutral")
         void productScopedSlotIsRejected() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
-                    List.of(), List.of(new ProductScopedSlot()), List.of(), List.of()))
+                    List.of(), List.of(new ProductScopedSlot()), List.of(), List.of(), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(ProductScopedSlot.class.getName())
                     .hasMessageContaining("product-neutral");
@@ -149,7 +160,7 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("products = {} on a BETTING_MINI provider is rejected")
         void emptyProductsOnBettingMiniIsRejected() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
-                    List.of(new BettingMiniWithNoProducts()), List.of(), List.of(), List.of()))
+                    List.of(new BettingMiniWithNoProducts()), List.of(), List.of(), List.of(), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(BettingMiniWithNoProducts.class.getName())
                     .hasMessageContaining("declares no products");
@@ -159,7 +170,7 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("products = {} on a CASHOUT provider is rejected — it is not product-neutral")
         void emptyProductsOnCashoutIsRejected() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
-                    List.of(), List.of(), List.of(), List.of(new CashoutWithNoProducts())))
+                    List.of(), List.of(), List.of(), List.of(new CashoutWithNoProducts()), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(CashoutWithNoProducts.class.getName())
                     .hasMessageContaining("declares no products");
@@ -169,11 +180,32 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("a CashoutMessageTypes declaring TAI_XIU is rejected, naming the class")
         void cashoutDeclaringTaiXiuIsRejected() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
-                    List.of(), List.of(), List.of(), List.of(new CashoutClaimingTaiXiu())))
+                    List.of(), List.of(), List.of(), List.of(new CashoutClaimingTaiXiu()), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(CashoutClaimingTaiXiu.class.getName())
                     .hasMessageContaining("declares gameType = TAI_XIU")
                     .hasMessageContaining("CASHOUT");
+        }
+
+        @Test
+        @DisplayName("products = {} on a CRASH provider is rejected — it is not product-neutral")
+        void emptyProductsOnCrashIsRejected() {
+            assertThatThrownBy(() -> new MessageTypesRegistry(
+                    List.of(), List.of(), List.of(), List.of(), List.of(new CrashWithNoProducts())))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(CrashWithNoProducts.class.getName())
+                    .hasMessageContaining("declares no products");
+        }
+
+        @Test
+        @DisplayName("a CrashMessageTypes declaring CASHOUT is rejected, naming the class")
+        void crashDeclaringCashoutIsRejected() {
+            assertThatThrownBy(() -> new MessageTypesRegistry(
+                    List.of(), List.of(), List.of(), List.of(), List.of(new CrashClaimingCashout())))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining(CrashClaimingCashout.class.getName())
+                    .hasMessageContaining("declares gameType = CASHOUT")
+                    .hasMessageContaining("CRASH");
         }
     }
 
@@ -193,7 +225,7 @@ class MessageTypesRegistryValidationTest {
         void duplicateBettingMiniProductIsRejected() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
                     List.of(new BomGameMessageTypes(), new SecondClaimantFor097()),
-                    List.of(), List.of(), List.of()))
+                    List.of(), List.of(), List.of(), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("Duplicate")
                     .hasMessageContaining("097")
@@ -207,7 +239,7 @@ class MessageTypesRegistryValidationTest {
             assertThatThrownBy(() -> new MessageTypesRegistry(
                     List.of(),
                     List.of(new SlotMessageTypesImpl(), new SecondProductNeutralSlot()),
-                    List.of(), List.of()))
+                    List.of(), List.of(), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("Duplicate product-neutral")
                     .hasMessageContaining(SlotMessageTypesImpl.class.getName())
@@ -225,7 +257,7 @@ class MessageTypesRegistryValidationTest {
             MessageTypesRegistry registry = new MessageTypesRegistry(
                     List.of(new TipGameMessageTypes()),
                     List.of(new SlotMessageTypesImpl()),
-                    List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()), List.of());
+                    List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()), List.of(), List.of());
 
             assertThat(registry.bettingMini("116")).isInstanceOf(TipGameMessageTypes.class);
             assertThat(registry.taiXiu("116")).isInstanceOf(MiniGameTaiXiuMessageTypes.class);
@@ -263,7 +295,7 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("construction throws, naming the class and what it is missing")
         void unannotatedProviderIsRejected() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
-                    List.of(new UnannotatedBettingMini()), List.of(), List.of(), List.of()))
+                    List.of(new UnannotatedBettingMini()), List.of(), List.of(), List.of(), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(UnannotatedBettingMini.class.getName())
                     .hasMessageContaining("carries no @MessageTypesImpl");
@@ -277,7 +309,7 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("an unannotated SLOT provider is rejected too")
         void unannotatedSlotProviderIsRejected() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
-                    List.of(), List.of(new UnannotatedSlot()), List.of(), List.of()))
+                    List.of(), List.of(new UnannotatedSlot()), List.of(), List.of(), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining(UnannotatedSlot.class.getName())
                     .hasMessageContaining("carries no @MessageTypesImpl");
@@ -312,7 +344,7 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("a subclass of an annotated provider inherits its products")
         void subclassInheritsTheAnnotation() {
             MessageTypesRegistry registry = new MessageTypesRegistry(
-                    List.of(new InheritsBomAnnotation()), List.of(), List.of(), List.of());
+                    List.of(new InheritsBomAnnotation()), List.of(), List.of(), List.of(), List.of());
 
             assertThat(registry.registeredBettingMiniProducts()).containsExactly("097", "098");
             assertThat(registry.bettingMini("097")).isInstanceOf(InheritsBomAnnotation.class);
@@ -328,7 +360,7 @@ class MessageTypesRegistryValidationTest {
         void subclassAlongsideItsSuperclassIsADuplicate() {
             assertThatThrownBy(() -> new MessageTypesRegistry(
                     List.of(new BomGameMessageTypes(), new InheritsBomAnnotation()),
-                    List.of(), List.of(), List.of()))
+                    List.of(), List.of(), List.of(), List.of()))
                     .isInstanceOf(IllegalStateException.class)
                     .hasMessageContaining("Duplicate");
         }
@@ -350,7 +382,7 @@ class MessageTypesRegistryValidationTest {
         @DisplayName("IllegalStateException naming the annotation the deploy is missing")
         void slotWithoutProviderThrowsIllegalState() {
             MessageTypesRegistry registry = new MessageTypesRegistry(
-                    List.of(new BomGameMessageTypes()), List.of(), List.of(), List.of());
+                    List.of(new BomGameMessageTypes()), List.of(), List.of(), List.of(), List.of());
 
             assertThat(registry.hasSlotProvider()).isFalse();
             assertThatThrownBy(registry::slot)
@@ -362,7 +394,7 @@ class MessageTypesRegistryValidationTest {
         @Test
         @DisplayName("an empty registry still constructs — the throw is at lookup, not at refresh")
         void emptyRegistryConstructs() {
-            assertThatCode(() -> new MessageTypesRegistry(List.of(), List.of(), List.of(), List.of()))
+            assertThatCode(() -> new MessageTypesRegistry(List.of(), List.of(), List.of(), List.of(), List.of()))
                     .doesNotThrowAnyException();
         }
     }

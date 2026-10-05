@@ -90,7 +90,7 @@ class JackpotTaiXiuMessageTypesTest {
      */
     private static final MessageTypesRegistry REGISTRY = new MessageTypesRegistry(
             List.of(), List.of(),
-            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()), List.of());
+            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()), List.of(), List.of());
 
     @Test
     @DisplayName("taiXiu(114) returns the jackpot provider")

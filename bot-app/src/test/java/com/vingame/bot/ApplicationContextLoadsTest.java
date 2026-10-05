@@ -190,6 +190,8 @@ class ApplicationContextLoadsTest {
         // CASHOUT_BOT: the newest provider, so the one most at risk of being invisible to
         // Starter's scan. BotFactory's CASHOUT arm resolves it on every cash-out bot.
         assertThat(registry.registeredCashoutProducts()).contains("119");
+        // AVIATOR_BOT: now the newest provider, for the same reason.
+        assertThat(registry.registeredCrashProducts()).contains("119");
 
         // Resolution, not just registration — this is what BotFactory does per bot.
         assertThat(registry.bettingMini(ProductCode.P_116.getCode()))

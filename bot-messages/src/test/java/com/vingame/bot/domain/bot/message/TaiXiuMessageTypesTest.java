@@ -43,7 +43,7 @@ class TaiXiuMessageTypesTest {
     private static final MessageTypesRegistry REGISTRY = new MessageTypesRegistry(
             List.of(), List.of(),
             List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes(),
-                    new Win79TaiXiuMessageTypes()), List.of());
+                    new Win79TaiXiuMessageTypes()), List.of(), List.of());
 
     @Test
     @DisplayName("Base cmd literals are 1005/1002/1004 (inbound) + 1000 (bet, outbound)")
