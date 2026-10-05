@@ -10,6 +10,7 @@ import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.bot.core.BettingMiniGameBot;
 import com.vingame.bot.domain.bot.core.Bot;
+import com.vingame.bot.domain.bot.core.CashoutBot;
 import com.vingame.bot.domain.bot.core.SlotMachineBot;
 import com.vingame.bot.domain.bot.core.TaiXiuGameBot;
 import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
@@ -194,10 +195,14 @@ public class BotFactory {
                 taiXiuBot.setStrategyFactory(strategyFactory);
                 yield taiXiuBot;
             }
-            // CASHOUT: the message layer and registry lookup exist (CASHOUT_BOT
-            // Phase 1) but there is no bot yet — Phase 3 replaces this arm with
-            // CashoutBot + messageTypesRegistry.cashout(productKey(env)).
-            case CARD_GAME, UP_DOWN, CASHOUT ->
+            case CASHOUT -> {
+                // CASHOUT_BOT AD-3: product-keyed like Tai Xiu — 119 Balloon/Soccer only.
+                // No strategy factory: CASHOUT has no strategy family (AD-7).
+                CashoutBot cashoutBot = new CashoutBot();
+                cashoutBot.setMessageTypes(messageTypesRegistry.cashout(productKey(env)));
+                yield cashoutBot;
+            }
+            case CARD_GAME, UP_DOWN ->
                 throw new IllegalArgumentException("Game type not yet implemented: " + game.getGameType());
         };
 

@@ -187,6 +187,9 @@ class ApplicationContextLoadsTest {
         assertThat(registry.registeredBettingMiniProducts()).contains("097", "098", "114", "116", "118");
         assertThat(registry.registeredTaiXiuProducts()).contains("114", "116");
         assertThat(registry.hasSlotProvider()).isTrue();
+        // CASHOUT_BOT: the newest provider, so the one most at risk of being invisible to
+        // Starter's scan. BotFactory's CASHOUT arm resolves it on every cash-out bot.
+        assertThat(registry.registeredCashoutProducts()).contains("119");
 
         // Resolution, not just registration — this is what BotFactory does per bot.
         assertThat(registry.bettingMini(ProductCode.P_116.getCode()))

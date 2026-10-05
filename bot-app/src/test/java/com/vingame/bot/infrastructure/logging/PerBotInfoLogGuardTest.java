@@ -232,6 +232,11 @@ class PerBotInfoLogGuardTest {
                                 + "SlotMachineBot.java",
                         "bot-engine/src/main/java/com/vingame/bot/domain/bot/core/"
                                 + "TaiXiuGameBot.java",
+                        // CASHOUT_BOT AD-13: nothing per bet or per bot at INFO.
+                        "bot-engine/src/main/java/com/vingame/bot/domain/bot/core/"
+                                + "CashoutBot.java",
+                        "bot-engine/src/main/java/com/vingame/bot/domain/bot/core/"
+                                + "cashout/CashoutBetStateMachine.java",
                         "bot-strategies/src/main/java/com/vingame/bot/domain/bot/strategy/"
                                 + "RandomBehaviorStrategy.java",
                         "bot-strategies/src/main/java/com/vingame/bot/domain/bot/strategy/"
