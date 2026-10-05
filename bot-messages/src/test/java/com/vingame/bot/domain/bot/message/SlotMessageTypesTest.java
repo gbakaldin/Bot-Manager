@@ -55,7 +55,7 @@ class SlotMessageTypesTest {
     @DisplayName("registry.slot() returns a product-neutral SlotMessageTypes")
     void resolveSlotReturnsProvider() {
         SlotMessageTypes resolved = new MessageTypesRegistry(
-                List.of(), List.of(new SlotMessageTypesImpl()), List.of()).slot();
+                List.of(), List.of(new SlotMessageTypesImpl()), List.of(), List.of()).slot();
 
         assertThat(resolved).isInstanceOf(SlotMessageTypesImpl.class);
         assertThat(resolved.getTypeRegistrations()).hasSize(2);

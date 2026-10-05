@@ -27,7 +27,7 @@ final class TestMessageTypes {
     static final MessageTypesRegistry REGISTRY = new MessageTypesRegistry(
             List.of(new BomGameMessageTypes(), new TipGameMessageTypes(), new NohuGameMessageTypes()),
             List.of(new SlotMessageTypesImpl()),
-            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()));
+            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()), List.of());
 
     private TestMessageTypes() {
     }

@@ -93,7 +93,7 @@ class TaiXiuJackpotGameBotStreamTest {
      */
     private static final MessageTypesRegistry MESSAGE_TYPES = new MessageTypesRegistry(
             List.of(), List.of(),
-            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()));
+            List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()), List.of());
 
     private TaiXiuGameBot bot;
     private BotMetrics metrics;

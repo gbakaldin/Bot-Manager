@@ -131,7 +131,7 @@ class BotFactoryForGameResolutionTest {
         registry = new MessageTypesRegistry(
                 List.of(rik, new BomGameMessageTypes()),
                 List.of(new SlotMessageTypesImpl()),
-                List.of(new JackpotTaiXiuMessageTypes()));
+                List.of(new JackpotTaiXiuMessageTypes()), List.of());
     }
 
     private BotFactory factory() {

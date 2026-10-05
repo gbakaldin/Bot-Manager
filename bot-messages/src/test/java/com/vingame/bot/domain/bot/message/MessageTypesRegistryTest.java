@@ -6,6 +6,7 @@ import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g2.bom.BomStartGameMd5Message;
 import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.nohu.NohuGameMessageTypes;
+import com.vingame.bot.domain.bot.message.g4.win79.cashout.Win79CashoutMessageTypes;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
@@ -147,6 +148,22 @@ class MessageTypesRegistryTest {
                 .isInstanceOf(JackpotTaiXiuMessageTypes.class);
     }
 
+    /**
+     * CASHOUT_BOT AD-3: a fourth, product-keyed table. 119 resolves the Win79 provider;
+     * 116 — a live brand with betting-mini and Tai Xiu providers — does not, and says so
+     * in the AD-20 shape with the {@code CashoutMessageTypes} contract name.
+     */
+    @Test
+    @DisplayName("cashout(119) resolves the Win79 provider; cashout(116) throws the AD-20 text")
+    void cashoutResolvesOnlyItsProduct() {
+        assertThat(registry.cashout(ProductCode.P_119.getCode()))
+                .isInstanceOf(Win79CashoutMessageTypes.class);
+        assertThatThrownBy(() -> registry.cashout(ProductCode.P_116.getCode()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("CashoutMessageTypes not yet implemented for product code: 116."
+                        + " Please create a CashoutMessageTypes implementation for this product.");
+    }
+
     /* ---- what the scan did and did not pick up ---- */
 
     /**
@@ -172,6 +189,9 @@ class MessageTypesRegistryTest {
                 .containsExactlyInAnyOrder("097", "098", "114", "116", "118", "119");
         assertThat(registry.registeredTaiXiuProducts())
                 .containsExactlyInAnyOrder("114", "116", "119");
+        assertThat(registry.registeredCashoutProducts())
+                .as("CASHOUT_BOT AD-3 — 119 Balloon/Soccer only")
+                .containsExactly("119");
     }
 
     /**
@@ -201,6 +221,7 @@ class MessageTypesRegistryTest {
         assertGameType(context.getBeansOfType(GameMessageTypes.class).values(), GameType.BETTING_MINI);
         assertGameType(context.getBeansOfType(SlotMessageTypes.class).values(), GameType.SLOT);
         assertGameType(context.getBeansOfType(TaiXiuMessageTypes.class).values(), GameType.TAI_XIU);
+        assertGameType(context.getBeansOfType(CashoutMessageTypes.class).values(), GameType.CASHOUT);
     }
 
     private static void assertGameType(Iterable<?> beans, GameType expected) {

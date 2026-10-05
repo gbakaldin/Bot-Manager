@@ -4,6 +4,7 @@ import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
 import com.vingame.bot.domain.bot.message.g2.bom.BomGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g4.nohu.NohuGameMessageTypes;
+import com.vingame.bot.domain.bot.message.g4.win79.cashout.Win79CashoutMessageTypes;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.taixiu.JackpotTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
@@ -136,6 +137,29 @@ class MessageTypesRegistryStartupLogTest {
     }
 
     /**
+     * CASHOUT_BOT AD-3: the CASHOUT segment is <b>appended</b>. The releaser diffs this
+     * line against the previous deploy (verification V-2), so everything before the new
+     * segment must be byte-identical to the pre-CASHOUT format and in the same order,
+     * and the whole thing must stay one line.
+     */
+    @Test
+    @DisplayName("the CASHOUT segment is appended last; the existing segments are unchanged")
+    void cashoutSegmentIsAppendedAfterTheExistingOnes() {
+        newFullRegistry();
+
+        String message = registryEvents().get(0).getMessage().getFormattedMessage();
+
+        assertThat(message)
+                .as("pre-CASHOUT prefix, byte for byte, then the new trailing segment")
+                .isEqualTo("MessageTypesRegistry initialized: "
+                        + "BETTING_MINI 4 products [097, 098, 116, 118], "
+                        + "TAI_XIU 2 products [114, 116], "
+                        + "SLOT provider SlotMessageTypesImpl, "
+                        + "CASHOUT 1 products [119]")
+                .doesNotContain("\n");
+    }
+
+    /**
      * The load-bearing half. A future contributor adding a per-product line inside the
      * registration loop would still leave the test above green (it constructs one
      * registry and would just see more events — caught) — but more importantly, this
@@ -165,12 +189,13 @@ class MessageTypesRegistryStartupLogTest {
                 List.of(new BomGameMessageTypes(), new TipGameMessageTypes(),
                         new NohuGameMessageTypes()),
                 List.of(new SlotMessageTypesImpl()),
-                List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()));
+                List.of(new MiniGameTaiXiuMessageTypes(), new JackpotTaiXiuMessageTypes()),
+                List.of(new Win79CashoutMessageTypes()));
     }
 
     private static MessageTypesRegistry newMinimalRegistry() {
         return new MessageTypesRegistry(
-                List.of(new BomGameMessageTypes()), List.of(), List.of());
+                List.of(new BomGameMessageTypes()), List.of(), List.of(), List.of());
     }
 
     private List<LogEvent> registryEvents() {

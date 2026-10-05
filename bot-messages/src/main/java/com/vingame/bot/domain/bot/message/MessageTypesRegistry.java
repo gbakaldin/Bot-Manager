@@ -26,7 +26,9 @@ import java.util.TreeSet;
  * "not yet implemented" inventory inside {@code MessageTypesCoverageTest}, which
  * AD-19 puts there deliberately.
  *
- * <p><b>The three lookups stay disjoint on purpose.</b> {@link #bettingMini(String)},
+ * <p><b>The lookups stay disjoint on purpose.</b> (A fourth,
+ * {@link #cashout(String)}, joined them for CASHOUT_BOT AD-3 — product-keyed, offset
+ * CMDs from code 0, its own contract.) {@link #bettingMini(String)},
  * {@link #slot()} and {@link #taiXiu(String)} return three unrelated interfaces
  * because the provider shapes genuinely differ (SLOT_MACHINE_BOT AD-4,
  * TAI_XIU_BOT AD-3/AD-4): betting-mini registers {@code CODE + offset} CMDs, slot and
@@ -91,21 +93,25 @@ public class MessageTypesRegistry {
      * @param taiXiu      product-code string → Tai Xiu provider.
      * @param slot        the single product-neutral SLOT provider, or {@code null} if
      *                    none was discovered.
+     * @param cashout     product-code string → CASHOUT provider (CASHOUT_BOT AD-3).
      */
     private record Tables(Map<String, GameMessageTypes> bettingMini,
                           Map<String, TaiXiuMessageTypes> taiXiu,
-                          SlotMessageTypes slot) {
+                          SlotMessageTypes slot,
+                          Map<String, CashoutMessageTypes> cashout) {
     }
 
     private final Tables tables;
 
     public MessageTypesRegistry(List<GameMessageTypes> bettingMiniProviders,
                                 List<SlotMessageTypes> slotProviders,
-                                List<TaiXiuMessageTypes> taiXiuProviders) {
+                                List<TaiXiuMessageTypes> taiXiuProviders,
+                                List<CashoutMessageTypes> cashoutProviders) {
         this.tables = new Tables(
                 indexByProduct(bettingMiniProviders, GameType.BETTING_MINI),
                 indexByProduct(taiXiuProviders, GameType.TAI_XIU),
-                resolveProductNeutral(slotProviders));
+                resolveProductNeutral(slotProviders),
+                indexByProduct(cashoutProviders, GameType.CASHOUT));
 
         // Tier-1 INFO: one line per JVM at application startup, the same shape and
         // justification as (Betting|Slot)StrategyFactory's "registered N strategies".
@@ -116,11 +122,16 @@ public class MessageTypesRegistry {
         // stable — the TAI_XIU pair really does render as both [114, 116] and
         // [116, 114] depending on which context built the registry, which makes the
         // smoke string un-diffable against a previous deploy for no benefit.
+        //
+        // The CASHOUT segment is appended LAST (CASHOUT_BOT AD-3): releasers diff the
+        // existing segments against the previous deploy, so they stay byte-identical
+        // and in order, and the line stays a single line.
         log.info("MessageTypesRegistry initialized: BETTING_MINI {} products {}, "
-                        + "TAI_XIU {} products {}, SLOT provider {}",
+                        + "TAI_XIU {} products {}, SLOT provider {}, CASHOUT {} products {}",
                 tables.bettingMini().size(), new TreeSet<>(tables.bettingMini().keySet()),
                 tables.taiXiu().size(), new TreeSet<>(tables.taiXiu().keySet()),
-                tables.slot() == null ? "none" : tables.slot().getClass().getSimpleName());
+                tables.slot() == null ? "none" : tables.slot().getClass().getSimpleName(),
+                tables.cashout().size(), new TreeSet<>(tables.cashout().keySet()));
     }
 
     /**
@@ -170,6 +181,21 @@ public class MessageTypesRegistry {
     }
 
     /**
+     * Resolve the {@link CashoutMessageTypes} for a product code (CASHOUT_BOT AD-3).
+     * Product-keyed like {@link #taiXiu(String)}: 119 is the only brand known to run
+     * the cash-out plugins, and the bet body looks brand-specific.
+     *
+     * @param productCode {@code ProductCode.getCode()} of the bot's environment.
+     * @return the provider claiming that product.
+     * @throws IllegalArgumentException if {@code productCode} is null, or no provider
+     *                                  claims it (AD-20 text, contract
+     *                                  {@code CashoutMessageTypes}).
+     */
+    public CashoutMessageTypes cashout(String productCode) {
+        return lookup(tables.cashout(), productCode, "CashoutMessageTypes");
+    }
+
+    /**
      * @return the product codes with a betting-mini provider, in discovery order.
      *         Used by {@code MessageTypesCoverageTest} (AD-19) for its inventory.
      */
@@ -182,6 +208,13 @@ public class MessageTypesRegistry {
      */
     public Set<String> registeredTaiXiuProducts() {
         return tables.taiXiu().keySet();
+    }
+
+    /**
+     * @return the product codes with a CASHOUT provider, in discovery order.
+     */
+    public Set<String> registeredCashoutProducts() {
+        return tables.cashout().keySet();
     }
 
     /**

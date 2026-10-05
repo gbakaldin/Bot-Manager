@@ -67,6 +67,14 @@ class MessageTypesCoverageTest {
             "066", "097", "098", "103", "105", "118", "222");
 
     /**
+     * Products with no {@code CASHOUT} provider — every product except 119, the only
+     * brand known to run {@code balloonPlugin} / {@code soccerPlugin}
+     * (CASHOUT_BOT AD-3).
+     */
+    private static final Set<String> CASHOUT_NOT_YET_IMPLEMENTED = Set.of(
+            "066", "097", "098", "103", "105", "114", "116", "118", "222");
+
+    /**
      * Game types that have no message-types lookup at all. {@code BotFactory}'s own
      * {@code switch (game.getGameType())} — which selects a <em>bot class</em>, not a
      * product implementation, and therefore stays a switch — rejects these with
@@ -75,7 +83,7 @@ class MessageTypesCoverageTest {
      * decision rather than defaulting to silence.
      */
     private static final Set<GameType> GAME_TYPES_WITHOUT_A_LOOKUP =
-            Set.of(GameType.CARD_GAME, GameType.UP_DOWN, GameType.CASHOUT);
+            Set.of(GameType.CARD_GAME, GameType.UP_DOWN);
 
     private static AnnotationConfigApplicationContext context;
     private static MessageTypesRegistry registry;
@@ -111,6 +119,11 @@ class MessageTypesCoverageTest {
                     () -> registry.taiXiu(code),
                     "TaiXiuMessageTypes");
 
+            assertResolvesOrIsListed(product, GameType.CASHOUT,
+                    CASHOUT_NOT_YET_IMPLEMENTED.contains(code),
+                    () -> registry.cashout(code),
+                    "CashoutMessageTypes");
+
             // SLOT is product-neutral (AD-17): one provider serves every product, so
             // there is no per-product arm to be missing and no inventory to keep.
             assertThat(registry.slot())
@@ -133,12 +146,15 @@ class MessageTypesCoverageTest {
 
         assertThat(BETTING_MINI_NOT_YET_IMPLEMENTED).isSubsetOf(allCodes);
         assertThat(TAI_XIU_NOT_YET_IMPLEMENTED).isSubsetOf(allCodes);
+        assertThat(CASHOUT_NOT_YET_IMPLEMENTED).isSubsetOf(allCodes);
 
         assertThat(registry.registeredBettingMiniProducts())
                 .as("a registered product must not also be listed as not-yet-implemented")
                 .doesNotContainAnyElementsOf(BETTING_MINI_NOT_YET_IMPLEMENTED);
         assertThat(registry.registeredTaiXiuProducts())
                 .doesNotContainAnyElementsOf(TAI_XIU_NOT_YET_IMPLEMENTED);
+        assertThat(registry.registeredCashoutProducts())
+                .doesNotContainAnyElementsOf(CASHOUT_NOT_YET_IMPLEMENTED);
 
         // Union covers everything: registered ∪ not-yet == every ProductCode.
         Set<String> bettingMiniCovered = new LinkedHashSet<>(registry.registeredBettingMiniProducts());
@@ -154,17 +170,26 @@ class MessageTypesCoverageTest {
                 .as("TAI_XIU coverage — a new ProductCode must be given a provider "
                         + "or added to TAI_XIU_NOT_YET_IMPLEMENTED")
                 .containsExactlyInAnyOrderElementsOf(allCodes);
+
+        Set<String> cashoutCovered = new LinkedHashSet<>(registry.registeredCashoutProducts());
+        cashoutCovered.addAll(CASHOUT_NOT_YET_IMPLEMENTED);
+        assertThat(cashoutCovered)
+                .as("CASHOUT coverage — a new ProductCode must be given a provider "
+                        + "or added to CASHOUT_NOT_YET_IMPLEMENTED")
+                .containsExactlyInAnyOrderElementsOf(allCodes);
     }
 
     /**
      * The other half of the lost exhaustiveness: a new {@link GameType} constant.
-     * Three of the six have a registry lookup; the other three are named in
+     * Four of the six have a registry lookup (CASHOUT joined for CASHOUT_BOT AD-3 —
+     * its lookup exists before its bot does); the other two are named in
      * {@link #GAME_TYPES_WITHOUT_A_LOOKUP}. A seventh belongs in one column or the other.
      */
     @Test
     @DisplayName("Every GameType either has a registry lookup or is explicitly listed as having none")
     void everyGameTypeIsClassified() {
-        Set<GameType> withLookup = Set.of(GameType.BETTING_MINI, GameType.SLOT, GameType.TAI_XIU);
+        Set<GameType> withLookup = Set.of(GameType.BETTING_MINI, GameType.SLOT, GameType.TAI_XIU,
+                GameType.CASHOUT);
 
         assertThat(withLookup).doesNotContainAnyElementsOf(GAME_TYPES_WITHOUT_A_LOOKUP);
 
@@ -195,6 +220,8 @@ class MessageTypesCoverageTest {
                 .hasSize(products - BETTING_MINI_NOT_YET_IMPLEMENTED.size());
         assertThat(registry.registeredTaiXiuProducts())
                 .hasSize(products - TAI_XIU_NOT_YET_IMPLEMENTED.size());
+        assertThat(registry.registeredCashoutProducts())
+                .hasSize(products - CASHOUT_NOT_YET_IMPLEMENTED.size());
         assertThat(registry.hasSlotProvider()).isTrue();
     }
 

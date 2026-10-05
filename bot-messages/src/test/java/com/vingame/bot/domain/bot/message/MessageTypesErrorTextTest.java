@@ -38,7 +38,7 @@ class MessageTypesErrorTextTest {
     private static final MessageTypesRegistry REGISTRY = new MessageTypesRegistry(
             List.of(new BomGameMessageTypes()),
             List.of(new SlotMessageTypesImpl()),
-            List.of(new MiniGameTaiXiuMessageTypes()));
+            List.of(new MiniGameTaiXiuMessageTypes()), List.of());
 
     @Test
     @DisplayName("betting-mini miss reads exactly as GameMessageTypesResolver's did")
@@ -56,6 +56,19 @@ class MessageTypesErrorTextTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("TaiXiuMessageTypes not yet implemented for product code: 097."
                         + " Please create a TaiXiuMessageTypes implementation for this product.");
+    }
+
+    /** CASHOUT_BOT AD-3: the fourth lookup misses in the same AD-20 shape, naming its own contract. */
+    @Test
+    @DisplayName("CASHOUT miss reads in the same AD-20 shape, naming CashoutMessageTypes")
+    void cashoutMissText() {
+        assertThatThrownBy(() -> REGISTRY.cashout("116"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("CashoutMessageTypes not yet implemented for product code: 116."
+                        + " Please create a CashoutMessageTypes implementation for this product.");
+        assertThatThrownBy(() -> REGISTRY.cashout(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("ProductCode cannot be null");
     }
 
     @Test
