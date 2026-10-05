@@ -194,7 +194,10 @@ public class BotFactory {
                 taiXiuBot.setStrategyFactory(strategyFactory);
                 yield taiXiuBot;
             }
-            case CARD_GAME, UP_DOWN ->
+            // CASHOUT: the message layer and registry lookup exist (CASHOUT_BOT
+            // Phase 1) but there is no bot yet — Phase 3 replaces this arm with
+            // CashoutBot + messageTypesRegistry.cashout(productKey(env)).
+            case CARD_GAME, UP_DOWN, CASHOUT ->
                 throw new IllegalArgumentException("Game type not yet implemented: " + game.getGameType());
         };
 

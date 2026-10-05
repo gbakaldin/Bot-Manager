@@ -70,12 +70,12 @@ class MessageTypesCoverageTest {
      * Game types that have no message-types lookup at all. {@code BotFactory}'s own
      * {@code switch (game.getGameType())} — which selects a <em>bot class</em>, not a
      * product implementation, and therefore stays a switch — rejects these with
-     * "Game type not yet implemented". Listed here so that adding a sixth
+     * "Game type not yet implemented". Listed here so that adding a new
      * {@link GameType} fails {@link #everyGameTypeIsClassified()} and forces the
      * decision rather than defaulting to silence.
      */
     private static final Set<GameType> GAME_TYPES_WITHOUT_A_LOOKUP =
-            Set.of(GameType.CARD_GAME, GameType.UP_DOWN);
+            Set.of(GameType.CARD_GAME, GameType.UP_DOWN, GameType.CASHOUT);
 
     private static AnnotationConfigApplicationContext context;
     private static MessageTypesRegistry registry;
@@ -158,8 +158,8 @@ class MessageTypesCoverageTest {
 
     /**
      * The other half of the lost exhaustiveness: a new {@link GameType} constant.
-     * Three of the five have a registry lookup; the other two are named in
-     * {@link #GAME_TYPES_WITHOUT_A_LOOKUP}. A sixth belongs in one column or the other.
+     * Three of the six have a registry lookup; the other three are named in
+     * {@link #GAME_TYPES_WITHOUT_A_LOOKUP}. A seventh belongs in one column or the other.
      */
     @Test
     @DisplayName("Every GameType either has a registry lookup or is explicitly listed as having none")
