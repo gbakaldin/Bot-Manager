@@ -585,6 +585,33 @@ mechanism was never missing; only the trigger was.
   can sit at 79% DEAD forever without being DEAD, so it is not a recovery candidate;
   `EnvironmentDeadBotRatioHigh` is the signal for that shape. Unchanged by this feature.
 
+### Crash bot — `GameType.CRASH` / `CrashBot`
+
+`docs/plans/AVIATOR_BOT.md` (119 Avatar, `aviatorPlugin`). One `Game` row, shared rounds,
+several runners; event-driven over one `CrashRoundStateMachine` (one CAS, no side flags).
+
+- **The runner is protocol metadata, not a `Game` field** (AD-2): `CrashMessageTypes` says
+  how many there are; 119 has eid 1 = Jake (`jOdd`), eid 2 = Neytiri (`nOdd`). The stake,
+  target and eid are drawn once per bet and frozen.
+- **Check the crashed flag before the multiplier** (F-1). A crashed runner's value freezes
+  at a real number that can be >= the target (2.86 vs 2.85), so the cash-out gate is
+  `!crashedFor(eid) && multiplierFor(eid) >= target`. A cash-out decided on the last tick
+  and refused after the crash records `crash` — correct, not an error.
+- **Never bet off the snapshot** (AD-12). The subscribe reply only resets the machine; the
+  first bet is on the next round start, scheduled 0-4.5 s after it. Ticks send the cash-out.
+- **Silence watch armed in `onStart`, not on the subscribe reply** (AD-9), so a *refused*
+  subscribe is caught: one WARN per silence episode with `subscribed=false`, reconnects at
+  1, 2, 4, 8, 16, 32 silent windows then every 32 (window = `bot.watchdog.timeout.seconds`,
+  180 s). **CASHOUT's watchdog does not catch a refused subscribe** — it is per-bet, armed
+  at bet send, and a refused subscribe sends no bet. Earlier drafts claimed otherwise.
+- **`bot_crash_bets_total{outcome=cashout|crash|unacked}`**, pre-registered at 0 in
+  `initializeSubclass` under the same MDC as the increments, so `CrashBetsUnacked` (> 50%
+  unacked for 15 m, internal) fires on the first occurrence. Placed = counted on the 1702
+  ack; winnings = the 1703 `wm` (gross). A reconnect abandons a live bet **without** an
+  outcome (do not invent one); a stale 1707 is ignored.
+- 119 staging crashes at fixed points (2.86 / 11.59), so **staging RTP is meaningless**.
+  Run it on the Club env (`websocket_mini`), not the proxy env.
+
 ### Token Naming Reference
 
 The same token is called different things in different contexts — this is a known mess:
