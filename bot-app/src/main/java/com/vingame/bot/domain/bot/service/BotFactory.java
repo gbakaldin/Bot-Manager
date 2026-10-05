@@ -11,6 +11,7 @@ import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.bot.core.BettingMiniGameBot;
 import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.CashoutBot;
+import com.vingame.bot.domain.bot.core.CrashBot;
 import com.vingame.bot.domain.bot.core.SlotMachineBot;
 import com.vingame.bot.domain.bot.core.TaiXiuGameBot;
 import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
@@ -202,10 +203,14 @@ public class BotFactory {
                 cashoutBot.setMessageTypes(messageTypesRegistry.cashout(productKey(env)));
                 yield cashoutBot;
             }
-            // CRASH: the message layer and registry lookup exist (AVIATOR_BOT Phase 1)
-            // but there is no bot yet — Phase 3 replaces this with CrashBot +
-            // messageTypesRegistry.crash(productKey(env)).
-            case CARD_GAME, UP_DOWN, CRASH ->
+            case CRASH -> {
+                // AVIATOR_BOT AD-5: product-keyed like CASHOUT — 119 Avatar only. No strategy
+                // factory: CRASH has no strategy family in v1 (AD-7).
+                CrashBot crashBot = new CrashBot();
+                crashBot.setMessageTypes(messageTypesRegistry.crash(productKey(env)));
+                yield crashBot;
+            }
+            case CARD_GAME, UP_DOWN ->
                 throw new IllegalArgumentException("Game type not yet implemented: " + game.getGameType());
         };
 

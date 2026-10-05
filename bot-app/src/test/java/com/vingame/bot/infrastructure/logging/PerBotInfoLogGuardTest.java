@@ -237,6 +237,13 @@ class PerBotInfoLogGuardTest {
                                 + "CashoutBot.java",
                         "bot-engine/src/main/java/com/vingame/bot/domain/bot/core/"
                                 + "cashout/CashoutBetStateMachine.java",
+                        // AVIATOR_BOT AD-13: nothing per bot, per round or per bet at INFO.
+                        "bot-engine/src/main/java/com/vingame/bot/domain/bot/core/"
+                                + "CrashBot.java",
+                        "bot-engine/src/main/java/com/vingame/bot/domain/bot/core/"
+                                + "crash/CrashRoundStateMachine.java",
+                        "bot-engine/src/main/java/com/vingame/bot/domain/bot/core/"
+                                + "crash/RoundSilenceWatch.java",
                         "bot-strategies/src/main/java/com/vingame/bot/domain/bot/strategy/"
                                 + "RandomBehaviorStrategy.java",
                         "bot-strategies/src/main/java/com/vingame/bot/domain/bot/strategy/"
