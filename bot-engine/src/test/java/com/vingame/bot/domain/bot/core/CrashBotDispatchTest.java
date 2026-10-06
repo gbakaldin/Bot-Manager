@@ -59,6 +59,7 @@ import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 /**
  * AVIATOR_BOT Phase 3: {@link CrashBot} driven by hand — no scenario engine, no socket —
@@ -151,6 +152,7 @@ class CrashBotDispatchTest {
     void setUp() {
         registry = new SimpleMeterRegistry();
         channel = mock(VingameWebSocketClient.class);
+        when(channel.isOpen()).thenReturn(true); // a live socket, as in production (review B3 gate)
         // Bot.initialize sets the MDC before initializeSubclass; the fixture does the same and
         // keeps it, so increments land on the series pre-registration created.
         BotMdc.set("group-crash", 1, "env-119", "119", "CRASH", "g-aviator", "Aviator", "crashbot1");

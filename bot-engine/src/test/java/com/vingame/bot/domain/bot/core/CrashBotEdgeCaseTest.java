@@ -39,7 +39,6 @@ import org.apache.logging.log4j.core.config.LoggerConfig;
 import org.apache.logging.log4j.core.layout.PatternLayout;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -60,6 +59,8 @@ import java.util.function.LongSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.doAnswer;
@@ -669,7 +670,6 @@ class CrashBotEdgeCaseTest {
      * "sends" to a closed client.
      */
     @Test
-    @Disabled("AVIATOR_BOT review B3 (open): the bet task outlives logout()/client close — enable with the fix")
     @DisplayName("B3: a bet task that fires after logout() closed the client neither debits nor sends")
     void betTaskAfterLogout() {
         bot.client = channel;
@@ -751,6 +751,57 @@ class CrashBotEdgeCaseTest {
         java.lang.reflect.Field f = Bot.class.getDeclaredField("reconnecting");
         f.setAccessible(true);
         ((java.util.concurrent.atomic.AtomicBoolean) f.get(bot)).set(value);
+    }
+
+    @Test
+    @DisplayName("B3: a bet task that fires after a full reconnect closed the channel neither debits nor sends")
+    void betTaskAfterChannelClosed() {
+        subscribe();
+        random.longs.addLast(2_000L);
+        roundStart(SID);
+        Scheduled task = last();
+
+        when(channel.isOpen()).thenReturn(false); // triggerFullReconnect's closeQuietly(client)
+        now.addAndGet(task.delayMs());
+        random.plan(10_000L, 240L, JAKE);
+        task.task().run();
+
+        verify(channel, never()).send(anyString());
+        assertThat(bot.getExpectedBalance()).isEqualTo(START_BALANCE);
+        assertThat(bot.machine().phase()).isEqualTo(Phase.OPEN);
+        assertThat(count(BotMetrics.BOT_BETS_PLACED_TOTAL)).isZero();
+    }
+
+    @Test
+    @DisplayName("B3: logout() cancels the pending bet task")
+    void logoutCancelsBetTask() {
+        bot.client = channel;
+        subscribe();
+        random.longs.addLast(2_000L);
+        roundStart(SID);
+        Scheduled task = last();
+
+        bot.logout();
+
+        verify(task.future()).cancel(false);
+    }
+
+    @Test
+    @DisplayName("S1: schedule() racing the scheduler's shutdown returns null instead of throwing into the frame handler")
+    void scheduleAfterShutdownRace() throws Exception {
+        CrashBot real = new CrashBot();
+        java.lang.reflect.Field f = CrashBot.class.getDeclaredField("scheduler");
+        f.setAccessible(true);
+        java.util.concurrent.ScheduledExecutorService rejecting =
+                mock(java.util.concurrent.ScheduledExecutorService.class);
+        when(rejecting.isShutdown()).thenReturn(false); // passed the check, then shut down
+        when(rejecting.schedule(any(Runnable.class), anyLong(), any()))
+                .thenThrow(new java.util.concurrent.RejectedExecutionException("shut down"));
+        f.set(real, rejecting);
+
+        AtomicReference<Object> result = new AtomicReference<>(new Object());
+        assertThatCode(() -> result.set(real.schedule(() -> { }, 10L))).doesNotThrowAnyException();
+        assertThat(result.get()).isNull();
     }
 
     // ================================================================== reconnect mid-bet

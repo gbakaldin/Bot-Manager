@@ -36,6 +36,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Random;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -385,9 +386,23 @@ public class CrashBot extends Bot {
     /**
      * The one-shot bet task (AD-10), fired at the round's {@code betAt}. Package-private as a
      * test seam.
+     * <p>
+     * <b>A closed channel places nothing</b> (review B3). The task lives on the bot's own
+     * scheduler, not on the client, so closing the client does not kill it: periodic logout
+     * ({@code logout()} → sleep → {@code restart()}) and a full reconnect both close the
+     * channel while a round's bet delay may still be running. Placing then would debit the
+     * local balance for a frame ws-parser drops, and leave a PLACED bet the next subscribe
+     * abandons. So the check runs before {@code tryPlace}: no CAS, no debit, no send. An
+     * <em>unbound</em> channel ({@code null}) is not this case and still goes through
+     * {@link #send}'s failure path.
      */
     void placeBet(long sid) {
         if (isStopped()) return;
+        VingameWebSocketClient channel = sendChannel;
+        if (channel != null && !channel.isOpen()) {
+            log.trace("Bot {}: send channel closed — no bet for round {}", getUserName(), sid);
+            return;
+        }
         if (sessionCheckInProgress.get()) {
             log.trace("Bot {}: session check in progress — skipping round {}", getUserName(), sid);
             return;
@@ -458,12 +473,22 @@ public class CrashBot extends Bot {
     /**
      * Schedule on the bot's single scheduler, or return {@code null} once it is shut down.
      * Package-private so a test can run tasks by hand.
+     * <p>
+     * The {@code isShutdown()} test is check-then-act against {@link #cleanup()}'s
+     * {@code shutdownNow()} (review S1): a frame handled on an inbound worker while the group
+     * stops can lose that race. The rejection is caught here, quietly, because a frame
+     * handler must not throw into ws-parser's processor.
      */
     ScheduledFuture<?> schedule(Runnable task, long delayMs) {
         if (scheduler == null || scheduler.isShutdown()) {
             return null;
         }
-        return scheduler.schedule(task, Math.max(1L, delayMs), MILLISECONDS);
+        try {
+            return scheduler.schedule(task, Math.max(1L, delayMs), MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            log.trace("Bot {}: scheduler shut down — task not scheduled", getUserName());
+            return null;
+        }
     }
 
     private void scheduleBet(long sid, long delayMs) {
@@ -609,6 +634,17 @@ public class CrashBot extends Bot {
             // The silence COUNT is deliberately kept (AD-9); only the subscribe flag resets.
             watch.clearSubscribed();
         }
+    }
+
+    /**
+     * Also cancels the pending bet task (review B3): {@code logout()} and {@code cleanup()}
+     * both close the client through here, and a bet task must not outlive it. The machine is
+     * left alone — the next subscribe reply resets it.
+     */
+    @Override
+    public void stop() {
+        cancelBetTask();
+        super.stop();
     }
 
     @Override
