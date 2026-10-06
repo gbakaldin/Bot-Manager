@@ -37,8 +37,8 @@
          engine/plugin boundary (D-2) is a compiler error, not a convention. The
          engine tests still need real strategies and providers behind the
          registries. Do not widen this scope to make something compile; move the
-         class to the side the D-2 rule puts it on. The enforcer below bans
-         compile/provided outright. -->
+         class to the side the D-2 rule puts it on. The enforcer (root pom)
+         bans compile/provided/system, and this pom also bans runtime. -->
     <dependency>
       <groupId>com.mercury</groupId>
       <artifactId>bot-strategies</artifactId>
@@ -132,9 +132,34 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
       </plugin>
+      <!-- On top of the root's compile/provided/system ban (inherited), bot-engine
+           must not take a plugin module at RUNTIME either: a runtime dependency here
+           propagates to bot-app transitively, so once Phase 4c moves bot-app's own
+           plugin dependencies to `test`, an engine runtime dependency would silently
+           put the plugin jars back into BOOT-INF/lib (qa-3b gap). bot-app keeps
+           runtime until 4c, so this ban is engine-only. -->
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>ban-plugin-modules-at-engine-runtime</id>
+            <goals>
+              <goal>enforce</goal>
+            </goals>
+            <configuration>
+              <rules>
+                <bannedDependencies>
+                  <excludes>
+                    <exclude>com.mercury:bot-strategies:*:*:runtime</exclude>
+                    <exclude>com.mercury:bot-messages:*:*:runtime</exclude>
+                  </excludes>
+                  <message>bot-engine takes a plugin module (bot-strategies / bot-messages) at runtime scope. It must be test scope: a runtime dependency here reaches bot-app transitively and would put the plugin jars back into the fat jar after Phase 4c (PLUGIN_HOT_RELOAD_3_4 D-6).</message>
+                </bannedDependencies>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
       </plugin>
     </plugins>
   </build>

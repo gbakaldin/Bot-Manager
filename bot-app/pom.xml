@@ -22,7 +22,8 @@
          code cannot compile against them, but they still land in BOOT-INF/lib and
          on the test classpath, so the component scan finds the same beans as
          before. Phase 4c turns this into `test`, when the bundle is loaded from
-         /app/plugins instead. The enforcer below bans compile/provided. -->
+         /app/plugins instead. The enforcer (root pom) bans
+         compile/provided/system. -->
     <dependency>
       <groupId>com.mercury</groupId>
       <artifactId>bot-strategies</artifactId>
@@ -163,10 +164,6 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
-      </plugin>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-enforcer-plugin</artifactId>
       </plugin>
     </plugins>
   </build>
