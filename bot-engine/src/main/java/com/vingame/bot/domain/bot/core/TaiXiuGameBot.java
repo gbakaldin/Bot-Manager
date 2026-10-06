@@ -2,6 +2,7 @@ package com.vingame.bot.domain.bot.core;
 
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.vingame.bot.domain.bot.message.EndGameMessage;
+import com.vingame.bot.domain.bot.message.HasRefund;
 import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
@@ -209,9 +210,10 @@ public class TaiXiuGameBot extends BettingMiniGameBot {
      * Refund-aware net balance credit at round end (AD-11). The full bet {@code b} was
      * debited at bet time ({@code creditBalance}); a Tai Xiu round's true balance effect
      * is {@code −b + gR + G}, so credit back the refund {@code gR} plus winnings (the
-     * {@code G} win-money field). The refund is read from the
-     * {@link com.vingame.bot.domain.bot.message.taixiu.TaiXiuEndGameMessage}
-     * ({@code gR}); {@code winnings} is the value the inherited {@code onEndGame} already
+     * {@code G} win-money field). The refund is read through the
+     * {@link HasRefund} capability ({@code gR} on the
+     * Tai Xiu end message; PLUGIN_HOT_RELOAD_3_4 D-5 — the engine no longer names the
+     * per-brand class); {@code winnings} is the value the inherited {@code onEndGame} already
      * extracted via {@code HasBotWinnings} — which now returns {@code G} directly
      * (OI-7), so {@code refund + winnings == gR + G}. The bet-amount <i>metric</i> stays
      * {@code gB − gR} (handled separately by {@code HasBetTotals}) — balance credit and
@@ -219,10 +221,7 @@ public class TaiXiuGameBot extends BettingMiniGameBot {
      */
     @Override
     protected long balanceCreditFor(EndGameMessage msg, long winnings) {
-        long refund = 0L;
-        if (msg instanceof com.vingame.bot.domain.bot.message.taixiu.TaiXiuEndGameMessage tx) {
-            refund = tx.getGR();
-        }
+        long refund = (msg instanceof HasRefund r) ? r.refundFor(getUserName()) : 0L;
         return refund + winnings;
     }
 }

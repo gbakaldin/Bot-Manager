@@ -7,6 +7,7 @@ import com.vingame.bot.domain.bot.message.HasBetTotals;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.HasJackpot;
 import com.vingame.bot.domain.bot.message.HasJackpotPool;
+import com.vingame.bot.domain.bot.message.HasRefund;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -60,7 +61,7 @@ import lombok.Setter;
 @Getter
 @Setter
 public class TaiXiuEndGameMessage extends EndGameMessage
-        implements HasBotWinnings, HasJackpot, HasBetTotals, HasJackpotPool {
+        implements HasBotWinnings, HasJackpot, HasBetTotals, HasJackpotPool, HasRefund {
 
     // Dice (1..6 each); sum determines Tai (>=11) vs Xiu (<=10).
     private int d1;
@@ -169,6 +170,19 @@ public class TaiXiuEndGameMessage extends EndGameMessage
     @Override
     public long betAmountFor(String userName) {
         return Math.max(0L, gB - gR);
+    }
+
+    /**
+     * The gold refund {@code gR} — the part of this bot's stake the server handed back
+     * to balance Tai against Xiu (AD-11). Read by {@code TaiXiuGameBot.balanceCreditFor}
+     * through {@link HasRefund} (PLUGIN_HOT_RELOAD_3_4 D-5). Not floored: it is the wire
+     * value, exactly what that method read via {@code getGR()} before. {@code 0} on the
+     * P_114 jackpot variant, which omits the field. {@code userName} ignored —
+     * recipient-personalized payload.
+     */
+    @Override
+    public long refundFor(String userName) {
+        return gR;
     }
 
     /**
