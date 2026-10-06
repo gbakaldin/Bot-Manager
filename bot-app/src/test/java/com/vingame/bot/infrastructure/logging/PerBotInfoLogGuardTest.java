@@ -47,8 +47,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * hand-maintained file list is the same manual enumeration that came up short twice: the Up
  * Down bot on the Q3 roadmap lands in {@code domain/bot/core/} and a per-bot strategy lands in
  * {@code bot-strategies/}, and neither would inherit a guard. A directory scan fails
- * <em>closed</em> on a new class. {@link #GROUP_LEVEL_EXEMPTIONS} carries the two files in
- * those trees that are not per-bot, each with the reason, and
+ * <em>closed</em> on a new class. {@link #GROUP_LEVEL_EXEMPTIONS} carries any file in
+ * those trees that is not per-bot, each with the reason, and
  * {@link #theGuardIsNotVacuous()} asserts every exemption still exists so a rename cannot
  * quietly widen the hole.
  * <p>
@@ -81,17 +81,17 @@ class PerBotInfoLogGuardTest {
             "bot-app/src/main/java/com/vingame/bot/domain/bot/service/BotFactory.java");
 
     /**
-     * The only files inside {@link #PER_BOT_DIRECTORIES} that are not per-bot. Both are Spring
-     * singletons whose single INFO line fires once from {@code init()} at application startup
-     * ("registered N strategies"), which is application-level, not bot-level. Anything added
-     * here needs the same argument: fires a bounded number of times per <em>process</em>,
-     * never per bot.
+     * Files inside {@link #PER_BOT_DIRECTORIES} that are not per-bot. Anything added here
+     * needs the argument the two strategy factories used to carry: fires a bounded number of
+     * times per <em>process</em>, never per bot.
+     * <p>
+     * Empty since PLUGIN_HOT_RELOAD_3_4 Phase 3a: {@code BettingStrategyFactory} and
+     * {@code SlotStrategyFactory} — the only two entries, each with one startup-only INFO line
+     * — moved to {@code bot-engine/…/domain/bot/strategy/}, which is not a banned tree, so
+     * there is nothing left to exempt. Kept, with the existence check in
+     * {@link #theGuardIsNotVacuous()}, so a future exemption gets the same protection.
      */
-    private static final List<String> GROUP_LEVEL_EXEMPTIONS = List.of(
-            "bot-strategies/src/main/java/com/vingame/bot/domain/bot/strategy/"
-                    + "BettingStrategyFactory.java",
-            "bot-strategies/src/main/java/com/vingame/bot/domain/bot/strategy/slot/"
-                    + "SlotStrategyFactory.java");
+    private static final List<String> GROUP_LEVEL_EXEMPTIONS = List.of();
 
     /**
      * message fragment → the file it lives in. These files keep legitimate group-level INFO
