@@ -81,6 +81,21 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
       </plugin>
+      <!-- Bot-Plugin-Version / Bot-Plugin-Name (PLUGIN_HOT_RELOAD_3_4 D-7): the
+           bundle loader (step 4) reads the version from here, never from the
+           directory name or the Maven version. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Bot-Plugin-Version>${bot.plugin.version}</Bot-Plugin-Version>
+              <Bot-Plugin-Name>${project.artifactId}</Bot-Plugin-Name>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
 </project>
