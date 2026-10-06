@@ -132,6 +132,21 @@
   <build>
     <finalName>Bot-1.0</finalName>
     <plugins>
+      <!-- Re-archive the thin jar on every build. Without it, a build without
+           `clean` that changes only a plugin module (or bot-engine / bot-api) leaves
+           bot-app's classes untouched, so maven-jar-plugin keeps the existing
+           Bot-1.0.jar - which is already the repackaged fat jar - and
+           spring-boot:repackage then leaves it as it is: the fat jar ships the
+           PREVIOUS build's nested bot-*.jar files. Found while fixing the same
+           defect in the plugin jars' Bot-Plugin-Version (review-3b / qa-3b F1). -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <forceCreation>true</forceCreation>
+        </configuration>
+      </plugin>
+
       <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
