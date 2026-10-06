@@ -332,7 +332,7 @@ Behaviour is identical: today a non-TX end message yields refund 0 too.
 `Bot-Plugin-Version: ${bot.plugin.version}`, where the root pom defines
 `bot.plugin.version = ${maven.build.timestamp}` with format `yyyyMMdd.HHmmss`. That is one
 value per reactor session, so both jars agree when they are built together. Maven's build
-timestamp is UTC (**UNVERIFIED**; Dev confirms from the manifest). A bundle is valid only
+timestamp is UTC (confirmed at 3b: a build at 15:37:57 +04 stamped `20261006.113757`). A bundle is valid only
 if every jar in it carries the same value, and that value is the bundle's version. In
 classpath mode the version stays `builtin`. The format sorts lexicographically, so "newer"
 is a string comparison.
@@ -441,14 +441,14 @@ another module is named.
 | Rule | Test |
 |---|---|
 | L-1 Every contract type a plugin references resolves to the parent's `Class`. Every plugin class's defining loader is the plugin loader, i.e. not shadowed by a copy on the parent classpath. Every class in the jars loads and links. Every loader URL is `file:` | `PluginTypeIdentityIT` |
-| L-2 A plugin jar contains only `com/vingame/bot/domain/bot/{message,strategy}/**` classes plus `META-INF/MANIFEST.MF`. No shaded third-party code | `PluginJarContentsIT` |
+| L-2 Every *file* entry in a plugin jar is a `com/vingame/bot/domain/bot/{message,strategy}/**` class, `META-INF/MANIFEST.MF`, or that module's own Maven descriptor `META-INF/maven/com.mercury/<artifactId>/pom.{xml,properties}` (maven-jar-plugin adds it by default; directory entries are ignored). Any other `META-INF/maven/**` path is the fingerprint of shaded code and fails. No shaded third-party code | `PluginJarContentsIT` |
 | L-3 Every child bean definition's class is defined by the plugin loader. No engine `@Component` exists in the child | `PluginContextOriginIT` |
 | L-4 The child context has no parent and no shutdown hook. The loading thread's TCCL equals its prior value after load, both after success and after a rejected candidate (S6) | `PluginContextOriginIT` |
 | L-5 A plugin logger binds to the app's `LoggerContext`: a level set on `com.vingame.bot` applies, and `ScopedDebugFilter` admits a scoped plugin line. The spike (S6) proved logging does not *pin*. It did not prove context *identity*, which this test does | `PluginLoggingContextIT` |
 | L-6 Plugin code defines no `ThreadLocal` / `InheritableThreadLocal`, and puts only `String` values into MDC (S7, scenario 4a) | source guard, each plugin module |
 | L-7 **No static or process-lifetime mapper ever touches a plugin type** (S1, scenarios 3c/3d). Forbidden: `registerSubtypes` on `ObjectMapperProvider.getDefault()` or its `strict()`/`lenient()` `CACHE` mappers; a typed matcher on the OutputPrinter (`getDefault()`) context; `ActionResponseMessage.serialize/deserialize` with a plugin type; plugin objects reaching `ApiGatewayClient`/`GameMsClient`'s static mappers or ws-parser `AuthClient` (so `LoginRequest`s stay engine-side) | source guard (`bot-engine` tests) over `bot-engine`/`bot-app` main |
 | L-8 Every per-bot mapper (`BettingMiniGameBot`, `SlotMachineBot`, `TaiXiuGameBot` via inheritance, `CashoutBot`, `CrashBot` **[av]**) uses the bundle's `TypeFactory`, never the shared default. `PluginBundle.close()` clears both caches (S2, scenarios 3a/3b) | `PerBotMapperTypeFactoryTest` (`bot-engine`), `PluginBundleCloseTest` (`bot-engine`) |
-| L-9 Plugins never touch `MeterRegistry`: the plugin modules have no Micrometer dependency. Engine-side review rule: no gauge whose value object or value function is plugin-defined, including a lambda written in plugin code (S4, scenarios 5a/5b) | `dependency:tree` check in the local gate |
+| L-9 Plugins never touch `MeterRegistry`: the plugin modules have no `micrometer-core` (or `micrometer-registry-*`) dependency at any scope. `micrometer-observation` / `-commons` arrive provided-transitively through `spring-context` 6.x (D-6), carry no `MeterRegistry`, and are allowed. Engine-side review rule: no gauge whose value object or value function is plugin-defined, including a lambda written in plugin code (S4, scenarios 5a/5b) | `dependency:tree` check in the local gate |
 | L-10 Among root beans, only `PluginRuntime` holds a `PluginBundle` / `PluginRegistries` / registry / `TypeFactory`-of-a-bundle reference (S3) | `RootContextHoldsNoPluginRefsTest` (`bot-app`): reflect over every `com.vingame.bot` bean's declared fields |
 | L-11 **Thread rules (S5).** Plugin code creates no thread or executor (`Executors`, `new Thread`, `Thread.of*`; virtual-only would be allowed, but no plugin needs one). Every `EventExecutor` of the shared group has a live thread before `PluginRuntime` is constructed. In isolated mode the shared group is mandatory: `ClientFactory`'s null branch (`:97-98`) becomes an `IllegalStateException`, so `VingameWebSocketClient.java:400`'s private group is unreachable. `GameMsClient.java:55` becomes a virtual thread | source guard, each plugin module; `NettyPrestartTest` (`bot-app`: live `multiThreadIoEventLoopGroup-*` thread count = `websocket.eventloop.threads` when `PluginRuntime` is created); `ClientFactoryRequiresGroupTest` (`bot-engine`) |
 | L-12 **Platform-thread census.** After L-13's exercise, no live platform thread's `inheritedAccessControlContext` contains a `ProtectionDomain` of the plugin loader, and no platform thread's TCCL is the plugin loader. A **negative control** proves the test can fail: start a *cold* `MultiThreadIoEventLoopGroup` from a plugin-frame callback, expect a detection, then shut it down. Failsafe `argLine` needs `--add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.security=ALL-UNNAMED` | `PlatformThreadPinIT` |
@@ -704,7 +704,9 @@ Expect two identical values matching `^Bot-Plugin-Version: [0-9]{8}\.[0-9]{6}`.
 **Local gate:** build green. Failsafe report count > 0, and every IT listed above is
 present in `bot-plugin-dist/target/failsafe-reports/`. Then:
 ```bash
-mvn -q -pl bot-strategies,bot-messages dependency:tree | grep -ciE 'micrometer'                                # L-9: expect 0
+mvn -pl bot-strategies,bot-messages dependency:tree > deptree.txt     # NOT -q: -q suppresses the tree and the grep passes vacuously
+grep -c 'com.mercury:bot-api:jar' deptree.txt                                                                  # expect 2 (the tree was printed)
+grep -ciE 'micrometer-(core|registry)' deptree.txt                                                             # L-9: expect 0
 ls bot-plugin-dist/target/plugins-dist/*/                                                                      # expect exactly the two jars
 ```
 
@@ -1010,3 +1012,7 @@ is. Stop.
 
 Plan written: docs/plans/PLUGIN_HOT_RELOAD_3_4.md
 Ready for user approval before Dev begins.
+
+## Changelog
+
+- 2026-10-06, compliance-3ab: D-7 UTC confirmed; L-2 admits the module's own `META-INF/maven` descriptor (maven-jar-plugin default) and treats any other as shading; L-9 and its 4b gate target `micrometer-core`/`-registry`, because `spring-context` 6.x pulls `micrometer-observation` transitively and the old `grep micrometer` returns 4, not 0 (and its `mvn -q` printed no tree at all, so it passed vacuously).
