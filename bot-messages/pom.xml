@@ -93,6 +93,12 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
         <configuration>
+          <!-- Re-archive on every build. Without it the jar's up-to-date check
+               skips a module whose classes did not change, its manifest keeps the
+               previous session's stamp, and one plugin module edited + `mvn package`
+               without `clean` yields a bundle whose two jars disagree (review-3b,
+               qa-3b F1) - which D-7 defines as invalid. -->
+          <forceCreation>true</forceCreation>
           <archive>
             <manifestEntries>
               <Bot-Plugin-Version>${bot.plugin.version}</Bot-Plugin-Version>

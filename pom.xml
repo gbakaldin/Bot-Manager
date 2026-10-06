@@ -49,7 +49,8 @@
     <!-- Plugin bundle version (PLUGIN_HOT_RELOAD_3_4 D-7), stamped into each plugin
          jar's manifest as Bot-Plugin-Version. maven.build.timestamp is fixed once per
          reactor session and is UTC, so bot-strategies and bot-messages built together
-         carry the same value - that shared value IS the bundle version, and a bundle
+         carry the same value (with or without `clean`: both plugin poms set
+         maven-jar-plugin forceCreation, so neither jar keeps a stale manifest) - that shared value IS the bundle version, and a bundle
          whose jars disagree is invalid. The format sorts lexicographically, so "newer"
          is a string comparison. The Maven version (1.0 everywhere) carries no
          information and is not used. Building one plugin module on its own
