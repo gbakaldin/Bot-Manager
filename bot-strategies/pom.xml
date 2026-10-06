@@ -13,10 +13,10 @@
   <name>Bot - Strategies</name>
   <description>
     Concrete betting/slot strategy implementations (martingale family, random /
-    weighted behaviour, slot bet strategies) plus the two @Component discovery
-    factories (BettingStrategyFactory / SlotStrategyFactory). Depends only on
-    bot-api (contract module) and framework libraries. The factories stay
-    concrete — the engine calls them directly; no factory interface here.
+    weighted behaviour, slot bet strategies). Depends only on bot-api (contract
+    module) and framework libraries. The discovery factories that resolve these
+    beans by key (BettingStrategyFactory / SlotStrategyFactory) live in bot-engine
+    since PLUGIN_HOT_RELOAD_3_4 Phase 3a.
   </description>
 
   <dependencies>
@@ -32,15 +32,10 @@
       <scope>provided</scope>
     </dependency>
 
-    <!-- @Component / ApplicationContext / ObjectProvider for the discovery factories. -->
+    <!-- @Component / @Scope("prototype") on the strategy beans. -->
     <dependency>
       <groupId>org.springframework</groupId>
       <artifactId>spring-context</artifactId>
-    </dependency>
-    <!-- @PostConstruct on the factories. -->
-    <dependency>
-      <groupId>jakarta.annotation</groupId>
-      <artifactId>jakarta.annotation-api</artifactId>
     </dependency>
 
     <!-- Testing -->

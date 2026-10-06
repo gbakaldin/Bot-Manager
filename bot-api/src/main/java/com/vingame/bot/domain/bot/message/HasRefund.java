@@ -1,7 +1,7 @@
 package com.vingame.bot.domain.bot.message;
 
 /**
- * Marker for {@link EndGameMessage} subtypes that carry the part of a bot's stake the
+ * Capability of {@link EndGameMessage} subtypes that carry the part of a bot's stake the
  * server handed back at round end, independently of win or loss — Tai Xiu's
  * imbalance refund ({@code gR}) is the one implementation today.
  * <p>

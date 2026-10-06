@@ -40,16 +40,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>{@code MessageTypesRegistry}'s line is emitted from the constructor of a Spring
  * singleton, so it fires once per application context — the same shape and the same
- * justification as {@code (Betting|Slot)StrategyFactory}'s "registered N strategies",
- * which {@code PerBotInfoLogGuardTest} exempts by name for exactly this reason.
+ * justification as {@code (Betting|Slot)StrategyFactory}'s "registered N strategies".
+ * Since PLUGIN_HOT_RELOAD_3_4 Phase 3a all three registries live in
+ * {@code bot-engine/.../domain/bot/{message,strategy}}, outside every tree
+ * {@code PerBotInfoLogGuardTest} bans, so that guard needs no exemption for any of them.
  *
  * <p><b>Why a test and not a code review.</b> {@code PerBotInfoLogGuardTest} scans
  * {@code bot-engine/.../domain/bot/core} and {@code bot-strategies/.../domain/bot/strategy}
- * — it does <b>not</b> scan {@code bot-messages}, which before this phase had no Spring
- * dependency and no logger at all. 2c is the commit that gives that module both, so it
- * is also the commit after which a per-product or per-bot INFO line can be added there
- * with nothing failing. The second test below is the durable half: it constructs the
- * registry with one provider and with six, and asserts the line count does not move.
+ * — it scans neither {@code bot-messages} nor the registry's own directory in
+ * {@code bot-engine}, so a per-product or per-bot INFO line added to the registry would
+ * fail nothing else. ({@code bot-messages} itself has had no logger since the registry,
+ * its only {@code @Slf4j} class, moved out in Phase 3a.) The second test below is the
+ * durable half: it constructs the registry with one provider and with six, and asserts
+ * the line count does not move.
  */
 @DisplayName("Tier-1 invariant: the message-types registry logs once, at INFO, per context")
 class MessageTypesRegistryStartupLogTest {

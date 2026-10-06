@@ -12,12 +12,13 @@
   <artifactId>bot-messages</artifactId>
   <name>Bot - Messages</name>
   <description>
-    Concrete per-brand message implementations (g2/{bom,b52}, g3/tip, g4/nohu,
-    slot, taixiu), the request builders (Request / SlotRequest / TaiXiuRequest and
-    friends), and the MessageTypesRegistry that maps a game type / product-code
-    string onto the correct concrete provider. The message interfaces and
-    abstract base messages live in bot-api (Phase 2); this module holds only the
-    concrete Jackson-polymorphic subtypes referenced by that contract. Depends only
+    Concrete per-brand message implementations (g2/{bom,b52}, g3/{rik,tip},
+    g4/{nohu,win79}, slot, taixiu) and the per-brand RIK request bodies. The
+    message interfaces, abstract base messages and product-neutral request frames
+    live in bot-api, and the MessageTypesRegistry that maps a game type /
+    product-code string onto a provider lives in bot-engine (PLUGIN_HOT_RELOAD_3_4
+    Phase 3a); this module holds only the concrete Jackson-polymorphic subtypes
+    referenced by that contract. Depends only
     on bot-api and Jackson/Lombok. One module for all brands (Architecture
     Decision #4).
   </description>
@@ -36,14 +37,13 @@
     </dependency>
 
     <!-- Jackson polymorphism annotations on the concrete message classes.
-         jackson-databind (used by the registry round-trip tests) is inherited
-         transitively from bot-api. -->
+         jackson-databind is inherited transitively from bot-api. -->
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-annotations</artifactId>
     </dependency>
 
-    <!-- @Component on the message-types providers and on MessageTypesRegistry
+    <!-- @Component on the message-types providers
          (PLUGIN_HOT_RELOAD Phase 2c, AD-18: discovery stays Spring bean
          discovery; ServiceLoader is rejected because the strategies already
          need Spring for prototype instances and two discovery models would be

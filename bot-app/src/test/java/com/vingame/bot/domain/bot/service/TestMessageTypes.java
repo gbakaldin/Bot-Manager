@@ -21,7 +21,7 @@ import java.util.List;
  * given product ends up holding the right provider; a stubbed registry would make that
  * assertion about the stub. It is also deliberately <em>not</em> a scanned context:
  * whether the production scan finds these beans is a different question, asserted in
- * {@code MessageTypesRegistryTest} / {@code MessageTypesCoverageTest} (bot-messages)
+ * {@code MessageTypesRegistryTest} / {@code MessageTypesCoverageTest} (bot-engine)
  * and, under {@code Starter}'s own scan,
  * {@code ApplicationContextLoadsTest.messageTypesRegistryIsFullyPopulated}.
  */

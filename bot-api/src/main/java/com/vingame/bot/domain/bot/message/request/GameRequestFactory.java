@@ -9,12 +9,12 @@ import com.vingame.bot.domain.game.model.Game;
  *
  * <h2>Why it is a separate interface and not a method on {@code GameMessageTypes}</h2>
  *
- * {@code GameMessageTypes} lives in <b>bot-api</b> while {@link GameRequest} and every
- * concrete request/bet body live in <b>bot-messages</b>, and bot-messages &rarr; bot-api
- * is the only legal module direction. A {@code default GameRequest requestFor(...)} on
- * the bot-api interface would put a bot-messages return type on a bot-api type, which
- * does not compile. Declaring the capability here and testing for it with
- * {@code instanceof} keeps the dependency pointing the right way.
+ * Not because of the module graph: this interface, {@link GameRequest}, {@link Request}
+ * and {@link Bet} all live in <b>bot-api</b> next to {@code GameMessageTypes}
+ * (PLUGIN_HOT_RELOAD_3_4 Phase 3a moved them there), so a {@code default} method on
+ * {@code GameMessageTypes} would compile. It stays separate because a capability that
+ * two providers opt into is better expressed as an interface they implement than as a
+ * method every provider inherits — see the next section.
  *
  * <h2>Why {@code instanceof} is the right shape anyway</h2>
  *
