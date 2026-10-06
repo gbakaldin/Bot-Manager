@@ -14,7 +14,6 @@ import com.vingame.bot.domain.bot.strategy.BetDecision;
 import com.vingame.bot.domain.bot.strategy.BettingStrategy;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.BotMemory;
-import com.vingame.bot.domain.bot.strategy.RandomBehaviorStrategy;
 import com.vingame.bot.domain.bot.strategy.RoundResult;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
@@ -207,15 +206,15 @@ public class BettingMiniGameBot extends Bot {
         // (PLUGIN_HOT_RELOAD AD-12), so reading the name off it keeps the
         // default tied to the catalogue instead of to a loose literal.
         String effectiveId = strategyId != null ? strategyId : StrategyId.RANDOM.name();
-        if (strategyFactory != null) {
-            this.strategy = strategyFactory.create(effectiveId);
-        } else {
-            // Test seam: fixtures that don't wire the factory (and don't intend
-            // to exercise the strategy code path) get a default instance so
-            // the bet() supplier can still run without NPE. Production callers
-            // always go through BotFactory which wires the factory.
-            this.strategy = new RandomBehaviorStrategy();
+        // No fallback to a concrete strategy (PLUGIN_HOT_RELOAD_3_4 D-4). There used
+        // to be a test-seam `new RandomBehaviorStrategy()` here, which tied the engine
+        // to a plugin class. BotFactory always wires the factory; a fixture that does
+        // not must wire one itself (TestStrategyFactories in bot-engine's tests).
+        if (strategyFactory == null) {
+            throw new IllegalStateException(
+                    "BettingStrategyFactory not wired — BotFactory always sets it");
         }
+        this.strategy = strategyFactory.create(effectiveId);
 
         this.watchdogTimeoutMillis = configuration.getWatchdogTimeoutSeconds() * 1000L;
         this.watchdogScheduler = Executors.newSingleThreadScheduledExecutor(

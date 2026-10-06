@@ -6,6 +6,7 @@ import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.message.StartGameMd5Message;
 import com.vingame.bot.domain.bot.message.taixiu.MiniGameTaiXiuMessageTypes;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
@@ -110,6 +111,7 @@ class BettingMiniGameBotStartGameMd5GuardTest {
         b.setConfiguration(cfg);
         b.setTaiXiuMessageTypes(new MiniGameTaiXiuMessageTypes());
         b.setRandom(new Random(0L));
+        b.setStrategyFactory(TestStrategyFactories.betting());
         b.initializeSubclass();
         // The inherited `client` field is normally set during auth (initialize()).
         // botBehaviorScenario() feeds it into PipelineContext, which rejects a null

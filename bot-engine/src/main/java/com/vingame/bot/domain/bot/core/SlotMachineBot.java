@@ -9,7 +9,6 @@ import com.vingame.bot.domain.bot.message.SlotMessageTypes;
 import com.vingame.bot.domain.bot.message.request.SlotRequest;
 import com.vingame.bot.domain.bot.message.slot.SlotSpinResultMessage;
 import com.vingame.bot.domain.bot.message.slot.SlotSubscribeResponse;
-import com.vingame.bot.domain.bot.strategy.slot.FixedBetStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotBetContext;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
@@ -101,10 +100,9 @@ public class SlotMachineBot extends Bot {
     // override via setRandom().
     private Random rng = new Random();
 
-    // Slot strategy factory (injected by BotFactory in Phase 5). May be null on
-    // standalone-test code paths — initializeSubclass() then falls back to an
-    // inline FixedBetStrategy (mirrors the betting bot's RandomBehaviorStrategy
-    // fallback).
+    // Slot strategy factory (injected by BotFactory in Phase 5). Required:
+    // initializeSubclass() throws when it is null (PLUGIN_HOT_RELOAD_3_4 D-4 — the
+    // engine has no fallback to a concrete plugin strategy).
     @Setter
     private SlotStrategyFactory slotStrategyFactory;
 
@@ -150,15 +148,16 @@ public class SlotMachineBot extends Bot {
 
         // Build the per-bot slot strategy (AD-9). Default to FIXED when the
         // config leaves slotStrategyId null (AD-10: slot strategy is out of the
-        // group strategy-mix UI for v1). When the factory is absent (standalone
-        // tests), fall back to an inline FixedBetStrategy so the bot is testable
-        // without a Spring context (mirrors the betting bot's fallback).
+        // group strategy-mix UI for v1). No fallback to a concrete strategy when the
+        // factory is absent (PLUGIN_HOT_RELOAD_3_4 D-4) — the betting bot's twin.
         String strategyId = configuration.getSlotStrategyId() != null
                 ? configuration.getSlotStrategyId()
                 : SlotStrategyId.FIXED.name();
-        this.strategy = slotStrategyFactory != null
-                ? slotStrategyFactory.create(strategyId)
-                : new FixedBetStrategy();
+        if (slotStrategyFactory == null) {
+            throw new IllegalStateException(
+                    "SlotStrategyFactory not wired — BotFactory always sets it");
+        }
+        this.strategy = slotStrategyFactory.create(strategyId);
 
         // numLines / allowedBetValues are NOT known yet — they arrive with the
         // 1300 response and are captured in onSubscribe (AD-12).

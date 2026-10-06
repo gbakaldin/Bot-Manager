@@ -3,6 +3,7 @@ package com.vingame.bot.domain.bot.core;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
@@ -85,6 +86,7 @@ class BettingMiniGameBotMdcTest {
         bot = new BettingMiniGameBot();
         bot.setClients(apiGw, mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
 
         // Inject the snapshot directly — this is the test seam. In production it

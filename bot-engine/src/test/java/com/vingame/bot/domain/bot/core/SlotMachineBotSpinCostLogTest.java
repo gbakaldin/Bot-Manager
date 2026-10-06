@@ -5,6 +5,7 @@ import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.slot.SlotSubscribeResponse;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategy;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
@@ -84,6 +85,7 @@ class SlotMachineBotSpinCostLogTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setMessageTypes(new SlotMessageTypesImpl());
+        bot.setSlotStrategyFactory(TestStrategyFactories.slot());
         bot.initializeSubclass();
         // Seed the balance BEFORE subscribing: onSubscribe → onNewSession → checkBalance,
         // which would otherwise reach for a WS client this fixture does not have.

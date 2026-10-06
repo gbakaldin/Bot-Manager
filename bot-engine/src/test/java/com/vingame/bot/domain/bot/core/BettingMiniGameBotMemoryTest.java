@@ -8,6 +8,7 @@ import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.strategy.BotMemory;
 import com.vingame.bot.domain.bot.strategy.RoundResult;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
@@ -75,6 +76,7 @@ class BettingMiniGameBotMemoryTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setRandom(mock(Random.class));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
 
         // Seed balance cache so onNewSession inside onEndGame returns from cache.

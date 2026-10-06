@@ -9,6 +9,7 @@ import com.vingame.bot.domain.bot.message.BettingMiniMessage;
 import com.vingame.bot.domain.bot.message.g3.tip.TipEndGameMessage;
 import com.vingame.bot.domain.bot.message.g3.tip.TipGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g3.tip.TipSubscribeMessage;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
@@ -84,6 +85,7 @@ class BettingMiniGameBotTipDispatchTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setRandom(mock(Random.class));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
         bot.setRandom(mock(Random.class));
 

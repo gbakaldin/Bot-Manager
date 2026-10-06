@@ -6,6 +6,7 @@ import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.slot.SlotSpinResultMessage;
 import com.vingame.bot.domain.bot.message.slot.SlotSubscribeResponse;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
@@ -77,6 +78,7 @@ class SlotMachineBotGateEdgeCasesTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setMessageTypes(new SlotMessageTypesImpl());
+        bot.setSlotStrategyFactory(TestStrategyFactories.slot());
         bot.initializeSubclass();
 
         metrics = mock(BotMetrics.class);

@@ -12,6 +12,7 @@ import com.vingame.bot.domain.bot.message.request.GameRequest;
 import com.vingame.bot.domain.bot.message.request.Request;
 import com.vingame.bot.domain.bot.message.request.RikStockRequest;
 import com.vingame.bot.domain.bot.message.request.ZicZacRequest;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
@@ -115,6 +116,7 @@ class BettingMiniGameBotRikRequestDispatchTest {
         bot.setRandom(mock(Random.class));
         // BotFactory injects the per-game-resolved provider before initializeSubclass.
         bot.setMessageTypes(registryProvider.forGame(game));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
 
         return (GameRequest) readField(bot, "request");
@@ -258,6 +260,7 @@ class BettingMiniGameBotRikRequestDispatchTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setRandom(mock(Random.class));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
 
         assertThat(readField(bot, "request")).isExactlyInstanceOf(Request.class);

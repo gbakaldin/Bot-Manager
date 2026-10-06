@@ -11,6 +11,7 @@ import com.vingame.bot.domain.bot.message.slot.SlotMessage;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
 import com.vingame.bot.domain.bot.message.slot.SlotSpinResultMessage;
 import com.vingame.bot.domain.bot.message.slot.SlotSubscribeResponse;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.bot.strategy.slot.RandomBetStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
@@ -104,6 +105,7 @@ class SlotMachineBotSpinStreamTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setMessageTypes(new SlotMessageTypesImpl());
+        bot.setSlotStrategyFactory(TestStrategyFactories.slot());
         bot.initializeSubclass();
         // Seed the RNG after init (initializeSubclass installs a process-seeded one).
         if (rng != null) {
@@ -244,10 +246,12 @@ class SlotMachineBotSpinStreamTest {
     void randomStrategy_betsDrawnFromServerSet() throws Exception {
         // Seed chosen so the run exercises more than one distinct value.
         SlotMachineBot bot = newBot(SlotStrategyId.RANDOM, new Random(42L), mock(BotMetrics.class));
-        // Standalone (no SlotStrategyFactory) → initializeSubclass falls back to an
-        // inline FixedBetStrategy regardless of slotStrategyId. Inject the real
-        // RandomBetStrategy directly to exercise the random bet-amount path; it
-        // reads the bot-owned seeded RNG via SlotBetContext.rng().
+        // newBot wires the real SlotStrategyFactory, so the bot already holds a
+        // RandomBetStrategy for slotStrategyId=RANDOM. (Before PLUGIN_HOT_RELOAD_3_4
+        // D-4 the unwired bot fell back to FixedBetStrategy regardless of the key,
+        // which is why this injection exists.) Injecting a fresh one keeps the run
+        // independent of the factory; it reads the bot-owned seeded RNG via
+        // SlotBetContext.rng().
         setStrategy(bot, new RandomBetStrategy());
 
         invokeOnSubscribe(bot, deserializeSubscribe());

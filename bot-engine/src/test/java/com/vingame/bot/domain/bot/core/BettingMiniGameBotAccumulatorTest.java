@@ -7,6 +7,7 @@ import com.vingame.bot.domain.bot.message.EndGameMessage;
 import com.vingame.bot.domain.bot.message.HasBotWinnings;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
@@ -76,6 +77,7 @@ class BettingMiniGameBotAccumulatorTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setRandom(new Random(0L));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
 
         seedLong("lastFetchedBalance", 50_000_000L);

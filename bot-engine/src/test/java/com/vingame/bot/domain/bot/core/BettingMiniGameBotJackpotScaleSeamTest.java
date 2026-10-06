@@ -7,6 +7,7 @@ import com.vingame.bot.domain.bot.coordination.JackpotScaler;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.strategy.BetContext;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
 import com.vingame.bot.infrastructure.client.ClientFactory;
@@ -73,6 +74,7 @@ class BettingMiniGameBotJackpotScaleSeamTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setRandom(new Random(0xF00DL));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
 
         seedAtomic("expectedCurrentBalance", 50_000_000L);
@@ -152,6 +154,7 @@ class BettingMiniGameBotJackpotScaleSeamTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setRandom(new Random(0xF00DL));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
         seedAtomic("expectedCurrentBalance", 50_000_000L);
 

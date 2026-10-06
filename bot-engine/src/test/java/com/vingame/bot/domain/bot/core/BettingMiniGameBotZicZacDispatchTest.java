@@ -7,6 +7,7 @@ import com.vingame.bot.domain.bot.coordination.BetCoordinator;
 import com.vingame.bot.domain.bot.coordination.JackpotScaler;
 import com.vingame.bot.domain.bot.message.g3.rik.RikZicZacBallResult;
 import com.vingame.bot.domain.bot.message.g3.rik.RikZicZacEndGameMessage;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
@@ -102,6 +103,7 @@ class BettingMiniGameBotZicZacDispatchTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setRandom(mock(Random.class));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
         bot.setRandom(mock(Random.class));
 

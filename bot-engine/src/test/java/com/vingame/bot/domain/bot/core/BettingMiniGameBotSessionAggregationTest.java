@@ -3,6 +3,7 @@ package com.vingame.bot.domain.bot.core;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
 import com.vingame.bot.domain.bot.util.SessionIdStore;
 import com.vingame.bot.domain.game.model.Game;
@@ -71,6 +72,7 @@ class BettingMiniGameBotSessionAggregationTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setRandom(mock(Random.class));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
 
         aggregator = mock(SessionAggregationService.class);

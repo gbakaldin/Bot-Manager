@@ -5,6 +5,7 @@ import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.message.slot.SlotMessageTypesImpl;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
@@ -99,6 +100,7 @@ class PerBotInitLogLevelTest {
         bot.setClients(apiGw, mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(bettingConfig());
 
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
 
         assertThat(levelsOf("BettingMiniGameBot initialized"))
@@ -117,6 +119,7 @@ class PerBotInitLogLevelTest {
         bot.setConfiguration(slotConfig());
         bot.setMessageTypes(new SlotMessageTypesImpl());
 
+        bot.setSlotStrategyFactory(TestStrategyFactories.slot());
         bot.initializeSubclass();
 
         assertThat(levelsOf("SlotMachineBot initialized"))
@@ -136,6 +139,7 @@ class PerBotInitLogLevelTest {
         betting.setClients(apiGw, mock(GameMsClient.class), mock(ClientFactory.class));
         betting.setConfiguration(bettingConfig());
         betting.setGroupLifecycleAggregator(aggregator);
+        betting.setStrategyFactory(TestStrategyFactories.betting());
         betting.initializeSubclass();
 
         SlotMachineBot slot = new SlotMachineBot();
@@ -144,6 +148,7 @@ class PerBotInitLogLevelTest {
         slot.setConfiguration(slotConfig());
         slot.setMessageTypes(new SlotMessageTypesImpl());
         slot.setGroupLifecycleAggregator(aggregator);
+        slot.setSlotStrategyFactory(TestStrategyFactories.slot());
         slot.initializeSubclass();
 
         // The count on the aggregate line is only right if the feed is 1:1 with bots. An
@@ -184,6 +189,7 @@ class PerBotInitLogLevelTest {
         bot.setClients(apiGw, mock(GameMsClient.class), clientFactory);
         bot.setConfiguration(bettingConfig());
         bot.setGroupLifecycleAggregator(aggregator);
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initialize();
 
         assertThat(groupIdsSeenByTheAggregator)
@@ -204,6 +210,7 @@ class PerBotInitLogLevelTest {
 
         // No setGroupLifecycleAggregator: the null-tolerance the field's javadoc promises.
         // Every non-Spring bot fixture in this module depends on it.
+        bot.setSlotStrategyFactory(TestStrategyFactories.slot());
         bot.initializeSubclass();
 
         assertThat(levelsOf("SlotMachineBot initialized")).containsExactly(Level.DEBUG);

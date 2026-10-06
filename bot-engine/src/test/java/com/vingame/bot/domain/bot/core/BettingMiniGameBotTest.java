@@ -10,6 +10,7 @@ import com.vingame.bot.domain.bot.message.HasJackpot;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
 import com.vingame.bot.domain.bot.message.SubscribeMessage;
 import com.vingame.bot.domain.bot.message.UpdateBetMessage;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
 import com.vingame.bot.domain.bot.util.GameState;
 import com.vingame.bot.domain.bot.util.SessionIdStore;
@@ -104,6 +105,7 @@ class BettingMiniGameBotTest {
         bot.setConfiguration(cfg);
         bot.setRandom(random);
 
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         // initializeSubclass() needs configuration and credentials set
         bot.initializeSubclass();
         // setRandom AFTER initializeSubclass to ensure it sticks (initializeSubclass doesn't touch random)
@@ -772,6 +774,7 @@ class BettingMiniGameBotTest {
         b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         b.setConfiguration(cfg);
         b.setRandom(mock(Random.class));
+        b.setStrategyFactory(TestStrategyFactories.betting());
         b.initializeSubclass();
         b.setRandom(mock(Random.class));
         seedBalance(b, 50_000_000L);
@@ -833,6 +836,7 @@ class BettingMiniGameBotTest {
         b.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         b.setConfiguration(cfg);
         b.setRandom(mock(Random.class));
+        b.setStrategyFactory(TestStrategyFactories.betting());
         b.initializeSubclass();
         b.setRandom(mock(Random.class));
         // Seed balance cache so onEndGame -> onNewSession -> checkBalance returns from cache and does not call getClient()

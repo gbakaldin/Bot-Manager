@@ -18,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import com.vingame.bot.domain.bot.message.StartGameMessage;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -86,6 +87,7 @@ class BettingMiniGameBotStrategyEquivalenceTest {
         bot = new BettingMiniGameBot();
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
 
         // Seed balance cache so canBet's downstream calls (onNewSession via

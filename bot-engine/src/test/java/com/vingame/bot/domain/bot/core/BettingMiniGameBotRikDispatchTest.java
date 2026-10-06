@@ -6,6 +6,7 @@ import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.domain.bot.message.g3.rik.RikBetInfo;
 import com.vingame.bot.domain.bot.message.g3.rik.RikEndGameMessage;
 import com.vingame.bot.domain.bot.message.g3.rik.RikMainBetSummary;
+import com.vingame.bot.domain.bot.strategy.TestStrategyFactories;
 import com.vingame.bot.domain.bot.util.BettingMiniGameState;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.infrastructure.client.ApiGatewayClient;
@@ -91,6 +92,7 @@ class BettingMiniGameBotRikDispatchTest {
         bot.setClients(mock(ApiGatewayClient.class), mock(GameMsClient.class), mock(ClientFactory.class));
         bot.setConfiguration(cfg);
         bot.setRandom(mock(Random.class));
+        bot.setStrategyFactory(TestStrategyFactories.betting());
         bot.initializeSubclass();
         bot.setRandom(mock(Random.class));
 
