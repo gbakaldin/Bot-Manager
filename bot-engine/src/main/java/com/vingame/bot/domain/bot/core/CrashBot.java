@@ -291,8 +291,11 @@ public class CrashBot extends Bot {
     }
 
     /**
-     * A flight tick ({@code X709}), ~2/s/bot. Allocates nothing beyond the parsed frame and
-     * logs at TRACE only. Package-private as a test seam.
+     * A flight tick ({@code X709}), ~2/s/bot. Logs at TRACE only, behind a guard. Below the
+     * target the state machine allocates nothing; the {@code crashTick} message counter does —
+     * every {@link com.vingame.bot.infrastructure.observability.BotMetrics#incBotMessage}
+     * builds its MDC tags and does a registry lookup, as for every other frame (review S2).
+     * Package-private as a test seam.
      */
     void onTick(ActionResponseMessage<? extends CrashTick> data) {
         watch.onFrame();
@@ -305,8 +308,19 @@ public class CrashBot extends Bot {
         } else if (action instanceof Action.Ended ended) {
             onBetEnded(ended);
         } else if (log.isTraceEnabled()) {
-            log.trace("Bot {}: tick sid={}, x{}/x{}", getUserName(), tick.sid(), tick.multiplierFor(1), tick.multiplierFor(2));
+            log.trace("Bot {}: tick sid={}, {}", getUserName(), tick.sid(), multipliers(tick));
         }
+    }
+
+    /** Every runner's value, {@code x<h>} or {@code x<h>!} once crashed — TRACE only (review Y1). */
+    private String multipliers(CrashTick tick) {
+        StringBuilder sb = new StringBuilder();
+        for (int eid = 1; eid <= machine.runnerCount(); eid++) {
+            if (eid > 1) sb.append('/');
+            sb.append('x').append(tick.multiplierFor(eid));
+            if (tick.crashedFor(eid)) sb.append('!');
+        }
+        return sb.toString();
     }
 
     /** The cash-out ack ({@code X703}). Package-private as a test seam. */
