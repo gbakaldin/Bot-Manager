@@ -727,3 +727,41 @@ burst.
 
 **State to leave:** the group stays ACTIVE as the 119 staging Aviator group. Report `$GAME`, `$G`
 and the money moved (3 × 20,000,000 registration funding, and no auto-deposit).
+
+---
+
+## Amendment — 2026-10-06 (Compliance Architect)
+
+Two technical oversights in the plan, both found during compliance review of
+`045670c..bd24e8f`. The text above is unchanged; where this section disagrees with it, this
+section is authoritative.
+
+**AM-1: V-5's "registered" poll did not prove the group was startable.** V-5 said to poll until
+`registeredCount == 3` and then `POST /start`. That gate is wrong. `RegistrationWorker` writes
+`registeredCount = k` (`persistProgress`) **before** it names and funds index `k`. It clears
+`registrationState` only in `recordCompletion`, once `depositedCount` also meets the target,
+because this group sets `initialDeposit` and AD-5 makes funding part of completion.
+`BotGroupBehaviorService` refuses `/start` with a 400 ("still registering") while
+`registrationState` is pending, and `BotGroupMapper.renderedStatus` shows that state as
+`targetStatus: "REGISTRATION_PENDING"`. So `registeredCount == 3` can be read while index 3 is
+still being named or funded, and a `/start` sent then fails. Replace that V-5 bullet with:
+
+- Poll `curl -s $BASE/api/v1/bot-group/$G | jq '{t:.targetStatus,r:.registeredCount,d:.depositedCount,e:.registrationError}'`
+  until `targetStatus` is **no longer** `REGISTRATION_PENDING` **and** `depositedCount == 3`. If
+  `targetStatus` becomes `REGISTRATION_FAILED`, report `registrationError` and stop: do not
+  retry blindly, because a deposit with an unknown outcome is money.
+
+The rest of V-5 is unchanged.
+
+**AM-2: AD-11 "every 1707 runs `roundsObserved++` and `onNewSession()`" assumed every 1707 lies
+between rounds.** §2 of this plan notes that ws-parser runs 4 inbound workers per client, so a
+bot's frames are handled out of order. A 1707 whose `sid` is older than the machine's
+(`onRoundEnd` → `None`) has, by definition, been overtaken by a later round start. Running the
+session check on it could set `sessionCheckInProgress` inside the next round's bet window and
+skip that round's bet (AD-10 step 1). That window is exactly what AD-11's "no bet is in flight"
+reasoning relies on not happening. Corrected rule: **a 1707 that the machine ignores as stale
+counts no round and runs no balance check.** It still records the frame for the silence watch
+and still increments `bot_messages_total{cmd="crashRoundEnd"}`, so V-9 is unaffected. The old
+bet's outcome is not lost, because the newer round start already reported it as `abandoned`
+(AD-8, missed-1707 row). Implemented in `CrashBot.onRoundEnd` and pinned by
+`CrashBotDispatchTest` "a stale 1707 counts no round".
