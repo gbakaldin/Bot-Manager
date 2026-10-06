@@ -18,8 +18,10 @@
     and per-brand login requests, the coordination services (BetCoordinator,
     JackpotScaler + value objects), and the engine-facing observability classes the
     bots pull down (BotMetrics, SessionAggregationService, the *SessionStrategy
-    interfaces + accumulator/context). Depends on bot-strategies, bot-messages and
-    bot-api (+ framework). The Spring-wiring observability classes that reach back up
+    interfaces + accumulator/context), and the three plugin registries
+    (BettingStrategyFactory, SlotStrategyFactory, MessageTypesRegistry). Depends on
+    bot-api (+ framework) only; bot-strategies / bot-messages are test scope
+    (PLUGIN_HOT_RELOAD_3_4 D-6). The Spring-wiring observability classes that reach back up
     into the app (ObservabilityConfig, InfoGaugeRefresher, BotMdcTagsMeterFilter) and
     the AuthStrategyFactory (which imports the app-owned Environment) stay in bot-app.
   </description>
@@ -30,15 +32,23 @@
       <artifactId>bot-api</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <!-- The plugin modules are TEST scope (PLUGIN_HOT_RELOAD_3_4 D-6): engine main
+         code cannot compile against a concrete strategy or message class, so the
+         engine/plugin boundary (D-2) is a compiler error, not a convention. The
+         engine tests still need real strategies and providers behind the
+         registries. Do not widen this scope to make something compile; move the
+         class to the side the D-2 rule puts it on. -->
     <dependency>
       <groupId>com.mercury</groupId>
       <artifactId>bot-strategies</artifactId>
       <version>${project.version}</version>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.mercury</groupId>
       <artifactId>bot-messages</artifactId>
       <version>${project.version}</version>
+      <scope>test</scope>
     </dependency>
 
     <dependency>

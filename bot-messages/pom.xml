@@ -24,10 +24,18 @@
   </description>
 
   <dependencies>
+    <!-- Everything below except the test dependencies is PROVIDED
+         (PLUGIN_HOT_RELOAD_3_4 D-6): the contract layer and the frameworks are
+         supplied by the engine that loads the plugin, so a plugin jar never carries
+         or transitively pulls them. bot-api's own compile dependencies (Jackson
+         databind, websocket-parser, spring-data-mongodb for @Document Game) become
+         provided with it - harmless, and not to be "fixed" by bundling. Do not add
+         a compile-scope dependency here, and no Micrometer at any scope (L-9). -->
     <dependency>
       <groupId>com.mercury</groupId>
       <artifactId>bot-api</artifactId>
       <version>${project.version}</version>
+      <scope>provided</scope>
     </dependency>
 
     <dependency>
@@ -41,6 +49,14 @@
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-annotations</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <!-- ActionRequestMessage / Body on the RIK request bodies. Was inherited from
+         bot-api; declared now that bot-api is provided. -->
+    <dependency>
+      <groupId>com.vingame</groupId>
+      <artifactId>websocket-parser-core</artifactId>
+      <scope>provided</scope>
     </dependency>
 
     <!-- @Component on the message-types providers
@@ -53,6 +69,7 @@
     <dependency>
       <groupId>org.springframework</groupId>
       <artifactId>spring-context</artifactId>
+      <scope>provided</scope>
     </dependency>
 
     <!-- Testing -->

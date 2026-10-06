@@ -18,15 +18,22 @@
       <artifactId>bot-api</artifactId>
       <version>${project.version}</version>
     </dependency>
+    <!-- The plugin modules are RUNTIME scope (PLUGIN_HOT_RELOAD_3_4 D-6): app main
+         code cannot compile against them, but they still land in BOOT-INF/lib and
+         on the test classpath, so the component scan finds the same beans as
+         before. Phase 4c turns this into `test`, when the bundle is loaded from
+         /app/plugins instead. -->
     <dependency>
       <groupId>com.mercury</groupId>
       <artifactId>bot-strategies</artifactId>
       <version>${project.version}</version>
+      <scope>runtime</scope>
     </dependency>
     <dependency>
       <groupId>com.mercury</groupId>
       <artifactId>bot-messages</artifactId>
       <version>${project.version}</version>
+      <scope>runtime</scope>
     </dependency>
     <dependency>
       <groupId>com.mercury</groupId>
