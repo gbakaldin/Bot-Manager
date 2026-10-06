@@ -361,7 +361,7 @@ class CrashBotEdgeCaseTest {
     }
 
     @Test
-    @DisplayName("cash-out send throws: exactly one attempt per bet (no retry on later ticks), 1707 counts crash, no winnings")
+    @DisplayName("cash-out send throws: exactly one attempt per bet (no retry on later ticks), counts crash by the next round start, no winnings")
     void cashoutSendFailure() {
         subscribe();
         live(SID, 10_000L, 200L, JAKE);
@@ -371,6 +371,10 @@ class CrashBotEdgeCaseTest {
         tick(SID, 2.10);
         tick(SID, 2.50);
         roundEnd(SID);
+        // Review B2: a pending cash-out survives its 1707 (CLOSING); the next round start resolves it.
+        assertThat(allOutcomes()).isZero();
+        random.longs.addLast(0L);
+        roundStart(NEXT_SID);
 
         verify(channel, times(2)).send(anyString()); // the bet + one cash-out attempt
         assertThat(outcome("crash")).isEqualTo(1.0);
@@ -593,7 +597,7 @@ class CrashBotEdgeCaseTest {
     }
 
     @Test
-    @DisplayName("cash-out sent but refused (no ack): 1707 counts crash, no winnings")
+    @DisplayName("cash-out sent but refused (no ack): counts crash by the next round start, no winnings")
     void cashoutRefused() {
         subscribe();
         live(SID, 10_000L, 240L, JAKE);
@@ -601,6 +605,11 @@ class CrashBotEdgeCaseTest {
         tick(SID, 2.45, 2.45, true, false);
 
         roundEnd(SID);
+        // Review B2: CLOSING until the next round start, in case the ack was only reordered.
+        assertThat(bot.machine().phase()).isEqualTo(Phase.CLOSING);
+        assertThat(allOutcomes()).isZero();
+        random.longs.addLast(0L);
+        roundStart(NEXT_SID);
 
         assertThat(outcome("crash")).isEqualTo(1.0);
         assertThat(count(BotMetrics.BOT_WINNINGS_TOTAL)).isZero();
@@ -616,7 +625,6 @@ class CrashBotEdgeCaseTest {
      * the test the review asks for. Enable it with the fix.
      */
     @Test
-    @Disabled("AVIATOR_BOT review B2 (open): a cash-out ack handled after its 1707 is dropped — enable with the fix")
     @DisplayName("B2: a cash-out ack handled after its 1707 still pays and counts cashout, with exactly one outcome")
     void cashoutAckAfterRoundEnd() {
         subscribe();

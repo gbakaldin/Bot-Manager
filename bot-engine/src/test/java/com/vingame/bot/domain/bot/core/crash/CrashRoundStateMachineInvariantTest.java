@@ -173,7 +173,8 @@ class CrashRoundStateMachineInvariantTest {
                     long wm = 1 + rnd.nextInt(500_000);
                     Action a = m.onCashoutAck(eid, stake, wm);
                     if (a instanceof Action.Ended e) {
-                        assertThat(before).isEqualTo(Phase.CASHING);
+                        // Review B2: an ack handled after its round end still binds, in CLOSING.
+                        assertThat(before).isIn(Phase.CASHING, Phase.CLOSING);
                         assertThat(e.outcome()).isEqualTo(Outcome.CASHOUT);
                         assertThat(e.winnings()).isEqualTo(wm);
                         ended(e, planBefore.orElse(null));
@@ -182,14 +183,22 @@ class CrashRoundStateMachineInvariantTest {
                     }
                 }
                 case 17 -> {
-                    Action a = m.onRoundEnd(pickSid());
+                    long endSid = pickSid();
+                    long sidBefore = m.sid();
+                    Action a = m.onRoundEnd(endSid);
                     if (a instanceof Action.Ended e) {
                         assertThat(e.outcome()).isNotEqualTo(Outcome.CASHOUT);
+                        assertThat(before).as("a round end never closes a pending cash-out in its own round")
+                                .isNotEqualTo(Phase.CASHING);
                         ended(e, planBefore.orElse(null));
                     }
                     if (!(a instanceof Action.None)) {
-                        assertThat(m.phase()).isEqualTo(Phase.WAITING);
-                        assertThat(m.inFlight()).isFalse();
+                        // Review B2: a pending cash-out survives its round end as CLOSING; a
+                        // repeat of the same round end leaves it there.
+                        boolean closing = before == Phase.CASHING
+                                || (before == Phase.CLOSING && endSid == sidBefore);
+                        assertThat(m.phase()).isEqualTo(closing ? Phase.CLOSING : Phase.WAITING);
+                        assertThat(m.inFlight()).isEqualTo(closing);
                     }
                 }
                 default -> {
@@ -199,8 +208,8 @@ class CrashRoundStateMachineInvariantTest {
                     }
                 }
             }
-            assertThat(m.inFlight()).isEqualTo(
-                    m.phase() == Phase.PLACED || m.phase() == Phase.LIVE || m.phase() == Phase.CASHING);
+            assertThat(m.inFlight()).isEqualTo(m.phase() == Phase.PLACED || m.phase() == Phase.LIVE
+                    || m.phase() == Phase.CASHING || m.phase() == Phase.CLOSING);
         }
 
         void ended(Action.Ended e, Plan inFlightBefore) {
@@ -319,10 +328,14 @@ class CrashRoundStateMachineInvariantTest {
                 }
                 go.countDown();
                 assertThat(done.await(5, TimeUnit.SECONDS)).isTrue();
+                assertThat(m.phase()).isIn(Phase.WAITING, Phase.SETTLED, Phase.CLOSING);
+                // Review B2: a cash-out still pending at the round end is CLOSING, not closed;
+                // the next round start is what guarantees its one outcome.
+                m.onRoundStart(sid + 1_000_000L).flatMap(Opened::abandoned).ifPresent(actions::add);
 
                 long ended = actions.stream().filter(a -> a instanceof Action.Ended).count();
                 long sends = actions.stream().filter(a -> a instanceof Action.SendCashout).count();
-                assertThat(ended).as("iteration %d: exactly one outcome (the round end guarantees one)", i).isEqualTo(1);
+                assertThat(ended).as("iteration %d: exactly one outcome (round end + next round start guarantee one)", i).isEqualTo(1);
                 assertThat(sends).isLessThanOrEqualTo(1);
                 Action.Ended e = (Action.Ended) actions.stream().filter(a -> a instanceof Action.Ended).findFirst().orElseThrow();
                 if (e.outcome() == Outcome.CASHOUT) {
@@ -331,7 +344,6 @@ class CrashRoundStateMachineInvariantTest {
                 } else {
                     assertThat(e.outcome()).isEqualTo(Outcome.CRASH);
                 }
-                assertThat(m.phase()).isIn(Phase.WAITING, Phase.SETTLED);
             }
         } finally {
             pool.shutdownNow();

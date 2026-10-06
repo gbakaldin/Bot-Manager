@@ -763,12 +763,65 @@ class CrashRoundStateMachineTest {
         }
 
         @Test
-        @DisplayName("CASHING with no ack --onRoundEnd--> WAITING [Ended(CRASH)] (the cash-out was refused)")
+        @DisplayName("CASHING --onRoundEnd--> CLOSING [RoundClosed], no outcome yet (review B2)")
         void cashingRoundEnd() {
             Plan plan = cashing(61L, 20_000L, 200L, JAKE);
-            assertThat(machine.onRoundEnd(61L)).isEqualTo(
-                    new Action.Ended(Outcome.CRASH, plan, 61L, 0L, CrashRoundStateMachine.UNKNOWN_MULTIPLIER, false));
+            assertThat(machine.onRoundEnd(61L)).isEqualTo(new Action.RoundClosed(61L, Optional.empty()));
+            assertThat(machine.phase()).isEqualTo(Phase.CLOSING);
+            assertThat(machine.inFlight()).isTrue();
+            assertThat(machine.currentPlan()).contains(plan);
+        }
+
+        @Test
+        @DisplayName("CLOSING --onCashoutAck(match)--> SETTLED [Ended(CASHOUT)]: an ack handled after its 1707 still pays (review B2)")
+        void closingCashoutAck() {
+            Plan plan = cashing(64L, 20_000L, 200L, JAKE);
+            machine.onRoundEnd(64L);
+            assertThat(machine.onCashoutAck(NEYTIRI, 20_000L, 40_000L)).isEqualTo(CrashRoundStateMachine.NONE);
+            assertThat(machine.onCashoutAck(JAKE, 10_000L, 40_000L)).isEqualTo(CrashRoundStateMachine.NONE);
+            assertThat(machine.onCashoutAck(JAKE, 20_000L, 40_000L)).isEqualTo(
+                    new Action.Ended(Outcome.CASHOUT, plan, 64L, 40_000L, CrashRoundStateMachine.UNKNOWN_MULTIPLIER, false));
+            assertThat(machine.phase()).isEqualTo(Phase.SETTLED);
+            assertThat(machine.onCashoutAck(JAKE, 20_000L, 40_000L)).isEqualTo(CrashRoundStateMachine.NONE);
+        }
+
+        @Test
+        @DisplayName("CLOSING with no ack --onRoundStart(next)--> OPEN, abandoned Ended(CRASH) (the cash-out was refused)")
+        void closingResolvedByNextRoundStart() {
+            Plan plan = cashing(65L, 20_000L, 200L, JAKE);
+            machine.onRoundEnd(65L);
+            random.longs.addLast(0L);
+            Opened opened = machine.onRoundStart(66L).orElseThrow();
+            assertThat(opened.abandoned()).contains(
+                    new Action.Ended(Outcome.CRASH, plan, 65L, 0L, CrashRoundStateMachine.UNKNOWN_MULTIPLIER, false));
+            assertThat(machine.phase()).isEqualTo(Phase.OPEN);
+            assertThat(machine.onCashoutAck(JAKE, 20_000L, 40_000L)).isEqualTo(CrashRoundStateMachine.NONE);
+        }
+
+        @Test
+        @DisplayName("CLOSING: a repeated 1707 for its round stays CLOSING; a newer 1707 resolves Ended(CRASH); ticks are ignored")
+        void closingRoundEnds() {
+            Plan plan = cashing(67L, 20_000L, 200L, JAKE);
+            machine.onRoundEnd(67L);
+            assertThat(machine.onTick(shared(67L, 9.0))).isEqualTo(CrashRoundStateMachine.NONE);
+            assertThat(machine.onRoundEnd(66L)).isEqualTo(CrashRoundStateMachine.NONE);
+            assertThat(machine.onRoundEnd(67L)).isEqualTo(new Action.RoundClosed(67L, Optional.empty()));
+            assertThat(machine.phase()).isEqualTo(Phase.CLOSING);
+            assertThat(machine.onRoundEnd(68L)).isEqualTo(
+                    new Action.Ended(Outcome.CRASH, plan, 67L, 0L, CrashRoundStateMachine.UNKNOWN_MULTIPLIER, false));
             assertThat(machine.phase()).isEqualTo(Phase.WAITING);
+            assertThat(machine.sid()).isEqualTo(68L);
+        }
+
+        @Test
+        @DisplayName("CLOSING --reset()--> WAITING with no outcome; a late ack then binds nothing")
+        void closingReset() {
+            cashing(69L, 20_000L, 200L, JAKE);
+            machine.onRoundEnd(69L);
+            machine.reset();
+            assertThat(machine.phase()).isEqualTo(Phase.WAITING);
+            assertThat(machine.inFlight()).isFalse();
+            assertThat(machine.onCashoutAck(JAKE, 20_000L, 40_000L)).isEqualTo(CrashRoundStateMachine.NONE);
         }
 
         @Test

@@ -27,9 +27,12 @@ import java.util.function.LongSupplier;
  * CASHING --onTick----------------------------------&gt; CASHING                 (crash flag ignored)
  * CASHING --onCashoutAck(eid, b match)--------------&gt; SETTLED                 [Ended(CASHOUT)]
  * PLACED --onRoundEnd-------------------------------&gt; WAITING                 [Ended(UNACKED)]
- * LIVE|CASHING --onRoundEnd-------------------------&gt; WAITING                 [Ended(CRASH)]
+ * LIVE --onRoundEnd---------------------------------&gt; WAITING                 [Ended(CRASH)]
+ * CASHING --onRoundEnd(sid)-------------------------&gt; CLOSING(sid)            [RoundClosed]  (review B2)
+ * CLOSING --onCashoutAck(eid, b match)--------------&gt; SETTLED                 [Ended(CASHOUT)]
+ * CLOSING --onRoundEnd(newer sid)-------------------&gt; WAITING                 [Ended(CRASH)]
  * SETTLED|OPEN|WAITING --onRoundEnd-----------------&gt; WAITING                 [RoundClosed]
- * PLACED|LIVE|CASHING --onRoundStart(other sid)-----&gt; OPEN(new)               [old bet's Ended first]
+ * PLACED|LIVE|CASHING|CLOSING --onRoundStart(other)-&gt; OPEN(new)               [old bet's Ended first]
  * any --reset()-------------------------------------&gt; WAITING                 [nothing]
  * </pre>
  *
@@ -58,7 +61,17 @@ import java.util.function.LongSupplier;
  *   <li><b>The plan is drawn once</b>, in {@link #tryPlace}, and frozen: stake, target in
  *       hundredths and runner. Nothing re-draws it.</li>
  *   <li><b>Acks carry no sid</b> (F-3). They bind on {@code (eid, stake)} and only in their
- *       single pending state — a bet ack in PLACED, a cash-out ack in CASHING.</li>
+ *       single pending state — a bet ack in PLACED, a cash-out ack in CASHING or
+ *       CLOSING.</li>
+ *   <li><b>A round end does not close a pending cash-out</b> (review B2). ws-parser runs
+ *       four inbound workers per client, so the {@code X703} ack and the {@code X707} right
+ *       after it can be handled in either order. A CASHING bet therefore moves to CLOSING
+ *       at the round end — the round boundary is reported ({@link Action.RoundClosed}) but
+ *       no outcome is — and CLOSING still accepts the ack. A cash-out the server refused
+ *       never gets one, and the next round start (or a newer round end) resolves it as
+ *       {@link Outcome#CRASH}, exactly as a missed round end is resolved from CASHING. The
+ *       outcome is still decided by one CAS, so it is still at most one per bet. A reset in
+ *       CLOSING abandons the bet without an outcome, like any other in-flight reset.</li>
  *   <li>A tick, betting-closed or round-end whose sid is <b>older</b> than the state's is
  *       ignored; a tick for any other sid is ignored. SETTLED ignores every tick, so
  *       nothing is ever sent after a crash or an ack, and a stale pre-crash tick handled
@@ -101,7 +114,7 @@ public final class CrashRoundStateMachine {
 
     /** Where the machine is. For logs and tests; callers act on {@link Action}s, not on this. */
     public enum Phase {
-        WAITING, OPEN, PLACED, LIVE, CASHING, SETTLED
+        WAITING, OPEN, PLACED, LIVE, CASHING, CLOSING, SETTLED
     }
 
     /**
@@ -121,7 +134,8 @@ public final class CrashRoundStateMachine {
      * @param betAt      clock time from which {@link #tryPlace} succeeds
      * @param betDelayMs {@code betAt - now}: the delay to schedule the bet task for
      * @param abandoned  the outcome of an in-flight bet of an earlier round whose round end
-     *                   was missed (UNACKED from PLACED, CRASH from LIVE/CASHING)
+     *                   was missed (UNACKED from PLACED, CRASH from LIVE/CASHING), or of a
+     *                   CLOSING bet whose cash-out ack never came (CRASH)
      */
     public record Opened(long sid, long betAt, long betDelayMs, Optional<Action.Ended> abandoned) {
     }
@@ -172,7 +186,7 @@ public final class CrashRoundStateMachine {
 
     // ------------------------------------------------------------------ state
 
-    private sealed interface State permits Waiting, Open, Placed, Live, Cashing, Settled {
+    private sealed interface State permits Waiting, Open, Placed, Live, Cashing, Closing, Settled {
         long sid();
     }
 
@@ -189,6 +203,10 @@ public final class CrashRoundStateMachine {
     }
 
     private record Cashing(long sid, Plan plan) implements State {
+    }
+
+    /** CASHING after its round end: the cash-out ack may still be in flight (review B2). */
+    private record Closing(long sid, Plan plan) implements State {
     }
 
     private record Settled(long sid, Plan plan) implements State {
@@ -242,6 +260,7 @@ public final class CrashRoundStateMachine {
                 case Placed p -> Optional.of(ended(Outcome.UNACKED, p.plan(), p.sid()));
                 case Live l -> Optional.of(ended(Outcome.CRASH, l.plan(), l.sid()));
                 case Cashing c -> Optional.of(ended(Outcome.CRASH, c.plan(), c.sid()));
+                case Closing c -> Optional.of(ended(Outcome.CRASH, c.plan(), c.sid()));
                 case Waiting w -> Optional.empty();
                 case Open o -> Optional.empty();
                 case Settled s -> Optional.empty();
@@ -379,7 +398,8 @@ public final class CrashRoundStateMachine {
     }
 
     /**
-     * The cash-out ack ({@code X703}). Binds only in CASHING, on the plan's runner and stake.
+     * The cash-out ack ({@code X703}). Binds only in CASHING, or in CLOSING when the round end
+     * was handled first (review B2), on the plan's runner and stake.
      *
      * @param winnings the gross payout, {@code round(wm)}
      * @return {@link Action.Ended} (CASHOUT), or {@link #NONE}
@@ -387,21 +407,33 @@ public final class CrashRoundStateMachine {
     public Action onCashoutAck(int eid, long stake, long winnings) {
         while (true) {
             State current = state.get();
-            if (!(current instanceof Cashing cashing)
-                    || cashing.plan().eid() != eid || cashing.plan().amount() != stake) {
+            long sid;
+            Plan plan;
+            if (current instanceof Cashing cashing) {
+                sid = cashing.sid();
+                plan = cashing.plan();
+            } else if (current instanceof Closing closing) {
+                sid = closing.sid();
+                plan = closing.plan();
+            } else {
                 return NONE;
             }
-            if (state.compareAndSet(current, new Settled(cashing.sid(), cashing.plan()))) {
-                return new Action.Ended(Outcome.CASHOUT, cashing.plan(), cashing.sid(), winnings,
-                        UNKNOWN_MULTIPLIER, false);
+            if (plan.eid() != eid || plan.amount() != stake) {
+                return NONE;
+            }
+            if (state.compareAndSet(current, new Settled(sid, plan))) {
+                return new Action.Ended(Outcome.CASHOUT, plan, sid, winnings, UNKNOWN_MULTIPLIER, false);
             }
         }
     }
 
     /**
      * The round ended ({@code X707}). Closes whatever the round left: an unacked bet, a live
-     * or cashing bet (a loss — a cash-out still pending at the round end was refused), or
-     * nothing. An older sid is ignored.
+     * bet (a loss), or nothing. A <b>cashing</b> bet is not closed here (review B2): its ack
+     * may be handled after this frame, so it moves to CLOSING and the round boundary alone is
+     * reported; the ack, or else the next round start, decides its outcome. A repeated round
+     * end for a CLOSING bet's own round reports the boundary again and leaves it CLOSING; a
+     * newer one resolves it as a loss. An older sid is ignored.
      *
      * @return {@link Action.Ended}, {@link Action.RoundClosed}, or {@link #NONE} for a stale sid
      */
@@ -411,15 +443,26 @@ public final class CrashRoundStateMachine {
             if (sid < current.sid()) {
                 return NONE;
             }
-            Action action = switch (current) {
-                case Placed p -> ended(Outcome.UNACKED, p.plan(), p.sid());
-                case Live l -> ended(Outcome.CRASH, l.plan(), l.sid());
-                case Cashing c -> ended(Outcome.CRASH, c.plan(), c.sid());
-                case Settled s -> new Action.RoundClosed(sid, Optional.of(s.plan()));
-                case Open o -> new Action.RoundClosed(sid, Optional.empty());
-                case Waiting w -> new Action.RoundClosed(sid, Optional.empty());
-            };
-            if (state.compareAndSet(current, new Waiting(sid))) {
+            State next = new Waiting(sid);
+            Action action;
+            switch (current) {
+                case Placed p -> action = ended(Outcome.UNACKED, p.plan(), p.sid());
+                case Live l -> action = ended(Outcome.CRASH, l.plan(), l.sid());
+                case Cashing c -> {
+                    next = new Closing(c.sid(), c.plan());
+                    action = new Action.RoundClosed(sid, Optional.empty());
+                }
+                case Closing c -> {
+                    if (sid == c.sid()) {
+                        return new Action.RoundClosed(sid, Optional.empty());
+                    }
+                    action = ended(Outcome.CRASH, c.plan(), c.sid());
+                }
+                case Settled s -> action = new Action.RoundClosed(sid, Optional.of(s.plan()));
+                case Open o -> action = new Action.RoundClosed(sid, Optional.empty());
+                case Waiting w -> action = new Action.RoundClosed(sid, Optional.empty());
+            }
+            if (state.compareAndSet(current, next)) {
                 return action;
             }
         }
@@ -456,6 +499,7 @@ public final class CrashRoundStateMachine {
             case Placed p -> Phase.PLACED;
             case Live l -> Phase.LIVE;
             case Cashing c -> Phase.CASHING;
+            case Closing c -> Phase.CLOSING;
             case Settled s -> Phase.SETTLED;
         };
     }
@@ -465,18 +509,20 @@ public final class CrashRoundStateMachine {
         return state.get().sid();
     }
 
-    /** @return whether a bet is PLACED, LIVE or CASHING. */
+    /** @return whether a bet is PLACED, LIVE, CASHING or CLOSING — placed, outcome not yet known. */
     public boolean inFlight() {
         State current = state.get();
-        return current instanceof Placed || current instanceof Live || current instanceof Cashing;
+        return current instanceof Placed || current instanceof Live || current instanceof Cashing
+                || current instanceof Closing;
     }
 
-    /** @return this round's plan, from placement until the round end (including SETTLED). */
+    /** @return this round's plan, from placement until the round end (including SETTLED), or while CLOSING. */
     public Optional<Plan> currentPlan() {
         return switch (state.get()) {
             case Placed p -> Optional.of(p.plan());
             case Live l -> Optional.of(l.plan());
             case Cashing c -> Optional.of(c.plan());
+            case Closing c -> Optional.of(c.plan());
             case Settled s -> Optional.of(s.plan());
             case Waiting w -> Optional.empty();
             case Open o -> Optional.empty();
