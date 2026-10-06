@@ -9,6 +9,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -109,9 +110,18 @@ public class SlotStrategyFactory {
      *         Read by {@code BotGroupConfigValidationService} to reject a
      *         {@code slotStrategyId} no bean claims (AD-15) — which sorts it
      *         itself before rendering it into a 400 body.
+     *
+     *         <p><b>A snapshot, not a view</b> (PLUGIN_HOT_RELOAD_3_4 D-17), for the
+     *         reason given on the betting twin's {@code registeredKeys()}: a view over
+     *         {@link #registry} is safe only while the map is never written after
+     *         {@link #init()}, and a request thread iterating it would throw
+     *         {@link java.util.ConcurrentModificationException} the first time that
+     *         stops being true. A {@link LinkedHashSet} copy and not
+     *         {@code Set.copyOf}, whose iteration order is unspecified and salted per
+     *         JVM run, so the discovery order promised above survives.
      */
     public Set<String> registeredKeys() {
-        return Collections.unmodifiableSet(registry.keySet());
+        return Collections.unmodifiableSet(new LinkedHashSet<>(registry.keySet()));
     }
 
     /** The keys as an operator should read them — see the betting twin. */

@@ -4,7 +4,10 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.ApplicationContext;
 
+import java.lang.reflect.Field;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -134,6 +137,55 @@ class SlotStrategyFactoryTest {
         factory.init();
 
         assertThat(factory.registeredKeys()).isEmpty();
+    }
+
+    /**
+     * PLUGIN_HOT_RELOAD_3_4 D-17 — the twin of
+     * {@code BettingStrategyFactoryTest.registeredKeysIsASnapshot}. This used to be
+     * {@code unmodifiableSet(registry.keySet())}, a live view. The mutation is done by
+     * reflection because no public path can mutate the registry; that is why the
+     * property is otherwise unobservable and would be reverted as a pointless copy.
+     */
+    @Test
+    @DisplayName("registeredKeys returns a snapshot, not a live view of the registry")
+    @SuppressWarnings("unchecked")
+    void registeredKeysIsASnapshot() throws Exception {
+        ApplicationContext context = mock(ApplicationContext.class);
+        SlotStrategyFactory factory =
+                new SlotStrategyFactory(context, List.of(new FixedBetStrategy()));
+        factory.init();
+
+        Set<String> taken = factory.registeredKeys();
+
+        Field registryField = SlotStrategyFactory.class.getDeclaredField("registry");
+        registryField.setAccessible(true);
+        Map<String, Class<? extends SlotStrategy>> registry =
+                (Map<String, Class<? extends SlotStrategy>>) registryField.get(factory);
+        registry.put("LATE_ARRIVAL", RandomBetStrategy.class);
+
+        assertThat(taken)
+                .as("a set handed out before the mutation must not see it")
+                .containsExactly("FIXED");
+        assertThat(factory.registeredKeys())
+                .as("and the next read must, since it is a fresh snapshot")
+                .containsExactly("FIXED", "LATE_ARRIVAL");
+    }
+
+    @Test
+    @DisplayName("the snapshot is still unmodifiable and still in discovery order")
+    void snapshotKeepsItsOldGuarantees() {
+        // Not Set.copyOf: its iteration order is unspecified and salted per JVM run.
+        // RANDOM is handed in first so a sorted copy would fail the order assertion.
+        ApplicationContext context = mock(ApplicationContext.class);
+        SlotStrategyFactory factory = new SlotStrategyFactory(
+                context, List.of(new RandomBetStrategy(), new FixedBetStrategy()));
+        factory.init();
+
+        Set<String> keys = factory.registeredKeys();
+
+        assertThat(keys).containsExactly("RANDOM", "FIXED");
+        assertThatThrownBy(() -> keys.add("NOPE"))
+                .isInstanceOf(UnsupportedOperationException.class);
     }
 
     /**
