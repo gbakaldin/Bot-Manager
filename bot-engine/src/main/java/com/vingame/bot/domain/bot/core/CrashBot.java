@@ -65,9 +65,10 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  *       this class adds no {@code betLive} / {@code cashedOut} flag beside it. The bet task,
  *       ws-parser's four inbound workers and the silence task all touch the machine.</li>
  *   <li><b>Silence watch</b> (AD-9), armed from {@link #onStart()}, not from the subscribe
- *       reply, so a refused subscribe is caught too: a {@code subscribed=false} WARN after
- *       one window, then reconnects at silent windows 1, 2, 4, 8, 16, 32 and every 32
- *       after that.</li>
+ *       reply, so a refused subscribe is caught too: reconnects at silent windows 1, 2, 4,
+ *       8, 16, 32 and every 32 after that, one WARN per silence episode carrying
+ *       {@code subscribed=}. A DEAD bot's task ends; a rung that lands while a reconnect is
+ *       already running neither counts nor escalates (review B1).</li>
  *   <li><b>Never bet off the snapshot</b> (AD-12): the first bet is on the next round
  *       start after the subscribe reply.</li>
  * </ul>
@@ -493,32 +494,52 @@ public class CrashBot extends Bot {
         }
     }
 
-    /** The silence task fired (AD-9). Package-private as a test seam. */
+    /**
+     * The silence task fired (AD-9). Package-private as a test seam.
+     * <p>
+     * <b>DEAD ends the task</b> (review B1): it is the only self-re-arming watchdog, and a
+     * DEAD bot's {@code triggerFullReconnect} is a no-op, so re-arming would only keep
+     * counting expiries and re-arming group-scoped DEBUG for as long as the group lives.
+     * Nothing revives a DEAD bot short of a group rebuild, which arms a fresh task from
+     * {@link #onStart()}. <b>While a reconnect is already running</b> the task keeps
+     * re-arming — the reconnect may fail back into silence — but a rung neither counts nor
+     * escalates, because it starts nothing.
+     * <p>
+     * <b>One WARN per silence episode</b> (review S3). When the episode's first window
+     * starts a reconnect, {@code triggerFullReconnect}'s own WARN is that line and carries
+     * the window and {@code subscribed=} detail in its reason; this method logs at DEBUG.
+     */
     void onSilenceCheck() {
         if (isStopped()) return;
+        if (getStatus() == BotStatus.DEAD) {
+            log.debug("Bot {}: DEAD — silence watch not re-armed", getUserName());
+            return;
+        }
         RoundSilenceWatch.Check check = watch.check();
         if (check instanceof RoundSilenceWatch.Check.Remaining remaining) {
             armSilenceWatch(remaining.millis());
             return;
         }
         RoundSilenceWatch.Check.Silent silent = (RoundSilenceWatch.Check.Silent) check;
-        if (silent.first()) {
+        boolean reconnect = silent.reconnect() && !isReconnecting();
+        if (silent.first() && !reconnect) {
             log.warn("Bot {}: no crash frame for {} s — silent window 1, subscribed={}{}",
                     getUserName(), watch.windowMillis() / 1_000L, silent.subscribed(),
-                    silent.reconnect() ? ", reconnecting" : "");
+                    silent.reconnect() ? ", reconnect already in progress" : "");
         } else {
             log.debug("Bot {}: no crash frame — silent window {}, subscribed={}{}",
                     getUserName(), silent.silentWindows(), silent.subscribed(),
-                    silent.reconnect() ? ", reconnecting" : "");
+                    reconnect ? ", reconnecting"
+                            : silent.reconnect() ? ", reconnect already in progress" : "");
         }
         // Re-arm BEFORE escalating: a successful reconnect re-arms again from onStart().
         armSilenceWatch(watch.windowMillis());
-        if (silent.reconnect()) {
-            escalate(silent.silentWindows());
+        if (reconnect) {
+            escalate(silent.silentWindows(), silent.subscribed());
         }
     }
 
-    private void escalate(int silentWindows) {
+    private void escalate(int silentWindows, boolean subscribed) {
         if (metrics != null) metrics.incBotWatchdogExpired();
         // Same early-warning arming as CashoutBot; a logging aid must never stop a reconnect.
         if (scopedDebugEscalator != null) {
@@ -529,7 +550,8 @@ public class CrashBot extends Bot {
             }
         }
         // triggerFullReconnect WARNs the reason itself; "watchdog" prefix => reason=watchdog.
-        triggerFullReconnect("watchdog: " + silentWindows + " silent windows");
+        triggerFullReconnect("watchdog: " + silentWindows + " silent windows of "
+                + watch.windowMillis() / 1_000L + " s, subscribed=" + subscribed);
     }
 
     // ------------------------------------------------------------------ scenario

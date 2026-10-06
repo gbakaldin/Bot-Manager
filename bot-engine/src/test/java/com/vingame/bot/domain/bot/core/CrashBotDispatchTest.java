@@ -495,7 +495,7 @@ class CrashBotDispatchTest {
     }
 
     @Test
-    @DisplayName("silence: no frames triggers triggerFullReconnect at windows 1 and 2, not 3; one WARN at window 1, subscribed=false")
+    @DisplayName("silence: no frames triggers triggerFullReconnect at windows 1 and 2, not 3; the reconnect's own WARN carries subscribed=false")
     void silenceLadder() {
         try (LogCapture logs = new LogCapture()) {
             for (int window = 1; window <= 3; window++) {
@@ -503,11 +503,12 @@ class CrashBotDispatchTest {
                 bot.onSilenceCheck();
                 assertThat(reconnectReasons).as("after window %d", window).hasSize(Math.min(window, 2));
             }
-            List<String> warns = logs.at(Level.WARN);
-            assertThat(warns).hasSize(1);
-            assertThat(warns.get(0)).contains("silent window 1").contains("subscribed=false");
+            // Review S3: triggerFullReconnect WARNs the reason itself; CrashBot adds no second WARN.
+            assertThat(logs.at(Level.WARN)).isEmpty();
+            assertThat(logs.containing("silent window 1")).hasSize(1);
         }
-        assertThat(reconnectReasons.get(0)).startsWith("watchdog").contains("1 silent windows");
+        assertThat(reconnectReasons.get(0)).startsWith("watchdog").contains("1 silent windows")
+                .contains("subscribed=false");
         assertThat(count(BotMetrics.BOT_WATCHDOG_EXPIRED_TOTAL)).isEqualTo(2.0);
         assertThat(scheduled).as("each check re-arms a full window")
                 .extracting(Scheduled::delayMs).containsOnly(WINDOW_MS);

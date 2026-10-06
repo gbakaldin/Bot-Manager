@@ -697,7 +697,6 @@ class CrashBotEdgeCaseTest {
      * every 32 windows, forever.
      */
     @Test
-    @Disabled("AVIATOR_BOT review B1 (open): the silence task keeps escalating on a DEAD bot — enable with the fix")
     @DisplayName("B1: on a DEAD bot the silence task neither counts, escalates nor re-arms")
     void silenceTaskOnDeadBot() throws Exception {
         ScopedDebugEscalator escalator = mock(ScopedDebugEscalator.class);
@@ -715,6 +714,43 @@ class CrashBotEdgeCaseTest {
         assertThat(count(BotMetrics.BOT_WATCHDOG_EXPIRED_TOTAL)).isZero();
         verify(escalator, never()).onWatchdogExpiry(anyString());
         assertThat(scheduled).as("a DEAD bot's silence task is not re-armed").hasSize(before);
+    }
+
+    @Test
+    @DisplayName("B1: while a reconnect is already running, the silence task keeps re-arming but neither counts, escalates nor reconnects")
+    void silenceTaskWhileReconnecting() throws Exception {
+        ScopedDebugEscalator escalator = mock(ScopedDebugEscalator.class);
+        bot.setScopedDebugEscalator(escalator);
+        setReconnecting(true);
+        int before = scheduled.size();
+
+        for (int window = 1; window <= 8; window++) {
+            now.addAndGet(WINDOW_MS);
+            bot.onSilenceCheck();
+        }
+
+        assertThat(count(BotMetrics.BOT_WATCHDOG_EXPIRED_TOTAL)).isZero();
+        verify(escalator, never()).onWatchdogExpiry(anyString());
+        assertThat(reconnectReasons).isEmpty();
+        assertThat(scheduled).as("re-armed every window: the reconnect may fail back into silence")
+                .hasSize(before + 8);
+
+        // The reconnect loop gives up the guard without a frame: the next rung counts again.
+        setReconnecting(false);
+        for (int window = 9; window <= 16; window++) {
+            now.addAndGet(WINDOW_MS);
+            bot.onSilenceCheck();
+        }
+        assertThat(reconnectReasons).hasSize(1);
+        assertThat(reconnectReasons.get(0)).contains("16 silent windows");
+        assertThat(count(BotMetrics.BOT_WATCHDOG_EXPIRED_TOTAL)).isEqualTo(1.0);
+        verify(escalator).onWatchdogExpiry("group-crash");
+    }
+
+    private void setReconnecting(boolean value) throws Exception {
+        java.lang.reflect.Field f = Bot.class.getDeclaredField("reconnecting");
+        f.setAccessible(true);
+        ((java.util.concurrent.atomic.AtomicBoolean) f.get(bot)).set(value);
     }
 
     // ================================================================== reconnect mid-bet
@@ -860,7 +896,7 @@ class CrashBotEdgeCaseTest {
     }
 
     @Test
-    @DisplayName("silence after a subscribe WARNs subscribed=true; a frame ends the episode and the next one WARNs and reconnects from window 1 again")
+    @DisplayName("silence after a subscribe reconnects with subscribed=true; a frame ends the episode and the next one reconnects from window 1 again")
     void silenceEpisodes() {
         subscribe();
         try (LogCapture logs = new LogCapture()) {
@@ -868,17 +904,31 @@ class CrashBotEdgeCaseTest {
             bot.onSilenceCheck();
             now.addAndGet(WINDOW_MS);
             bot.onSilenceCheck();
-            assertThat(logs.at(Level.WARN)).hasSize(1);
-            assertThat(logs.at(Level.WARN).get(0)).contains("silent window 1").contains("subscribed=true");
+            // Review S3: the episode's one WARN is triggerFullReconnect's, carrying the reason.
+            assertThat(logs.at(Level.WARN)).isEmpty();
+            assertThat(reconnectReasons.get(0)).contains("1 silent windows").contains("subscribed=true");
 
             random.longs.addLast(4_000L);
             roundStart(SID); // a frame
             now.addAndGet(WINDOW_MS);
             bot.onSilenceCheck();
-            assertThat(logs.at(Level.WARN)).as("one WARN per silence episode").hasSize(2);
+            assertThat(logs.at(Level.WARN)).isEmpty();
         }
         assertThat(reconnectReasons).hasSize(3);
         assertThat(reconnectReasons.get(2)).contains("1 silent windows");
+    }
+
+    @Test
+    @DisplayName("S3: silent window 1 while a reconnect is already running WARNs once from CrashBot, and nothing else")
+    void silenceWindowOneDuringReconnectWarns() throws Exception {
+        setReconnecting(true);
+        try (LogCapture logs = new LogCapture()) {
+            now.addAndGet(WINDOW_MS);
+            bot.onSilenceCheck();
+            assertThat(logs.at(Level.WARN)).hasSize(1);
+            assertThat(logs.at(Level.WARN).get(0)).contains("silent window 1").contains("reconnect already in progress");
+        }
+        assertThat(reconnectReasons).isEmpty();
     }
 
     @Test

@@ -835,6 +835,16 @@ public abstract class Bot {
         return stopped;
     }
 
+    /**
+     * Whether a reconnect loop is running for this bot — while it is,
+     * {@link #triggerFullReconnect} and the WS-disconnect path are no-ops. A watchdog that
+     * re-arms itself reads this to count and escalate only the expiries that actually
+     * start a reconnect (AVIATOR_BOT review B1). Advisory: the loop may finish right after.
+     */
+    protected boolean isReconnecting() {
+        return reconnecting.get();
+    }
+
     protected void markConnectionAuthenticated() {
         if (status != BotStatus.CONNECTION_AUTHENTICATED) {
             transitionStatus(BotStatus.CONNECTION_AUTHENTICATED);
