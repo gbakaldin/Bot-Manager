@@ -100,6 +100,40 @@
   <build>
     <pluginManagement>
       <plugins>
+        <!-- The engine/plugin boundary (PLUGIN_HOT_RELOAD_3_4 D-6). Declared (bound,
+             with no further configuration) in bot-api, bot-engine and bot-app - the
+             modules that must never compile against a plugin module. The scopes in
+             those poms are what make a concrete plugin class a compiler error; this
+             rule is what stops someone "fixing" that error by widening the scope back
+             to compile/provided. Pattern format:
+             groupId:artifactId:version:type:scope. Transitive paths are searched too,
+             so a plugin module cannot arrive at compile scope through another module
+             either. -->
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-enforcer-plugin</artifactId>
+          <executions>
+            <execution>
+              <id>ban-plugin-modules-on-compile-classpath</id>
+              <goals>
+                <goal>enforce</goal>
+              </goals>
+              <configuration>
+                <rules>
+                  <bannedDependencies>
+                    <excludes>
+                      <exclude>com.mercury:bot-strategies:*:*:compile</exclude>
+                      <exclude>com.mercury:bot-strategies:*:*:provided</exclude>
+                      <exclude>com.mercury:bot-messages:*:*:compile</exclude>
+                      <exclude>com.mercury:bot-messages:*:*:provided</exclude>
+                    </excludes>
+                    <message>A plugin module (bot-strategies / bot-messages) is on this module's compile classpath. Engine and app code must not compile against plugin classes: bot-engine takes them at test scope, bot-app at runtime scope (PLUGIN_HOT_RELOAD_3_4 D-6). Move the class you need to the side the D-2 rule puts it on instead of widening the scope.</message>
+                  </bannedDependencies>
+                </rules>
+              </configuration>
+            </execution>
+          </executions>
+        </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-compiler-plugin</artifactId>
