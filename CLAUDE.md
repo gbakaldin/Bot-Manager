@@ -412,6 +412,10 @@ declare.
 | `SlotStrategyFactory` | slot strategy key | `@SlotStrategyImpl("FIXED")` |
 | `MessageTypesRegistry` | `(GameType, productCode)`, e.g. `(BETTING_MINI, "116")` | `@MessageTypesImpl(gameType=…, products={"097","098"})` |
 
+All three registries live in **`bot-engine`** (moved there, FQNs unchanged, by
+`docs/plans/PLUGIN_HOT_RELOAD_3_4.md` Phase 3a); what they resolve stays in
+`bot-strategies` / `bot-messages`, and the engine names no concrete class from either.
+
 - **`StrategyId` / `SlotStrategyId` survive, demoted to the built-in catalogue**
   (AD-12). They are the compile-time home of the canonical key strings and of the
   `displayName` / `description` the UI picker renders — **no runtime code path may
