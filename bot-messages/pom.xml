@@ -18,8 +18,8 @@
     live in bot-api, and the MessageTypesRegistry that maps a game type /
     product-code string onto a provider lives in bot-engine (PLUGIN_HOT_RELOAD_3_4
     Phase 3a); this module holds only the concrete Jackson-polymorphic subtypes
-    referenced by that contract. Depends only
-    on bot-api and Jackson/Lombok. One module for all brands (Architecture
+    referenced by that contract. Depends only on bot-api (contract module) and
+    framework libraries, all provided. One module for all brands (Architecture
     Decision #4).
   </description>
 
@@ -30,7 +30,10 @@
          or transitively pulls them. bot-api's own compile dependencies (Jackson
          databind, websocket-parser, spring-data-mongodb for @Document Game) become
          provided with it - harmless, and not to be "fixed" by bundling. Do not add
-         a compile-scope dependency here, and no Micrometer at any scope (L-9). -->
+         a compile-scope dependency here, and no micrometer-core or
+         micrometer-registry-* at any scope (L-9): plugins never touch a
+         MeterRegistry. micrometer-observation / -commons arriving provided-
+         transitively through spring-context 6.x is expected and allowed. -->
     <dependency>
       <groupId>com.mercury</groupId>
       <artifactId>bot-api</artifactId>
@@ -63,9 +66,10 @@
          (PLUGIN_HOT_RELOAD Phase 2c, AD-18: discovery stays Spring bean
          discovery; ServiceLoader is rejected because the strategies already
          need Spring for prototype instances and two discovery models would be
-         worse than either). This is a downward dependency on an external
-         library — it introduces no reverse edge in
-         bot-app -> bot-engine -> {bot-strategies, bot-messages} -> bot-api. -->
+         worse than either). A downward dependency on an external library: it
+         gives this module no edge to the engine, and since PLUGIN_HOT_RELOAD_3_4
+         Phase 3b nothing engine-side can take one to this module at compile
+         scope either (scopes + the root enforcer). -->
     <dependency>
       <groupId>org.springframework</groupId>
       <artifactId>spring-context</artifactId>

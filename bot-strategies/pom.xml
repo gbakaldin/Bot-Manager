@@ -26,7 +26,10 @@
          or transitively pulls them. bot-api's own compile dependencies (Jackson
          databind, websocket-parser, spring-data-mongodb for @Document Game) become
          provided with it - harmless, and not to be "fixed" by bundling. Do not add
-         a compile-scope dependency here, and no Micrometer at any scope (L-9). -->
+         a compile-scope dependency here, and no micrometer-core or
+         micrometer-registry-* at any scope (L-9): plugins never touch a
+         MeterRegistry. micrometer-observation / -commons arriving provided-
+         transitively through spring-context 6.x is expected and allowed. -->
     <dependency>
       <groupId>com.mercury</groupId>
       <artifactId>bot-api</artifactId>
