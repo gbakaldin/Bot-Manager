@@ -765,3 +765,16 @@ and still increments `bot_messages_total{cmd="crashRoundEnd"}`, so V-9 is unaffe
 bet's outcome is not lost, because the newer round start already reported it as `abandoned`
 (AD-8, missed-1707 row). Implemented in `CrashBot.onRoundEnd` and pinned by
 `CrashBotDispatchTest` "a stale 1707 counts no round".
+
+**AM-3 (2026-10-06, review fix B2): a CASHING bet at 1707 moves to CLOSING, not straight to
+`Ended(CRASH)`.** The AD-8 row "LIVE|CASHING --onRoundEnd--> WAITING [ENDED(CRASH)]" and §"a
+CASHING bet with no ack gets Ended(CRASH) on 1707" assumed the 1703 ack is handled before the
+1707. With 4 inbound workers per client it may not be, and the old rule then recorded a paid bet as
+a crash and dropped its `wm`. Corrected rule: at 1707 a **CASHING** bet becomes
+`Closing(sid, plan)` and returns `RoundClosed`. The round still counts and the session check still
+runs. CLOSING accepts the matching 1703 ack (`Ended(CASHOUT)`). The next round start or a newer
+1707 resolves it as `Ended(CRASH)`. A LIVE bet at 1707 is unchanged: `Ended(CRASH)`.
+At-most-one-outcome still holds, because the outcome is still one CAS. A reconnect while CLOSING
+abandons the bet with no outcome, like any other mid-bet reconnect. Implemented in `06c32c8`,
+pinned by `CrashBotEdgeCaseTest.cashoutAckAfterRoundEnd` and the CLOSING cases in
+`CrashRoundStateMachineTest`.
