@@ -97,6 +97,42 @@ class PluginBundleCloseTest {
     }
 
     @Test
+    @DisplayName("an Error in a step (NoClassDefFoundError from a destroy callback) does not stop the later ones (review-4a)")
+    void laterStepsRunAfterAnError() {
+        RecordingBundle bundle = new RecordingBundle();
+        bundle.contextCloseFailure = new NoClassDefFoundError("com/vingame/bot/Gone");
+        bundle.typeFactory().constructType(BundleProbe.class);
+
+        assertThatThrownBy(bundle::close)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("close context failed")
+                .hasCauseInstanceOf(NoClassDefFoundError.class);
+
+        assertThat(bundle.events)
+                .as("a LinkageError in step 2 must not leave the loader open with `closed` latched")
+                .containsExactly("context", "loader");
+        assertThat(bundle.bundleCacheHeldProbeAtLoaderClose).isFalse();
+    }
+
+    @Test
+    @DisplayName("a fatal VM error still lets every step run, then escapes as is with the rest suppressed")
+    void fatalVmErrorIsRethrownUnwrappedAfterTheLastStep() {
+        RecordingBundle bundle = new RecordingBundle();
+        InternalError fatal = new InternalError("vm is unwell");
+        bundle.onUnpublish(() -> {
+            throw new IllegalStateException("hook failed first");
+        });
+        bundle.contextCloseFailure = fatal;
+
+        assertThatThrownBy(bundle::close).isSameAs(fatal);
+
+        assertThat(bundle.events).containsExactly("context", "loader");
+        assertThat(fatal.getSuppressed()).hasSize(1);
+        assertThat(fatal.getSuppressed()[0]).hasMessageContaining("unpublish failed")
+                .hasRootCauseMessage("hook failed first");
+    }
+
+    @Test
     @DisplayName("once its bundle closes, PluginRuntime stops publishing the registries")
     void runtimeUnpublishesOnBundleClose() {
         RecordingBundle bundle = new RecordingBundle();
@@ -148,6 +184,7 @@ class PluginBundleCloseTest {
     private static final class RecordingBundle extends PluginBundle {
         final List<String> events = new ArrayList<>();
         boolean failContextClose;
+        Throwable contextCloseFailure;
         boolean bundleCacheHeldProbeAtContextClose;
         boolean bundleCacheHeldProbeAtLoaderClose = true;
         boolean defaultCacheHeldProbeAtLoaderClose = true;
@@ -188,6 +225,9 @@ class PluginBundleCloseTest {
             bundleCacheHeldProbeAtContextClose = cached(typeFactory(), BundleProbe.class);
             if (failContextClose) {
                 throw new IllegalStateException("context refused to close");
+            }
+            if (contextCloseFailure instanceof Error error) {
+                throw error;
             }
         }
 

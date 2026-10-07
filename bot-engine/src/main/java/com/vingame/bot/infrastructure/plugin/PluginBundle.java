@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.type.TypeFactory;
 import com.fasterxml.jackson.databind.util.LRUMap;
 import com.fasterxml.jackson.databind.util.LookupCache;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -43,8 +44,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *   <li>clear this bundle's type cache and {@code TypeFactory.defaultInstance()}'s;</li>
  *   <li>close the classloader.</li>
  * </ol>
- * Each step runs even if an earlier one threw; the first failure is rethrown at the end
- * with the later ones suppressed. At step 4 {@code close()} runs only for a rejected
+ * <b>Each step runs even if an earlier one threw — anything at all, {@link Error}s
+ * included.</b> Step 2 runs plugin destroy callbacks, whose typical failure is a
+ * {@code NoClassDefFoundError} / {@code LinkageError}, and stopping there would leave the
+ * type caches full and the loader open with {@code closed} already latched, i.e. leaked
+ * for the life of the JVM (review-4a). After the last step:
+ * <ul>
+ *   <li>if any step threw a {@link VirtualMachineError} (out of memory, stack overflow,
+ *       an internal error), the first such error is rethrown <em>as is</em>, with every
+ *       other failure suppressed on it — a fatal VM condition must not be disguised as
+ *       a close failure;</li>
+ *   <li>otherwise the first failure is rethrown wrapped in an
+ *       {@link IllegalStateException} naming the bundle and the step, with the later
+ *       ones (each wrapped the same way) suppressed on it.</li>
+ * </ul>
+ * At step 4 {@code close()} runs only for a rejected
  * candidate and at JVM shutdown. {@link ClasspathPluginBundle} overrides it with a no-op,
  * because it owns neither its context nor its loader.
  */
@@ -123,32 +137,33 @@ public abstract class PluginBundle implements AutoCloseable {
     /**
      * Release the bundle in D-13's order. Idempotent: a second call does nothing.
      *
-     * @throws IllegalStateException carrying the first step failure, if any step threw.
+     * @throws IllegalStateException carrying the first step failure, if any step threw
+     *                               and none of the failures was fatal.
+     * @throws VirtualMachineError   the first fatal VM error a step threw, after every
+     *                               remaining step has run.
      */
     @Override
     public void close() {
         if (!closed.compareAndSet(false, true)) {
             return;
         }
-        RuntimeException failure = null;
+        Failures failures = new Failures();
         // 1. Unpublish: nothing may hand out this bundle's registries any more.
         for (Runnable hook : unpublishHooks) {
-            failure = runStep("unpublish", hook::run, failure);
+            runStep("unpublish", hook::run, failures);
         }
         // 2. The child context. Its close() runs resetCommonCaches().
-        failure = runStep("close context", this::closeContext, failure);
+        runStep("close context", this::closeContext, failures);
         // 3. Both type caches. The default one is cleared too, because a plugin type can
         //    reach it through any mapper that was not built on this bundle's factory.
-        failure = runStep("clear type caches", () -> {
+        runStep("clear type caches", () -> {
             typeFactory.clearCache();
             TypeFactory.defaultInstance().clearCache();
-        }, failure);
+        }, failures);
         // 4. The classloader, last: closing it first would leave steps 2-3 unable to load
         //    a class they need.
-        failure = runStep("close classloader", this::closeClassLoader, failure);
-        if (failure != null) {
-            throw failure;
-        }
+        runStep("close classloader", this::closeClassLoader, failures);
+        failures.rethrow();
     }
 
     /** Step 2 of {@link #close()}: close the bundle's own context. */
@@ -162,18 +177,51 @@ public abstract class PluginBundle implements AutoCloseable {
         void run() throws Exception;
     }
 
-    private RuntimeException runStep(String name, Step step, RuntimeException failure) {
+    private void runStep(String name, Step step, Failures failures) {
         try {
             step.run();
-            return failure;
-        } catch (Exception e) {
+        } catch (Throwable t) {
+            // Throwable, not Exception: see the class javadoc. Nothing is rethrown here, so
+            // the remaining steps always run; Failures decides what escapes at the end.
+            failures.add(name, t);
+        }
+    }
+
+    /** What the close steps threw, and what {@link #close()} rethrows after the last one. */
+    private final class Failures {
+        private IllegalStateException first;
+        private VirtualMachineError fatal;
+        private final List<Throwable> all = new ArrayList<>();
+
+        void add(String step, Throwable thrown) {
             IllegalStateException wrapped = new IllegalStateException(
-                    "plugin bundle " + version() + ": " + name + " failed", e);
-            if (failure == null) {
-                return wrapped;
+                    "plugin bundle " + version() + ": " + step + " failed", thrown);
+            if (first == null) {
+                first = wrapped;
             }
-            failure.addSuppressed(wrapped);
-            return failure;
+            if (fatal == null && thrown instanceof VirtualMachineError vmError) {
+                fatal = vmError;
+            }
+            all.add(thrown instanceof VirtualMachineError ? thrown : wrapped);
+        }
+
+        void rethrow() {
+            if (fatal != null) {
+                for (Throwable other : all) {
+                    if (other != fatal) {
+                        fatal.addSuppressed(other);
+                    }
+                }
+                throw fatal;
+            }
+            if (first != null) {
+                for (Throwable other : all) {
+                    if (other != first) {
+                        first.addSuppressed(other);
+                    }
+                }
+                throw first;
+            }
         }
     }
 }
