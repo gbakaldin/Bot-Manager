@@ -143,8 +143,37 @@ class PluginBundleCloseTest {
 
         assertThat(bundle.events).containsExactly("context", "loader");
         assertThatThrownBy(runtime::current)
+                .isInstanceOf(PluginUnpublishedException.class)
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("has been closed");
+                .hasMessageContaining("has been closed")
+                .hasMessageContaining("20261007.000000");
+    }
+
+    @Test
+    @DisplayName("a runtime refuses a bundle that is already closed (review-4a)")
+    void runtimeRefusesAClosedBundle() {
+        RecordingBundle bundle = new RecordingBundle();
+        PluginRegistries registries = PluginRegistries.build(bundle);
+        bundle.close();
+
+        assertThatThrownBy(() -> new PluginRuntime(registries))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("already closed");
+    }
+
+    @Test
+    @DisplayName("current() refuses a closed bundle even if its unpublish hook never ran (the registration race, review-4a)")
+    void currentAsksTheBundleNotOnlyTheHook() throws Exception {
+        RecordingBundle bundle = new RecordingBundle();
+        PluginRuntime runtime = new PluginRuntime(PluginRegistries.build(bundle));
+        // What a hook registered while close() iterates its snapshot looks like: never run.
+        Field hooks = PluginBundle.class.getDeclaredField("unpublishHooks");
+        hooks.setAccessible(true);
+        ((List<?>) hooks.get(bundle)).clear();
+
+        bundle.close();
+
+        assertThatThrownBy(runtime::current).isInstanceOf(PluginUnpublishedException.class);
     }
 
     @Test

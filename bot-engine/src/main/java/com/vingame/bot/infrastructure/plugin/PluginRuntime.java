@@ -21,8 +21,17 @@ import java.util.Objects;
  * <b>Shutdown.</b> {@link #close()} closes the bundle, which Spring calls as the bean's
  * inferred destroy method. Step 1 of the bundle's close order is "unpublish", and this
  * class is what gets unpublished: once its bundle has closed, {@link #current()} throws
- * rather than handing out registries whose loader is gone. A classpath bundle's close is
- * a no-op, so in classpath mode none of this is reachable.
+ * {@link PluginUnpublishedException} rather than handing out registries whose loader is
+ * gone. A classpath bundle's close is a no-op, so in classpath mode none of this is
+ * reachable.
+ * <p>
+ * <b>Two ways in, one answer</b> (review-4a). The unpublish hook flips a flag as step 1 of
+ * the bundle's close, and {@link #current()} additionally asks the bundle itself
+ * ({@link PluginBundle#isClosed()}, latched before step 1 runs). The second check is what
+ * makes the hook's two blind spots harmless: a hook registered while {@code close()} is
+ * already iterating its snapshot of the hook list is never run, and a hook registered
+ * after {@code close()} finished is never run either. The constructor refuses an
+ * already-closed bundle outright, so a runtime can never start out serving one.
  */
 public final class PluginRuntime implements AutoCloseable {
 
@@ -30,30 +39,28 @@ public final class PluginRuntime implements AutoCloseable {
 
     private volatile boolean unpublished;
 
+    /**
+     * @throws IllegalArgumentException if the registries' bundle is already closed.
+     */
     public PluginRuntime(PluginRegistries registries) {
         this.current = Objects.requireNonNull(registries, "registries");
-        registries.bundle().onUnpublish(() -> unpublished = true);
-    }
-
-    /**
-     * A runtime serving exactly these registries. The test helper D-9's plan step 7 asks
-     * for ({@code BotFactory*} tests build registries by hand); production goes through
-     * {@code PluginRuntimeConfiguration}.
-     */
-    public static PluginRuntime of(PluginRegistries registries) {
-        return new PluginRuntime(registries);
+        PluginBundle bundle = registries.bundle();
+        if (bundle.isClosed()) {
+            throw new IllegalArgumentException("plugin bundle " + bundle.version()
+                    + " is already closed — a PluginRuntime cannot publish it");
+        }
+        bundle.onUnpublish(() -> unpublished = true);
     }
 
     /**
      * The registries new work is built from. Read it once per operation and take every
      * registry from the same value; never cache it in a field.
      *
-     * @throws IllegalStateException once the bundle has been closed.
+     * @throws PluginUnpublishedException once the bundle has been closed.
      */
     public PluginRegistries current() {
-        if (unpublished) {
-            throw new IllegalStateException("plugin bundle " + current.bundle().version()
-                    + " has been closed — its registries are no longer published");
+        if (unpublished || current.bundle().isClosed()) {
+            throw new PluginUnpublishedException(current.bundle().version());
         }
         return current;
     }
