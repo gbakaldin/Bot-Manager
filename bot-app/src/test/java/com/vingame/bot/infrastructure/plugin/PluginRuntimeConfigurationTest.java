@@ -75,4 +75,24 @@ class PluginRuntimeConfigurationTest {
 
         assertThat(resolver.currentVersion()).isEqualTo("builtin");
     }
+
+    @Test
+    @DisplayName("a rejected bundle whose close() also fails keeps the rejection reason; the close failure is suppressed (review-4a)")
+    void closeFailureDoesNotHideTheRejection() {
+        IllegalStateException rejected = new IllegalStateException("Duplicate @StrategyImpl(RANDOM)");
+        PluginBundle unclosable = new TestPluginRuntimes.InertBundle("20261007.101500") {
+            @Override
+            protected void closeContext() {
+                throw new IllegalStateException("context refused to close");
+            }
+        };
+
+        PluginRuntimeConfiguration.closeAfterRejection(unclosable, rejected);
+
+        assertThat(rejected).hasMessage("Duplicate @StrategyImpl(RANDOM)");
+        assertThat(rejected.getSuppressed()).hasSize(1);
+        assertThat(rejected.getSuppressed()[0]).hasMessageContaining("close context failed")
+                .hasRootCauseMessage("context refused to close");
+        assertThat(unclosable.isClosed()).isTrue();
+    }
 }

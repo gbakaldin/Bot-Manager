@@ -53,7 +53,7 @@ public class PluginRuntimeConfiguration {
             return new PluginRuntime(PluginRegistries.build(bundle));
         } catch (RuntimeException rejected) {
             // A no-op for a classpath bundle; releases an isolated one's loader (4b).
-            bundle.close();
+            closeAfterRejection(bundle, rejected);
             throw rejected;
         }
     }
@@ -66,6 +66,20 @@ public class PluginRuntimeConfiguration {
     @Bean
     public PluginVersionResolver pluginVersionResolver(PluginRuntime pluginRuntime) {
         return () -> pluginRuntime.current().bundle().version();
+    }
+
+    /**
+     * Close a bundle that {@link PluginRegistries#build} rejected, without losing the reason.
+     * {@code rejected} is the D-10 cause ("duplicate key '116'", "missing
+     * {@code @MessageTypesImpl}" …), the one thing an operator needs; a close that throws
+     * too is attached to it as suppressed rather than replacing it (review-4a).
+     */
+    static void closeAfterRejection(PluginBundle bundle, RuntimeException rejected) {
+        try {
+            bundle.close();
+        } catch (RuntimeException | Error closeFailure) {
+            rejected.addSuppressed(closeFailure);
+        }
     }
 
     static PluginBundle openBundle(ApplicationContext context, String mode) {
