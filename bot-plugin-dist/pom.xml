@@ -71,6 +71,34 @@
         <artifactId>maven-compiler-plugin</artifactId>
       </plugin>
 
+      <!-- Exactly one bundle directory, on every build. The directory name is this
+           session's timestamp, so without this a build without `clean` adds a second
+           version directory next to the last one: the ITs (which load exactly what ships)
+           would see two bundles, and 4c's Dockerfile COPY would bake every stale version
+           into the image. Same class of defect as f9f34e6 (the fat jar re-nesting stale
+           plugin jars on non-clean builds). -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-clean-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>clean-plugins-dist</id>
+            <phase>prepare-package</phase>
+            <goals>
+              <goal>clean</goal>
+            </goals>
+            <configuration>
+              <excludeDefaultDirectories>true</excludeDefaultDirectories>
+              <filesets>
+                <fileset>
+                  <directory>${project.build.directory}/plugins-dist</directory>
+                </fileset>
+              </filesets>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
       <!-- The bundle that ships. Resolved through the reactor: under `mvn clean install`
            (and `mvn verify`) both plugin modules are packaged earlier in the same session,
            so these are this build's jars and their Bot-Plugin-Version equals the directory
