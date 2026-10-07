@@ -852,10 +852,18 @@ All commands run on the target host (Bot-1: `/home/sgame/bot-java`) unless marke
 `docs/reviews/PLUGIN_HOT_RELOAD_3_4/` (A11: a capture that is referenced but not kept is
 not evidence).
 
+**The container is resolved by compose service, never by name.** Compose names it
+`<project>-bot-manager-1` (on Bot-1 `bot-java-bot-manager-1`), so a literal
+`docker logs bot-manager` matches nothing (release-d1 note 3). Every command below uses
+`"$(docker compose ps -q bot-manager)"`, which works on Bot-1 and Prod-Bot alike. Run it
+from the compose project directory, and inline it in each command rather than caching it
+in a variable: the container ID changes on every recreate, so a value captured at P-0
+names the old container after the deploy.
+
 ### P-0 — before every deploy (D1, D2, D3)
 
 ```bash
-docker logs bot-manager 2>&1 | grep -oE '(Betting|Slot)StrategyFactory initialized.*|MessageTypesRegistry initialized.*|plugin runtime: version=[^,]*' > boot-before.txt
+docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep -oE '(Betting|Slot)StrategyFactory initialized.*|MessageTypesRegistry initialized.*|plugin runtime: version=[^,]*' > boot-before.txt
 curl -sf $BOT/api/v1/strategy/ | md5sum                       # expect a72c40f56057cda5434b273ea36315ea
 curl -sf "$BOT/api/v1/strategy/?gameType=SLOT"                # expect []
 curl -sf $BOT/actuator/prometheus | grep -E '^(plugin_classloaders_|bots_by_plugin_version|bots_managed )' > metrics-before.txt
@@ -871,7 +879,7 @@ is. Stop.
   `Prometheus Server is Ready`, and Grafana HTTP 200.
 - **C-2:**
   ```bash
-  docker logs bot-manager 2>&1 | grep -oE '(Betting|Slot)StrategyFactory initialized.*|MessageTypesRegistry initialized.*' > boot-after.txt
+  docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep -oE '(Betting|Slot)StrategyFactory initialized.*|MessageTypesRegistry initialized.*' > boot-after.txt
   diff <(grep -v 'plugin runtime' boot-before.txt) boot-after.txt
   ```
   Expect **no output**: `registered 9 strategies`, `registered 2 strategies`, and the
@@ -905,7 +913,7 @@ is. Stop.
 - **C-1..C-6.**
 - **V3-1:**
   ```bash
-  docker logs bot-manager 2>&1 | grep -c 'plugin runtime: version=builtin'
+  docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep -c 'plugin runtime: version=builtin'
   curl -sf $BOT/actuator/prometheus | grep -E '^plugin_classloaders_'
   ```
   Expect `1`, and `live=1`, `registered_total=1`, `reclaimed_total=0`, all with
@@ -916,7 +924,7 @@ is. Stop.
 - **C-1..C-6** and **V3-1.**
 - **V4a-1:**
   ```bash
-  docker logs bot-manager 2>&1 | grep 'plugin runtime: version=builtin' | grep -c 'source=classpath'
+  docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep 'plugin runtime: version=builtin' | grep -c 'source=classpath'
   ```
   Expect `1`.
 - **V4a-2:** group running, wait ≥ 20 s:
@@ -925,13 +933,17 @@ is. Stop.
   ```
   Expect every row `pluginVersion="builtin"`, and their sum equal to `bots_managed`. This
   shows `createSingleBot` now sets the field without changing its value.
-- **V4a-3:** `docker logs bot-manager 2>&1 | grep -c 'plugin bundle'`. Expect **0**: the
+- **V4a-3:** `docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep -c 'plugin bundle'`. Expect **0**: the
   isolated loader does not run in classpath mode.
+- **Metaspace (informational, the D3 input).** Record `jvm_memory_used_bytes{id="Metaspace"}`
+  and uptime at P-0 and again after the deploy at a **comparable uptime** (release-d1's
+  note: its 5 h before against 12 min after was not like for like). 4a/4b add a handful of
+  engine classes and no plugin loader, so the two should agree within normal warm-up drift.
 - **V4b-1, Netty pre-start (L-11, spike S5).** Within 90 s of start, and before
   starting any group:
   ```bash
-  docker kill --signal=QUIT bot-manager && sleep 2
-  docker logs --since 1m bot-manager 2>&1 | grep -oE '^"multiThreadIoEventLoopGroup-[0-9]+-[0-9]+"' | sort -u | wc -l
+  docker kill --signal=QUIT "$(docker compose ps -q bot-manager)" && sleep 2
+  docker logs --since 1m "$(docker compose ps -q bot-manager)" 2>&1 | grep -oE '^"multiThreadIoEventLoopGroup-[0-9]+-[0-9]+"' | sort -u | wc -l
   ```
   - SIGQUIT makes the JVM print a platform-thread dump to stdout. It does not stop the
     process.
@@ -945,7 +957,11 @@ is. Stop.
   curl -s 'http://localhost:9090/api/v1/query?query=time()-process_start_time_seconds%7Bjob%3D%22bot-manager%22%7D'
   curl -s 'http://localhost:9090/api/v1/query?query=jvm_memory_used_bytes%7Barea%3D%22nonheap%22%2Cid%3D%22Metaspace%22%7D'
   ```
-  Expect uptime > 86400 and Metaspace ≤ **111,149,056 B** (106 MiB). If it is higher,
+  Expect uptime > 86400 and Metaspace ≤ **111,149,056 B** (106 MiB). Compare a metaspace
+  reading only with one taken at a similar uptime: the JVM keeps loading classes lazily for
+  hours (release-d1: 84.3 MB at 35 s and 87.2 MB at 12 min on the new JVM, against
+  93.5 MB on the previous one at 5 h), so a fresh reading against an old one is not like
+  for like. If it is higher,
   **stop**: D-16's formula needs a larger cap. Write both numbers into the release report.
   If uptime is < 24 h, record the reading as provisional and proceed only if it is ≤
   95 MiB (headroom for warm-up).
@@ -959,19 +975,19 @@ is. Stop.
   sftp alongside `bot.tar` and the updated `docker-compose.yml`. Confirm the user has
   added `plugins-dist` to `deploy.sh`'s `mkdir -p`.
 - **C-1..C-6.**
-- **V4-2:** `docker logs bot-manager 2>&1 | grep -c 'Picked up JAVA_TOOL_OPTIONS: -XX:MaxMetaspaceSize=320m'`.
+- **V4-2:** `docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep -c 'Picked up JAVA_TOOL_OPTIONS: -XX:MaxMetaspaceSize=320m'`.
   Expect `1`.
 - **V4-3:**
   ```bash
   curl -sf $BOT/actuator/prometheus | grep -E '^jvm_memory_max_bytes\{.*id="Metaspace"'
   ```
   Expect the value `3.3554432E8`.
-- **V4-4:** `docker logs bot-manager 2>&1 | grep 'plugin runtime: version='`. Expect
+- **V4-4:** `docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep 'plugin runtime: version='`. Expect
   exactly one line with:
   - `version=V`, matching `^[0-9]{8}\.[0-9]{6}$` and equal to the directory name shipped;
   - `source=/app/plugins/V`;
   - two `jars=` entries whose sha256 prefixes match `plugins-sha.txt`.
-  Also `docker logs bot-manager 2>&1 | grep -cE 'plugin bundle .* rejected|running the image.s built-in bundle'`,
+  Also `docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep -cE 'plugin bundle .* rejected|running the image.s built-in bundle'`,
   which must be `0`.
 - **V4-5:**
   ```bash
