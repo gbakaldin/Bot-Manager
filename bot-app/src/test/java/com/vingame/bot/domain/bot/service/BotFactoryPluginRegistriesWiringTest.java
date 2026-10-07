@@ -5,7 +5,11 @@ import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.config.client.EnvironmentClients;
 import com.vingame.bot.domain.bot.core.BettingMiniGameBot;
+import com.vingame.bot.domain.bot.core.Bot;
 import com.vingame.bot.domain.bot.core.CashoutBot;
+import com.vingame.bot.domain.bot.core.CrashBot;
+import com.vingame.bot.domain.bot.core.SlotMachineBot;
+import com.vingame.bot.domain.bot.core.TaiXiuGameBot;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.brand.model.BrandCode;
@@ -27,6 +31,8 @@ import com.vingame.bot.infrastructure.plugin.TestPluginRuntimes;
 import io.netty.channel.EventLoopGroup;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.MockedConstruction;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -119,5 +125,90 @@ class BotFactoryPluginRegistriesWiringTest {
             verify(bot).setMessageTypes(plugins.messageTypes().cashout("119"));
             verify(bot).setPluginTypeFactory(plugins.typeFactory());
         }
+    }
+
+    /**
+     * Every production bot type, with the product it is keyed on and what its branch of
+     * {@code BotFactory.createBot} must take from the registries (QA 4a). The two tests
+     * above cover BETTING_MINI and CASHOUT; this is the same contract for all five, so a
+     * branch that reads {@code pluginRuntime.current()} a second time, or a bot type that
+     * stops receiving the bundle's TypeFactory, fails here.
+     */
+    enum Branch {
+        BETTING_MINI(BettingMiniGameBot.class, ProductCode.P_116,
+                Game.builder().id("bc").name("BauCua").gameType(GameType.BETTING_MINI)
+                        .pluginName("BauCua").offset(2000).build()) {
+            @Override
+            void verifyRegistryWiring(Bot bot, PluginRegistries plugins) {
+                verify((BettingMiniGameBot) bot).setStrategyFactory(plugins.bettingStrategies());
+            }
+        },
+        TAI_XIU(TaiXiuGameBot.class, ProductCode.P_116,
+                Game.builder().id("tx").name("TaiXiu").gameType(GameType.TAI_XIU)
+                        .pluginName("taixiuPlugin").build()) {
+            @Override
+            void verifyRegistryWiring(Bot bot, PluginRegistries plugins) {
+                TaiXiuGameBot taiXiu = (TaiXiuGameBot) bot;
+                verify(taiXiu).setTaiXiuMessageTypes(plugins.messageTypes().taiXiu("116"));
+                verify(taiXiu).setStrategyFactory(plugins.bettingStrategies());
+            }
+        },
+        SLOT(SlotMachineBot.class, ProductCode.P_116,
+                Game.builder().id("slot").name("SlotTip").gameType(GameType.SLOT)
+                        .pluginName("Tip").gameId(204).build()) {
+            @Override
+            void verifyRegistryWiring(Bot bot, PluginRegistries plugins) {
+                SlotMachineBot slot = (SlotMachineBot) bot;
+                verify(slot).setMessageTypes(plugins.messageTypes().slot());
+                verify(slot).setSlotStrategyFactory(plugins.slotStrategies());
+            }
+        },
+        CASHOUT(CashoutBot.class, ProductCode.P_119,
+                Game.builder().id("balloon").name("Balloon").gameType(GameType.CASHOUT)
+                        .pluginName("balloonPlugin").offset(1500).build()) {
+            @Override
+            void verifyRegistryWiring(Bot bot, PluginRegistries plugins) {
+                verify((CashoutBot) bot).setMessageTypes(plugins.messageTypes().cashout("119"));
+            }
+        },
+        CRASH(CrashBot.class, ProductCode.P_119,
+                Game.builder().id("aviator").name("Aviator").gameType(GameType.CRASH)
+                        .pluginName("aviatorPlugin").offset(1700).build()) {
+            @Override
+            void verifyRegistryWiring(Bot bot, PluginRegistries plugins) {
+                verify((CrashBot) bot).setMessageTypes(plugins.messageTypes().crash("119"));
+            }
+        };
+
+        final Class<? extends Bot> botClass;
+        final ProductCode product;
+        final Game game;
+
+        Branch(Class<? extends Bot> botClass, ProductCode product, Game game) {
+            this.botClass = botClass;
+            this.product = product;
+            this.game = game;
+        }
+
+        abstract void verifyRegistryWiring(Bot bot, PluginRegistries plugins);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Branch.class)
+    @DisplayName("every bot type is wired from exactly one current() read, TypeFactory included")
+    void everyBranchIsWiredFromOneRegistriesValue(Branch branch) {
+        environment(branch.product);
+        org.mockito.Mockito.clearInvocations(runtime);
+
+        try (MockedConstruction<? extends Bot> built = mockConstruction(branch.botClass,
+                withSettings().defaultAnswer(RETURNS_SELF))) {
+            factory().createBot("env-1", config(branch.game));
+
+            assertThat(built.constructed()).hasSize(1);
+            Bot bot = built.constructed().get(0);
+            verify(bot).setPluginTypeFactory(plugins.typeFactory());
+            branch.verifyRegistryWiring(bot, plugins);
+        }
+        verify(runtime, times(1)).current();
     }
 }
