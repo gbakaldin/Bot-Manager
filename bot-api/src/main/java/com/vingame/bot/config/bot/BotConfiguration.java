@@ -6,6 +6,7 @@ import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
 import com.vingame.bot.domain.game.model.Game;
 import lombok.Builder;
 import lombok.Value;
+import lombok.With;
 
 import java.util.function.BooleanSupplier;
 
@@ -152,15 +153,18 @@ public class BotConfiguration {
      * {@code BotHealthDTO} deliberately does not carry it in Phase 1 either — that is an
      * additive API change with no reader until a drain exists, and it lands at step 5.
      * <p>
-     * <b>Set at group start since PLUGIN_HOT_RELOAD_3_4 Phase 4a (D-15).</b>
-     * {@code BotGroupBehaviorService.createSingleBot} stamps it from the
-     * {@link com.vingame.bot.common.plugin.PluginVersionResolver}, which answers from the
-     * plugin bundle new bots are built from — {@link PluginVersions#BUILTIN} in classpath
-     * mode, the bundle's {@code Bot-Plugin-Version} from 4c. It stays nullable: a fixture
-     * that uses the builder directly leaves it unset, and {@link #resolvePluginVersion()}
-     * then supplies {@link PluginVersions#BUILTIN}, which is what every bot reported
-     * before the field was written.
+     * <b>Set at bot build since PLUGIN_HOT_RELOAD_3_4 Phase 4a (D-15).</b>
+     * {@code BotFactory.createBot} stamps it with {@link #withPluginVersion} from the
+     * <em>same</em> {@code PluginRegistries} value it wires the bot's strategy factory,
+     * message types and type factory from — one {@code PluginRuntime.current()} read per
+     * bot, so the label can never name a different bundle from the code the bot runs
+     * (review-4a). {@link PluginVersions#BUILTIN} in classpath mode, the bundle's
+     * {@code Bot-Plugin-Version} from 4c. It stays nullable: a fixture that uses the
+     * builder directly leaves it unset, and {@link #resolvePluginVersion()} then supplies
+     * {@link PluginVersions#BUILTIN}, which is what every bot reported before the field
+     * was written.
      */
+    @With
     String pluginVersion;
 
     /**

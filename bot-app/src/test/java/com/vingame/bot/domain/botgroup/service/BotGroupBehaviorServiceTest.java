@@ -97,10 +97,6 @@ class BotGroupBehaviorServiceTest {
     @Mock
     private com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry gatewayBudgetRegistry;
 
-    /** PLUGIN_HOT_RELOAD_3_4 D-15: answers null, so bots fall back to `builtin` as before. */
-    @Mock
-    private com.vingame.bot.common.plugin.PluginVersionResolver pluginVersionResolver;
-
     @Captor
     private ArgumentCaptor<BotGroup> botGroupCaptor;
 
@@ -1276,13 +1272,14 @@ class BotGroupBehaviorServiceTest {
         }
 
         @Test
-        @DisplayName("start() stamps every bot's BotConfiguration with the resolver's plugin version (D-15)")
-        void startStampsThePluginVersion() {
-            // PLUGIN_HOT_RELOAD_3_4 D-15: createSingleBot sets pluginVersion from the
-            // PluginVersionResolver, so bots_by_plugin_version and the MDC follow the bundle
-            // the bot is built from. A version that is not `builtin` is used on purpose:
-            // resolvePluginVersion() falls back to `builtin` for an unset field, so a
-            // `builtin` stub could not tell "stamped" from "left null".
+        @DisplayName("start() leaves pluginVersion to BotFactory, which stamps it from the bundle it wires (review-4a)")
+        void startLeavesThePluginVersionToTheFactory() {
+            // PLUGIN_HOT_RELOAD_3_4 D-15 as amended by review-4a: createSingleBot used to stamp
+            // pluginVersion from PluginVersionResolver — a second PluginRuntime.current() read,
+            // separate from the one BotFactory wires the bot from. Once step 5 can swap the
+            // bundle between the two, a bot is labelled N while running N+1's code. The stamp
+            // now happens inside BotFactory.createBot (BotFactoryPluginRegistriesWiringTest);
+            // this pins that the service does not reintroduce its own.
             BotGroup group = BotGroup.builder()
                     .id("g-1")
                     .name("Group")
@@ -1298,7 +1295,6 @@ class BotGroupBehaviorServiceTest {
             when(botGroupService.findById("g-1")).thenReturn(group);
             when(environmentService.findById("env-1")).thenReturn(env);
             when(gameService.findById("game-1")).thenReturn(game);
-            when(pluginVersionResolver.currentVersion()).thenReturn("20261007.101500");
 
             ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
             when(botFactory.createBot(anyString(), configCaptor.capture()))
@@ -1308,10 +1304,7 @@ class BotGroupBehaviorServiceTest {
 
             assertThat(configCaptor.getAllValues())
                     .isNotEmpty()
-                    .allSatisfy(cfg -> {
-                        assertThat(cfg.getPluginVersion()).isEqualTo("20261007.101500");
-                        assertThat(cfg.resolvePluginVersion()).isEqualTo("20261007.101500");
-                    });
+                    .allSatisfy(cfg -> assertThat(cfg.getPluginVersion()).isNull());
 
             BotGroupRuntime rt = runningGroups().get("g-1");
             if (rt != null) rt.stopAllBots();

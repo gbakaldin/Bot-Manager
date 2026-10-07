@@ -33,6 +33,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -61,7 +62,14 @@ import static org.mockito.Mockito.withSettings;
 class BotFactoryPluginRegistriesWiringTest {
 
     private final EnvironmentClientRegistry clientRegistry = mock(EnvironmentClientRegistry.class);
-    private final PluginRuntime runtime = spy(TestPluginRuntimes.of(
+    /**
+     * Not {@code builtin} on purpose: {@code resolvePluginVersion()} falls back to
+     * {@code builtin} for an unset field, so a {@code builtin} bundle could not tell
+     * "stamped" from "left null".
+     */
+    private static final String BUNDLE_VERSION = "20261007.101500";
+
+    private final PluginRuntime runtime = spy(TestPluginRuntimes.of(BUNDLE_VERSION,
             mock(BettingStrategyFactory.class), mock(SlotStrategyFactory.class), TestMessageTypes.REGISTRY));
     private final PluginRegistries plugins = runtime.current();
 
@@ -208,7 +216,47 @@ class BotFactoryPluginRegistriesWiringTest {
             Bot bot = built.constructed().get(0);
             verify(bot).setPluginTypeFactory(plugins.typeFactory());
             branch.verifyRegistryWiring(bot, plugins);
+            verifyStampedFromTheBundle(bot);
         }
         verify(runtime, times(1)).current();
+    }
+
+    /**
+     * review-4a: the version label comes from the same {@link PluginRegistries} value the bot
+     * is wired from — {@code plugins.bundle().version()}, inside {@code createBot} — so the
+     * {@code times(1)} on {@code current()} above covers the label as well as the wiring. The
+     * caller's other fields survive the stamp.
+     */
+    @Test
+    @DisplayName("the version label is stamped from the bundle the bot is wired from, not by the caller (review-4a)")
+    void pluginVersionComesFromTheWiringBundle() {
+        environment(ProductCode.P_116);
+        Game game = Game.builder().id("bc").name("BauCua").gameType(GameType.BETTING_MINI)
+                .pluginName("BauCua").offset(2000).build();
+        BotConfiguration callerConfig = config(game).withPluginVersion("stale-caller-value");
+        org.mockito.Mockito.clearInvocations(runtime);
+
+        try (MockedConstruction<BettingMiniGameBot> built = mockConstruction(BettingMiniGameBot.class,
+                withSettings().defaultAnswer(RETURNS_SELF))) {
+            factory().createBot("env-1", callerConfig);
+
+            BotConfiguration wired = verifyStampedFromTheBundle(built.constructed().get(0));
+            assertThat(wired.getCredentials()).isSameAs(callerConfig.getCredentials());
+            assertThat(wired.getGame()).isSameAs(game);
+            assertThat(wired.getBotGroupId()).isEqualTo("g-1");
+        }
+        verify(runtime, times(1)).current();
+    }
+
+    private BotConfiguration verifyStampedFromTheBundle(Bot bot) {
+        ArgumentCaptor<BotConfiguration> captor = ArgumentCaptor.forClass(BotConfiguration.class);
+        verify(bot).setConfiguration(captor.capture());
+        BotConfiguration wired = captor.getValue();
+        assertThat(wired.getPluginVersion())
+                .as("stamped from plugins.bundle().version() of the one current() read")
+                .isEqualTo(plugins.bundle().version())
+                .isEqualTo(BUNDLE_VERSION);
+        assertThat(wired.resolvePluginVersion()).isEqualTo(BUNDLE_VERSION);
+        return wired;
     }
 }

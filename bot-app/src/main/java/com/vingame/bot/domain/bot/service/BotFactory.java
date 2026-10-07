@@ -101,7 +101,9 @@ public class BotFactory {
      * Create a bot instance with direct instantiation.
      *
      * @param environmentId The Environment ID (for fetching shared clients)
-     * @param configuration Bot configuration (credentials, behavior, and game)
+     * @param configuration Bot configuration (credentials, behavior, and game). Its
+     *                      {@code pluginVersion} is replaced with the version of the bundle
+     *                      the bot is wired from.
      * @return Fully initialized bot ready to start()
      */
     public Bot createBot(
@@ -154,8 +156,12 @@ public class BotFactory {
         freshClientFactory.setEventLoopGroup(eventLoopGroup);
 
         // PLUGIN_HOT_RELOAD_3_4 D-9: read once, and wire everything below from this one
-        // value — never a second current() for the same bot.
+        // value — never a second current() for the same bot. That includes the version
+        // label (D-15, review-4a): it is stamped here, from the bundle the bot is wired
+        // from, so `pluginVersion` in the MDC and in bots_by_plugin_version cannot name a
+        // different bundle from the code the bot runs once step 5 can swap bundles.
         PluginRegistries plugins = pluginRuntime.current();
+        BotConfiguration stamped = configuration.withPluginVersion(plugins.bundle().version());
 
         // Instantiate bot based on game type (using domain.game.model.GameType).
         // Message-types resolution is now per-branch (AD-4): betting-mini resolves
@@ -232,7 +238,7 @@ public class BotFactory {
             // PLUGIN_HOT_RELOAD_3_4 D-9 / L-8: every per-bot mapper is built on the bundle's
             // TypeFactory, from the same registries value as the factory and messages above.
             .setPluginTypeFactory(plugins.typeFactory())
-            .setConfiguration(configuration)
+            .setConfiguration(stamped)
             .setMetrics(botMetrics)
             .setSessionAggregator(sessionAggregator)
             // Must be wired BEFORE initialize(): initializeSubclass() is where the
