@@ -1,5 +1,7 @@
 package com.vingame.bot.domain.botgroup.controller;
 
+import com.vingame.bot.infrastructure.plugin.PluginRuntime;
+import com.vingame.bot.infrastructure.plugin.PluginRuntimeConfiguration;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
@@ -116,6 +118,9 @@ class BotGroupStrategyKeyValidationTest {
             basePackages = "com.vingame.bot.domain.bot.strategy",
             excludeFilters = @ComponentScan.Filter(
                     type = FilterType.ANNOTATION, classes = RestController.class))
+    // PLUGIN_HOT_RELOAD_3_4 Phase 4a: the registries are no longer beans; the scanned
+    // strategy beans become a classpath bundle, published through PluginRuntime.
+    @Import(PluginRuntimeConfiguration.class)
     static class RealStrategyRegistries {
     }
 
@@ -126,10 +131,7 @@ class BotGroupStrategyKeyValidationTest {
     private MockMvc mockMvc;
 
     @Autowired
-    private BettingStrategyFactory bettingStrategyFactory;
-
-    @Autowired
-    private SlotStrategyFactory slotStrategyFactory;
+    private PluginRuntime pluginRuntime;
 
     @MockitoBean
     private BotGroupRepository repository;
@@ -208,10 +210,10 @@ class BotGroupStrategyKeyValidationTest {
         @Test
         @DisplayName("every StrategyId / SlotStrategyId constant name is registered")
         void catalogueIsReal() {
-            assertThat(bettingStrategyFactory.registeredKeys())
+            assertThat(pluginRuntime.current().bettingStrategies().registeredKeys())
                     .containsExactlyInAnyOrderElementsOf(
                             Arrays.stream(StrategyId.values()).map(Enum::name).toList());
-            assertThat(slotStrategyFactory.registeredKeys())
+            assertThat(pluginRuntime.current().slotStrategies().registeredKeys())
                     .containsExactlyInAnyOrderElementsOf(
                             Arrays.stream(SlotStrategyId.values()).map(Enum::name).toList());
         }

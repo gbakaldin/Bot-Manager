@@ -1,5 +1,7 @@
 package com.vingame.bot.domain.botgroup.validation;
 
+import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
+import com.vingame.bot.infrastructure.plugin.TestPluginRuntimes;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
@@ -8,10 +10,10 @@ import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -19,6 +21,7 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -48,8 +51,19 @@ class BotGroupConfigValidationServiceTest {
     @Mock
     private SlotStrategyFactory slotStrategyFactory;
 
-    @InjectMocks
     private BotGroupConfigValidationService service;
+
+    /**
+     * Built by hand rather than {@code @InjectMocks}: since PLUGIN_HOT_RELOAD_3_4 Phase 4a
+     * the service takes a {@code PluginRuntime}, not the two factories, so the mocks above
+     * are wrapped in one.
+     */
+    @BeforeEach
+    void buildService() {
+        service = new BotGroupConfigValidationService(validatorFactory, gameService,
+                TestPluginRuntimes.of(bettingStrategyFactory, slotStrategyFactory,
+                        mock(MessageTypesRegistry.class)));
+    }
 
     @Test
     @DisplayName("null gameId throws BadRequestException")

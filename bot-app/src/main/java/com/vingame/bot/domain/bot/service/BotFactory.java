@@ -14,12 +14,11 @@ import com.vingame.bot.domain.bot.core.CashoutBot;
 import com.vingame.bot.domain.bot.core.CrashBot;
 import com.vingame.bot.domain.bot.core.SlotMachineBot;
 import com.vingame.bot.domain.bot.core.TaiXiuGameBot;
-import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
-import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
-import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.brand.model.ProductCode;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.environment.model.Environment;
+import com.vingame.bot.infrastructure.plugin.PluginRegistries;
+import com.vingame.bot.infrastructure.plugin.PluginRuntime;
 import io.netty.channel.EventLoopGroup;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -62,6 +61,12 @@ import java.net.URI;
  * - EnvironmentClientRegistry is thread-safe (ConcurrentHashMap)
  * - Each bot gets its own instance with independent state
  * - Multiple threads can create bots in parallel without coordination
+ * <p>
+ * Plugin registries (PLUGIN_HOT_RELOAD_3_4 D-9): this class holds {@link PluginRuntime},
+ * never a registry. {@link #createBot} reads {@link PluginRuntime#current()} once and
+ * takes the strategy factory, the message types and the Jackson type factory of every
+ * bot it builds from that one value, so a bot is wired from exactly one bundle and keeps
+ * it for life.
  */
 @Slf4j
 @Component
@@ -73,9 +78,7 @@ public class BotFactory {
     private final SessionAggregationService sessionAggregator;
     private final GroupLifecycleAggregator groupLifecycleAggregator;
     private final ScopedDebugEscalator scopedDebugEscalator;
-    private final BettingStrategyFactory strategyFactory;
-    private final SlotStrategyFactory slotStrategyFactory;
-    private final MessageTypesRegistry messageTypesRegistry;
+    private final PluginRuntime pluginRuntime;
 
     @Autowired
     public BotFactory(EnvironmentClientRegistry clientRegistry,
@@ -84,18 +87,14 @@ public class BotFactory {
                       SessionAggregationService sessionAggregator,
                       GroupLifecycleAggregator groupLifecycleAggregator,
                       ScopedDebugEscalator scopedDebugEscalator,
-                      BettingStrategyFactory strategyFactory,
-                      SlotStrategyFactory slotStrategyFactory,
-                      MessageTypesRegistry messageTypesRegistry) {
+                      PluginRuntime pluginRuntime) {
         this.clientRegistry = clientRegistry;
         this.eventLoopGroup = eventLoopGroup;
         this.botMetrics = botMetrics;
         this.sessionAggregator = sessionAggregator;
         this.groupLifecycleAggregator = groupLifecycleAggregator;
         this.scopedDebugEscalator = scopedDebugEscalator;
-        this.strategyFactory = strategyFactory;
-        this.slotStrategyFactory = slotStrategyFactory;
-        this.messageTypesRegistry = messageTypesRegistry;
+        this.pluginRuntime = pluginRuntime;
     }
 
     /**
@@ -154,6 +153,10 @@ public class BotFactory {
         freshClientFactory.setIgnoreJwtToken(!env.isUseJwtAuth());
         freshClientFactory.setEventLoopGroup(eventLoopGroup);
 
+        // PLUGIN_HOT_RELOAD_3_4 D-9: read once, and wire everything below from this one
+        // value — never a second current() for the same bot.
+        PluginRegistries plugins = pluginRuntime.current();
+
         // Instantiate bot based on game type (using domain.game.model.GameType).
         // Message-types resolution is now per-branch (AD-4): betting-mini resolves
         // a product-keyed GameMessageTypes; SLOT resolves a product-neutral
@@ -171,18 +174,18 @@ public class BotFactory {
                 // bettingMini(...) lookup that forgets forGame silently falls back to
                 // the generic provider, and ziczac's winnings go back to zero.
                 bettingBot.setMessageTypes(
-                        messageTypesRegistry.bettingMini(productKey(env)).forGame(game));
+                        plugins.messageTypes().bettingMini(productKey(env)).forGame(game));
                 // Wire the strategy registry so initializeSubclass() can build the
                 // per-bot BettingStrategy for configuration.strategyId.
-                bettingBot.setStrategyFactory(strategyFactory);
+                bettingBot.setStrategyFactory(plugins.bettingStrategies());
                 yield bettingBot;
             }
             case SLOT -> {
                 SlotMachineBot slotBot = new SlotMachineBot();
-                slotBot.setMessageTypes(messageTypesRegistry.slot());
+                slotBot.setMessageTypes(plugins.messageTypes().slot());
                 // Wire the slot strategy registry so initializeSubclass() can build
                 // the per-bot SlotStrategy for configuration.slotStrategyId (AD-9).
-                slotBot.setSlotStrategyFactory(slotStrategyFactory);
+                slotBot.setSlotStrategyFactory(plugins.slotStrategies());
                 yield slotBot;
             }
             case TAI_XIU -> {
@@ -192,22 +195,22 @@ public class BotFactory {
                 // betting strategy family unchanged (AD-6), same as BETTING_MINI.
                 TaiXiuGameBot taiXiuBot = new TaiXiuGameBot();
                 taiXiuBot.setTaiXiuMessageTypes(
-                        messageTypesRegistry.taiXiu(productKey(env)));
-                taiXiuBot.setStrategyFactory(strategyFactory);
+                        plugins.messageTypes().taiXiu(productKey(env)));
+                taiXiuBot.setStrategyFactory(plugins.bettingStrategies());
                 yield taiXiuBot;
             }
             case CASHOUT -> {
                 // CASHOUT_BOT AD-3: product-keyed like Tai Xiu — 119 Balloon/Soccer only.
                 // No strategy factory: CASHOUT has no strategy family (AD-7).
                 CashoutBot cashoutBot = new CashoutBot();
-                cashoutBot.setMessageTypes(messageTypesRegistry.cashout(productKey(env)));
+                cashoutBot.setMessageTypes(plugins.messageTypes().cashout(productKey(env)));
                 yield cashoutBot;
             }
             case CRASH -> {
                 // AVIATOR_BOT AD-5: product-keyed like CASHOUT — 119 Avatar only. No strategy
                 // factory: CRASH has no strategy family in v1 (AD-7).
                 CrashBot crashBot = new CrashBot();
-                crashBot.setMessageTypes(messageTypesRegistry.crash(productKey(env)));
+                crashBot.setMessageTypes(plugins.messageTypes().crash(productKey(env)));
                 yield crashBot;
             }
             case CARD_GAME, UP_DOWN ->

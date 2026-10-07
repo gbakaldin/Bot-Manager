@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.service;
 
+import com.vingame.bot.infrastructure.plugin.TestPluginRuntimes;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
@@ -139,7 +140,7 @@ class BotFactoryForGameResolutionTest {
                 new SessionAggregationService(),
                 new GroupLifecycleAggregator(),
                 (ScopedDebugEscalator) null,
-                strategyFactory, slotStrategyFactory, registry);
+                TestPluginRuntimes.of(strategyFactory, slotStrategyFactory, registry));
     }
 
     /** customZone=false → resolveZoneName yields a product default, so the switch is reached. */

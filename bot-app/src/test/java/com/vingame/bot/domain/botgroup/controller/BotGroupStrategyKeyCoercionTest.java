@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.controller;
 
+import com.vingame.bot.infrastructure.plugin.PluginRuntimeConfiguration;
 import com.vingame.bot.common.exception.RestExceptionHandler;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
@@ -113,6 +114,9 @@ class BotGroupStrategyKeyCoercionTest {
             basePackages = "com.vingame.bot.domain.bot.strategy",
             excludeFilters = @ComponentScan.Filter(
                     type = FilterType.ANNOTATION, classes = RestController.class))
+    // PLUGIN_HOT_RELOAD_3_4 Phase 4a: the registries are no longer beans; the scanned
+    // strategy beans become a classpath bundle, published through PluginRuntime.
+    @Import(PluginRuntimeConfiguration.class)
     static class RealStrategyRegistries {
     }
 

@@ -1,10 +1,10 @@
 package com.vingame.bot.domain.bot.message;
 
 import com.vingame.bot.domain.game.model.GameType;
+import com.vingame.bot.infrastructure.plugin.PluginBundle;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.aop.support.AopUtils;
 import org.springframework.core.annotation.AnnotationUtils;
-import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -14,8 +14,13 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Spring-managed registry that resolves the message-types provider for a
+ * Registry that resolves the message-types provider for a
  * {@code (GameType, product-code string)} pair (PLUGIN_HOT_RELOAD Phase 2c, AD-17).
+ *
+ * <p><b>Per bundle, immutable, not a Spring bean</b> (PLUGIN_HOT_RELOAD_3_4 D-9). This
+ * was a root-context {@code @Component} until Phase 4a. It is now built by
+ * {@code PluginRegistries.build} from one {@link PluginBundle}, together with the two
+ * strategy factories, and reached only through {@code PluginRuntime.current()}.
  *
  * <p><b>What this replaced and why.</b> {@code GameMessageTypesResolver} was a
  * static class holding three hardcoded {@code switch (productCode)} statements, so
@@ -61,7 +66,6 @@ import java.util.TreeSet;
  * <p>See {@code docs/plans/PLUGIN_HOT_RELOAD.md} AD-16 through AD-20.
  */
 @Slf4j
-@Component
 public class MessageTypesRegistry {
 
     /**
@@ -77,10 +81,15 @@ public class MessageTypesRegistry {
      * mixed-version wiring — the exact failure a versioned plugin system exists to
      * prevent, and one that leaves no trace in the logs.
      *
-     * <p>Folding them into one carrier makes that window unexpressible: step 5's
-     * reload becomes a single write of a fully-built {@code Tables}, and this field
-     * becomes {@code private volatile Tables tables}. Every accessor already reads it
-     * exactly once into a local, so no accessor has to change when it does.
+     * <p>Folding them into one carrier made that window unexpressible inside this
+     * class. <b>The step-5 plan this javadoc used to record — make this field
+     * {@code volatile} and swap a new {@code Tables} into it on reload — is superseded</b>
+     * (PLUGIN_HOT_RELOAD_3_4 D-9). A registry never mutates: one is built per plugin
+     * bundle, and the swap point is {@code PluginRuntime}, which publishes this registry
+     * and both strategy factories as one {@code PluginRegistries} value. The same
+     * mixed-version argument therefore holds one level up, across all three registries,
+     * and this field stays {@code final}. The carrier is kept because it costs nothing
+     * and still keeps the five tables one value.
      *
      * <p>Both maps are {@link LinkedHashMap}s wrapped unmodifiable. That keeps
      * iteration deterministic within a JVM run, so the startup line does not shuffle
@@ -140,6 +149,22 @@ public class MessageTypesRegistry {
                 tables.slot() == null ? "none" : tables.slot().getClass().getSimpleName(),
                 tables.cashout().size(), new TreeSet<>(tables.cashout().keySet()),
                 tables.crash().size(), new TreeSet<>(tables.crash().keySet()));
+    }
+
+    /**
+     * Build the registry from one plugin bundle's providers (PLUGIN_HOT_RELOAD_3_4 D-9).
+     * Production's only constructor call, from {@code PluginRegistries.build}; the
+     * list-taking constructor above is what it delegates to, and what tests use.
+     *
+     * @throws IllegalStateException on any misconfiguration, which rejects the whole
+     *                               bundle (D-10).
+     */
+    public MessageTypesRegistry(PluginBundle bundle) {
+        this(bundle.beansOfType(GameMessageTypes.class),
+                bundle.beansOfType(SlotMessageTypes.class),
+                bundle.beansOfType(TaiXiuMessageTypes.class),
+                bundle.beansOfType(CashoutMessageTypes.class),
+                bundle.beansOfType(CrashMessageTypes.class));
     }
 
     /**
@@ -289,30 +314,20 @@ public class MessageTypesRegistry {
                                 + " providers may be product-neutral (AD-17).");
             }
             for (String product : annotation.products()) {
-                // Two step-5 constraints live on this line, recorded here rather than
-                // in the plan because this is the code that has to change (review-2c
-                // F4). Both are design decisions for step 5, NOT defects today: the
-                // key is deliberately (gameType, product) with no version dimension,
-                // and adding one before versions exist would be speculative.
+                // Two step-5 constraints were recorded on this line (review-2c F4).
+                // PLUGIN_HOT_RELOAD_3_4 resolved both, for all three registries alike:
                 //
-                // 1. Two live plugin versions are not expressible under this key.
-                //    The end goal is v1 and v2 of a brand's plugin serving different
-                //    groups at once; both versions' providers claim "116", which is a
-                //    duplicate here and refuses the refresh. Step 5 needs either a
-                //    version in the key or one registry instance per plugin version
-                //    in a child context, with BotFactory selecting on the group's
-                //    pinned version. The singleton-in-the-root-context shape is what
-                //    has to give.
-                // 2. This throw is right while every key is ours — two built-in
-                //    providers claiming "116" is a programming error and the build
-                //    should not produce a startable artifact. It becomes wrong the
-                //    moment a third-party plugin can collide with a built-in: a bad
-                //    plugin should be rejected and logged, not stop the other nine
-                //    brands from starting. That is a policy decision needed BEFORE
-                //    plugins can register, not after.
-                //
-                // The same two apply verbatim to BettingStrategyFactory's duplicate
-                // guard; the policy must be one policy, decided once.
+                // 1. Two live plugin versions under one (gameType, product) key — D-9:
+                //    the key gets no version dimension; instead there is one registry
+                //    instance per plugin bundle, and step 5 selects the bundle in
+                //    PluginRuntime. v1 and v2 both claiming "116" is then two
+                //    registries, not a duplicate in one.
+                // 2. Whether a duplicate stops the app — D-10: a duplicate rejects the
+                //    whole bundle. In classpath mode that is still a context-refresh
+                //    failure (two of our own providers claiming "116" must not produce
+                //    a startable artifact); in isolated mode the loader logs it and
+                //    falls back to the next candidate bundle, so a bad mounted bundle
+                //    never stops the other brands.
                 T existing = registry.put(product, provider);
                 if (existing != null) {
                     throw new IllegalStateException(

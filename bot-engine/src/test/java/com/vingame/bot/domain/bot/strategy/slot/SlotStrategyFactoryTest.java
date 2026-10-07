@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.strategy.slot;
 
+import com.vingame.bot.infrastructure.plugin.StubPluginBundle;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.ApplicationContext;
@@ -34,13 +35,12 @@ import static org.mockito.Mockito.when;
 class SlotStrategyFactoryTest {
 
     @Test
-    @DisplayName("init() registers all @SlotStrategyImpl beans — {FIXED, RANDOM}")
+    @DisplayName("construction registers all @SlotStrategyImpl beans — {FIXED, RANDOM}")
     void initRegistersAnnotated() {
         ApplicationContext context = mock(ApplicationContext.class);
 
-        SlotStrategyFactory factory = new SlotStrategyFactory(
-                context, List.of(new FixedBetStrategy(), new RandomBetStrategy()));
-        factory.init();
+        SlotStrategyFactory factory = new SlotStrategyFactory(StubPluginBundle.of(context,
+                List.of(new FixedBetStrategy(), new RandomBetStrategy())));
 
         assertThat(factory.registeredKeys())
                 .containsExactlyInAnyOrder("FIXED", "RANDOM");
@@ -54,8 +54,8 @@ class SlotStrategyFactoryTest {
         RandomBetStrategy b = new RandomBetStrategy();
         when(context.getBean(RandomBetStrategy.class)).thenReturn(a, b);
 
-        SlotStrategyFactory factory = new SlotStrategyFactory(context, List.of(a));
-        factory.init();
+        SlotStrategyFactory factory = new SlotStrategyFactory(StubPluginBundle.of(context,
+                List.of(a)));
 
         SlotStrategy s1 = factory.create(SlotStrategyId.RANDOM.name());
         SlotStrategy s2 = factory.create(SlotStrategyId.RANDOM.name());
@@ -70,8 +70,8 @@ class SlotStrategyFactoryTest {
     void unknownIdThrows() {
         ApplicationContext context = mock(ApplicationContext.class);
 
-        SlotStrategyFactory factory = new SlotStrategyFactory(context, List.of());
-        factory.init();
+        SlotStrategyFactory factory = new SlotStrategyFactory(StubPluginBundle.of(context,
+                List.of()));
 
         assertThatThrownBy(() -> factory.create(SlotStrategyId.FIXED.name()))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -89,8 +89,8 @@ class SlotStrategyFactoryTest {
         ApplicationContext context = mock(ApplicationContext.class);
 
         SlotStrategyFactory factory =
-                new SlotStrategyFactory(context, List.of(new FixedBetStrategy()));
-        factory.init();
+                new SlotStrategyFactory(StubPluginBundle.of(context,
+                        List.of(new FixedBetStrategy())));
 
         assertThatThrownBy(() -> factory.create(null))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -104,9 +104,8 @@ class SlotStrategyFactoryTest {
         // blankKeyIsQuotedInTheMessage. RANDOM is handed in first so an
         // insertion-ordered render would put it first and fail the assertion.
         ApplicationContext context = mock(ApplicationContext.class);
-        SlotStrategyFactory factory = new SlotStrategyFactory(
-                context, List.of(new RandomBetStrategy(), new FixedBetStrategy()));
-        factory.init();
+        SlotStrategyFactory factory = new SlotStrategyFactory(StubPluginBundle.of(context,
+                List.of(new RandomBetStrategy(), new FixedBetStrategy())));
 
         assertThat(factory.registeredKeys()).containsExactly("RANDOM", "FIXED");
 
@@ -117,13 +116,12 @@ class SlotStrategyFactoryTest {
     }
 
     @Test
-    @DisplayName("Duplicate @SlotStrategyImpl on two beans throws at init")
+    @DisplayName("Duplicate @SlotStrategyImpl on two beans throws at construction")
     void duplicateImplThrows() {
         ApplicationContext context = mock(ApplicationContext.class);
 
-        SlotStrategyFactory factory = new SlotStrategyFactory(
-                context, List.of(new FixedBetStrategy(), new FakeFixedDuplicate()));
-        assertThatThrownBy(factory::init)
+        assertThatThrownBy(() -> new SlotStrategyFactory(StubPluginBundle.of(context,
+                List.of(new FixedBetStrategy(), new FakeFixedDuplicate()))))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Duplicate");
     }
@@ -133,8 +131,8 @@ class SlotStrategyFactoryTest {
     void unannotatedBeanSkipped() {
         ApplicationContext context = mock(ApplicationContext.class);
 
-        SlotStrategyFactory factory = new SlotStrategyFactory(context, List.of(new UnannotatedStrategy()));
-        factory.init();
+        SlotStrategyFactory factory = new SlotStrategyFactory(StubPluginBundle.of(context,
+                List.of(new UnannotatedStrategy())));
 
         assertThat(factory.registeredKeys()).isEmpty();
     }
@@ -152,8 +150,8 @@ class SlotStrategyFactoryTest {
     void registeredKeysIsASnapshot() throws Exception {
         ApplicationContext context = mock(ApplicationContext.class);
         SlotStrategyFactory factory =
-                new SlotStrategyFactory(context, List.of(new FixedBetStrategy()));
-        factory.init();
+                new SlotStrategyFactory(StubPluginBundle.of(context,
+                        List.of(new FixedBetStrategy())));
 
         Set<String> taken = factory.registeredKeys();
 
@@ -177,9 +175,8 @@ class SlotStrategyFactoryTest {
         // Not Set.copyOf: its iteration order is unspecified and salted per JVM run.
         // RANDOM is handed in first so a sorted copy would fail the order assertion.
         ApplicationContext context = mock(ApplicationContext.class);
-        SlotStrategyFactory factory = new SlotStrategyFactory(
-                context, List.of(new RandomBetStrategy(), new FixedBetStrategy()));
-        factory.init();
+        SlotStrategyFactory factory = new SlotStrategyFactory(StubPluginBundle.of(context,
+                List.of(new RandomBetStrategy(), new FixedBetStrategy())));
 
         Set<String> keys = factory.registeredKeys();
 

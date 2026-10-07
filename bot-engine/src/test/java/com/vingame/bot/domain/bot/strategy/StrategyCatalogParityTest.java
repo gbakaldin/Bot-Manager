@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.strategy;
 
+import com.vingame.bot.infrastructure.plugin.ClasspathPluginBundle;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategy;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyId;
@@ -32,11 +33,11 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p><b>Discovery here is real Spring component scanning, not a hand-built bean
  * list.</b> The sibling {@link BettingStrategyFactoryTest} /
  * {@link MartingaleStrategyFactoryWiringTest} construct the factory with
- * {@code new BettingStrategyFactory(mockContext, List.of(new Xxx(), ...))},
+ * {@code new BettingStrategyFactory(StubPluginBundle.of(mockContext, List.of(new Xxx(), ...)))},
  * which cannot notice a strategy that stopped being a bean — the test hands it
  * the instance itself. Here the beans arrive the way they arrive in production:
- * classpath scan → {@code @Component} → {@code List<BettingStrategy>} injection
- * → {@code @PostConstruct init()} → {@code getBean(Class)} for a prototype.
+ * classpath scan → {@code @Component} → {@code ClasspathPluginBundle.beansOfType}
+ * → the factory's constructor → {@code getBean(Class)} for a prototype.
  *
  * <p>What this still does <em>not</em> exercise is Spring Boot's own context
  * (bot-app's {@code Starter} scans {@code com.vingame.bot} with auto-configuration
@@ -48,7 +49,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @DisplayName("Strategy catalogue parity — every built-in enum name is a registered key")
 class StrategyCatalogParityTest {
 
-    /** The package both factories and all eleven strategy beans live under. */
+    /** The package all eleven strategy beans live under. */
     private static final String SCAN_BASE = "com.vingame.bot.domain.bot.strategy";
 
     private static AnnotationConfigApplicationContext context;
@@ -60,8 +61,11 @@ class StrategyCatalogParityTest {
         context = new AnnotationConfigApplicationContext();
         context.scan(SCAN_BASE);
         context.refresh();
-        bettingFactory = context.getBean(BettingStrategyFactory.class);
-        slotFactory = context.getBean(SlotStrategyFactory.class);
+        // PLUGIN_HOT_RELOAD_3_4 Phase 4a: the factories are per-bundle objects, not beans,
+        // built from the scanned context exactly as PluginRegistries.build builds them.
+        ClasspathPluginBundle bundle = new ClasspathPluginBundle(context);
+        bettingFactory = new BettingStrategyFactory(bundle);
+        slotFactory = new SlotStrategyFactory(bundle);
     }
 
     @AfterAll

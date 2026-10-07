@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.strategy;
 
+import com.vingame.bot.infrastructure.plugin.StubPluginBundle;
 import com.vingame.bot.domain.bot.strategy.martingale.ClassicMartingaleAggressive;
 import com.vingame.bot.domain.bot.strategy.martingale.ClassicMartingaleCautious;
 import com.vingame.bot.domain.bot.strategy.martingale.DAlembertAggressive;
@@ -26,8 +27,7 @@ import static org.mockito.Mockito.when;
  * Mirrors the mocked-context harness from {@link BettingStrategyFactoryTest}
  * (the registry / lookup contract is pure Java — Spring's prototype semantics
  * are stubbed by returning fresh instances from the mocked
- * {@link ApplicationContext#getBean(Class)} calls). Lives in the same package
- * as {@link BettingStrategyFactory} because {@code init()} is package-private.
+ * {@link ApplicationContext#getBean(Class)} calls, behind a {@code StubPluginBundle}).
  *
  * <p>What's pinned here:
  * <ul>
@@ -81,7 +81,7 @@ class MartingaleStrategyFactoryWiringTest {
         when(context.getBean(FibonacciAggressive.class))
                 .thenAnswer(inv -> new FibonacciAggressive());
 
-        BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(
+        BettingStrategyFactory factory = new BettingStrategyFactory(StubPluginBundle.of(context, List.of(
                 new RandomBehaviorStrategy(),
                 new ClassicMartingaleCautious(),
                 new ClassicMartingaleAggressive(),
@@ -90,8 +90,7 @@ class MartingaleStrategyFactoryWiringTest {
                 new DAlembertCautious(),
                 new DAlembertAggressive(),
                 new FibonacciCautious(),
-                new FibonacciAggressive()));
-        factory.init();
+                new FibonacciAggressive())));
         return factory;
     }
 

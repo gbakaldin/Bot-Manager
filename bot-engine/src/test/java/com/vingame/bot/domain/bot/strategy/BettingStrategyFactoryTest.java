@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.strategy;
 
+import com.vingame.bot.infrastructure.plugin.StubPluginBundle;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.ApplicationContext;
@@ -34,13 +35,13 @@ import static org.mockito.Mockito.when;
 class BettingStrategyFactoryTest {
 
     @Test
-    @DisplayName("init() registers all @StrategyImpl-annotated beans")
+    @DisplayName("construction registers all @StrategyImpl-annotated beans")
     void initRegistersAnnotated() {
         RandomBehaviorStrategy random = new RandomBehaviorStrategy();
         ApplicationContext context = mock(ApplicationContext.class);
 
-        BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(random));
-        factory.init();
+        BettingStrategyFactory factory = new BettingStrategyFactory(StubPluginBundle.of(context,
+                List.of(random)));
 
         assertThat(factory.registeredKeys()).containsExactly("RANDOM");
     }
@@ -53,8 +54,8 @@ class BettingStrategyFactoryTest {
         RandomBehaviorStrategy b = new RandomBehaviorStrategy();
         when(context.getBean(RandomBehaviorStrategy.class)).thenReturn(a, b);
 
-        BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(a));
-        factory.init();
+        BettingStrategyFactory factory = new BettingStrategyFactory(StubPluginBundle.of(context,
+                List.of(a)));
 
         BettingStrategy s1 = factory.create(StrategyId.RANDOM.name());
         BettingStrategy s2 = factory.create(StrategyId.RANDOM.name());
@@ -69,8 +70,8 @@ class BettingStrategyFactoryTest {
     void unknownIdThrows() {
         ApplicationContext context = mock(ApplicationContext.class);
 
-        BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of());
-        factory.init();
+        BettingStrategyFactory factory = new BettingStrategyFactory(StubPluginBundle.of(context,
+                List.of()));
 
         assertThatThrownBy(() -> factory.create(StrategyId.RANDOM.name()))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -91,8 +92,8 @@ class BettingStrategyFactoryTest {
         ApplicationContext context = mock(ApplicationContext.class);
 
         BettingStrategyFactory factory =
-                new BettingStrategyFactory(context, List.of(new RandomBehaviorStrategy()));
-        factory.init();
+                new BettingStrategyFactory(StubPluginBundle.of(context,
+                        List.of(new RandomBehaviorStrategy())));
 
         assertThatThrownBy(() -> factory.create(null))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -108,9 +109,8 @@ class BettingStrategyFactoryTest {
         // fixture is deliberately handed its beans in an order that is NOT sorted,
         // so an unsorted render would reproduce it and fail here.
         ApplicationContext context = mock(ApplicationContext.class);
-        BettingStrategyFactory factory = new BettingStrategyFactory(
-                context, List.of(new RandomBehaviorStrategy(), new FakeAaaStrategy()));
-        factory.init();
+        BettingStrategyFactory factory = new BettingStrategyFactory(StubPluginBundle.of(context,
+                List.of(new RandomBehaviorStrategy(), new FakeAaaStrategy())));
 
         assertThat(factory.registeredKeys()).containsExactly("RANDOM", "AAA_FIRST_WHEN_SORTED");
 
@@ -131,8 +131,8 @@ class BettingStrategyFactoryTest {
         // forbids.
         ApplicationContext context = mock(ApplicationContext.class);
         BettingStrategyFactory factory =
-                new BettingStrategyFactory(context, List.of(new RandomBehaviorStrategy()));
-        factory.init();
+                new BettingStrategyFactory(StubPluginBundle.of(context,
+                        List.of(new RandomBehaviorStrategy())));
 
         assertThatThrownBy(() -> factory.create("   "))
                 .isInstanceOf(IllegalArgumentException.class)
@@ -154,14 +154,14 @@ class BettingStrategyFactoryTest {
         // line.
         ApplicationContext context = mock(ApplicationContext.class);
         BettingStrategyFactory factory =
-                new BettingStrategyFactory(context, List.of(new SubclassOfAnnotatedBase()));
-        factory.init();
+                new BettingStrategyFactory(StubPluginBundle.of(context,
+                        List.of(new SubclassOfAnnotatedBase())));
 
         assertThat(factory.registeredKeys()).containsExactly("INHERITED_KEY");
     }
 
     @Test
-    @DisplayName("Duplicate @StrategyImpl on two beans throws at init")
+    @DisplayName("Duplicate @StrategyImpl on two beans throws at construction")
     void duplicateImplThrows() {
         ApplicationContext context = mock(ApplicationContext.class);
         RandomBehaviorStrategy a = new RandomBehaviorStrategy();
@@ -169,8 +169,8 @@ class BettingStrategyFactoryTest {
         // simulates a deploy bug where two strategies claim the same id.
         FakeRandomDuplicate b = new FakeRandomDuplicate();
 
-        BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(a, b));
-        assertThatThrownBy(factory::init)
+        assertThatThrownBy(() -> new BettingStrategyFactory(StubPluginBundle.of(context,
+                List.of(a, b))))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("Duplicate");
     }
@@ -181,8 +181,8 @@ class BettingStrategyFactoryTest {
         ApplicationContext context = mock(ApplicationContext.class);
         UnannotatedStrategy stray = new UnannotatedStrategy();
 
-        BettingStrategyFactory factory = new BettingStrategyFactory(context, List.of(stray));
-        factory.init();
+        BettingStrategyFactory factory = new BettingStrategyFactory(StubPluginBundle.of(context,
+                List.of(stray)));
 
         assertThat(factory.registeredKeys()).isEmpty();
     }
@@ -207,8 +207,8 @@ class BettingStrategyFactoryTest {
     void registeredKeysIsASnapshot() throws Exception {
         ApplicationContext context = mock(ApplicationContext.class);
         BettingStrategyFactory factory =
-                new BettingStrategyFactory(context, List.of(new RandomBehaviorStrategy()));
-        factory.init();
+                new BettingStrategyFactory(StubPluginBundle.of(context,
+                        List.of(new RandomBehaviorStrategy())));
 
         Set<String> taken = factory.registeredKeys();
 
@@ -234,9 +234,8 @@ class BettingStrategyFactoryTest {
         // lookupFailureTailIsSorted — whose premise is that this method reproduces
         // the *unsorted* scan order — flake.
         ApplicationContext context = mock(ApplicationContext.class);
-        BettingStrategyFactory factory = new BettingStrategyFactory(
-                context, List.of(new RandomBehaviorStrategy(), new FakeAaaStrategy()));
-        factory.init();
+        BettingStrategyFactory factory = new BettingStrategyFactory(StubPluginBundle.of(context,
+                List.of(new RandomBehaviorStrategy(), new FakeAaaStrategy())));
 
         Set<String> keys = factory.registeredKeys();
 

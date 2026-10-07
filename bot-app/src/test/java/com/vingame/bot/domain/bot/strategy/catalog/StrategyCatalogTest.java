@@ -1,5 +1,8 @@
 package com.vingame.bot.domain.bot.strategy.catalog;
 
+import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
+import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
+import com.vingame.bot.infrastructure.plugin.TestPluginRuntimes;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.dto.StrategyInfoDTO;
@@ -56,7 +59,8 @@ class StrategyCatalogTest {
         // is what lets these tests prove the sort ignores it.
         Set<String> keys = new LinkedHashSet<>(Arrays.asList(registeredKeys));
         when(factory.registeredKeys()).thenReturn(keys);
-        return new StrategyCatalog(factory);
+        return new StrategyCatalog(TestPluginRuntimes.of(factory,
+                mock(SlotStrategyFactory.class), mock(MessageTypesRegistry.class)));
     }
 
     @Nested

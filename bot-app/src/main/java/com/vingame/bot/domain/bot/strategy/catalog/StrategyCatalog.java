@@ -3,6 +3,7 @@ package com.vingame.bot.domain.bot.strategy.catalog;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.StrategyId;
 import com.vingame.bot.domain.bot.strategy.dto.StrategyInfoDTO;
+import com.vingame.bot.infrastructure.plugin.PluginRuntime;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -103,10 +104,15 @@ public class StrategyCatalog {
             Comparator.<String>comparingInt(StrategyCatalog::builtinRank)
                     .thenComparing(Comparator.naturalOrder());
 
-    private final BettingStrategyFactory bettingStrategyFactory;
+    /**
+     * Never the {@link BettingStrategyFactory} itself: every read goes through
+     * {@link PluginRuntime#current()} (PLUGIN_HOT_RELOAD_3_4 D-9), which is what lets step 5
+     * swap the bundle under this class without touching it.
+     */
+    private final PluginRuntime pluginRuntime;
 
-    public StrategyCatalog(BettingStrategyFactory bettingStrategyFactory) {
-        this.bettingStrategyFactory = bettingStrategyFactory;
+    public StrategyCatalog(PluginRuntime pluginRuntime) {
+        this.pluginRuntime = pluginRuntime;
     }
 
     /**
@@ -130,7 +136,7 @@ public class StrategyCatalog {
      */
     @PostConstruct
     void warnOnMissingBuiltins() {
-        Set<String> registered = bettingStrategyFactory.registeredKeys();
+        Set<String> registered = pluginRuntime.current().bettingStrategies().registeredKeys();
         List<String> missing = BUILTINS.keySet().stream()
                 .filter(key -> !registered.contains(key))
                 .toList();
@@ -159,7 +165,7 @@ public class StrategyCatalog {
      *         discovered at all.
      */
     public List<StrategyInfoDTO> bettingStrategies() {
-        return bettingStrategyFactory.registeredKeys().stream()
+        return pluginRuntime.current().bettingStrategies().registeredKeys().stream()
                 .sorted(DISPLAY_ORDER)
                 .map(StrategyCatalog::describe)
                 .toList();

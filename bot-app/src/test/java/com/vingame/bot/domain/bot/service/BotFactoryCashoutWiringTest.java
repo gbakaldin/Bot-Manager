@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.service;
 
+import com.vingame.bot.infrastructure.plugin.TestPluginRuntimes;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
@@ -69,7 +70,7 @@ class BotFactoryCashoutWiringTest {
         return new BotFactory(clientRegistry, eventLoopGroup, botMetrics,
                 new SessionAggregationService(), new GroupLifecycleAggregator(),
                 (ScopedDebugEscalator) null,
-                strategyFactory, slotStrategyFactory, TestMessageTypes.REGISTRY);
+                TestPluginRuntimes.of(strategyFactory, slotStrategyFactory, TestMessageTypes.REGISTRY));
     }
 
     private static Environment env(ProductCode product) {

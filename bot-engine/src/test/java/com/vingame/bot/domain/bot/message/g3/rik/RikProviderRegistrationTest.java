@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.message.g3.rik;
 
+import com.vingame.bot.infrastructure.plugin.ClasspathPluginBundle;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.vingame.bot.domain.bot.message.GameMessageTypes;
 import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
@@ -51,7 +52,8 @@ class RikProviderRegistrationTest {
         context = new AnnotationConfigApplicationContext();
         context.scan(SCAN_BASE);
         context.refresh();
-        registry = context.getBean(MessageTypesRegistry.class);
+        // PLUGIN_HOT_RELOAD_3_4 Phase 4a: the registry is a per-bundle object, not a bean.
+        registry = new MessageTypesRegistry(new ClasspathPluginBundle(context));
     }
 
     @AfterAll

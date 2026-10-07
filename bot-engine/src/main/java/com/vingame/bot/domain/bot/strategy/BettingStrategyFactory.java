@@ -1,12 +1,9 @@
 package com.vingame.bot.domain.bot.strategy;
 
-import jakarta.annotation.PostConstruct;
+import com.vingame.bot.infrastructure.plugin.PluginBundle;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.aop.support.AopUtils;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.context.ApplicationContext;
 import org.springframework.core.annotation.AnnotationUtils;
-import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -17,16 +14,22 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Spring-managed registry that produces fresh {@link BettingStrategy} instances
- * per bot.
+ * Registry of one plugin bundle's {@link BettingStrategy} implementations; produces
+ * fresh instances per bot.
  *
- * <p>Discovery happens once at startup in {@link #init()}: Spring injects every
- * {@link BettingStrategy} bean, the factory reads the {@link StrategyImpl}
- * annotation off each class to determine its <b>key</b>, and stores
- * an {@link ObjectProvider} that produces fresh prototype-scoped instances on
- * demand. Strategy beans MUST be marked {@code @Scope("prototype")} (Architecture
- * Decision 12) — singleton-scoped strategies would share mutable state across
- * bots and silently corrupt decisions.
+ * <p><b>Per bundle, immutable, not a Spring bean</b> (PLUGIN_HOT_RELOAD_3_4 D-9). This
+ * was a root-context {@code @Component} until Phase 4a. It is now built by
+ * {@code PluginRegistries.build} from one {@link PluginBundle}, reached only through
+ * {@code PluginRuntime.current()}, and handed by {@code BotFactory} to each bot, which
+ * keeps it for life. Nothing writes {@link #registry} after the constructor.
+ *
+ * <p>Discovery happens once, in the constructor: every {@link BettingStrategy} bean of
+ * the bundle ({@link PluginBundle#beansOfType}), the factory reads the
+ * {@link StrategyImpl} annotation off each class to determine its <b>key</b>, and
+ * {@link #create(String)} asks the bundle for a fresh prototype-scoped instance
+ * ({@link PluginBundle#newInstance}). Strategy beans MUST be marked
+ * {@code @Scope("prototype")} (Architecture Decision 12) — singleton-scoped strategies
+ * would share mutable state across bots and silently corrupt decisions.
  *
  * <p><b>Keys are {@code String}s, not {@link StrategyId}s</b> (PLUGIN_HOT_RELOAD
  * Phase 2a/2b, AD-12): a strategy served from a plugin classloader cannot name an
@@ -50,11 +53,10 @@ import java.util.TreeSet;
  * and {@code docs/plans/PLUGIN_HOT_RELOAD.md} AD-12/AD-13.
  */
 @Slf4j
-@Component
 public class BettingStrategyFactory {
 
-    private final ApplicationContext context;
-    private final List<BettingStrategy> discoveredStrategies;
+    /** The bundle the strategies came from, and the one {@link #create} instantiates from. */
+    private final PluginBundle bundle;
     /**
      * Key → implementation class, in discovery order.
      *
@@ -84,14 +86,15 @@ public class BettingStrategyFactory {
     private final Map<String, Class<? extends BettingStrategy>> registry =
             new LinkedHashMap<>();
 
-    public BettingStrategyFactory(ApplicationContext context,
-                                  List<BettingStrategy> discoveredStrategies) {
-        this.context = context;
-        this.discoveredStrategies = discoveredStrategies;
-    }
-
-    @PostConstruct
-    void init() {
+    /**
+     * Discover the bundle's strategies and log the one-per-bundle INFO line.
+     *
+     * @throws IllegalStateException on a duplicate {@link StrategyImpl} key, which rejects
+     *                               the whole bundle (D-10).
+     */
+    public BettingStrategyFactory(PluginBundle bundle) {
+        this.bundle = bundle;
+        List<BettingStrategy> discoveredStrategies = bundle.beansOfType(BettingStrategy.class);
         for (BettingStrategy bean : discoveredStrategies) {
             // Resolve the target class once and use it for both the annotation and
             // the registered value. Not bean.getClass(): that is whatever object
@@ -152,8 +155,9 @@ public class BettingStrategyFactory {
             throw new IllegalArgumentException("No BettingStrategy registered for '" + id
                     + "' — strategies present: " + sortedKeys());
         }
-        // getBean(class) on a prototype-scoped @Component returns a fresh instance.
-        return context.getBean(clazz);
+        // getBean(class) on a prototype-scoped @Component returns a fresh instance; the
+        // bundle asks its own context, so the instance comes from the bundle's loader.
+        return bundle.newInstance(clazz);
     }
 
     /**
@@ -167,14 +171,13 @@ public class BettingStrategyFactory {
      *         <p><b>A snapshot, deliberately, not a view</b> (review-2d finding 3).
      *         This used to be {@code unmodifiableSet(registry.keySet())}, which is
      *         an unmodifiable <em>view</em> over {@link #registry}: safe only while
-     *         the map is written once in {@link #init()} and never touched again.
-     *         Phase 2d put an HTTP request thread on this method, and step 5 is
-     *         where the registry starts being mutated after refresh — at which
-     *         point a view would throw {@link java.util.ConcurrentModificationException}
-     *         on the request thread mid-stream, i.e. a 500 on the picker whenever a
-     *         reload landed mid-request, looking like an endpoint bug rather than a
-     *         registry-lifecycle bug. Nine strings per call is not a cost worth
-     *         reasoning about.
+     *         the map is written once at construction and never touched again.
+     *         Phase 2d put an HTTP request thread on this method. Since Phase 4a
+     *         the registry is immutable and a reload swaps whole registries through
+     *         {@code PluginRuntime} instead of mutating this one (PLUGIN_HOT_RELOAD_3_4
+     *         D-9), so a view would in fact be safe; the snapshot stays because it
+     *         costs nine strings per call and keeps this method correct whatever a
+     *         later step does to the map.
      *
      *         <p>The copy is a {@link java.util.LinkedHashSet} and <b>not</b>
      *         {@code Set.copyOf}: {@code Set.copyOf}'s iteration order is

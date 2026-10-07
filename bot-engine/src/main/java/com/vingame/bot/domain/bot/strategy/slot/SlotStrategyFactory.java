@@ -1,11 +1,9 @@
 package com.vingame.bot.domain.bot.strategy.slot;
 
-import jakarta.annotation.PostConstruct;
+import com.vingame.bot.infrastructure.plugin.PluginBundle;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.aop.support.AopUtils;
-import org.springframework.context.ApplicationContext;
 import org.springframework.core.annotation.AnnotationUtils;
-import org.springframework.stereotype.Component;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -16,15 +14,18 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Spring-managed registry that produces fresh {@link SlotStrategy} instances
- * per bot. Mirrors the betting {@code BettingStrategyFactory} (AD-9 of
+ * Registry of one plugin bundle's {@link SlotStrategy} implementations; produces
+ * fresh instances per bot. Mirrors the betting {@code BettingStrategyFactory} (AD-9 of
  * {@code docs/plans/SLOT_MACHINE_BOT.md}).
  *
- * <p>Discovery happens once at startup in {@link #init()}: Spring injects every
- * {@link SlotStrategy} bean, the factory reads the {@link SlotStrategyImpl}
- * annotation off each class to determine its <b>key</b>, and stores
- * the class for prototype-scoped instantiation via
- * {@link ApplicationContext#getBean(Class)}. Strategy beans MUST be marked
+ * <p><b>Per bundle, immutable, not a Spring bean</b> (PLUGIN_HOT_RELOAD_3_4 D-9) — see
+ * the betting twin. Built by {@code PluginRegistries.build}, reached only through
+ * {@code PluginRuntime.current()}, kept for life by each {@code SlotMachineBot}.
+ *
+ * <p>Discovery happens once, in the constructor: every {@link SlotStrategy} bean of the
+ * bundle, the factory reads the {@link SlotStrategyImpl} annotation off each class to
+ * determine its <b>key</b>, and stores the class for prototype-scoped instantiation via
+ * {@link PluginBundle#newInstance(Class)}. Strategy beans MUST be marked
  * {@code @Scope("prototype")} — singleton-scoped strategies would share mutable
  * state across bots.
  *
@@ -39,30 +40,30 @@ import java.util.TreeSet;
  * from config without a corresponding bean is a deploy bug, not a runtime
  * fallback.
  *
- * <p>{@code BotFactory} injects this and wires it onto each {@code SlotMachineBot}
- * (Phase 5).
+ * <p>{@code BotFactory} reads this from {@code PluginRuntime.current()} and wires it
+ * onto each {@code SlotMachineBot}.
  */
 @Slf4j
-@Component
 public class SlotStrategyFactory {
 
-    private final ApplicationContext context;
-    private final List<SlotStrategy> discoveredStrategies;
+    /** The bundle the strategies came from, and the one {@link #create} instantiates from. */
+    private final PluginBundle bundle;
     /** Key → implementation class, in Spring's bean-discovery order. */
     private final Map<String, Class<? extends SlotStrategy>> registry =
             new LinkedHashMap<>();
 
-    public SlotStrategyFactory(ApplicationContext context,
-                               List<SlotStrategy> discoveredStrategies) {
-        this.context = context;
-        this.discoveredStrategies = discoveredStrategies;
-    }
-
-    @PostConstruct
-    void init() {
+    /**
+     * Discover the bundle's slot strategies and log the one-per-bundle INFO line.
+     *
+     * @throws IllegalStateException on a duplicate {@link SlotStrategyImpl} key, which
+     *                               rejects the whole bundle (D-10).
+     */
+    public SlotStrategyFactory(PluginBundle bundle) {
+        this.bundle = bundle;
+        List<SlotStrategy> discoveredStrategies = bundle.beansOfType(SlotStrategy.class);
         for (SlotStrategy bean : discoveredStrategies) {
-            // See BettingStrategyFactory.init for why this is the target class and
-            // not bean.getClass().
+            // See BettingStrategyFactory's constructor for why this is the target class
+            // and not bean.getClass().
             Class<? extends SlotStrategy> implClass =
                     AopUtils.getTargetClass(bean).asSubclass(SlotStrategy.class);
             SlotStrategyImpl annotation =
@@ -102,7 +103,7 @@ public class SlotStrategyFactory {
             throw new IllegalArgumentException("No SlotStrategy registered for '" + id
                     + "' — strategies present: " + sortedKeys());
         }
-        return context.getBean(clazz);
+        return bundle.newInstance(clazz);
     }
 
     /**
@@ -114,7 +115,7 @@ public class SlotStrategyFactory {
      *         <p><b>A snapshot, not a view</b> (PLUGIN_HOT_RELOAD_3_4 D-17), for the
      *         reason given on the betting twin's {@code registeredKeys()}: a view over
      *         {@link #registry} is safe only while the map is never written after
-     *         {@link #init()}, and a request thread iterating it would throw
+     *         construction, and a request thread iterating it would throw
      *         {@link java.util.ConcurrentModificationException} the first time that
      *         stops being true. A {@link LinkedHashSet} copy and not
      *         {@code Set.copyOf}, whose iteration order is unspecified and salted per

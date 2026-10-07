@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.service;
 
+import com.vingame.bot.infrastructure.plugin.TestPluginRuntimes;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
 import com.vingame.bot.config.client.EnvironmentClientRegistry;
@@ -69,7 +70,7 @@ class BotFactoryProductKeyTest {
                 new com.vingame.bot.infrastructure.observability.SessionAggregationService(),
                 new com.vingame.bot.infrastructure.observability.GroupLifecycleAggregator(),
                 (com.vingame.bot.infrastructure.observability.ScopedDebugEscalator) null,
-                strategyFactory, slotStrategyFactory, TestMessageTypes.REGISTRY);
+                TestPluginRuntimes.of(strategyFactory, slotStrategyFactory, TestMessageTypes.REGISTRY));
     }
 
     /**

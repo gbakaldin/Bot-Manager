@@ -25,6 +25,8 @@ import com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry;
 import com.vingame.bot.infrastructure.gateway.GatewayBudgetSettings;
 import com.vingame.bot.infrastructure.notification.VipTalkClient;
 import com.vingame.bot.infrastructure.observability.InfoGaugeRefresher;
+import com.vingame.bot.infrastructure.plugin.PluginRegistries;
+import com.vingame.bot.infrastructure.plugin.PluginRuntime;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -143,8 +145,12 @@ class ApplicationContextLoadsTest {
         // P2-2 ("registered 9 strategies" / "registered 2 strategies" in the
         // boot log); a lower count means a bean lost its annotation or its
         // package.
-        BettingStrategyFactory betting = context.getBean(BettingStrategyFactory.class);
-        SlotStrategyFactory slot = context.getBean(SlotStrategyFactory.class);
+        //
+        // PLUGIN_HOT_RELOAD_3_4 Phase 4a: the registries are no longer beans. They are read
+        // the way every production consumer reads them, through PluginRuntime.current().
+        PluginRegistries plugins = context.getBean(PluginRuntime.class).current();
+        BettingStrategyFactory betting = plugins.bettingStrategies();
+        SlotStrategyFactory slot = plugins.slotStrategies();
 
         assertThat(betting.registeredKeys())
                 .containsExactlyInAnyOrderElementsOf(
@@ -172,7 +178,7 @@ class ApplicationContextLoadsTest {
         // scan that actually runs in production. bot-messages is the first module
         // whose beans cross a jar boundary into this context, so this is also the
         // only place that proves the new spring-context dependency is enough.
-        MessageTypesRegistry registry = context.getBean(MessageTypesRegistry.class);
+        MessageTypesRegistry registry = context.getBean(PluginRuntime.class).current().messageTypes();
 
         // A superset check, not an exact set. What this test uniquely proves is that no
         // provider goes *missing* under Starter's scan; "exactly these products and no

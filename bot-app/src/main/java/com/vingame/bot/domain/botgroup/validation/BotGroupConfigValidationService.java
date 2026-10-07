@@ -2,13 +2,13 @@ package com.vingame.bot.domain.botgroup.validation;
 
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ResourceNotFoundException;
-import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.WeightedStrategy;
-import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 import com.vingame.bot.domain.botgroup.model.BotGroup;
 import com.vingame.bot.domain.game.model.Game;
 import com.vingame.bot.domain.game.model.GameType;
 import com.vingame.bot.domain.game.service.GameService;
+import com.vingame.bot.infrastructure.plugin.PluginRegistries;
+import com.vingame.bot.infrastructure.plugin.PluginRuntime;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -37,17 +37,19 @@ public class BotGroupConfigValidationService {
 
     private final GameConfigValidatorFactory validatorFactory;
     private final GameService gameService;
-    private final BettingStrategyFactory bettingStrategyFactory;
-    private final SlotStrategyFactory slotStrategyFactory;
+
+    /**
+     * Never a registry: {@link #validateStrategyKeys} reads {@link PluginRuntime#current()}
+     * per call (PLUGIN_HOT_RELOAD_3_4 D-9).
+     */
+    private final PluginRuntime pluginRuntime;
 
     public BotGroupConfigValidationService(GameConfigValidatorFactory validatorFactory,
                                            GameService gameService,
-                                           BettingStrategyFactory bettingStrategyFactory,
-                                           SlotStrategyFactory slotStrategyFactory) {
+                                           PluginRuntime pluginRuntime) {
         this.validatorFactory = validatorFactory;
         this.gameService = gameService;
-        this.bettingStrategyFactory = bettingStrategyFactory;
-        this.slotStrategyFactory = slotStrategyFactory;
+        this.pluginRuntime = pluginRuntime;
     }
 
     /**
@@ -145,8 +147,14 @@ public class BotGroupConfigValidationService {
      */
     private void validateStrategyKeys(BotGroup group) {
         List<WeightedStrategy> mix = group.getStrategyMix();
+        String slotStrategyId = group.getSlotStrategyId();
+        if ((mix == null || mix.isEmpty()) && slotStrategyId == null) {
+            return;
+        }
+        // One current() per validation, so both keys are checked against the same bundle.
+        PluginRegistries plugins = pluginRuntime.current();
         if (mix != null && !mix.isEmpty()) {
-            Set<String> registered = bettingStrategyFactory.registeredKeys();
+            Set<String> registered = plugins.bettingStrategies().registeredKeys();
             for (WeightedStrategy entry : mix) {
                 String key = entry == null ? null : entry.strategyId();
                 if (key == null || !registered.contains(key)) {
@@ -157,9 +165,8 @@ public class BotGroupConfigValidationService {
             }
         }
 
-        String slotStrategyId = group.getSlotStrategyId();
         if (slotStrategyId != null) {
-            Set<String> registered = slotStrategyFactory.registeredKeys();
+            Set<String> registered = plugins.slotStrategies().registeredKeys();
             if (!registered.contains(slotStrategyId)) {
                 throw new BadRequestException(
                         "Unknown slotStrategyId '" + slotStrategyId

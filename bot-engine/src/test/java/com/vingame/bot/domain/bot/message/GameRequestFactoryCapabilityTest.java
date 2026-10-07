@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.bot.message;
 
+import com.vingame.bot.infrastructure.plugin.ClasspathPluginBundle;
 import com.vingame.bot.domain.bot.message.g3.rik.RikGameMessageTypes;
 import com.vingame.bot.domain.bot.message.g3.rik.RikZicZacGameMessageTypes;
 import com.vingame.bot.domain.bot.message.request.GameRequestFactory;
@@ -70,7 +71,8 @@ class GameRequestFactoryCapabilityTest {
         context = new AnnotationConfigApplicationContext();
         context.scan(SCAN_BASE);
         context.refresh();
-        registry = context.getBean(MessageTypesRegistry.class);
+        // PLUGIN_HOT_RELOAD_3_4 Phase 4a: the registry is a per-bundle object, not a bean.
+        registry = new MessageTypesRegistry(new ClasspathPluginBundle(context));
     }
 
     @AfterAll
