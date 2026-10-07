@@ -65,6 +65,8 @@ class RegistrationStartGuardTest {
     @Mock private GroupLifecycleAggregator groupLifecycleAggregator;
     @Mock private ScopedDebugEscalator scopedDebugEscalator;
     @Mock private GatewayBudgetRegistry gatewayBudgetRegistry;
+    /** PLUGIN_HOT_RELOAD_3_4 D-15: answers null, so bots fall back to `builtin` as before. */
+    @Mock private com.vingame.bot.common.plugin.PluginVersionResolver pluginVersionResolver;
 
     @InjectMocks
     private BotGroupBehaviorService service;

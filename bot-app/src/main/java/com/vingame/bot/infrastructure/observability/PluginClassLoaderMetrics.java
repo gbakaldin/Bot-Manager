@@ -1,18 +1,24 @@
 package com.vingame.bot.infrastructure.observability;
 
 import com.vingame.bot.common.plugin.PluginVersionResolver;
+import com.vingame.bot.infrastructure.plugin.ClasspathPluginBundle;
+import com.vingame.bot.infrastructure.plugin.PluginBundle;
+import com.vingame.bot.infrastructure.plugin.PluginJar;
+import com.vingame.bot.infrastructure.plugin.PluginRuntime;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.lang.ref.PhantomReference;
 import java.lang.ref.Reference;
 import java.lang.ref.ReferenceQueue;
 import java.lang.ref.WeakReference;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,6 +26,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 /**
  * Counts plugin classloader <em>instances</em>, because nothing else does
@@ -62,6 +70,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * is the safe direction — the same lower-bound discipline {@code AsyncQueueMetrics}
  * documents for the log queues.
  * <p>
+ * <b>Since PLUGIN_HOT_RELOAD_3_4 Phase 4a (D-15)</b> the loader and version registered at
+ * startup are the accepted plugin bundle's, read from {@link PluginRuntime} — exactly once,
+ * for that bundle only. In classpath mode that is still the application classloader under
+ * {@code builtin}, so the readings above are unchanged; from 4c it is the bundle's child
+ * loader under its {@code Bot-Plugin-Version}. A rejected candidate bundle is closed, never
+ * registered. The boot line keeps its {@code plugin runtime: version=} prefix and appends
+ * {@code , source=…, jars=[…]}.
+ * <p>
  * Meter names are deliberately <b>not</b> {@code bot_}-prefixed, for the same reason
  * {@code AsyncQueueMetrics}' are not: {@code BotMdcTagsMeterFilter} would otherwise stamp
  * a JVM-wide fact with whatever MDC the sampler thread inherited.
@@ -101,7 +117,13 @@ public class PluginClassLoaderMetrics {
     static final long ERROR_INTERVAL_MINUTES = 5;
 
     private final MeterRegistry registry;
-    private final PluginVersionResolver versionResolver;
+
+    /**
+     * What {@link #start()} registers and prints. A supplier, read once at start, rather
+     * than a bundle captured at construction — and never a {@link PluginBundle} field,
+     * because only {@link PluginRuntime} may hold one (L-10).
+     */
+    private final Supplier<Subject> subject;
 
     /**
      * Cleared references land here. {@link WeakReference} (not {@link PhantomReference})
@@ -128,9 +150,43 @@ public class PluginClassLoaderMetrics {
 
     private ScheduledExecutorService sampler;
 
-    public PluginClassLoaderMetrics(MeterRegistry registry, PluginVersionResolver versionResolver) {
+    /**
+     * The production constructor: register the accepted bundle's loader under its version.
+     */
+    @Autowired
+    public PluginClassLoaderMetrics(MeterRegistry registry, PluginRuntime pluginRuntime) {
         this.registry = registry;
-        this.versionResolver = versionResolver;
+        this.subject = () -> Subject.of(pluginRuntime.current().bundle());
+    }
+
+    /**
+     * The Phase 1 shape, kept as a test seam: the application classloader under whatever
+     * the resolver answers, {@code source=classpath}, no jars — what a classpath bundle
+     * reports, without needing one. {@code PluginClassLoaderMetricsTest} and
+     * {@code InfoGaugePrometheusScrapeTest} use it, and Phase 4a's gate requires both to
+     * pass unchanged.
+     */
+    PluginClassLoaderMetrics(MeterRegistry registry, PluginVersionResolver versionResolver) {
+        this.registry = registry;
+        this.subject = () -> new Subject(versionResolver.currentVersion(),
+                PluginClassLoaderMetrics.class.getClassLoader(), ClasspathPluginBundle.SOURCE,
+                List.of());
+    }
+
+    /** The registered loader and what the boot line says about it. */
+    private record Subject(String version, ClassLoader loader, String source,
+                           List<PluginJar> jars) {
+
+        static Subject of(PluginBundle bundle) {
+            return new Subject(bundle.version(), bundle.classLoader(), bundle.source(),
+                    bundle.jars());
+        }
+
+        /** {@code [<name> sha256=<12 hex>, …]}; {@code []} for a classpath bundle. */
+        String renderedJars() {
+            return jars.stream().map(PluginJar::render)
+                    .collect(Collectors.joining(", ", "[", "]"));
+        }
     }
 
     /** A weak reference that remembers which plugin version its referent belonged to. */
@@ -146,8 +202,9 @@ public class PluginClassLoaderMetrics {
 
     @PostConstruct
     void start() {
-        String version = versionResolver.currentVersion();
-        ClassLoader loader = getClass().getClassLoader();
+        Subject current = subject.get();
+        String version = current.version();
+        ClassLoader loader = current.loader();
         register(version, loader);
 
         sampler = Executors.newSingleThreadScheduledExecutor(
@@ -159,8 +216,12 @@ public class PluginClassLoaderMetrics {
         // same shape and justification as NettyEventLoopConfig's one-shot EventLoopGroup
         // identity line. The identity hash is what makes a later "the loader changed"
         // claim checkable against a log rather than against memory.
-        log.info("plugin runtime: version={}, classloader={}",
-                version, System.identityHashCode(loader));
+        //
+        // PLUGIN_HOT_RELOAD_3_4 D-15: the prefix through `classloader=` is unchanged (P1-2
+        // and V3-1 grep it); `source=` and `jars=` are appended at the end only (D-1 (a)).
+        log.info("plugin runtime: version={}, classloader={}, source={}, jars={}",
+                version, System.identityHashCode(loader), current.source(),
+                current.renderedJars());
     }
 
     @PreDestroy
@@ -173,9 +234,9 @@ public class PluginClassLoaderMetrics {
     /**
      * Start accounting for a classloader under a plugin version.
      * <p>
-     * Public because step 4's loader factory is the caller that makes this class do
-     * anything interesting; in Phase 1 the only caller is {@link #start()}, registering the
-     * application classloader under {@code builtin}.
+     * Public because a later step's loader factory may call it; through step 4 the only
+     * caller is {@link #start()}, registering the accepted bundle's loader (in classpath
+     * mode the application classloader under {@code builtin}).
      * <p>
      * <b>Registering two distinct loaders under the same version is the fact worth
      * seeing</b> — that is a version loaded twice, and it is deliberately not deduplicated.

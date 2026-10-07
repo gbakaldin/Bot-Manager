@@ -97,6 +97,10 @@ class BotGroupBehaviorServiceTest {
     @Mock
     private com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry gatewayBudgetRegistry;
 
+    /** PLUGIN_HOT_RELOAD_3_4 D-15: answers null, so bots fall back to `builtin` as before. */
+    @Mock
+    private com.vingame.bot.common.plugin.PluginVersionResolver pluginVersionResolver;
+
     @Captor
     private ArgumentCaptor<BotGroup> botGroupCaptor;
 
@@ -1267,6 +1271,48 @@ class BotGroupBehaviorServiceTest {
                     .allSatisfy(cfg -> assertThat(cfg.getStrategyId()).isEqualTo(StrategyId.RANDOM.name()));
 
             // Cleanup the side-effect runtime created on the failed start path.
+            BotGroupRuntime rt = runningGroups().get("g-1");
+            if (rt != null) rt.stopAllBots();
+        }
+
+        @Test
+        @DisplayName("start() stamps every bot's BotConfiguration with the resolver's plugin version (D-15)")
+        void startStampsThePluginVersion() {
+            // PLUGIN_HOT_RELOAD_3_4 D-15: createSingleBot sets pluginVersion from the
+            // PluginVersionResolver, so bots_by_plugin_version and the MDC follow the bundle
+            // the bot is built from. A version that is not `builtin` is used on purpose:
+            // resolvePluginVersion() falls back to `builtin` for an unset field, so a
+            // `builtin` stub could not tell "stamped" from "left null".
+            BotGroup group = BotGroup.builder()
+                    .id("g-1")
+                    .name("Group")
+                    .environmentId("env-1")
+                    .gameId("game-1")
+                    .botCount(2)
+                    .namePrefix("bot")
+                    .password("pass")
+                    .strategyMix(List.of(new WeightedStrategy(StrategyId.RANDOM.name(), 1.0)))
+                    .build();
+            Environment env = Environment.builder().id("env-1").name("Env").miniZoneName("zone").build();
+            Game game = Game.builder().id("game-1").name("BauCua").build();
+            when(botGroupService.findById("g-1")).thenReturn(group);
+            when(environmentService.findById("env-1")).thenReturn(env);
+            when(gameService.findById("game-1")).thenReturn(game);
+            when(pluginVersionResolver.currentVersion()).thenReturn("20261007.101500");
+
+            ArgumentCaptor<BotConfiguration> configCaptor = ArgumentCaptor.forClass(BotConfiguration.class);
+            when(botFactory.createBot(anyString(), configCaptor.capture()))
+                    .thenThrow(new RuntimeException("intentional — captures only"));
+
+            service.start("g-1");
+
+            assertThat(configCaptor.getAllValues())
+                    .isNotEmpty()
+                    .allSatisfy(cfg -> {
+                        assertThat(cfg.getPluginVersion()).isEqualTo("20261007.101500");
+                        assertThat(cfg.resolvePluginVersion()).isEqualTo("20261007.101500");
+                    });
+
             BotGroupRuntime rt = runningGroups().get("g-1");
             if (rt != null) rt.stopAllBots();
         }

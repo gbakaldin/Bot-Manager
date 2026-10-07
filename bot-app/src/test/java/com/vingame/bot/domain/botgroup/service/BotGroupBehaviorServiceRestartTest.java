@@ -107,6 +107,10 @@ class BotGroupBehaviorServiceRestartTest {
     @Mock
     private com.vingame.bot.infrastructure.gateway.GatewayBudgetRegistry gatewayBudgetRegistry;
 
+    /** PLUGIN_HOT_RELOAD_3_4 D-15: answers null, so bots fall back to `builtin` as before. */
+    @Mock
+    private com.vingame.bot.common.plugin.PluginVersionResolver pluginVersionResolver;
+
     @InjectMocks
     private BotGroupBehaviorService service;
 
@@ -575,7 +579,7 @@ class BotGroupBehaviorServiceRestartTest {
         BotGroupBehaviorService realMetricsService = new BotGroupBehaviorService(
                 botGroupService, environmentService, gameService, botFactory, realMetrics,
                 sessionAggregationService, groupLifecycleAggregator, scopedDebugEscalator,
-                gatewayBudgetRegistry);
+                gatewayBudgetRegistry, pluginVersionResolver);
         ReflectionTestUtils.setField(realMetricsService, "deadBotGroupThreshold", 0.80);
         ReflectionTestUtils.setField(realMetricsService, "botCreationParallelism", 10);
         ReflectionTestUtils.setField(realMetricsService, "watchdogTimeoutSeconds", 180L);
@@ -776,7 +780,7 @@ class BotGroupBehaviorServiceRestartTest {
         BotGroupBehaviorService svc = new BotGroupBehaviorService(
                 botGroupService, environmentService, gameService, botFactory, realMetrics,
                 sessionAggregationService, groupLifecycleAggregator, scopedDebugEscalator,
-                gatewayBudgetRegistry);
+                gatewayBudgetRegistry, pluginVersionResolver);
         ReflectionTestUtils.setField(svc, "deadBotGroupThreshold", 0.80);
         ReflectionTestUtils.setField(svc, "botCreationParallelism", 10);
         ReflectionTestUtils.setField(svc, "watchdogTimeoutSeconds", 180L);

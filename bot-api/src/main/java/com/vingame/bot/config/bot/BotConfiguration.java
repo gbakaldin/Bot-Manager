@@ -152,12 +152,14 @@ public class BotConfiguration {
      * {@code BotHealthDTO} deliberately does not carry it in Phase 1 either — that is an
      * additive API change with no reader until a drain exists, and it lands at step 5.
      * <p>
-     * <b>Nullable, and null is the normal case in Phase 1.</b> Nothing writes it yet:
-     * with one classloader the answer is a constant, so {@link #resolvePluginVersion()}
-     * supplies {@link PluginVersions#BUILTIN} and every bot labels correctly without the
-     * group-start path having to thread a {@link com.vingame.bot.common.plugin.PluginVersionResolver}
-     * through. Step 4, which is the first release where the answer can differ per bot, is
-     * where the builder starts setting it.
+     * <b>Set at group start since PLUGIN_HOT_RELOAD_3_4 Phase 4a (D-15).</b>
+     * {@code BotGroupBehaviorService.createSingleBot} stamps it from the
+     * {@link com.vingame.bot.common.plugin.PluginVersionResolver}, which answers from the
+     * plugin bundle new bots are built from — {@link PluginVersions#BUILTIN} in classpath
+     * mode, the bundle's {@code Bot-Plugin-Version} from 4c. It stays nullable: a fixture
+     * that uses the builder directly leaves it unset, and {@link #resolvePluginVersion()}
+     * then supplies {@link PluginVersions#BUILTIN}, which is what every bot reported
+     * before the field was written.
      */
     String pluginVersion;
 

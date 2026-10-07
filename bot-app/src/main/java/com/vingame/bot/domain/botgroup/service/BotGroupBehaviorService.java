@@ -1,5 +1,6 @@
 package com.vingame.bot.domain.botgroup.service;
 
+import com.vingame.bot.common.plugin.PluginVersionResolver;
 import com.vingame.bot.domain.bot.core.SessionSetupHandedOffException;
 import com.vingame.bot.common.exception.BadRequestException;
 import com.vingame.bot.common.exception.ConflictException;
@@ -128,6 +129,14 @@ public class BotGroupBehaviorService {
      * they sit in belongs to the environment's budget.
      */
     private final GatewayBudgetRegistry gatewayBudgetRegistry;
+
+    /**
+     * The plugin version new bots are built from (PLUGIN_HOT_RELOAD_3_4 D-15). Read per bot
+     * in {@code createSingleBot} and stamped onto its {@link BotConfiguration}, which is
+     * what the {@code pluginVersion} MDC key and {@code bots_by_plugin_version} read — the
+     * "step 4 starts setting it" that PLUGIN_HOT_RELOAD AD-10 deferred.
+     */
+    private final PluginVersionResolver pluginVersionResolver;
 
     /**
      * Max number of bots to create/authenticate simultaneously.
@@ -278,7 +287,8 @@ public class BotGroupBehaviorService {
             SessionAggregationService sessionAggregationService,
             GroupLifecycleAggregator groupLifecycleAggregator,
             ScopedDebugEscalator scopedDebugEscalator,
-            GatewayBudgetRegistry gatewayBudgetRegistry
+            GatewayBudgetRegistry gatewayBudgetRegistry,
+            PluginVersionResolver pluginVersionResolver
     ) {
         this.botGroupService = botGroupService;
         this.environmentService = environmentService;
@@ -289,6 +299,7 @@ public class BotGroupBehaviorService {
         this.groupLifecycleAggregator = groupLifecycleAggregator;
         this.scopedDebugEscalator = scopedDebugEscalator;
         this.gatewayBudgetRegistry = gatewayBudgetRegistry;
+        this.pluginVersionResolver = pluginVersionResolver;
 
         // Use virtual threads for scheduled tasks
         this.scheduler = Executors.newScheduledThreadPool(4, Thread.ofVirtual().factory());
@@ -2074,6 +2085,10 @@ public class BotGroupBehaviorService {
                 .cashoutReconnectAfterTimeouts(cashoutReconnectAfterTimeouts)
                 .strategyId(strategyId)
                 .slotStrategyId(slotStrategyId)
+                // PLUGIN_HOT_RELOAD_3_4 D-15. `builtin` in classpath mode, which is the value
+                // resolvePluginVersion() fell back to while this was unset — so the label
+                // does not change until 4c makes the bundle version real.
+                .pluginVersion(pluginVersionResolver.currentVersion())
                 // GATEWAY_REQUEST_BUDGET AD-8: how the bot's queued gateway requests learn that
                 // the start they belong to was cancelled. Supplied here rather than in BotFactory
                 // because it must be in place before initialize(), which is where the login, the
