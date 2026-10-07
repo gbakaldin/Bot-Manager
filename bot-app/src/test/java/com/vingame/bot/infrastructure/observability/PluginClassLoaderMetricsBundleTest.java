@@ -55,9 +55,9 @@ class PluginClassLoaderMetricsBundleTest {
         registry = new SimpleMeterRegistry();
         bundleLoader = new URLClassLoader("plugin-" + VERSION, new URL[0], getClass().getClassLoader());
         FixedBundle bundle = new FixedBundle(bundleLoader);
-        PluginRuntime runtime = PluginRuntime.of(new PluginRegistries(bundle,
+        PluginRuntime runtime = new PluginRuntime(new PluginRegistries(bundle,
                 mock(BettingStrategyFactory.class), mock(SlotStrategyFactory.class),
-                mock(MessageTypesRegistry.class), bundle.typeFactory()));
+                mock(MessageTypesRegistry.class)));
         metrics = new PluginClassLoaderMetrics(registry, runtime);
         capture = new Capture();
     }

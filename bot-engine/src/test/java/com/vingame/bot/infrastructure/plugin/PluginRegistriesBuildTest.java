@@ -98,10 +98,29 @@ class PluginRegistriesBuildTest {
     void componentsAreRequired() {
         PluginRegistries built = PluginRegistries.build(StubPluginBundle.of(null, List.of()));
 
-        assertThatThrownBy(() -> new PluginRegistries(built.bundle(), built.bettingStrategies(),
-                built.slotStrategies(), built.messageTypes(), null))
+        assertThatThrownBy(() -> new PluginRegistries(null, built.bettingStrategies(),
+                built.slotStrategies(), built.messageTypes()))
                 .isInstanceOf(NullPointerException.class)
-                .hasMessageContaining("typeFactory");
+                .hasMessageContaining("bundle");
+        assertThatThrownBy(() -> new PluginRegistries(built.bundle(), built.bettingStrategies(),
+                built.slotStrategies(), null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("messageTypes");
+    }
+
+    @Test
+    @DisplayName("the type factory is always the bundle's own — a record cannot pair it with another cache (review-4a)")
+    void typeFactoryIsTheBundles() {
+        StubPluginBundle bundle = StubPluginBundle.of(null, List.of());
+        PluginRegistries built = PluginRegistries.build(bundle);
+        PluginRegistries handBuilt = new PluginRegistries(bundle, built.bettingStrategies(),
+                built.slotStrategies(), built.messageTypes());
+
+        assertThat(built.typeFactory()).isSameAs(bundle.typeFactory());
+        assertThat(handBuilt.typeFactory()).isSameAs(bundle.typeFactory());
+        assertThat(built.typeFactory())
+                .as("never the shared default: that cache pins plugin types (spike 3a)")
+                .isNotSameAs(com.fasterxml.jackson.databind.type.TypeFactory.defaultInstance());
     }
 
     // ------------------------------------------------------------------ fixtures

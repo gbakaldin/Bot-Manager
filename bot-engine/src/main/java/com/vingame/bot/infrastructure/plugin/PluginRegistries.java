@@ -25,22 +25,32 @@ import java.util.Objects;
  * @param bettingStrategies the bundle's betting strategies.
  * @param slotStrategies    the bundle's slot strategies.
  * @param messageTypes      the bundle's message-types providers.
- * @param typeFactory       the bundle's Jackson type factory, with its private cache.
- *                          {@code BotFactory} hands it to every bot, and every per-bot
- *                          mapper is built on it (D-9, L-8).
  */
 public record PluginRegistries(PluginBundle bundle,
                                BettingStrategyFactory bettingStrategies,
                                SlotStrategyFactory slotStrategies,
-                               MessageTypesRegistry messageTypes,
-                               TypeFactory typeFactory) {
+                               MessageTypesRegistry messageTypes) {
 
     public PluginRegistries {
         Objects.requireNonNull(bundle, "bundle");
         Objects.requireNonNull(bettingStrategies, "bettingStrategies");
         Objects.requireNonNull(slotStrategies, "slotStrategies");
         Objects.requireNonNull(messageTypes, "messageTypes");
-        Objects.requireNonNull(typeFactory, "typeFactory");
+    }
+
+    /**
+     * The bundle's Jackson type factory, with its private cache. {@code BotFactory} hands
+     * it to every bot, and every per-bot mapper is built on it (D-9, L-8).
+     * <p>
+     * <b>Derived, not a component</b> (review-4a). It used to be a fifth record component
+     * that {@link #build} filled from {@code bundle.typeFactory()}, but the canonical
+     * constructor accepted any factory, so a hand-built record could pair one bundle's
+     * registries with another bundle's type cache — or with
+     * {@code TypeFactory.defaultInstance()}, the exact pin D-9 exists to prevent. Reading
+     * it through the bundle makes that pairing unexpressible.
+     */
+    public TypeFactory typeFactory() {
+        return bundle.typeFactory();
     }
 
     /**
@@ -66,6 +76,6 @@ public record PluginRegistries(PluginBundle bundle,
         BettingStrategyFactory betting = new BettingStrategyFactory(bundle);
         SlotStrategyFactory slot = new SlotStrategyFactory(bundle);
         MessageTypesRegistry messageTypes = new MessageTypesRegistry(bundle);
-        return new PluginRegistries(bundle, betting, slot, messageTypes, bundle.typeFactory());
+        return new PluginRegistries(bundle, betting, slot, messageTypes);
     }
 }
