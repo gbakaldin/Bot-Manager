@@ -22,6 +22,8 @@
     <module>bot-messages</module>
     <module>bot-engine</module>
     <module>bot-app</module>
+    <!-- Last, and with no dependency on the plugin modules (PLUGIN_HOT_RELOAD_3_4 4b). -->
+    <module>bot-plugin-dist</module>
   </modules>
 
   <repositories>

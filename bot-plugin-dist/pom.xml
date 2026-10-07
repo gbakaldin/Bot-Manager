@@ -1,0 +1,148 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.mercury</groupId>
+    <artifactId>Bot</artifactId>
+    <version>1.0</version>
+    <relativePath>../pom.xml</relativePath>
+  </parent>
+
+  <artifactId>bot-plugin-dist</artifactId>
+  <name>Bot - Plugin distribution</name>
+  <description>
+    The shippable plugin bundle and the tests that prove it loads in isolation
+    (PLUGIN_HOT_RELOAD_3_4 Phase 4b). No main code. At `package` it copies the two
+    plugin jars into target/plugins-dist/${bot.plugin.version}/ - the directory 4c
+    bakes into the image and the operator mounts as ./plugins-dist - and failsafe
+    then runs the loader ITs (L-1..L-5, L-12..L-14 and the D-11 selection tests)
+    against exactly that directory.
+
+    THIS MODULE MUST NOT DEPEND ON bot-strategies OR bot-messages AT ANY SCOPE. With
+    parent-first delegation a plugin class that is also on the test classpath is
+    silently loaded by the parent, and every isolation test then passes vacuously
+    (L-1's defining-loader assertion is what would catch it). The jars reach this
+    module only through maven-dependency-plugin:copy below, which does not touch
+    the classpath. Reactor order still puts this module after both: it depends on
+    bot-engine, which takes them at test scope.
+  </description>
+
+  <dependencies>
+    <!-- The loader under test, the registries and the contracts (bot-api, transitive).
+         Test scope: there is no main code. Its own test-scoped plugin dependencies
+         are not transitive, so they do not reach this classpath. -->
+    <dependency>
+      <groupId>com.mercury</groupId>
+      <artifactId>bot-engine</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>org.springframework.boot</groupId>
+          <artifactId>spring-boot-starter-logging</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <!-- L-5: a plugin logger must bind to the app's log4j2 LoggerContext, so log4j2 is
+         the SLF4J binding here exactly as in bot-app. -->
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-slf4j2-impl</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+      </plugin>
+
+      <!-- The bundle that ships. Resolved through the reactor: under `mvn clean install`
+           (and `mvn verify`) both plugin modules are packaged earlier in the same session,
+           so these are this build's jars and their Bot-Plugin-Version equals the directory
+           name. Building this module on its own (`-pl bot-plugin-dist`) resolves them from
+           ~/.m2 instead, possibly from another session - PluginJarContentsIT fails that
+           case rather than letting a stale bundle through. overWriteReleases: the version
+           is 1.0 on every build, so without it a non-clean build keeps the old jars. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>copy-plugin-bundle</id>
+            <phase>package</phase>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/plugins-dist/${bot.plugin.version}</outputDirectory>
+              <overWriteReleases>true</overWriteReleases>
+              <overWriteSnapshots>true</overWriteSnapshots>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>com.mercury</groupId>
+                  <artifactId>bot-strategies</artifactId>
+                  <version>${project.version}</version>
+                  <type>jar</type>
+                </artifactItem>
+                <artifactItem>
+                  <groupId>com.mercury</groupId>
+                  <artifactId>bot-messages</artifactId>
+                  <version>${project.version}</version>
+                  <type>jar</type>
+                </artifactItem>
+              </artifactItems>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- Declared HERE with explicit executions, not just inherited from
+           pluginManagement: an *IT class that no failsafe execution binds never runs
+           (BotGroupConfigValidationIT is the standing example). The local gate counts
+           target/failsafe-reports and requires > 0. The id is `default` on purpose: the
+           Spring Boot parent's pluginManagement already declares an execution with that
+           id, and any other id would bind integration-test a second time. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>default</id>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <!-- L-12 reads Thread.inheritedAccessControlContext and
+               AccessControlContext.context by reflection. -->
+          <argLine>--add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.security=ALL-UNNAMED</argLine>
+          <!-- A real java.class.path: the L-14 negative control forks a JVM from it and
+               the selection fixtures compile a class against it. -->
+          <useManifestOnlyJar>false</useManifestOnlyJar>
+          <systemPropertyVariables>
+            <plugins.dist>${project.build.directory}/plugins-dist</plugins.dist>
+            <bot.plugin.version>${bot.plugin.version}</bot.plugin.version>
+            <fixtures.dir>${project.build.directory}/it-fixtures</fixtures.dir>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

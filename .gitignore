@@ -58,3 +58,8 @@ infra-images.tar.gz
 logs/
 app/
 *.log
+
+### Host-side plugin bundle mount (PLUGIN_HOT_RELOAD_3_4 D-11) ###
+### compose mounts ./plugins-dist read-only at /app/plugins; its contents are build ###
+### output (bot-plugin-dist/target/plugins-dist/<version>/) shipped by the releaser. ###
+/plugins-dist/

@@ -7,3 +7,6 @@ seed.js
 bot-app/src/main/resources/namechangeref.js
 bot-app/src/main/resources/application-loadtest.properties
 startup.sh
+# Host-side plugin bundle mount (PLUGIN_HOT_RELOAD_3_4 D-11): bind-mounted at runtime,
+# never part of the image. The image's own bundle comes from bot-plugin-dist/target (4c).
+plugins-dist
