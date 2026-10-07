@@ -52,7 +52,11 @@ public class GameMsClient {
         TokenDetails tokenDetails = fetchTokenDetails(agencyToken);
         int agencyId = Integer.parseInt(agencyToken.substring(0, agencyToken.indexOf('-')));
 
-        Thread t = new Thread(() -> {
+        // Virtual, not `new Thread` (PLUGIN_HOT_RELOAD_3_4 L-11, spike 7b): a platform thread
+        // captures the protection domains of every frame that constructs it, and a deposit can
+        // be reached from a bot's own play loop. Virtual threads capture none. Started and
+        // joined exactly as before, so the call is still synchronous.
+        Thread t = Thread.ofVirtual().name("gamems-deposit").unstarted(() -> {
             try {
                 log.debug("Depositing {} for agency token {}", amount, agencyToken);
 

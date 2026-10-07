@@ -162,6 +162,10 @@ public class BotFactory {
         // different bundle from the code the bot runs once step 5 can swap bundles.
         PluginRegistries plugins = pluginRuntime.current();
         BotConfiguration stamped = configuration.withPluginVersion(plugins.bundle().version());
+        // L-11: a bot of an isolated bundle must use the shared, pre-started Netty group; a
+        // client that fell back to ws-parser's private group would start platform threads
+        // that can pin the plugin loader. Classpath mode keeps the old WARN-only behaviour.
+        freshClientFactory.setRequireSharedEventLoopGroup(plugins.bundle().isolated());
 
         // Instantiate bot based on game type (using domain.game.model.GameType).
         // Message-types resolution is now per-branch (AD-4): betting-mini resolves

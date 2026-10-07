@@ -25,6 +25,19 @@ public class ClientFactory {
     private boolean ignoreJwtToken;
 
     /**
+     * Whether a client may be built without the shared {@link #eventLoopGroup}
+     * (PLUGIN_HOT_RELOAD_3_4 L-11). {@code BotFactory} sets it for bots of an isolated
+     * plugin bundle. Without a shared group ws-parser falls back to a private
+     * {@code MultiThreadIoEventLoopGroup} per client ({@code VingameWebSocketClient:400}),
+     * whose platform threads start lazily — possibly under a plugin frame, where each would
+     * capture the plugin loader for its whole life (spike 7b). Required, a missing group is
+     * an {@link IllegalStateException} at build time, so that fallback is unreachable;
+     * not required, it stays the WARN it always was (fixtures and tooling build clients
+     * without a group).
+     */
+    private boolean requireSharedEventLoopGroup;
+
+    /**
      * Create a new WebSocket client with authentication configured.
      *
      * PREFERRED METHOD: Pass tokens directly to avoid race conditions.
@@ -94,6 +107,11 @@ public class ClientFactory {
                         // same hash once per JVM.
                         log.debug("Setting shared EventLoopGroup on client: {}", System.identityHashCode(eventLoopGroup));
                         builder.eventLoopGroup(eventLoopGroup);
+                    } else if (requireSharedEventLoopGroup) {
+                        throw new IllegalStateException("Client ws-" + name + " has no shared "
+                                + "EventLoopGroup, and this bot's plugin bundle is isolated: "
+                                + "ws-parser's private-group fallback would start platform "
+                                + "threads that pin the plugin classloader (PLUGIN_HOT_RELOAD_3_4 L-11)");
                     } else {
                         log.warn("EventLoopGroup is NULL! Each client will create its own EventLoopGroup.");
                     }

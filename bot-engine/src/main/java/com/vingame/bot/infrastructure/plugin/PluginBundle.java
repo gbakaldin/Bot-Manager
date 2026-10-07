@@ -116,6 +116,16 @@ public abstract class PluginBundle implements AutoCloseable {
      */
     public abstract <T> T newInstance(Class<T> type);
 
+    /**
+     * Whether the bundle's classes live in a loader of their own (isolated mode, 4b).
+     * {@code BotFactory} reads it to make the shared Netty group mandatory for that bundle's
+     * bots (L-11): a WebSocket client that fell back to ws-parser's private group would
+     * start platform threads under a plugin frame, which pins the loader (spike 7b).
+     */
+    public boolean isolated() {
+        return false;
+    }
+
     /** The bundle's Jackson type factory, with its private cache (D-9). */
     public final TypeFactory typeFactory() {
         return typeFactory;

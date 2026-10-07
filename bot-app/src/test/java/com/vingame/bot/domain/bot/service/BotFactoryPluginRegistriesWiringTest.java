@@ -248,6 +248,42 @@ class BotFactoryPluginRegistriesWiringTest {
         verify(runtime, times(1)).current();
     }
 
+    /**
+     * L-11: a bot of an isolated bundle must never get ws-parser's private-group fallback, so
+     * its ClientFactory requires the shared EventLoopGroup; a classpath bundle keeps the old
+     * WARN-only behaviour. Read from the same {@code PluginRegistries} value as the wiring.
+     */
+    @ParameterizedTest(name = "isolated={0}")
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    @DisplayName("the ClientFactory requires the shared EventLoopGroup exactly when the bundle is isolated (L-11)")
+    void sharedGroupIsRequiredForIsolatedBundles(boolean isolated) {
+        environment(ProductCode.P_116);
+        Game game = Game.builder().id("bc").name("BauCua").gameType(GameType.BETTING_MINI)
+                .pluginName("BauCua").offset(2000).build();
+        PluginRuntime isolatedRuntime = new PluginRuntime(new PluginRegistries(
+                new TestPluginRuntimes.InertBundle(BUNDLE_VERSION) {
+                    @Override
+                    public boolean isolated() {
+                        return isolated;
+                    }
+                },
+                plugins.bettingStrategies(), plugins.slotStrategies(), plugins.messageTypes()));
+        BotFactory factory = new BotFactory(clientRegistry, mock(EventLoopGroup.class), mock(BotMetrics.class),
+                new SessionAggregationService(), new GroupLifecycleAggregator(),
+                (ScopedDebugEscalator) null, isolatedRuntime);
+
+        try (MockedConstruction<BettingMiniGameBot> ignored = mockConstruction(BettingMiniGameBot.class,
+                withSettings().defaultAnswer(RETURNS_SELF));
+             MockedConstruction<ClientFactory> clientFactories = mockConstruction(ClientFactory.class)) {
+            factory.createBot("env-1", config(game));
+
+            assertThat(clientFactories.constructed()).hasSize(1);
+            ClientFactory clientFactory = clientFactories.constructed().get(0);
+            verify(clientFactory).setRequireSharedEventLoopGroup(isolated);
+            verify(clientFactory).setEventLoopGroup(org.mockito.ArgumentMatchers.any(EventLoopGroup.class));
+        }
+    }
+
     private BotConfiguration verifyStampedFromTheBundle(Bot bot) {
         ArgumentCaptor<BotConfiguration> captor = ArgumentCaptor.forClass(BotConfiguration.class);
         verify(bot).setConfiguration(captor.capture());

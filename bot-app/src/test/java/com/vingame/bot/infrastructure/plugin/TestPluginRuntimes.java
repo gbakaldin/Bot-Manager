@@ -43,10 +43,10 @@ public final class TestPluginRuntimes {
     }
 
     /** No beans, no jars, the test's own loader; nothing to release. */
-    static class InertBundle extends PluginBundle {
+    public static class InertBundle extends PluginBundle {
         private final String version;
 
-        InertBundle(String version) {
+        public InertBundle(String version) {
             this.version = Objects.requireNonNull(version, "version");
         }
 
