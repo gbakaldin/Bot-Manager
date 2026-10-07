@@ -53,7 +53,7 @@ Note: the container is named `bot-java-bot-manager-1`, not `bot-manager`, so the
   plugin runtime: version=builtin
   ```
 - `GET /api/v1/strategy/` md5 = `a72c40f56057cda5434b273ea36315ea` (the expected value, so the box was running what we thought). `?gameType=SLOT` → `[]`.
-- `plugin_classloaders_live=1`, `registered_total=1`, `reclaimed_total=0`, all with `pluginVersion="builtin"`. `bots_by_plugin_version` had 11 series, all `builtin` (268 bots). `bots_managed` is not exported, either before or after.
+- `plugin_classloaders_live=1`, `registered_total=1`, `reclaimed_total=0`, all with `pluginVersion="builtin"`. `bots_by_plugin_version` had 11 series, all `builtin` (268 bots). `bots_managed` was not captured: the P-0 grep required a space after the name, and the `{application="bot-manager"}` tag follows it directly, so it matched nothing. It *is* exported (qa-4a Finding 1).
 - `jvm_threads_live=71`, `peak=104`. Metaspace used = 93,547,208 B (committed 96,141,312), `jvm_classes_loaded=17,904`.
 - Firing alerts: `GameNoRounds` ×3 (Aviator/CRASH, Balloon/CASHOUT, Soccer/CASHOUT, all 119 Club) and `GroupBalanceLow` ×3 (Angry Birds, Aviator, Kong Godzilla 119 Club).
 - Groups: 11 ACTIVE/ACTIVE at full count. Coins 100/100 and Zic Zac 100/100 (114); 119 Tai Xiu probe 10/10 and 119 Xoc Dia probe 10/10 (119); 119 Club Tai Xiu KM probe 10/10; Balloon cashout 3/3 and Soccer cashout 3/3; Aviator 3/3; Angry Birds 3/3 and Kong Godzilla 3/3 (119 Club); Slot group 120 20/20 (116). The other 41 groups were DEAD-target/STOPPED, STOPPED, or had a null target, and none had a runtime.
@@ -150,7 +150,7 @@ The metaspace figures are not like for like (5 h uptime against 12 min). The new
 2. **Slot group 120 `2bf237bd` (116) has no `bot_messages_total` series.** It was the same before the deploy: the Prometheus query `bot_messages_total{botGroupId="2bf237bd…"} offset 20m` returns empty, and the 116 rollup showed `rounds=0 staked=0` before the restart. The group is ACTIVE with 20/20 bots, and the health monitor reports `playing: 20`. This is pre-existing and was therefore excluded from C-4.
 3. **The plan's commands use container name `bot-manager`**. On Bot-1 the name is `bot-java-bot-manager-1`, so `docker logs bot-manager` matches nothing (my first P-0 capture came back empty for that reason). D2/D3 should use `docker logs $(docker ps --filter name=bot-manager --format '{{.Names}}' | head -1)`.
 4. Bot-1 has no `python3`. All JSON post-processing was done locally.
-5. `bots_managed` is not exported by either build, so the P-0 grep for it matches nothing in both.
+5. **Corrected by qa-4a Finding 1:** `bots_managed` is exported by both builds (`bots_managed{application="bot-manager"} …`). The P-0 grep `bots_managed ` required a space after the name and so matched nothing; the plan now greps `'^bots_managed[{ ]'`.
 
 ## Rollback
 

@@ -411,9 +411,16 @@ the image's own bundle is valid.
   `setClassLoader(loader)`.
 - Scanning: base package `com.vingame.bot`, matching `Starter`'s scan. That avoids the
   known trap where a guard scanning `…domain.bot.message` disagrees with `Starter`. The
-  scanner's resource loader is a resource-only `URLClassLoader(jarUrls, null)`, so it
-  **can only see bundle-jar entries**. Without that restriction, a scan of a split package
-  would also instantiate parent `@Component`s.
+  scanner's resource loader is a resource-only `URLClassLoader(jarUrls, null)`, so its
+  **candidates can only be bundle-jar entries**. Without that restriction, a scan of a
+  split package would also instantiate parent `@Component`s. The scanner's
+  *metadata reader factory* must use the **plugin loader**, though: Spring reads each
+  candidate's annotations by loading the annotation *type* through the reader's class
+  loader and silently drops any it cannot load
+  (`MergedAnnotationReadingVisitor.get` catches `ClassNotFoundException`), and a
+  null-parent loader cannot load `org.springframework.stereotype.Component`, so a
+  resource-only reader finds zero components. Which classes are candidates comes from the
+  resource-only loader; how their annotations are read comes from the plugin loader.
 - The loader uses plain `file:` jar URLs from the on-disk directory, never `jar:nested:`.
   Boot's nested-jar handler caches `JarFile`s by URL.
 - TCCL is set to the plugin loader only for the duration of `refresh()`, and restored in
@@ -442,7 +449,7 @@ another module is named.
 |---|---|
 | L-1 Every contract type a plugin references resolves to the parent's `Class`. Every plugin class's defining loader is the plugin loader, i.e. not shadowed by a copy on the parent classpath. Every class in the jars loads and links. Every loader URL is `file:` | `PluginTypeIdentityIT` |
 | L-2 Every *file* entry in a plugin jar is a `com/vingame/bot/domain/bot/{message,strategy}/**` class, `META-INF/MANIFEST.MF`, or that module's own Maven descriptor `META-INF/maven/com.mercury/<artifactId>/pom.{xml,properties}` (maven-jar-plugin adds it by default; directory entries are ignored). Any other `META-INF/maven/**` path is the fingerprint of shaded code and fails. No shaded third-party code | `PluginJarContentsIT` |
-| L-3 Every child bean definition's class is defined by the plugin loader. No engine `@Component` exists in the child | `PluginContextOriginIT` |
+| L-3 Every child bean definition's class is defined by the plugin loader. No engine `@Component` exists in the child. Also enforced at load time: `IsolatedPluginBundle` rejects a bundle that fails it. With parent-first delegation, a bundle whose classes are also on the app classpath would otherwise be accepted and silently run the app's copies. **Consequence:** isolated mode cannot start on any fat jar that still carries the plugin jars (3b through 4b). 4c step 1 removes them. Until then every deploy, D2 included, runs `classpath` | `PluginContextOriginIT` |
 | L-4 The child context has no parent and no shutdown hook. The loading thread's TCCL equals its prior value after load, both after success and after a rejected candidate (S6) | `PluginContextOriginIT` |
 | L-5 A plugin logger binds to the app's `LoggerContext`: a level set on `com.vingame.bot` applies, and `ScopedDebugFilter` admits a scoped plugin line. The spike (S6) proved logging does not *pin*. It did not prove context *identity*, which this test does | `PluginLoggingContextIT` |
 | L-6 Plugin code defines no `ThreadLocal` / `InheritableThreadLocal`, and puts only `String` values into MDC (S7, scenario 4a) | source guard, each plugin module |
@@ -452,7 +459,7 @@ another module is named.
 | L-10 Among root beans, only `PluginRuntime` holds a `PluginBundle` / `PluginRegistries` / registry / `TypeFactory`-of-a-bundle reference (S3) | `RootContextHoldsNoPluginRefsTest` (`bot-app`): reflect over every `com.vingame.bot` bean's declared fields |
 | L-11 **Thread rules (S5).** Plugin code creates no thread or executor (`Executors`, `new Thread`, `Thread.of*`; virtual-only would be allowed, but no plugin needs one). Every `EventExecutor` of the shared group has a live thread before `PluginRuntime` is constructed. In isolated mode the shared group is mandatory: `ClientFactory`'s null branch (`:97-98`) becomes an `IllegalStateException`, so `VingameWebSocketClient.java:400`'s private group is unreachable. `GameMsClient.java:55` becomes a virtual thread | source guard, each plugin module; `NettyPrestartTest` (`bot-app`: live `multiThreadIoEventLoopGroup-*` thread count = `websocket.eventloop.threads` when `PluginRuntime` is created); `ClientFactoryRequiresGroupTest` (`bot-engine`) |
 | L-12 **Platform-thread census.** After L-13's exercise, no live platform thread's `inheritedAccessControlContext` contains a `ProtectionDomain` of the plugin loader, and no platform thread's TCCL is the plugin loader. A **negative control** proves the test can fail: start a *cold* `MultiThreadIoEventLoopGroup` from a plugin-frame callback, expect a detection, then shut it down. Failsafe `argLine` needs `--add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.security=ALL-UNNAMED` | `PlatformThreadPinIT` |
-| L-13 The two modes are equivalent: isolated registries expose the same strategy key sets (9 / 2) and the same `MessageTypesRegistry` product sets as classpath mode. One recorded frame per provider deserializes to the same type through a per-bot mapper built as the bots build it (bundle `TypeFactory`) | `IsolatedEquivalenceIT` |
+| L-13 The two modes are equivalent: isolated registries expose the same strategy key sets (9 / 2) and the same `MessageTypesRegistry` product sets as classpath mode (both pinned to one catalogue literal, in `ApplicationContextLoadsTest` and `IsolatedEquivalenceIT`). For **every registered type of every provider**, a minimal `{"cmd":N}` frame deserializes to the registered class through a per-bot mapper built as the bots build it (bundle `TypeFactory`). Recorded frames are not required: they exist only for some providers (none for RIK, Win79, CASHOUT or CRASH), and they live in `bot-engine` test resources. They would add no loader-sensitive coverage either, because Jackson resolves every property's deserializer, nested types included, when it builds the bean deserializer, whatever the frame contains | `IsolatedEquivalenceIT` |
 | L-14 **Reclaim rehearsal.** Load the shipped bundle, run L-13 plus 9 strategies × `decide`/`onRoundEnd`, drop every reference, `close()` in D-13's order, then up to 20 × (`System.gc()` + 150 ms). The loader's `WeakReference` must clear. **Negative control:** the same flow plus `getDefault().registerSubtypes(...)` must stay pinned (spike 3c). The control runs **in a forked JVM**, because that pin is permanent | `PluginBundleReclaimIT` |
 | L-15 **Boot parent + Linux.** L-14's flow, run with the parent as Spring Boot's real `LaunchedClassLoader` over the 4c fat jar, inside `eclipse-temurin:21-jre`. Covers the spike's flat-classpath and macOS caveats | `BootParentReclaimMain` (in `bot-plugin-dist` test sources), run by the 4c local gate (Plan 4c step 7). Best effort; see there |
 
@@ -469,10 +476,16 @@ recorded in the handoff.
 - The boot line keeps its prefix (`plugin runtime: version=`; P1-2 greps it) and appends
   `, source=<classpath|dir>, jars=[<name> sha256=<first 12 hex>, …]`.
 - `BuiltinPluginVersionResolver` is deleted. The `PluginVersionResolver` bean returns
-  `bundle.version()`.
-- `BotGroupBehaviorService.createSingleBot` sets `.pluginVersion(resolver.currentVersion())`.
-  This is the "step 4 starts setting it" that AD-10 deferred, and it keeps
-  `bots_by_plugin_version` consistent with `plugin_classloaders_live`.
+  `bundle.version()`. At step 4 it has no production consumer. It is kept as AD-11's seam
+  for step 5 (e.g. `BotHealthDTO.pluginVersion`). **Never stamp a bot from it.**
+- `BotFactory.createBot` stamps `pluginVersion` (`configuration.withPluginVersion(...)`)
+  from `plugins.bundle().version()`, where `plugins` is the same single `current()` read the
+  bot's factories, message types and `TypeFactory` come from. This is the "step 4 starts
+  setting it" that AD-10 deferred, and it keeps `bots_by_plugin_version` consistent with
+  `plugin_classloaders_live`. (This bullet originally said `createSingleBot` via the
+  resolver. That is a second `current()` read, which breaks D-9's one-read-per-operation
+  rule: once step 5 can swap bundles, a bot could be labelled N while running N+1;
+  review-4a.)
 
 **D-16. Metaspace cap: `-XX:MaxMetaspaceSize=320m`.**
 - It goes in compose as
@@ -624,9 +637,12 @@ Expect two identical values matching `^Bot-Plugin-Version: [0-9]{8}\.[0-9]{6}`.
 1. `bot-engine`, package `com.vingame.bot.infrastructure.plugin`:
    - `PluginBundle`: `version()`, `source()`, `classLoader()`, `<T> List<T> beansOfType(Class<T>)`,
      `<T> T newInstance(Class<T>)`, `close()`;
-   - `PluginRegistries` record `{bundle, bettingStrategies, slotStrategies, messageTypes, typeFactory}`
-     with a static `build(PluginBundle)`, which is the single D-10 validation point;
-     `typeFactory` = `TypeFactory.defaultInstance().withCache(new LRUMap<>(16, 200))` (D-9);
+   - `PluginRegistries` record `{bundle, bettingStrategies, slotStrategies, messageTypes}`
+     with a static `build(PluginBundle)`, which is the single D-10 validation point, and a
+     `typeFactory()` accessor derived from the bundle. The bundle owns
+     `TypeFactory.defaultInstance().withCache(new LRUMap<>(16, 200))` (D-9). It is not a
+     record component, because a hand-built record could then pair one bundle's
+     registries with another type cache (review-4a);
    - `PluginRuntime` with `current()`. The field is `final` in step 4.
 2. Registries: drop `@Component`. Each one is constructed from a `PluginBundle`, and
    `create(key)` uses `bundle.newInstance(clazz)`, i.e. a prototype `getBean` on the
@@ -650,7 +666,7 @@ Expect two identical values matching `^Bot-Plugin-Version: [0-9]{8}\.[0-9]{6}`.
     `PluginBundle.close()` follows D-13's order, with `PluginBundleCloseTest`.
 6. **D-15:** `PluginClassLoaderMetrics` takes `PluginRuntime`, registers
    `current().bundle()`'s loader and version once, and appends the boot-line fields.
-   `createSingleBot` sets `pluginVersion`.
+   `BotFactory.createBot` stamps `pluginVersion` from its single `current()` read (D-15).
 7. `ApplicationContextLoadsTest.strategyRegistriesAreFullyPopulated` (`:134`) reads via
    `PluginRuntime`. Add a test helper `PluginRuntime.of(PluginRegistries)` for the
    `BotFactory*` tests.
@@ -866,7 +882,7 @@ names the old container after the deploy.
 docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep -oE '(Betting|Slot)StrategyFactory initialized.*|MessageTypesRegistry initialized.*|plugin runtime: version=[^,]*' > boot-before.txt
 curl -sf $BOT/api/v1/strategy/ | md5sum                       # expect a72c40f56057cda5434b273ea36315ea
 curl -sf "$BOT/api/v1/strategy/?gameType=SLOT"                # expect []
-curl -sf $BOT/actuator/prometheus | grep -E '^(plugin_classloaders_|bots_by_plugin_version|bots_managed )' > metrics-before.txt
+curl -sf $BOT/actuator/prometheus | grep -E '^(plugin_classloaders_|bots_by_plugin_version|bots_managed[{ ])' > metrics-before.txt
 curl -s 'http://localhost:9090/api/v1/query?query=ALERTS%7Balertstate%3D%22firing%22%7D' > alerts-before.json
 ```
 A wrong md5 on the **before** capture means the box is not running what you think it
@@ -929,26 +945,52 @@ is. Stop.
   Expect `1`.
 - **V4a-2:** group running, wait ≥ 20 s:
   ```bash
-  curl -sf $BOT/actuator/prometheus | grep -E '^bots_by_plugin_version|^bots_managed '
+  curl -sf $BOT/actuator/prometheus | grep -E '^bots_by_plugin_version|^bots_managed[{ ]'
   ```
-  Expect every row `pluginVersion="builtin"`, and their sum equal to `bots_managed`. This
-  shows `createSingleBot` now sets the field without changing its value.
+  Expect every row `pluginVersion="builtin"`, and their sum equal to `bots_managed`.
+  This shows that `BotFactory.createBot` now stamps the field, from the bundle it wires the
+  bot from, without changing its value (D-15). `[{ ]` is there because
+  `management.metrics.tags.application` puts `{application="bot-manager"}` straight after
+  every name, so a pattern that requires a space after `bots_managed` never matches
+  (qa-4a Finding 1).
 - **V4a-3:** `docker logs "$(docker compose ps -q bot-manager)" 2>&1 | grep -c 'plugin bundle'`. Expect **0**: the
   isolated loader does not run in classpath mode.
-- **Metaspace (informational, the D3 input).** Record `jvm_memory_used_bytes{id="Metaspace"}`
-  and uptime at P-0 and again after the deploy at a **comparable uptime** (release-d1's
-  note: its 5 h before against 12 min after was not like for like). 4a/4b add a handful of
-  engine classes and no plugin loader, so the two should agree within normal warm-up drift.
-- **V4b-1, Netty pre-start (L-11, spike S5).** Within 90 s of start, and before
-  starting any group:
+- **Metaspace (informational, the D3 input).** Compare the new JVM with the old one **at
+  the same uptime**, not "before vs after" (release-d1: 5 h before against 12 min after
+  was not like for like). Prometheus keeps 30 d, so the old JVM's reading at a matching
+  uptime can be read back after the deploy:
+  ```bash
+  # at P-0, before the deploy: the old JVM's start time (epoch seconds)
+  OLD_START=$(curl -sf $BOT/actuator/prometheus | awk '/^process_start_time_seconds/{printf "%d", $2}'); echo $OLD_START
+  # after the deploy, as late in the window as practical (>= 30 min):
+  M='jvm_memory_used_bytes%7Barea%3D%22nonheap%22%2Cid%3D%22Metaspace%22%7D'
+  NEW_START=$(curl -sf $BOT/actuator/prometheus | awk '/^process_start_time_seconds/{printf "%d", $2}')
+  U=$(( $(date +%s) - NEW_START )); echo "uptime=$U"
+  curl -s "http://localhost:9090/api/v1/query?query=$M"                            # new JVM at uptime U
+  curl -s "http://localhost:9090/api/v1/query?query=$M&time=$((OLD_START + U))"    # old JVM at uptime U
+  ```
+  Record both values and `U`. 4a/4b add a handful of engine classes and no plugin loader,
+  so the two should agree within about 2 MiB. A larger gap is a finding, not a rollback.
+- **V4b-1, Netty pre-start (L-11, spike S5).** Any time after start:
   ```bash
   docker kill --signal=QUIT "$(docker compose ps -q bot-manager)" && sleep 2
-  docker logs --since 1m "$(docker compose ps -q bot-manager)" 2>&1 | grep -oE '^"multiThreadIoEventLoopGroup-[0-9]+-[0-9]+"' | sort -u | wc -l
+  docker logs --since 1m "$(docker compose ps -q bot-manager)" 2>&1 \
+    | grep -E '^"(multiThreadIoEventLoopGroup-[0-9]+-[0-9]+|http-nio-[0-9]+-Acceptor)"' \
+    | grep -oE '^"[^"]+"|elapsed=[0-9.]+s' | paste - -
   ```
   - SIGQUIT makes the JVM print a platform-thread dump to stdout. It does not stop the
     process.
-  - Expect the count to equal `websocket.eventloop.threads` (default **4**).
-  - Before 4b, the count would be 0 on an idle box.
+  - Expect exactly `websocket.eventloop.threads` (default **4**) distinct
+    `multiThreadIoEventLoopGroup-*` names, all from one `-N-` family.
+  - Expect every event-loop thread's `elapsed=` to be **≥** the Tomcat Acceptor's. This
+    is the check that tells pre-start from lazy start. The group bean is built during
+    singleton creation, and Tomcat starts after that. Before 4b, the threads were created
+    by the first bot client, and the startup chain only runs on `ApplicationReadyEvent`,
+    which is after Tomcat. So pre-4b event-loop threads are always *younger* than the
+    Acceptor.
+  - The count alone does not discriminate. `onStartup` auto-starts every ACTIVE group
+    within seconds of boot (11 on Bot-1), and a pre-4b JVM with running groups also
+    shows 4 threads. You cannot take the dump "before starting any group" on such a box.
 
 ### D3 — after 4c
 
@@ -996,7 +1038,7 @@ is. Stop.
   Expect `live{pluginVersion="V"}=1`, `registered_total=1`, `reclaimed_total=0`, and
   `grep -c 'pluginVersion="builtin"'` over the same scrape returns **0**.
 - **V4-6:** group running, wait ≥ 20 s. `bots_by_plugin_version` rows are all
-  `pluginVersion="V"`, and their sum equals `bots_managed`.
+  `pluginVersion="V"`, and their sum equals `bots_managed` (V4a-2's grep).
 - **V4-7:** `grep -m1 '"pluginVersion":"V"' logs/console.log` matches. In Grafana,
   `{job="bot-manager"} | json | pluginVersion="V"` returns lines.
 - **V4-8:**
@@ -1012,9 +1054,10 @@ is. Stop.
   2. Then `mv plugins-dist/_V plugins-dist/V && docker compose restart bot-manager`.
      Expect `source=/app/plugins/V` again.
 - **V4-11, platform-thread census (spike S5; staging only).**
-  1. Take a SIGQUIT dump as in V4b-1 right after boot, and save the thread *names*.
+  1. Right after boot, send SIGQUIT as in V4b-1's first line, then save every thread
+     name: `docker logs --since 1m "$(docker compose ps -q bot-manager)" 2>&1 | grep -oE '^"[^"]+"' > t0`.
   2. Start the C-4 groups and let them play for 10 min.
-  3. Take a second dump.
+  3. Take a second dump the same way, into `t1`.
   4. Compare the name families (strip numeric suffixes) with
      `diff <(sed -E 's/[-#][0-9]+//g' t0 | sort -u) <(sed -E 's/[-#][0-9]+//g' t1 | sort -u)`.
   Expect **no new long-lived platform-thread family**. The event-loop count must be
@@ -1032,3 +1075,5 @@ Ready for user approval before Dev begins.
 ## Changelog
 
 - 2026-10-06, compliance-3ab: D-7 UTC confirmed; L-2 admits the module's own `META-INF/maven` descriptor (maven-jar-plugin default) and treats any other as shading; L-9 and its 4b gate target `micrometer-core`/`-registry`, because `spring-context` 6.x pulls `micrometer-observation` transitively and the old `grep micrometer` returns 4, not 0 (and its `mvn -q` printed no tree at all, so it passed vacuously).
+- 2026-10-07, qa-4a Finding 1: `bots_managed` IS exported; P-0 / V4a-2 (and V4-6, which reuses V4a-2) grep `'^bots_managed[{ ]'`, because the `{application=…}` tag follows the name directly.
+- 2026-10-07, compliance-4ab: D-13: the scan takes its candidates from the resource-only loader but reads their annotations through the plugin loader, because a null-parent metadata reader drops `@Component` and finds zero beans. L-3: also enforced at load time, so isolated mode cannot start on a fat jar that still carries the plugin jars, and D2 stays classpath. L-13: minimal `{"cmd":N}` frames for every registration, not recorded frames, which do not exist for RIK, Win79, CASHOUT or CRASH and add no loader-sensitive coverage. D-15 / 4a steps 1 and 6: `BotFactory.createBot` stamps `pluginVersion` from its single `current()` read, `PluginVersionResolver` has no production consumer at step 4 and is kept, and `PluginRegistries.typeFactory()` is derived from the bundle. D2 metaspace: compared at equal uptime via a Prometheus `time=` read-back. V4b-1: elapsed-vs-Acceptor check, because auto-started groups make the bare count non-discriminating. V4-11: explicit capture commands.
