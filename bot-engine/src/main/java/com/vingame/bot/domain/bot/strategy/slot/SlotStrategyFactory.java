@@ -53,7 +53,7 @@ public class SlotStrategyFactory {
             new LinkedHashMap<>();
 
     /**
-     * Discover the bundle's slot strategies and log the one-per-bundle INFO line.
+     * Discover the bundle's slot strategies. The INFO line is {@link #logInitialized()}'s.
      *
      * @throws IllegalStateException on a duplicate {@link SlotStrategyImpl} key, which
      *                               rejects the whole bundle (D-10).
@@ -83,6 +83,14 @@ public class SlotStrategyFactory {
                                 + " and " + implClass.getName());
             }
         }
+    }
+
+    /**
+     * The one-per-bundle INFO line, byte-identical to what the constructor used to print.
+     * Printed by {@code PluginRegistries.logInitialized()} for the accepted bundle only —
+     * see {@code BettingStrategyFactory.logInitialized()} for why (review-4a).
+     */
+    public void logInitialized() {
         log.info("SlotStrategyFactory initialized: registered {} strategies — {}",
                 registry.size(), sortedKeys());
     }

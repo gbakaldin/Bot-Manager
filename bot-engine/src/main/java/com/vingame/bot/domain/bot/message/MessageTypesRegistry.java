@@ -126,7 +126,17 @@ public class MessageTypesRegistry {
                 resolveProductNeutral(slotProviders),
                 indexByProduct(cashoutProviders, GameType.CASHOUT),
                 indexByProduct(crashProviders, GameType.CRASH));
+    }
 
+    /**
+     * The one-per-bundle INFO line, {@code MessageTypesRegistry initialized: ...},
+     * byte-identical to what the constructor used to print. Printed by
+     * {@code PluginRegistries.logInitialized()} for the accepted bundle only: an
+     * isolated-mode candidate rejected by a later check must not leave its catalogue in the
+     * boot log next to the bundle that actually runs (PLUGIN_HOT_RELOAD_3_4 Phase 4b,
+     * review-4a).
+     */
+    public void logInitialized() {
         // Tier-1 INFO: one line per JVM at application startup, the same shape and
         // justification as (Betting|Slot)StrategyFactory's "registered N strategies".
         //

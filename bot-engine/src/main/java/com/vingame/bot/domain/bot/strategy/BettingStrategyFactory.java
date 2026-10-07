@@ -128,6 +128,20 @@ public class BettingStrategyFactory {
                                 + " and " + implClass.getName());
             }
         }
+    }
+
+    /**
+     * The one-per-bundle INFO line, {@code BettingStrategyFactory initialized: registered N
+     * strategies — [...]}, byte-identical to what the constructor used to print.
+     * <p>
+     * <b>Not printed by the constructor any more</b> (PLUGIN_HOT_RELOAD_3_4 Phase 4b,
+     * review-4a). An isolated-mode candidate can build this factory and then be rejected by
+     * its message types; printed at construction, a fallback-accepted boot logged the line
+     * once per candidate tried, and the releaser's C-2 diff against the previous deploy
+     * flagged a duplicate. {@code PluginRegistries.logInitialized()} calls this for the
+     * accepted bundle only.
+     */
+    public void logInitialized() {
         // Sorted, not registry.keySet(): the map's order is Spring's scan order and
         // is not stable across packagings, so an unsorted list makes a boot log
         // pointlessly hard to diff between an IDE run and the box. Sorting at

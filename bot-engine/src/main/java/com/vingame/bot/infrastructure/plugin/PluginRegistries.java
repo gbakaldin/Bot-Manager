@@ -5,7 +5,12 @@ import com.vingame.bot.domain.bot.message.MessageTypesRegistry;
 import com.vingame.bot.domain.bot.strategy.BettingStrategyFactory;
 import com.vingame.bot.domain.bot.strategy.slot.SlotStrategyFactory;
 
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.function.Function;
 
 /**
  * The three registries of one plugin bundle, built together and never mutated
@@ -61,9 +66,11 @@ public record PluginRegistries(PluginBundle bundle,
      * with no products. A strategy bean with no annotation stays a WARN-and-skip, as it
      * always was.
      * <p>
-     * The registries are built in the order the boot log has always printed them —
-     * betting, slot, message types — because the releaser diffs those three lines
-     * against the previous deploy, in order.
+     * <b>Builds silently.</b> The three registries' INFO lines are printed by
+     * {@link #logInitialized()}, which the caller runs for the accepted bundle only
+     * (Phase 4b): an isolated candidate rejected here — or by the origin check after it —
+     * must not leave a "registered 9 strategies" line in the boot log next to the bundle
+     * that actually runs.
      *
      * @throws IllegalStateException if the bundle is rejected. In classpath mode this
      *                               propagates out of context refresh, exactly as the
@@ -77,5 +84,50 @@ public record PluginRegistries(PluginBundle bundle,
         SlotStrategyFactory slot = new SlotStrategyFactory(bundle);
         MessageTypesRegistry messageTypes = new MessageTypesRegistry(bundle);
         return new PluginRegistries(bundle, betting, slot, messageTypes);
+    }
+
+    /**
+     * Print the registries' one-per-bundle INFO lines, in the order the boot log has always
+     * printed them — betting, slot, message types — because the releaser diffs those three
+     * lines against the previous deploy, in order (C-2). Each line is byte-identical to what
+     * the registry constructors printed through Phase 4a. Called once, for the accepted
+     * bundle, by {@code PluginRuntimeConfiguration}.
+     */
+    public void logInitialized() {
+        bettingStrategies.logInitialized();
+        slotStrategies.logInitialized();
+        messageTypes.logInitialized();
+    }
+
+    /**
+     * The registries' catalogue as one stable string: every key and product set, sorted.
+     * Two bundles that resolve the same keys to the same providers render the same string,
+     * which is how L-13 ({@code IsolatedEquivalenceIT}) and the classpath-mode build guard
+     * ({@code ApplicationContextLoadsTest}) prove the two modes equivalent against one
+     * literal. Not a log line; nothing parses it.
+     */
+    public String catalogue() {
+        return "betting=" + new TreeSet<>(bettingStrategies.registeredKeys())
+                + "; slot=" + new TreeSet<>(slotStrategies.registeredKeys())
+                + "; BETTING_MINI=" + providers(messageTypes.registeredBettingMiniProducts(),
+                        messageTypes::bettingMini)
+                + "; TAI_XIU=" + providers(messageTypes.registeredTaiXiuProducts(),
+                        messageTypes::taiXiu)
+                + "; SLOT=" + (messageTypes.hasSlotProvider()
+                        ? messageTypes.slot().getClass().getSimpleName() : "none")
+                + "; CASHOUT=" + providers(messageTypes.registeredCashoutProducts(),
+                        messageTypes::cashout)
+                + "; CRASH=" + providers(messageTypes.registeredCrashProducts(),
+                        messageTypes::crash);
+    }
+
+    /** {@code {097=BomGameMessageTypes, ...}}, sorted by product. */
+    private static String providers(Set<String> products,
+                                    Function<String, ?> lookup) {
+        Map<String, String> byProduct = new TreeMap<>();
+        for (String product : products) {
+            byProduct.put(product, lookup.apply(product).getClass().getSimpleName());
+        }
+        return byProduct.toString();
     }
 }

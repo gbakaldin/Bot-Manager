@@ -420,6 +420,11 @@ three from one plugin bundle, and the only root-held reference is `PluginRuntime
 it and call `current()` once per operation; never keep a registry, the bundle or its
 `TypeFactory` in a field (`RootContextHoldsNoPluginRefsTest` fails the build). Every
 per-bot mapper is built on the bundle's `TypeFactory` (`Bot.newMessageMapper()`).
+`bot.plugins.mode` selects the bundle: `classpath` (the default, and the only mode in use
+before Phase 4c) or, since Phase 4b, `isolated` — `IsolatedPluginBundleLoader` loads the
+first valid bundle under `bot.plugins.dir` (then `bot.plugins.builtin-dir`) in a
+classloader of its own, proven by the `bot-plugin-dist` ITs. Until 4c's fat jar drops the
+plugin jars, an isolated start rejects every bundle as "not isolated" and fails, by design.
 
 - **`StrategyId` / `SlotStrategyId` survive, demoted to the built-in catalogue**
   (AD-12). They are the compile-time home of the canonical key strings and of the

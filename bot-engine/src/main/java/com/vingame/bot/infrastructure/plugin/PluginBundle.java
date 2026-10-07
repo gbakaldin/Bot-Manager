@@ -22,8 +22,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <ul>
  *   <li>{@link ClasspathPluginBundle} (4a): the plugin beans of the application context
  *       itself, version {@code builtin}, the application classloader;</li>
- *   <li>the isolated bundle (4b): a child {@code URLClassLoader} plus a parentless child
- *       context over the jars of one directory.</li>
+ *   <li>{@link IsolatedPluginBundle} (4b): a child {@code URLClassLoader} plus a parentless
+ *       child context over the jars of one directory, chosen by
+ *       {@link IsolatedPluginBundleLoader}.</li>
  * </ul>
  *
  * <h2>The bundle owns its Jackson {@link TypeFactory} (D-9, spike rule 2)</h2>

@@ -207,6 +207,34 @@ class ApplicationContextLoadsTest {
         assertThat(registry.slot()).isInstanceOf(SlotMessageTypesImpl.class);
     }
 
+    /**
+     * PLUGIN_HOT_RELOAD_3_4 <b>L-13</b>, classpath half: the catalogue classpath mode exposes
+     * under the real {@code Starter} scan. {@code IsolatedEquivalenceIT} in
+     * {@code bot-plugin-dist} asserts the isolated bundle renders the <em>same literal</em>
+     * ({@code ShippedBundle.CATALOGUE}), which is what makes the two modes provably
+     * equivalent — keep the two copies identical. A new strategy or provider changes both,
+     * deliberately: an exact set here is the point, unlike the superset checks above.
+     */
+    static final String SHIPPED_CATALOGUE = "betting=[DALEMBERT_AGGRESSIVE, DALEMBERT_CAUTIOUS, "
+            + "FIBONACCI_AGGRESSIVE, FIBONACCI_CAUTIOUS, MARTINGALE_CLASSIC_AGGRESSIVE, "
+            + "MARTINGALE_CLASSIC_CAUTIOUS, PAROLI_AGGRESSIVE, PAROLI_CAUTIOUS, RANDOM]; "
+            + "slot=[FIXED, RANDOM]; "
+            + "BETTING_MINI={097=BomGameMessageTypes, 098=BomGameMessageTypes, "
+            + "114=RikGameMessageTypes, 116=TipGameMessageTypes, 118=NohuGameMessageTypes, "
+            + "119=Win79GameMessageTypes}; "
+            + "TAI_XIU={114=JackpotTaiXiuMessageTypes, 116=MiniGameTaiXiuMessageTypes, "
+            + "119=Win79TaiXiuMessageTypes}; "
+            + "SLOT=SlotMessageTypesImpl; "
+            + "CASHOUT={119=Win79CashoutMessageTypes}; "
+            + "CRASH={119=Win79CrashMessageTypes}";
+
+    @Test
+    @DisplayName("classpath mode's catalogue is the one the isolated bundle ships (L-13)")
+    void classpathModeCatalogueIsTheShippedOne() {
+        assertThat(context.getBean(PluginRuntime.class).current().catalogue())
+                .isEqualTo(SHIPPED_CATALOGUE);
+    }
+
     @Test
     @DisplayName("BotFactory wires from the context with the registry injected")
     void botFactoryIsConstructableBySpring() {

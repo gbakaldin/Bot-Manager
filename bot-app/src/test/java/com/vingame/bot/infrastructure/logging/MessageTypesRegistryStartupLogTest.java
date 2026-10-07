@@ -220,7 +220,18 @@ class MessageTypesRegistryStartupLogTest {
                 .isEqualTo(withOneProvider);
     }
 
+    /**
+     * Construct and print, the way {@code PluginRegistries.logInitialized()} does for the
+     * accepted bundle. Since PLUGIN_HOT_RELOAD_3_4 Phase 4b the constructor itself is
+     * silent (see {@link #constructionAloneIsSilent()}).
+     */
     private static MessageTypesRegistry newFullRegistry() {
+        MessageTypesRegistry registry = constructFullRegistry();
+        registry.logInitialized();
+        return registry;
+    }
+
+    private static MessageTypesRegistry constructFullRegistry() {
         return new MessageTypesRegistry(
                 List.of(new BomGameMessageTypes(), new TipGameMessageTypes(),
                         new NohuGameMessageTypes()),
@@ -231,8 +242,25 @@ class MessageTypesRegistryStartupLogTest {
     }
 
     private static MessageTypesRegistry newMinimalRegistry() {
-        return new MessageTypesRegistry(
+        MessageTypesRegistry registry = new MessageTypesRegistry(
                 List.of(new BomGameMessageTypes()), List.of(), List.of(), List.of(), List.of());
+        registry.logInitialized();
+        return registry;
+    }
+
+    /**
+     * PLUGIN_HOT_RELOAD_3_4 Phase 4b (review-4a): an isolated-mode candidate can build this
+     * registry and then be rejected, so construction prints nothing and the line is
+     * {@code logInitialized()}'s, run for the accepted bundle only. Otherwise a
+     * fallback-accepted boot logs one catalogue per candidate tried and the releaser's C-2
+     * diff flags it.
+     */
+    @Test
+    @DisplayName("constructing the registry alone prints nothing — the line is logInitialized()'s (4b)")
+    void constructionAloneIsSilent() {
+        constructFullRegistry();
+
+        assertThat(registryEvents()).isEmpty();
     }
 
     private List<LogEvent> registryEvents() {
