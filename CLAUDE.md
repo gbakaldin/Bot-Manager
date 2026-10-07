@@ -415,6 +415,11 @@ declare.
 All three registries live in **`bot-engine`** (moved there, FQNs unchanged, by
 `docs/plans/PLUGIN_HOT_RELOAD_3_4.md` Phase 3a); what they resolve stays in
 `bot-strategies` / `bot-messages`, and the engine names no concrete class from either.
+Since Phase 4a they are **not Spring beans**: `PluginRegistries.build(bundle)` builds all
+three from one plugin bundle, and the only root-held reference is `PluginRuntime`. Inject
+it and call `current()` once per operation; never keep a registry, the bundle or its
+`TypeFactory` in a field (`RootContextHoldsNoPluginRefsTest` fails the build). Every
+per-bot mapper is built on the bundle's `TypeFactory` (`Bot.newMessageMapper()`).
 
 - **`StrategyId` / `SlotStrategyId` survive, demoted to the built-in catalogue**
   (AD-12). They are the compile-time home of the canonical key strings and of the
@@ -469,9 +474,10 @@ All three registries live in **`bot-engine`** (moved there, FQNs unchanged, by
   package scan.
 - **A duplicate key fails context refresh** in all three registries, which is right
   while every key is ours and becomes wrong once a third-party plugin can collide
-  with a built-in. Neither the strategy key nor the message-types key carries a
-  version dimension, so two live plugin versions are not expressible under them.
-  Both are step-5 decisions, recorded in Amendment A8.
+  with a built-in. `docs/plans/PLUGIN_HOT_RELOAD_3_4.md` settles both halves of
+  Amendment A8: keys get no version dimension, two versions are two registry sets
+  (D-9), and a bad bundle is rejected as a whole — a refresh failure in classpath
+  mode, a fallback to the next candidate in isolated mode (D-10).
 
 ### A DEAD bot group restarts itself — `bot.recovery.enabled`
 
