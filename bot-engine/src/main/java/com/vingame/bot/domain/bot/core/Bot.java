@@ -22,6 +22,9 @@ import com.vingame.bot.infrastructure.observability.SessionAggregationService;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.config.bot.BotConfiguration;
 import com.vingame.bot.config.bot.BotCredentials;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.type.TypeFactory;
 import com.vingame.websocketparser.VingameWebSocketClient;
 import com.vingame.websocketparser.auth.TokensProvider;
 import com.vingame.websocketparser.scenario.Scenario;
@@ -128,6 +131,21 @@ public abstract class Bot {
     // null means jackpot-scale is off (or the type is ineligible) and the bot's
     // effective per-round bet cap is the configured maxBetsPerRound (factor 1.0).
     protected JackpotScaler jackpotScaler;
+
+    /**
+     * The Jackson type factory of the plugin bundle this bot was built from
+     * (PLUGIN_HOT_RELOAD_3_4 D-9, spike rule 2) — set via a builder-style setter by
+     * {@code BotFactory}, from the same {@code PluginRegistries} value its strategy
+     * factory and message types came from, and kept for the bot's life.
+     * <p>
+     * Every per-bot mapper is built on it through {@link #newMessageMapper()}, so plugin
+     * types are cached in the bundle's private cache and never in the shared
+     * {@code TypeFactory.defaultInstance()}, whose strong LRU would otherwise pin the
+     * plugin classloader after the bot is gone. Null-tolerant: a fixture that builds a
+     * bot without {@code BotFactory} leaves it null and gets a mapper on the default
+     * factory, exactly as before this field existed.
+     */
+    protected TypeFactory pluginTypeFactory;
 
     // Bot runtime configuration (set via builder-style setters)
     @Getter
@@ -324,6 +342,33 @@ public abstract class Bot {
     public Bot setGatewayBudget(GatewayBudget gatewayBudget) {
         this.gatewayBudget = gatewayBudget == null ? GatewayBudget.UNLIMITED : gatewayBudget;
         return this;
+    }
+
+    /**
+     * Wire the plugin bundle's Jackson type factory (PLUGIN_HOT_RELOAD_3_4 D-9). Fluent and
+     * null-tolerant: null means "the shared default", which is what a fixture gets.
+     */
+    public Bot setPluginTypeFactory(TypeFactory pluginTypeFactory) {
+        this.pluginTypeFactory = pluginTypeFactory;
+        return this;
+    }
+
+    /**
+     * A fresh per-bot message mapper: {@code new ObjectMapper()}, unknown properties
+     * ignored, and — when one is wired — the plugin bundle's type factory (L-8). Every bot
+     * type builds the mapper its scenario deserializes with through this method, then
+     * registers its own subtypes on it, so no bot can forget the type factory.
+     * <p>
+     * {@code setTypeFactory} is skipped, not called with the default, when none is wired,
+     * so the fixture path is byte-for-byte the mapper the bots built before.
+     */
+    protected ObjectMapper newMessageMapper() {
+        ObjectMapper mapper = new ObjectMapper();
+        mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        if (pluginTypeFactory != null) {
+            mapper.setTypeFactory(pluginTypeFactory);
+        }
+        return mapper;
     }
 
     public Bot initialize() {

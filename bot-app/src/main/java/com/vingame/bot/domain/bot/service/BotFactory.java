@@ -229,6 +229,9 @@ public class BotFactory {
             // diverge. Note that freshClientFactory above is per-bot by design
             // (RESTART_LIFECYCLE_FIX) while the budget is deliberately per-environment.
             .setGatewayBudget(environmentClients.getGatewayBudget())
+            // PLUGIN_HOT_RELOAD_3_4 D-9 / L-8: every per-bot mapper is built on the bundle's
+            // TypeFactory, from the same registries value as the factory and messages above.
+            .setPluginTypeFactory(plugins.typeFactory())
             .setConfiguration(configuration)
             .setMetrics(botMetrics)
             .setSessionAggregator(sessionAggregator)

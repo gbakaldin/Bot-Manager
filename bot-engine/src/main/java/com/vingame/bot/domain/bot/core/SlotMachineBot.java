@@ -1,6 +1,5 @@
 package com.vingame.bot.domain.bot.core;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.domain.bot.message.HasBetTotals;
@@ -452,8 +451,8 @@ public class SlotMachineBot extends Bot {
     protected Scenario botBehaviorScenario() {
         Game game = configuration.getGame();
 
-        ObjectMapper mapper = new ObjectMapper();
-        mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        // PLUGIN_HOT_RELOAD_3_4 L-8: built on the plugin bundle's TypeFactory (see Bot).
+        ObjectMapper mapper = newMessageMapper();
         mapper.registerSubtypes(messageTypes.getTypeRegistrations());
 
         // onMessage handlers run on the per-client netty-ws-message-processor pool;

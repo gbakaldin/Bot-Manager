@@ -1,6 +1,5 @@
 package com.vingame.bot.domain.bot.core;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
 import com.vingame.bot.domain.bot.core.cashout.CashoutBehavior;
@@ -524,8 +523,8 @@ public class CashoutBot extends Bot {
         // even if Bot.client is reassigned by a reconnect (RIK_114 AD-31's rule).
         VingameWebSocketClient channel = client;
 
-        ObjectMapper mapper = new ObjectMapper();
-        mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        // PLUGIN_HOT_RELOAD_3_4 L-8: built on the plugin bundle's TypeFactory (see Bot).
+        ObjectMapper mapper = newMessageMapper();
         mapper.registerSubtypes(messageTypes.getTypeRegistrations(offset));
         bindCashoutChannel(channel, mapper);
 

@@ -1,6 +1,5 @@
 package com.vingame.bot.domain.bot.core;
 
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.vingame.bot.config.bot.BotBehaviorConfig;
@@ -1070,8 +1069,8 @@ public class BettingMiniGameBot extends Bot {
         // reconnect while a bet runnable is in flight.
         VingameWebSocketClient channel = client;
 
-        ObjectMapper mapper = new ObjectMapper();
-        mapper.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        // PLUGIN_HOT_RELOAD_3_4 L-8: built on the plugin bundle's TypeFactory (see Bot).
+        ObjectMapper mapper = newMessageMapper();
         mapper.registerSubtypes(messageTypeRegistrations());
 
         Class<? extends SubscribeMessage> subscribeClass = subscribeType();
