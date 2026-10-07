@@ -228,6 +228,23 @@ public class RestExceptionHandler extends ResponseEntityExceptionHandler {
      * logged server-side at ERROR so the operator can correlate via request
      * URI and stacktrace.
      */
+    /**
+     * A request that needed the plugin registries after their bundle closed, i.e. during
+     * JVM shutdown (PLUGIN_HOT_RELOAD_3_4, review-4a) — e.g. {@code GET /api/v1/strategy/}
+     * or a strategy-key PATCH racing the stop. The service is going away, not broken, so
+     * 503 rather than the 500 its {@link IllegalStateException} supertype would map to, and
+     * WARN without a stack trace. Must stay declared alongside the {@code IllegalStateException}
+     * arm: Spring picks the most specific handler, so this one wins for the subtype.
+     */
+    @ExceptionHandler(com.vingame.bot.infrastructure.plugin.PluginUnpublishedException.class)
+    public ResponseEntity<ErrorResponse> handlePluginUnpublished(
+            com.vingame.bot.infrastructure.plugin.PluginUnpublishedException e, HttpServletRequest request) {
+        log.warn("Handled {} from {}: {}", e.getClass().getSimpleName(),
+                request.getRequestURI(), e.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(new ErrorResponse("Service unavailable", e.getMessage()));
+    }
+
     @ExceptionHandler(IllegalStateException.class)
     public ResponseEntity<ErrorResponse> handleIllegalState(IllegalStateException e, HttpServletRequest request) {
         log.error("Handled {} from {}: {}", e.getClass().getSimpleName(),

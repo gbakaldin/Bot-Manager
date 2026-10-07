@@ -29,4 +29,14 @@ class CreationFailureLocalClassificationTest {
         assertThat(BotGroupBehaviorService.classifyCreationFailure(new UpstreamLoginException(
                 "Login failed for user 'rikcoins54': wrong password", null))).isEqualTo("auth");
     }
+
+    @Test
+    @DisplayName("an unpublished plugin bundle (JVM shutdown) is 'shutdown', not the 'validation' of its supertype (review-4a)")
+    void anUnpublishedBundleIsShutdown() {
+        assertThat(BotGroupBehaviorService.classifyCreationFailure(
+                new com.vingame.bot.infrastructure.plugin.PluginUnpublishedException("builtin")))
+                .isEqualTo("shutdown");
+        assertThat(BotGroupBehaviorService.classifyCreationFailure(new IllegalStateException("x")))
+                .isEqualTo("validation");
+    }
 }

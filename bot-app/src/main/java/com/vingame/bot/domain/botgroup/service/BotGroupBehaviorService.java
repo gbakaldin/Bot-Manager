@@ -1837,6 +1837,14 @@ public class BotGroupBehaviorService {
                         circuitRefused++;
                         log.debug("Bot {}/{} of group {} refused by an open gateway circuit: {}",
                                 fromIndex + i, toIndex, group.getId(), refusal.getMessage());
+                    } else if (cause instanceof com.vingame.bot.infrastructure.plugin.PluginUnpublishedException unpublished) {
+                        // The plugin bundle closed under a running start: at step 4 that only
+                        // happens at JVM shutdown (review-4a). Still a bot that did not come up,
+                        // so it is counted (reason "shutdown"), but it is not a defect — WARN with
+                        // the cause, no stack trace, and not an ERROR that pages someone for a
+                        // deploy.
+                        log.warn("Bot {}/{} of group {} was not built — {}",
+                                fromIndex + i, toIndex, group.getId(), unpublished.getMessage());
                     } else {
                         log.error("Failed to create bot {}/{} for group {} (env {}): {}",
                                 fromIndex + i, toIndex, group.getId(), group.getEnvironmentId(),
@@ -1886,9 +1894,16 @@ public class BotGroupBehaviorService {
      * {@code bot_creation_failures_total}. Bounded labels keep Prometheus
      * cardinality low. RESTART_LIFECYCLE_FIX Architecture Decision 5.
      * <p>
-     * The bounded value set is {@code validation | auth | budget | cancelled | local | unknown}.
+     * The bounded value set is
+     * {@code validation | auth | budget | cancelled | local | shutdown | unknown}.
      */
     static String classifyCreationFailure(Throwable cause) {
+        // "shutdown" (PLUGIN_HOT_RELOAD_3_4, review-4a): the plugin bundle was unpublished, which
+        // at step 4 means the JVM is stopping. Ahead of the IllegalStateException arm below, which
+        // it extends and which would otherwise call it "validation".
+        if (cause instanceof com.vingame.bot.infrastructure.plugin.PluginUnpublishedException) {
+            return "shutdown";
+        }
         // GATEWAY_REQUEST_BUDGET AD-9 — two NEW bounded label values, and they must be tested
         // FIRST, before the heuristic below, which matches on the substring "token" and can
         // appear in these messages.

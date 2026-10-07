@@ -148,6 +148,16 @@ class RestExceptionHandlerTest {
     }
 
     @Test
+    @DisplayName("PluginUnpublishedException -> 503, not the 500 of its IllegalStateException supertype (review-4a)")
+    void pluginUnpublished_returns503() throws Exception {
+        mockMvc.perform(get("/__test/plugin-unpublished"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.type").value("Service unavailable"))
+                .andExpect(jsonPath("$.msg").value(
+                        org.hamcrest.Matchers.containsString("shutting down")));
+    }
+
+    @Test
     @DisplayName("IllegalStateException -> 500 with sanitised body (msg does not echo e.getMessage())")
     void illegalState_returns500WithSanitisedBody() throws Exception {
         // Security: raw IllegalStateException messages from initialization
@@ -382,6 +392,11 @@ class RestExceptionHandlerTest {
         @GetMapping("/__test/illegal-state")
         public String illegalState() {
             throw new IllegalStateException("not initialized");
+        }
+
+        @GetMapping("/__test/plugin-unpublished")
+        public String pluginUnpublished() {
+            throw new com.vingame.bot.infrastructure.plugin.PluginUnpublishedException("20261007.101500");
         }
 
         @GetMapping("/__test/generic")
